@@ -2311,11 +2311,46 @@ export class QqService {
     );
   }
 
+  /**
+   * main 渠道任务派生出的子会话产生 agent 提问时，把提醒转发给发起任务的 QQ 用户。
+   *
+   * 与 {@link forwardTaskQuestion} 的区别只在寻址：main 渠道任务注入的是主会话，
+   * 没有 `correlation.superSessionId`，所以按该字段寻址永远匹配不到；这里按主
+   * 任务 `taskId` 定位（与 forwardMainTaskQuestion 同口径），但答案经 child 端口
+   * 回灌到**真正提问的那一个子会话**（`answerRemoteQuestion(superSessionId)` →
+   * `SuperAgentManager.respond`），而不是主会话的提问卡 —— 提问卡在子会话看板
+   * 上，回灌到主会话会 resolve 不到任何东西。
+   *
+   * 服务侧仍要求任务为 main 渠道且非终态；本地回合 / 未知任务安静忽略。
+   */
+  async forwardMainTaskChildQuestion(input: {
+    taskId: string;
+    superSessionId: string;
+    questions: readonly QqRemoteQuestion[];
+  }): Promise<void> {
+    const taskId = typeof input.taskId === "string" ? input.taskId.trim() : "";
+    const superSessionId =
+      typeof input.superSessionId === "string" ? input.superSessionId.trim() : "";
+    if (taskId.length === 0 || superSessionId.length === 0) return;
+    await this.forwardQuestionToTask(
+      () => {
+        const candidate = this.tasks.get(taskId);
+        return candidate && candidate.channel === "main" && !isTerminalStatus(candidate.status)
+          ? candidate
+          : undefined;
+      },
+      input.questions,
+      "child",
+      superSessionId,
+    );
+  }
+
   /** 转发提问的共用实现：规范化 → 定位任务 → 切 waiting_answer → 挂槽 → 投递。 */
   private async forwardQuestionToTask(
     findTask: () => QqTask | undefined,
     rawQuestions: readonly QqRemoteQuestion[],
     channel: "child" | "main",
+    answerSuperSessionId?: string,
   ): Promise<void> {
     if (this.stopped || !this.config.enabled) return;
 
@@ -2363,7 +2398,7 @@ export class QqService {
     timer.unref?.();
     this.pendingAnswers.set(taskId, {
       taskId,
-      superSessionId: task.correlation.superSessionId ?? "",
+      superSessionId: answerSuperSessionId ?? task.correlation.superSessionId ?? "",
       channel,
       questions,
       timer,

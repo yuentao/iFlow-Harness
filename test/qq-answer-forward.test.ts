@@ -636,4 +636,53 @@ describe("主会话渠道提问提醒转发（main）", () => {
     expect(inject).toHaveBeenCalledTimes(0);
     f.service.stop();
   });
+
+  it("main 任务派生子会话的提问转发到 QQ，回答经 child 端口回灌子会话", async () => {
+    const f = makeFixture();
+    const task = await runningMainTask(f);
+    f.delivered.length = 0;
+
+    await f.service.forwardMainTaskChildQuestion({
+      taskId: task.taskId,
+      superSessionId: "super-delegated-1",
+      questions: [question()],
+    });
+
+    const waiting = f.service.getTask(task.taskId)!;
+    expect(waiting.status).toBe("waiting_answer");
+    const notice = f.delivered[f.delivered.length - 1]!;
+    expect(notice.text).toContain(`/qq answer ${shortTaskId(task.taskId)}`);
+
+    f.delivered.length = 0;
+    await f.service.handleInboundMessage(
+      inbound(`/qq answer ${shortTaskId(task.taskId)} 我选蓝色`, "m-child-answer"),
+    );
+
+    // 关键：走 child 端口（superSessionId = 提问的子会话），不是 main 端口。
+    expect(f.answered).toHaveLength(1);
+    expect(f.answered[0]!.superSessionId).toBe("super-delegated-1");
+    expect(f.answered[0]!.answers).toEqual({ 颜色: "我选蓝色" });
+    expect(f.mainAnswered).toHaveLength(0);
+    expect(f.service.getTask(task.taskId)!.status).toBe("running");
+  });
+
+  it("child 渠道 / 不存在的任务不会被 forwardMainTaskChildQuestion 误转发", async () => {
+    const f = makeFixture();
+    const child = await runningRemoteTask(f);
+    f.delivered.length = 0;
+
+    await f.service.forwardMainTaskChildQuestion({
+      taskId: child.taskId,
+      superSessionId: "super-delegated-1",
+      questions: [question()],
+    });
+    await f.service.forwardMainTaskChildQuestion({
+      taskId: "not-exist",
+      superSessionId: "super-delegated-1",
+      questions: [question()],
+    });
+
+    expect(f.delivered.length).toBe(0);
+    expect(f.answered).toHaveLength(0);
+  });
 });
