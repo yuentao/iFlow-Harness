@@ -896,6 +896,36 @@ function deletesNodeModules(segments: string[][]): boolean {
 }
 
 /**
+ * 路径段内部的字符（小写）。`root` 后面紧跟这些字符说明它只是更长路径的
+ * **前缀子串**（兄弟仓库 `J:\git\project-x` 以 `J:\git\proj` 开头），不是命中。
+ *
+ * 引号 / 空白 / `;` `,` `:` `=` / 括号 / `/` 等都不是段内字符 —— 带引号的
+ * `--prefix "J:\git\proj"` 与 `cd "J:\git\proj"` 仍按命中处理。
+ */
+function isPathSegmentChar(ch: string): boolean {
+  return /[a-z0-9._~-]/.test(ch);
+}
+
+/**
+ * `probe`（已统一成小写正斜杠）里 `root`（归一化路径）是否作为完整路径出现。
+ *
+ * 不裸用 `includes`：`J:\git\project-x` 会以 `J:\git\proj` 为前缀误命中，把对
+ * 兄弟仓库的操作升级成 `session` 档、终止整个合法子会话。逐个候选 occurrence
+ * 检查右边界，只有 root 后面是「路径段结束」才算命中。
+ */
+function probeContainsRoot(probe: string, root: string): boolean {
+  if (!root) return false;
+  let from = 0;
+  for (;;) {
+    const at = probe.indexOf(root, from);
+    if (at < 0) return false;
+    const after = probe.charAt(at + root.length);
+    if (!after || !isPathSegmentChar(after)) return true;
+    from = at + 1;
+  }
+}
+
+/**
  * 命令文本里是否出现主工作区根。
  *
  * 子会话的 worktree 就在主仓里面（`.iflow/super/worktrees/...`），所以先把
@@ -908,7 +938,7 @@ function mentionsMainWorkspace(text: string, ctx: ChildShellGuardContext): boole
   let probe = text.replace(/\\/g, "/").toLowerCase();
   const cwd = normalizePath(ctx.cwd);
   if (cwd && cwd !== root) probe = probe.split(cwd).join(" ");
-  return probe.includes(root);
+  return probeContainsRoot(probe, root);
 }
 
 /** 命令里是否有 `cd` 落到主仓根（相对 / 绝对路径都解析；解析不了就不据此判定）。 */

@@ -134,6 +134,21 @@ describe("parseSuperToolCall", () => {
     expect(parsed.tasks.flat()[0]?.title).toBe("字符串载荷");
   });
 
+  it("脏 JSON 字符串（原始换行 + 尾逗号）两通道一致：围栏能派发，工具通道也必须能派发", () => {
+    // 任务书正文带未转义的原始换行，数组与对象末尾各带一个尾逗号。
+    const dirty = '{\n"tasks":[{"title":"甲","task":"第一行\n第二行",},],\n}';
+    const fenced = parseSuperDelegationPayload(dirty);
+    expect(fenced.ok).toBe(true);
+    if (!fenced.ok) return;
+    expect(fenced.tasks[0]?.task).toContain("\n第二行");
+
+    const parsed = parseSuperToolCall("dispatch", dirty);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.tasks.flat()[0]?.task).toContain("\n第二行");
+    expect(parsed.tasks.flat()[0]?.title).toBe("甲");
+  });
+
   it("管理动作载荷能被现有动作解析器解析", () => {
     const parsed = parseSuperToolCall("actions", {
       actions: [

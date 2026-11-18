@@ -22,6 +22,7 @@
 import {
   extractSuperActions,
   extractSuperDirectives,
+  parseJsonLoose,
   parseSuperDelegationPayload,
   type SuperAction,
   type SuperTaskSpec,
@@ -102,12 +103,13 @@ function normalizeArgsValue(args: unknown): unknown {
   if (typeof args === "string") {
     const trimmed = args.trim();
     if (!trimmed) return null;
-    try {
-      const parsed: unknown = JSON.parse(trimmed);
-      return parsed && typeof parsed === "object" ? parsed : null;
-    } catch {
-      return null;
-    }
+    // 与围栏通道 parseSuperDelegationPayload 同源：字符串载荷一律走宽松解析
+    // （修原始换行 / 尾逗号 / 非法转义）。否则同一份脏 JSON 字符串围栏能派发、
+    // 工具通道却严格 parse 失败返回 null → 静默零派发。
+    const loose = parseJsonLoose(trimmed);
+    if (!loose.ok) return null;
+    const parsed = loose.value;
+    return parsed && typeof parsed === "object" ? parsed : null;
   }
   return args && typeof args === "object" ? args : null;
 }

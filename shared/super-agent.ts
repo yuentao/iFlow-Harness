@@ -650,8 +650,23 @@ export function applySuperEvent(session: SuperSessionUi, event: SuperEvent): Sup
         // 终态不再等应答：卡死在那里的审批对用户没有意义。
         next.pending = undefined;
       }
-      if (status === "awaiting_input" && event.report.humanAction) {
-        next.summary = event.report.summary;
+      if (status === "awaiting_input") {
+        // `awaiting_input` 的契约是 pending 必须非空 —— reportForSession 完全
+        // 依赖它推导 blocked 汇报，没有 pending 就返回 null，主会话永远收不到
+        // 这条汇报（孤儿态）。report 本身不带结构化 pending，这里据报告合成
+        // 一个降级 pending：问题正文取 humanAction（退回 summary），requestId
+        // 用 session id + 事件时间保证确定，超时取 5 分钟兜底。
+        // 注意：当前宿主只 emit ready、blocked report 生产不可达；真被卡住时
+        // 仍走 needs_input（携带可路由回真实 ACP 请求的 pending）。此合成项仅
+        // 为守住导出状态机 API 的契约，不伪造任务 / 汇报内容。
+        const question = event.report.humanAction ?? event.report.summary;
+        next.pending = {
+          kind: "question",
+          requestId: `${session.id}:report:${event.at}`,
+          questions: [{ question, header: "需要人工处理", options: [], multiSelect: false }],
+          deadline: event.at + 300_000,
+          timeoutMs: 300_000,
+        };
       }
       return next;
     }
@@ -2574,6 +2589,17 @@ function readTolerantString(
     if (ch === "\\") {
       const next = text.charAt(i + 1);
       if (next === "") break;
+      // \uXXXX：把 4 位十六进制真正解码成字符。原实现把反斜杠丢掉、把
+      // `u4E2D` 当普通正文读出，中文任务书因此变成乱码。十六进制非法时
+      // 退回普通转义处理（保留原文可读，不伪造内容）。
+      if (next === "u") {
+        const hex = text.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          value += String.fromCharCode(parseInt(hex, 16));
+          i += 6;
+          continue;
+        }
+      }
       value += decodeJsonEscape(next);
       i += 2;
       continue;

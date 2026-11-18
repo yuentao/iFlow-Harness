@@ -737,6 +737,33 @@ describe("super agent · 状态机", () => {
     expect(applySuperEvent(base, { type: "report", report: { state: "dropped", summary: "s", at: 2 }, at: 2 }).status).toBe("cancelled");
   });
 
+  it("report(blocked) 进入 awaiting_input 时必带 pending，不再产出 reportForSession 为 null 的孤儿态", () => {
+    const base = applySuperEvent(session(), { type: "started", cliSessionId: "s1", at: 1 });
+    const next = applySuperEvent(base, {
+      type: "report",
+      report: { state: "blocked", summary: "等用户确认部署", at: 2, humanAction: "请确认是否部署" },
+      at: 2,
+    });
+    expect(next.status).toBe("awaiting_input");
+    expect(next.pending).toBeDefined();
+    expect(next.pending?.kind).toBe("question");
+    expect(next.pending?.questions[0]?.question).toBe("请确认是否部署");
+    expect(next.pending?.requestId).toBeTruthy();
+    const report = reportForSession(next, 3, "fallback");
+    expect(report?.state).toBe("blocked");
+    expect(report?.humanAction).toBe("请确认是否部署");
+  });
+
+  it("report(blocked) 缺 humanAction 时 pending 问题正文退回 summary", () => {
+    const next = applySuperEvent(session(), {
+      type: "report",
+      report: { state: "blocked", summary: "只有摘要可依据", at: 2 },
+      at: 2,
+    });
+    expect(next.status).toBe("awaiting_input");
+    expect(next.pending?.questions[0]?.question).toBe("只有摘要可依据");
+  });
+
   it("失败与中断记录原因", () => {
     expect(applySuperEvent(session(), { type: "failed", error: "boom", at: 1 }).error).toBe("boom");
     expect(applySuperEvent(session(), { type: "cancelled", at: 1 }).status).toBe("cancelled");
@@ -1828,6 +1855,21 @@ describe("super agent · 宿主与渲染共用块解析", () => {
       { title: "乙", task: "跑测试", attachments: [] },
       // 缺 title 时用任务书首行兜底，绝不编造标题。
       { title: "读代码", task: "读代码", attachments: [] },
+    ]);
+  });
+
+  it("容错拆分：\\uXXXX 转义正确解码成中文，不再读成 uXXXX 乱码", () => {
+    // 源码里的 \\u 在运行时就是载荷正文里的字面 `\u`，正是模型会写出的形态。
+    const body = '{"tasks":[{"title":"\\u4E2D\\u6587","task":"\\u4FEE\\u590D\\u767B\\u5F55"}]}';
+    expect(salvageSuperTasks(body)).toEqual([
+      { title: "中文", task: "修复登录", attachments: [] },
+    ]);
+  });
+
+  it("容错拆分：非法 \\u 十六进制不抛错，退回可读原文", () => {
+    const body = '{"tasks":[{"title":"坏转义","task":"\\uZZZZ 仍然可读"}]}';
+    expect(salvageSuperTasks(body)).toEqual([
+      { title: "坏转义", task: "uZZZZ 仍然可读", attachments: [] },
     ]);
   });
 

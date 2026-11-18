@@ -203,6 +203,10 @@ describe("子会话 shell 护栏 · 放行", () => {
       name: "回归：--prefix 指向自己的 worktree 且安装是子命令",
       command: `npm --prefix "${WORKTREE}" ci`,
     },
+    {
+      name: "回归：兄弟仓库路径以主仓根为前缀（J:\\git\\project-x vs J:\\git\\proj）不被误杀",
+      command: 'npm install --prefix "J:\\git\\project-x"',
+    },
     { name: "删除非依赖目录", command: "rm -rf dist" },
     { name: "git clean（不涉及 node_modules）", command: "git clean -fdx" },
     { name: "node_modules_backup 不是 node_modules", command: "rm -rf node_modules_backup" },
@@ -405,6 +409,18 @@ describe("子会话 shell 护栏 · 处置档位（severity）", () => {
   it("装到主工作区 → session 档", () => {
     const result = classifyChildShellCommand('npm install --prefix "J:\\git\\proj"', ctx());
     expect(result.severity).toBe("session");
+  });
+
+  it("主仓根的真实子路径仍命中 → session 档", () => {
+    const result = classifyChildShellCommand('npm install --prefix "J:\\git\\proj\\sub"', ctx());
+    expect(result.decision).toBe("deny");
+    expect(result.severity).toBe("session");
+  });
+
+  it("兄弟仓库路径（主仓根为前缀子串）删除 node_modules 只判 tool 档，不误杀子会话", () => {
+    const result = classifyChildShellCommand('rm -rf "J:\\git\\project-x\\node_modules"', ctx());
+    expect(result.decision).toBe("deny");
+    expect(result.severity).toBe("tool");
   });
 
   it("删自己 worktree 里的 node_modules → tool 档（不因此杀掉子会话）", () => {
