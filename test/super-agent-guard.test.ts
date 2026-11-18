@@ -431,6 +431,99 @@ describe("子会话 shell 护栏 · 处置档位（severity）", () => {
   });
 });
 
+describe("子会话 shell 护栏 · repo 档（主仓工作区）的破坏性 git 命令", () => {
+  /** repo 档上下文：cwd 就是主仓根，宿主显式标记 repoWorkspace。 */
+  function repoCtx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
+    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, ...overrides };
+  }
+
+  const denyCases: Array<{ name: string; command: string }> = [
+    { name: "git reset --hard", command: "git reset --hard" },
+    { name: "git reset --hard 到指定提交", command: "git reset --hard HEAD~3" },
+    { name: "git -C <主仓> reset --hard（全局选项带取值）", command: `git -C "${REPO}" reset --hard` },
+    { name: "git clean -fd", command: "git clean -fd" },
+    { name: "git clean -fdx", command: "git clean -fdx" },
+    { name: "git clean --force -d", command: "git clean --force -d" },
+    { name: "git checkout -- .", command: "git checkout -- ." },
+    { name: "git checkout .", command: "git checkout ." },
+    { name: "git checkout -f", command: "git checkout -f" },
+    { name: "git restore .", command: "git restore ." },
+    { name: "cmd /c 包装的 git reset --hard", command: 'cmd /c "git reset --hard"' },
+    { name: "powershell -c 包装的 git clean -fd", command: 'powershell -c "git clean -fd"' },
+  ];
+
+  for (const testCase of denyCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, repoCtx());
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toBeTruthy();
+      // session 档：预检路径据此终止子会话（命令一跑就不可逆）。
+      expect(result.severity).toBe("session");
+      expect(result.reason).toContain("MAIN repository workspace");
+    });
+  }
+
+  const allowCases: Array<{ name: string; command: string }> = [
+    { name: "git status", command: "git status" },
+    { name: "git diff --stat", command: "git diff --stat" },
+    { name: "git log --oneline -3", command: "git log --oneline -3" },
+    { name: "git add 单个文件", command: "git add a.txt" },
+    { name: "git merge --no-ff <分支>（repo 档的授权操作）", command: "git merge --no-ff iflow/super/fix-login-abcd1234" },
+    { name: "git clean -nd（dry-run 不删文件）", command: "git clean -nd" },
+    { name: "git checkout -b <新分支>", command: "git checkout -b feature/x" },
+    { name: "git restore --staged（只取消暂存）", command: "git restore --staged a.txt" },
+    { name: "提交信息里出现 reset --hard（只是文本）", command: 'git commit -m "revert: undo git reset --hard"' },
+  ];
+
+  for (const testCase of allowCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, repoCtx());
+      expect(result.decision).toBe("allow");
+      expect(result.reason).toBeUndefined();
+    });
+  }
+
+  it("worktree 档行为不变：同样的破坏性命令仍放行（毁掉的是自己的临时目录）", () => {
+    for (const command of ["git reset --hard", "git clean -fd", "git checkout -- ."]) {
+      const result = classifyChildShellCommand(command, ctx());
+      expect(result.decision).toBe("allow");
+    }
+  });
+
+  it("预检帧（tool_call_update in_progress）在 repo 档被拦下", () => {
+    const verdict = classifyChildToolCall(
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "run_shell_command",
+        kind: "execute",
+        status: "in_progress",
+        title: "git clean -fd",
+        args: { command: "git clean -fd" },
+      },
+      repoCtx(),
+    );
+    expect(verdict?.decision).toBe("deny");
+    expect(verdict?.severity).toBe("session");
+  });
+
+  it("预检帧在 worktree 档不受影响", () => {
+    const verdict = classifyChildToolCall(
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "run_shell_command",
+        kind: "execute",
+        status: "in_progress",
+        title: "git reset --hard",
+        args: { command: "git reset --hard" },
+      },
+      ctx(),
+    );
+    expect(verdict?.decision).toBe("allow");
+  });
+});
+
 describe("子会话 shell 护栏 · 工具识别与命令提取", () => {
   it("run_shell_command 是 shell 工具", () => {
     expect(isShellToolCall({ toolName: "run_shell_command" })).toBe(true);
