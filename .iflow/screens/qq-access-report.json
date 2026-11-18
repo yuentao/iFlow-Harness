@@ -35,18 +35,18 @@
         "label": "允许的用户",
         "className": "w-full table-fixed border-collapse text-ui-label",
         "rect": {
-          "x": 226,
-          "y": 316.1,
-          "w": 219.9,
-          "h": 187.4,
-          "right": 445.9,
-          "bottom": 503.5
+          "x": 50,
+          "y": 345.3,
+          "w": 400,
+          "h": 201,
+          "right": 450,
+          "bottom": 546.3
         }
       },
       "thWidths": [
         {
           "text": "条目",
-          "w": 155.9
+          "w": 336
         },
         {
           "text": "操作",
@@ -58,15 +58,15 @@
         "maskedText": "D754********8D11",
         "maskedHasTail4": true,
         "maskedRect": {
-          "x": 226,
-          "y": 374.5,
-          "w": 147.9,
+          "x": 50,
+          "y": 408.3,
+          "w": 328,
           "h": 18,
-          "right": 374,
-          "bottom": 392.5
+          "right": 378,
+          "bottom": 426.3
         },
-        "maskedScrollWidth": 148,
-        "maskedClientWidth": 148,
+        "maskedScrollWidth": 328,
+        "maskedClientWidth": 328,
         "maskedScrollHeight": 18,
         "maskedClientHeight": 18,
         "maskedLineHeight": "18px",
@@ -79,37 +79,37 @@
         {
           "label": "编辑 我的手机（私聊）",
           "rect": {
-            "x": 395.9,
-            "y": 360.8,
+            "x": 400,
+            "y": 392.3,
             "w": 24,
             "h": 24,
-            "right": 419.9,
-            "bottom": 384.8
+            "right": 424,
+            "bottom": 416.3
           }
         },
         {
           "label": "删除 我的手机（私聊）",
           "rect": {
-            "x": 421.9,
-            "y": 360.8,
+            "x": 426,
+            "y": 392.3,
             "w": 24,
             "h": 24,
-            "right": 445.9,
-            "bottom": 384.8
+            "right": 450,
+            "bottom": 416.3
           }
         }
       ],
-      "actionMaxRight": 445.9263610839844,
+      "actionMaxRight": 450,
       "actionInsideViewport": true,
       "groupTitle": {
         "text": "访问控制",
         "rect": {
-          "x": 226,
-          "y": 169.4,
-          "w": 219.9,
+          "x": 50,
+          "y": 219.6,
+          "w": 400,
           "h": 18,
-          "right": 445.9,
-          "bottom": 187.4
+          "right": 450,
+          "bottom": 237.6
         },
         "lineHeight": "18px",
         "fontSize": "12px",
@@ -120,12 +120,12 @@
       "groupHint": {
         "text": "留空表示不接受该来源的任务",
         "rect": {
-          "x": 226,
-          "y": 191.4,
-          "w": 219.9,
+          "x": 50,
+          "y": 241.6,
+          "w": 400,
           "h": 18,
-          "right": 445.9,
-          "bottom": 209.3
+          "right": 450,
+          "bottom": 259.6
         },
         "belowTitle": true
       },
@@ -134,15 +134,15 @@
       "settingsModal": {
         "ariaLabel": "设置",
         "rect": {
-          "x": 16.1,
-          "y": 88.3,
-          "w": 467.8,
-          "h": 623.8,
-          "right": 483.9,
+          "x": 16,
+          "y": 88,
+          "w": 468,
+          "h": 624,
+          "right": 484,
           "bottom": 712
         },
         "insideViewport": true,
-        "contentColumnWidth": 219.9
+        "contentColumnWidth": 400
       }
     },
     "w360": {
@@ -159,11 +159,11 @@
         "className": "w-full table-fixed border-collapse text-ui-label",
         "rect": {
           "x": 50,
-          "y": 468.8,
+          "y": 351.8,
           "w": 260,
-          "h": 187.5,
+          "h": 201,
           "right": 310,
-          "bottom": 656.3
+          "bottom": 552.8
         }
       },
       "thWidths": [
@@ -182,11 +182,11 @@
         "maskedHasTail4": true,
         "maskedRect": {
           "x": 50,
-          "y": 527.3,
+          "y": 414.8,
           "w": 188,
           "h": 18,
           "right": 238,
-          "bottom": 545.3
+          "bottom": 432.8
         },
         "maskedScrollWidth": 188,
         "maskedClientWidth": 188,
@@ -203,22 +203,22 @@
           "label": "编辑 我的手机（私聊）",
           "rect": {
             "x": 260,
-            "y": 513.5,
+            "y": 398.8,
             "w": 24,
             "h": 24,
             "right": 284,
-            "bottom": 537.5
+            "bottom": 422.8
           }
         },
         {
           "label": "删除 我的手机（私聊）",
           "rect": {
             "x": 286,
-            "y": 513.5,
+            "y": 398.8,
             "w": 24,
             "h": 24,
             "right": 310,
-            "bottom": 537.5
+            "bottom": 422.8
           }
         }
       ],
@@ -228,11 +228,11 @@
         "text": "访问控制",
         "rect": {
           "x": 50,
-          "y": 322,
+          "y": 205,
           "w": 260,
           "h": 18,
           "right": 310,
-          "bottom": 340
+          "bottom": 223
         },
         "lineHeight": "18px",
         "fontSize": "12px",
@@ -244,11 +244,11 @@
         "text": "留空表示不接受该来源的任务",
         "rect": {
           "x": 50,
-          "y": 344,
+          "y": 227,
           "w": 260,
           "h": 18,
           "right": 310,
-          "bottom": 362
+          "bottom": 245
         },
         "belowTitle": true
       },
@@ -281,18 +281,18 @@
         "label": "允许的用户",
         "className": "w-full table-fixed border-collapse text-ui-label",
         "rect": {
-          "x": 226,
-          "y": 297.9,
-          "w": 220,
-          "h": 203,
-          "right": 446,
-          "bottom": 500.9
+          "x": 50,
+          "y": 330.3,
+          "w": 400,
+          "h": 201,
+          "right": 450,
+          "bottom": 531.3
         }
       },
       "thWidths": [
         {
           "text": "条目",
-          "w": 156
+          "w": 336
         },
         {
           "text": "操作",
@@ -304,15 +304,15 @@
         "maskedText": "D754********8D11",
         "maskedHasTail4": true,
         "maskedRect": {
-          "x": 226,
-          "y": 371.9,
-          "w": 148,
+          "x": 50,
+          "y": 393.3,
+          "w": 328,
           "h": 18,
-          "right": 374,
-          "bottom": 389.9
+          "right": 378,
+          "bottom": 411.3
         },
-        "maskedScrollWidth": 148,
-        "maskedClientWidth": 148,
+        "maskedScrollWidth": 328,
+        "maskedClientWidth": 328,
         "maskedScrollHeight": 18,
         "maskedClientHeight": 18,
         "maskedLineHeight": "18px",
@@ -325,37 +325,37 @@
         {
           "label": "保存",
           "rect": {
-            "x": 396,
-            "y": 350.4,
+            "x": 400,
+            "y": 377.3,
             "w": 24,
             "h": 24,
-            "right": 420,
-            "bottom": 374.4
+            "right": 424,
+            "bottom": 401.3
           }
         },
         {
           "label": "取消",
           "rect": {
-            "x": 422,
-            "y": 350.4,
+            "x": 426,
+            "y": 377.3,
             "w": 24,
             "h": 24,
-            "right": 446,
-            "bottom": 374.4
+            "right": 450,
+            "bottom": 401.3
           }
         }
       ],
-      "actionMaxRight": 446,
+      "actionMaxRight": 450,
       "actionInsideViewport": true,
       "groupTitle": {
         "text": "访问控制",
         "rect": {
-          "x": 226,
-          "y": 151.1,
-          "w": 220,
+          "x": 50,
+          "y": 204.6,
+          "w": 400,
           "h": 18,
-          "right": 446,
-          "bottom": 169.1
+          "right": 450,
+          "bottom": 222.6
         },
         "lineHeight": "18px",
         "fontSize": "12px",
@@ -366,27 +366,27 @@
       "groupHint": {
         "text": "留空表示不接受该来源的任务",
         "rect": {
-          "x": 226,
-          "y": 173.1,
-          "w": 220,
+          "x": 50,
+          "y": 226.6,
+          "w": 400,
           "h": 18,
-          "right": 446,
-          "bottom": 191.1
+          "right": 450,
+          "bottom": 244.6
         },
         "belowTitle": true
       },
       "editInput": {
         "rect": {
-          "x": 226,
-          "y": 334.9,
-          "w": 148,
-          "h": 35,
-          "right": 374,
-          "bottom": 369.9
+          "x": 50,
+          "y": 367.3,
+          "w": 328,
+          "h": 24,
+          "right": 378,
+          "bottom": 391.3
         },
         "ariaLabel": "备注 我的手机（私聊）",
         "value": "我的手机（私聊）",
-        "fontSize": "14px"
+        "fontSize": "13px"
       },
       "dialog": null,
       "settingsModal": {
@@ -400,7 +400,7 @@
           "bottom": 712
         },
         "insideViewport": true,
-        "contentColumnWidth": 220
+        "contentColumnWidth": 400
       }
     },
     "edit360": {
@@ -417,11 +417,11 @@
         "className": "w-full table-fixed border-collapse text-ui-label",
         "rect": {
           "x": 50,
-          "y": 452.8,
+          "y": 351.8,
           "w": 260,
-          "h": 203,
+          "h": 201,
           "right": 310,
-          "bottom": 655.8
+          "bottom": 552.8
         }
       },
       "thWidths": [
@@ -440,11 +440,11 @@
         "maskedHasTail4": true,
         "maskedRect": {
           "x": 50,
-          "y": 526.8,
+          "y": 414.8,
           "w": 188,
           "h": 18,
           "right": 238,
-          "bottom": 544.8
+          "bottom": 432.8
         },
         "maskedScrollWidth": 188,
         "maskedClientWidth": 188,
@@ -461,22 +461,22 @@
           "label": "保存",
           "rect": {
             "x": 260,
-            "y": 505.3,
+            "y": 398.8,
             "w": 24,
             "h": 24,
             "right": 284,
-            "bottom": 529.3
+            "bottom": 422.8
           }
         },
         {
           "label": "取消",
           "rect": {
             "x": 286,
-            "y": 505.3,
+            "y": 398.8,
             "w": 24,
             "h": 24,
             "right": 310,
-            "bottom": 529.3
+            "bottom": 422.8
           }
         }
       ],
@@ -486,11 +486,11 @@
         "text": "访问控制",
         "rect": {
           "x": 50,
-          "y": 306,
+          "y": 205,
           "w": 260,
           "h": 18,
           "right": 310,
-          "bottom": 324
+          "bottom": 223
         },
         "lineHeight": "18px",
         "fontSize": "12px",
@@ -502,26 +502,26 @@
         "text": "留空表示不接受该来源的任务",
         "rect": {
           "x": 50,
-          "y": 328,
+          "y": 227,
           "w": 260,
           "h": 18,
           "right": 310,
-          "bottom": 346
+          "bottom": 245
         },
         "belowTitle": true
       },
       "editInput": {
         "rect": {
           "x": 50,
-          "y": 489.8,
+          "y": 388.8,
           "w": 188,
-          "h": 35,
+          "h": 24,
           "right": 238,
-          "bottom": 524.8
+          "bottom": 412.8
         },
         "ariaLabel": "备注 我的手机（私聊）",
         "value": "我的手机（私聊）",
-        "fontSize": "14px"
+        "fontSize": "13px"
       },
       "dialog": null,
       "settingsModal": {
@@ -551,18 +551,18 @@
         "label": "允许的用户",
         "className": "w-full table-fixed border-collapse text-ui-label",
         "rect": {
-          "x": 226,
-          "y": 297.9,
-          "w": 220,
-          "h": 187.5,
-          "right": 446,
-          "bottom": 485.4
+          "x": 50,
+          "y": 330.3,
+          "w": 400,
+          "h": 201,
+          "right": 450,
+          "bottom": 531.3
         }
       },
       "thWidths": [
         {
           "text": "条目",
-          "w": 156
+          "w": 336
         },
         {
           "text": "操作",
@@ -574,15 +574,15 @@
         "maskedText": "D754********8D11",
         "maskedHasTail4": true,
         "maskedRect": {
-          "x": 226,
-          "y": 356.4,
-          "w": 148,
+          "x": 50,
+          "y": 393.3,
+          "w": 328,
           "h": 18,
-          "right": 374,
-          "bottom": 374.4
+          "right": 378,
+          "bottom": 411.3
         },
-        "maskedScrollWidth": 148,
-        "maskedClientWidth": 148,
+        "maskedScrollWidth": 328,
+        "maskedClientWidth": 328,
         "maskedScrollHeight": 18,
         "maskedClientHeight": 18,
         "maskedLineHeight": "18px",
@@ -595,37 +595,37 @@
         {
           "label": "编辑 我的手机（私聊）",
           "rect": {
-            "x": 396,
-            "y": 342.6,
+            "x": 400,
+            "y": 377.3,
             "w": 24,
             "h": 24,
-            "right": 420,
-            "bottom": 366.6
+            "right": 424,
+            "bottom": 401.3
           }
         },
         {
           "label": "删除 我的手机（私聊）",
           "rect": {
-            "x": 422,
-            "y": 342.6,
+            "x": 426,
+            "y": 377.3,
             "w": 24,
             "h": 24,
-            "right": 446,
-            "bottom": 366.6
+            "right": 450,
+            "bottom": 401.3
           }
         }
       ],
-      "actionMaxRight": 446,
+      "actionMaxRight": 450,
       "actionInsideViewport": true,
       "groupTitle": {
         "text": "访问控制",
         "rect": {
-          "x": 226,
-          "y": 151.1,
-          "w": 220,
+          "x": 50,
+          "y": 204.6,
+          "w": 400,
           "h": 18,
-          "right": 446,
-          "bottom": 169.1
+          "right": 450,
+          "bottom": 222.6
         },
         "lineHeight": "18px",
         "fontSize": "12px",
@@ -636,12 +636,12 @@
       "groupHint": {
         "text": "留空表示不接受该来源的任务",
         "rect": {
-          "x": 226,
-          "y": 173.1,
-          "w": 220,
+          "x": 50,
+          "y": 226.6,
+          "w": 400,
           "h": 18,
-          "right": 446,
-          "bottom": 191.1
+          "right": 450,
+          "bottom": 244.6
         },
         "belowTitle": true
       },
@@ -661,7 +661,7 @@
           "x": 50,
           "y": 324.9,
           "w": 400,
-          "h": 150.2,
+          "h": 150.3,
           "right": 450,
           "bottom": 475.1
         },
@@ -681,7 +681,7 @@
           "bottom": 712
         },
         "insideViewport": true,
-        "contentColumnWidth": 220
+        "contentColumnWidth": 400
       }
     }
   },
@@ -699,23 +699,23 @@
       "windowScrollY": 0,
       "scroller": {
         "tag": "DIV",
-        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5",
-        "scrollTop": 587,
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 472,
         "rect": {
-          "y": 130,
-          "h": 536,
+          "y": 184,
+          "h": 482,
           "bottom": 666
         }
       },
       "titleRect": {
-        "y": 169.1,
+        "y": 219.6,
         "h": 18,
-        "bottom": 187.1
+        "bottom": 237.6
       },
       "tableRect": {
-        "y": 315.9,
-        "h": 187.5,
-        "bottom": 503.4
+        "y": 345.3,
+        "h": 201,
+        "bottom": 546.3
       },
       "atTitle": "H3:访问控制"
     },
@@ -723,47 +723,47 @@
       "windowScrollY": 0,
       "scroller": {
         "tag": "DIV",
-        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5",
-        "scrollTop": 725,
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 584,
         "rect": {
-          "y": 442,
-          "h": 224,
+          "y": 184,
+          "h": 482,
           "bottom": 666
         }
       },
       "titleRect": {
-        "y": 322,
+        "y": 205,
         "h": 18,
-        "bottom": 340
+        "bottom": 223
       },
       "tableRect": {
-        "y": 468.8,
-        "h": 187.5,
-        "bottom": 656.3
+        "y": 351.8,
+        "h": 201,
+        "bottom": 552.8
       },
-      "atTitle": "BUTTON:记忆与知识"
+      "atTitle": "H3:访问控制"
     },
     "qq-access-section-360.png": {
       "windowScrollY": 0,
       "scroller": {
         "tag": "DIV",
-        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5",
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
         "scrollTop": 584,
         "rect": {
-          "y": 442,
-          "h": 224,
+          "y": 184,
+          "h": 482,
           "bottom": 666
         }
       },
       "titleRect": {
-        "y": 463,
+        "y": 205,
         "h": 18,
-        "bottom": 481
+        "bottom": 223
       },
       "tableRect": {
-        "y": 609.8,
-        "h": 187.5,
-        "bottom": 797.3
+        "y": 351.8,
+        "h": 201,
+        "bottom": 552.8
       },
       "atTitle": "H3:访问控制"
     },
@@ -771,23 +771,23 @@
       "windowScrollY": 0,
       "scroller": {
         "tag": "DIV",
-        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5",
-        "scrollTop": 605,
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 487,
         "rect": {
-          "y": 130,
-          "h": 536,
+          "y": 184,
+          "h": 482,
           "bottom": 666
         }
       },
       "titleRect": {
-        "y": 151.1,
+        "y": 204.6,
         "h": 18,
-        "bottom": 169.1
+        "bottom": 222.6
       },
       "tableRect": {
-        "y": 297.9,
-        "h": 203,
-        "bottom": 500.9
+        "y": 330.3,
+        "h": 201,
+        "bottom": 531.3
       },
       "atTitle": "H3:访问控制"
     },
@@ -795,47 +795,47 @@
       "windowScrollY": 0,
       "scroller": {
         "tag": "DIV",
-        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5",
-        "scrollTop": 741,
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 584,
         "rect": {
-          "y": 442,
-          "h": 224,
+          "y": 184,
+          "h": 482,
           "bottom": 666
         }
       },
       "titleRect": {
-        "y": 306,
+        "y": 205,
         "h": 18,
-        "bottom": 324
+        "bottom": 223
       },
       "tableRect": {
-        "y": 452.8,
-        "h": 203,
-        "bottom": 655.8
+        "y": 351.8,
+        "h": 201,
+        "bottom": 552.8
       },
-      "atTitle": "BUTTON:记忆与知识"
+      "atTitle": "H3:访问控制"
     },
     "qq-access-delete-confirm-500.png": {
       "windowScrollY": 0,
       "scroller": {
         "tag": "DIV",
-        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5",
-        "scrollTop": 605,
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 487,
         "rect": {
-          "y": 130,
-          "h": 536,
+          "y": 184,
+          "h": 482,
           "bottom": 666
         }
       },
       "titleRect": {
-        "y": 151.1,
+        "y": 204.6,
         "h": 18,
-        "bottom": 169.1
+        "bottom": 222.6
       },
       "tableRect": {
-        "y": 297.9,
-        "h": 187.5,
-        "bottom": 485.4
+        "y": 330.3,
+        "h": 201,
+        "bottom": 531.3
       },
       "atTitle": "DIV:删除条目删除「我的手机（私聊）」后将无法恢复：完"
     }

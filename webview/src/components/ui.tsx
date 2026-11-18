@@ -513,6 +513,12 @@ export function HelpTip({
  */
 export const BTN_INPUT =
   "rounded-md border border-border bg-editor px-2.5 py-1.5 text-ui-body text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/80 focus:border-primary/50 focus:shadow-focus";
+/** Compact field (24px) for inline/dense rows such as table editing. Same
+ * surface as BTN_INPUT but 13px text and a 24px height so it sits flush with
+ * `size="sm"` icon buttons and the surrounding 13px table text — a full-size
+ * field there reads as a foreign box dropped into a flat table. */
+const BTN_INPUT_SM =
+  "h-6 rounded-md border border-border bg-editor px-2 text-ui-label text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/80 focus:border-primary/50 focus:shadow-focus";
 /** Regular secondary button (28px). */
 export const BTN =
   "press inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-border bg-editor px-2.5 text-ui-caption font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
@@ -1504,6 +1510,7 @@ export function TextInput({
   mono = false,
   invalid = false,
   revealable = false,
+  dense = false,
   className = "",
   ref,
   ...rest
@@ -1512,6 +1519,8 @@ export function TextInput({
   invalid?: boolean;
   /** Kit reveal toggle for credential fields (call site supplies `type`). */
   revealable?: boolean;
+  /** Compact 24px / 13px field for inline or dense rows (default: 28px form field). */
+  dense?: boolean;
   ref?: Ref<HTMLInputElement>;
 }) {
   const [shown, setShown] = useState(false);
@@ -1522,9 +1531,9 @@ export function TextInput({
       aria-invalid={invalid || undefined}
       {...rest}
       type={revealable && shown ? "text" : (rest.type ?? "text")}
-      className={`${BTN_INPUT}${mono ? " font-mono" : ""}${invalid ? " border-destructive/60" : ""}${
-        revealable ? " pr-8" : ""
-      }${className ? ` ${className}` : ""}`}
+      className={`${dense ? BTN_INPUT_SM : BTN_INPUT}${mono ? " font-mono" : ""}${
+        invalid ? " border-destructive/60" : ""
+      }${revealable ? " pr-8" : ""}${className ? ` ${className}` : ""}`}
     />
   );
   if (!revealable) return field;
