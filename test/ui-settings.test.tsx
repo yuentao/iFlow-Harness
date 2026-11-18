@@ -40,6 +40,8 @@ const hostSettings = vi.hoisted(() => ({
   costTable: [],
   thinkingModelRules: [],
   superAgentMaxConcurrent: 5,
+  superAgentIntegration: "merge",
+  superAgentMaxWorktrees: 10,
 } as HostSettingsUi));
 const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,
