@@ -122,6 +122,16 @@ export interface QqHostPorts {
   injectIntoMain?(input: QqMainInjectInput): Promise<QqMainInjectResult>;
   /** 停止某个主会话渠道任务：取消等待空闲并打断正在跑的那一轮。 */
   cancelMainInjection?(taskId: string): Promise<boolean> | boolean;
+  /**
+   * 把远程任务的提问答案送回 agent（面板侧 `SuperAgentManager.respond`）。
+   *
+   * `answers` 以问题 `header` 为键，与 `_iflow/user/questions` 的回包同构。
+   * 返回是否真的命中了一个挂起的提问（子会话可能已超时 / 已被回答）。
+   */
+  answerRemoteQuestion?(
+    superSessionId: string,
+    answers: Record<string, string | string[]>,
+  ): boolean;
   /** 本地通知（面板 toast / 日志），不发往 QQ。 */
   notify(text: string): void;
   /**
@@ -354,6 +364,15 @@ export function createQqServiceHost(
     async unbindAccount(): Promise<{ ok: boolean; message: string }> {
       return ports.unbindAccount();
     },
+
+    ...(ports.answerRemoteQuestion
+      ? {
+          answerRemoteQuestion: (
+            superSessionId: string,
+            answers: Record<string, string | string[]>,
+          ): boolean => ports.answerRemoteQuestion!(superSessionId, answers),
+        }
+      : {}),
 
     notify(text: string): void {
       ports.notify(text);
