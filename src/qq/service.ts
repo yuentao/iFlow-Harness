@@ -125,6 +125,53 @@ export interface QqServiceDeliverInput {
   dedupeKey?: string;
 }
 
+/** 转发给 QQ 的一个问题（结构形状与 `_iflow/user/questions` 的 UserQuestion 同构）。 */
+export interface QqRemoteQuestion {
+  /** 问题短标签，同时是答案映射的键。 */
+  header: string;
+  /** 完整问题正文。 */
+  question: string;
+  /** 可选项（有值就在提醒里列出，QQ 用户仍以自由文本作答）。 */
+  options?: readonly { label: string; description?: string }[];
+  /** 是否多选（决定回灌给 agent 的答案是数组还是单值）。 */
+  multiSelect?: boolean;
+}
+
+/** 一次远程任务提问提醒的输入。 */
+export interface QqRemoteQuestionInput {
+  /** 产生提问的 Super Agent 子会话 id（对应 `QqTask.correlation.superSessionId`）。 */
+  superSessionId: string;
+  /** agent 的问题，逐字搬运，不改写。 */
+  questions: readonly QqRemoteQuestion[];
+  /** 子会话标题（仅用于本地日志，不发给 QQ）。 */
+  title?: string;
+}
+
+/**
+ * 把 agent 的提问渲染成 QQ 纯文本提醒。
+ *
+ * 不使用 Markdown（QQ 客户端不渲染）；多个问题时给用户一个明确说明：这段自由
+ * 文本会作为所有问题的答案提交 —— 这是自由文本通道的诚实取舍（见报告）。
+ */
+export function formatQqQuestionNotice(
+  shortId: string,
+  questions: readonly QqRemoteQuestion[],
+  timeoutMs: number,
+): string {
+  const lines = [`任务 ${shortId} 需要你回答：`, ""];
+  questions.forEach((question, index) => {
+    lines.push(`${index + 1}. ${question.question || question.header}`);
+    if (question.options && question.options.length > 0) {
+      lines.push(`   选项：${question.options.map((option) => option.label).join(" / ")}`);
+    }
+  });
+  lines.push("");
+  lines.push(`回复 /qq answer ${shortId} <回答> 作答。`);
+  if (questions.length > 1) lines.push("这段回答会作为上面所有问题的答案提交。");
+  lines.push(`逾期（${Math.max(1, Math.round(timeoutMs / 60_000))} 分钟）按未回答继续。`);
+  return lines.join("\n");
+}
+
 /**
  * 主会话注入：一次把消息投进主会话并等那一轮结束的完整输入。
  *
@@ -237,6 +284,19 @@ export interface QqServiceHost {
   ): { dropped: boolean } | Promise<{ dropped: boolean }> | void;
   /** 解除当前账号绑定。 */
   unbindAccount(): Promise<{ ok: boolean; message: string }>;
+  /**
+   * 把远程任务的提问答案送回 agent（宿主侧 `SuperAgentManager.respond`）。
+   *
+   * 参数与 `_iflow/user/questions` 的回包同构：`answers` 以问题 `header` 为键。
+   * 返回是否真的命中了一个挂起的提问（子会话可能已超时 / 已被回答）。
+   *
+   * 可选：没有这条端口时，提问提醒仍会转发给 QQ，但用户回答无法送回 agent
+   * ——此时服务如实回执「回答未能送达」，绝不假装提交成功。
+   */
+  answerRemoteQuestion?(
+    superSessionId: string,
+    answers: Record<string, string | string[]>,
+  ): boolean;
   /** 本地通知（面板 toast / 日志），不发给 QQ。 */
   notify(text: string): void;
 }
@@ -258,6 +318,13 @@ export interface QqServiceOptions {
   onChanged?: () => void;
   /** 结果回包重试的基础间隔（毫秒，缺省 {@link QQ_DELIVERY_RETRY_DELAY_MS}）。 */
   deliveryRetryDelayMs?: number;
+  /**
+   * 远程任务提问提醒的应答窗口（毫秒，缺省 {@link QQ_ANSWER_TIMEOUT_MS}）。
+   *
+   * 必须短于子会话自身的提问超时（`SUPER_PENDING_TIMEOUT_MS`），才能抢在内核
+   * 按「未回答」继续之前把 QQ 用户的答案送进去。测试可注入小值确定化。
+   */
+  questionTimeoutMs?: number;
   /**
    * 终态任务的保留天数（`start()` 时按它清理归档）。
    *
@@ -292,6 +359,11 @@ export type QqTaskAction =
  * {@link QQ_APPROVAL_TIMEOUT_MINUTES}），不在两处各写一份分钟数。
  */
 export const QQ_APPROVAL_TIMEOUT_MS = QQ_APPROVAL_TIMEOUT_MINUTES * 60_000;
+/**
+ * 远程任务提问提醒的应答窗口：与审批窗口同源（4 分钟），刻意短于子会话自身的
+ * 提问超时（5 分钟）—— 这样 QQ 用户的答案能抢在内核按「未回答」继续之前送达。
+ */
+export const QQ_ANSWER_TIMEOUT_MS = QQ_APPROVAL_TIMEOUT_MS;
 /** 验证码最多尝试次数：第一次错误后仍保留 2 次机会。 */
 export const QQ_APPROVAL_MAX_ATTEMPTS = 3;
 /** `status` 无编号时回显的最近任务条数。 */
@@ -508,6 +580,15 @@ interface PendingApproval {
   code: string;
   attemptsLeft: number;
   resolve: (decision: SuperPermissionDecision) => void;
+  timer: NodeJS.Timeout;
+}
+
+/** 一个已转发到 QQ、正等用户作答的远程任务提问。 */
+interface PendingAnswer {
+  taskId: string;
+  superSessionId: string;
+  /** 规范化后的问题（保证 header 非空），用于按 header 拼回包。 */
+  questions: QqRemoteQuestion[];
   timer: NodeJS.Timeout;
 }
 
@@ -787,12 +868,16 @@ export class QqService {
   private readonly log: (line: string) => void;
   private readonly onChanged: () => void;
   private readonly deliveryRetryDelayMs: number;
+  /** 远程任务提问提醒的应答窗口（毫秒）。 */
+  private readonly questionTimeoutMs: number;
 
   private readonly tasks = new Map<string, QqTask>();
   private readonly idempotency = new Map<string, string>();
   private readonly queue: string[] = [];
   private readonly jobs = new Set<Promise<void>>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
+  /** 已转发到 QQ、正等用户作答的远程任务提问（taskId → 槽位）。 */
+  private readonly pendingAnswers = new Map<string, PendingAnswer>();
   /** 每个发送者的滑动窗口（毫秒时间戳，保留最近 60s）。 */
   private readonly rateWindows = new Map<string, number[]>();
 
@@ -879,6 +964,12 @@ export class QqService {
       options.deliveryRetryDelayMs >= 0
         ? options.deliveryRetryDelayMs
         : QQ_DELIVERY_RETRY_DELAY_MS;
+    this.questionTimeoutMs =
+      typeof options.questionTimeoutMs === "number" &&
+      Number.isFinite(options.questionTimeoutMs) &&
+      options.questionTimeoutMs > 0
+        ? options.questionTimeoutMs
+        : QQ_ANSWER_TIMEOUT_MS;
   }
 
   // -------------------------------------------------------------------------
@@ -1045,6 +1136,12 @@ export class QqService {
       entry.resolve("deny");
     }
     this.pendingApprovals.clear();
+    // 提问提醒也不能让 agent 永远挂着：按「未回答」把空答案送回去。
+    for (const entry of this.pendingAnswers.values()) {
+      clearTimeout(entry.timer);
+      this.feedAnswerBack(entry.superSessionId, {});
+    }
+    this.pendingAnswers.clear();
   }
 
   // -------------------------------------------------------------------------
@@ -1808,6 +1905,116 @@ export class QqService {
   }
 
   // -------------------------------------------------------------------------
+  // 远程提问提醒转发
+  // -------------------------------------------------------------------------
+
+  /**
+   * 远程派发的子会话产生 agent 提问时，把提醒转发给发起任务的 QQ 用户。
+   *
+   * 只有「确实由 QQ 派发、仍非终态、正在执行」的任务才会转发 —— 本地子会话
+   * 找不到对应的 `correlation.superSessionId`，在这里就被忽略，因此本地任务
+   * 完全不受影响（不会多出一条 QQ 消息）。
+   *
+   * 转发后任务切到 `waiting_answer`，等 `/qq answer <id> <回答>` 把答案经宿主
+   * 端口送回 agent；逾期按未回答继续，与子会话自身的超时纪律一致。
+   */
+  async forwardTaskQuestion(input: QqRemoteQuestionInput): Promise<void> {
+    if (this.stopped || !this.config.enabled) return;
+    const superSessionId = input.superSessionId;
+    if (typeof superSessionId !== "string" || superSessionId.length === 0) return;
+
+    const questions = (input.questions ?? [])
+      .filter(
+        (question): question is QqRemoteQuestion =>
+          Boolean(question) && typeof question.header === "string" && question.header.length > 0,
+      )
+      .map((question) => ({
+        header: question.header,
+        question: typeof question.question === "string" ? question.question : question.header,
+        ...(question.options ? { options: question.options } : {}),
+        multiSelect: question.multiSelect === true,
+      }));
+    if (questions.length === 0) return;
+
+    const task = [...this.tasks.values()].find(
+      (candidate) =>
+        candidate.correlation.superSessionId === superSessionId &&
+        candidate.channel !== "main" &&
+        !isTerminalStatus(candidate.status),
+    );
+    if (!task) return;
+    if (this.pendingAnswers.has(task.taskId)) return; // 同一问题只转发一次
+    if (
+      task.status !== "running" &&
+      task.status !== "dispatched" &&
+      task.status !== "injected"
+    ) {
+      return;
+    }
+
+    const taskId = task.taskId;
+    const at = this.now();
+    const firstQuestion = questions[0]!.question;
+    const pending = {
+      kind: "answer" as const,
+      text: firstQuestion.length > 200 ? `${firstQuestion.slice(0, 199)}…` : firstQuestion,
+      at,
+    };
+    const waiting = await this.commitStatus(task, "waiting_answer", {
+      pending,
+      updatedAt: Math.max(task.updatedAt, at),
+    });
+    if (isTerminalStatus(waiting.status)) return;
+
+    const timer = setTimeout(() => {
+      void this.expireQuestion(taskId);
+    }, this.questionTimeoutMs);
+    timer.unref?.();
+    this.pendingAnswers.set(taskId, { taskId, superSessionId, questions, timer });
+
+    await this.deliverTaskNotice(
+      waiting,
+      formatQqQuestionNotice(shortTaskId(taskId), questions, this.questionTimeoutMs),
+      `answer-request:${taskId}:${++this.deliverySeqCounter}`,
+    );
+  }
+
+  /**
+   * 把答案送回 agent。端口缺失或抛错一律按「未送达」处理，绝不让回灌异常打断
+   * 任务状态收尾 —— 否则槽位已摘、状态却停在 waiting_answer，agent 只能干等超时。
+   */
+  private feedAnswerBack(
+    superSessionId: string,
+    answers: Record<string, string | string[]>,
+  ): boolean {
+    try {
+      return this.host.answerRemoteQuestion?.(superSessionId, answers) ?? false;
+    } catch (error) {
+      this.log(`QQ 提问回答回灌失败：${errorText(error)}`);
+      return false;
+    }
+  }
+
+  /** 提问应答窗口耗尽：按未回答继续，清空 QQ 侧等待状态并如实回执。 */
+  private async expireQuestion(taskId: string): Promise<void> {
+    const entry = this.pendingAnswers.get(taskId);
+    if (!entry) return;
+    this.pendingAnswers.delete(taskId);
+    clearTimeout(entry.timer);
+    // 子会话可能已先一步超时（respond 返回 false），重复送空答案是幂等的。
+    this.feedAnswerBack(entry.superSessionId, {});
+
+    const task = this.tasks.get(taskId);
+    if (!task || isTerminalStatus(task.status)) return;
+    const updated = await this.clearPendingAndResume(taskId, task);
+    await this.deliverTaskNotice(
+      updated,
+      `任务 ${shortTaskId(taskId)} 的提问已超时（${Math.max(1, Math.round(this.questionTimeoutMs / 60_000))} 分钟），已按未回答继续。`,
+      `answer-result:${taskId}:timeout:${++this.deliverySeqCounter}`,
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // 任务操作（IPC / 命令共用）
   // -------------------------------------------------------------------------
 
@@ -1840,7 +2047,7 @@ export class QqService {
         await this.denyTask(task);
         return;
       case "answer":
-        await this.answerTask(task);
+        await this.answerTask(task, text);
         return;
       case "stop":
         await this.stopTask(task);
@@ -1919,10 +2126,39 @@ export class QqService {
     );
   }
 
-  private async answerTask(task: QqTask): Promise<void> {
-    await this.deliverTask(
-      task,
-      `任务 ${shortTaskId(task.taskId)} 当前没有等待回答的问题。`,
+  private async answerTask(task: QqTask, text: string | undefined): Promise<void> {
+    const pending = this.pendingAnswers.get(task.taskId);
+    if (!pending) {
+      await this.deliverTask(
+        task,
+        `任务 ${shortTaskId(task.taskId)} 当前没有等待回答的问题。`,
+      );
+      return;
+    }
+    const answer = typeof text === "string" ? text.trim() : "";
+    if (!answer) {
+      await this.deliverTask(
+        task,
+        `请提供回答：/qq answer ${shortTaskId(task.taskId)} <回答>`,
+      );
+      return;
+    }
+
+    // 先摘掉槽位并停表：第二次 answer 不能重复回灌同一个问题。
+    this.pendingAnswers.delete(task.taskId);
+    clearTimeout(pending.timer);
+    const answers: Record<string, string | string[]> = {};
+    for (const question of pending.questions) {
+      answers[question.header] = question.multiSelect ? [answer] : answer;
+    }
+    const delivered = this.feedAnswerBack(pending.superSessionId, answers);
+    const updated = await this.clearPendingAndResume(task.taskId, task);
+    await this.deliverTaskNotice(
+      updated,
+      delivered
+        ? `任务 ${shortTaskId(task.taskId)} 的回答已提交给 agent。`
+        : `任务 ${shortTaskId(task.taskId)} 的提问已结束，但回答未能送达 agent（子会话可能已超时）。`,
+      `answer-result:${task.taskId}:${++this.deliverySeqCounter}`,
     );
   }
 

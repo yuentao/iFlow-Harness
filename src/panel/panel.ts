@@ -45,6 +45,7 @@ import type {
   PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  UserQuestion,
   UserQuestionsRequest,
   UserQuestionsResponse,
   ExitPlanModeRequest,
@@ -4622,6 +4623,42 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingQuestions.clear();
   }
 
+  /**
+   * 远程派发的子会话提问 → 转发给 QQ 发起者。
+   *
+   * 服务侧会按 `QqTask.correlation.superSessionId` 判定任务是否真的来自 QQ，
+   * 本地子会话在这里就会被忽略，因此无需重复判断任务来源。转发是异步的，
+   * 不阻塞子会话的提问挂起；接线层异常只记日志，不打断看板作答通道。
+   */
+  private forwardQqTaskQuestion(superSessionId: string, questions: readonly UserQuestion[]): void {
+    const service = this.qq?.service;
+    if (!service) return;
+    try {
+      void service
+        .forwardTaskQuestion({
+          superSessionId,
+          questions: questions.map((question) => ({
+            header: question.header,
+            question: question.question,
+            ...(question.options
+              ? {
+                  options: question.options.map((option) => ({
+                    label: option.label,
+                    description: option.description,
+                  })),
+                }
+              : {}),
+            multiSelect: question.multiSelect === true,
+          })),
+        })
+        .catch((error: unknown) => {
+          this.log.warn(`QQ 提问提醒转发失败：${errorMessage(error)}`);
+        });
+    } catch (error) {
+      this.log.warn(`QQ 提问提醒转发失败：${errorMessage(error)}`);
+    }
+  }
+
   // --- Profile-switch choice dialog (extension-side, custom webview modal) ----
 
   /**
@@ -7506,8 +7543,14 @@ export class ChatPanel implements vscode.Disposable {
       // 子会话在等你回答：与主会话的提问卡同一档通知（`question` 属
       // approvals 默认档），只弹系统通知、不发提示音 —— 子会话的汇报回合
       // 已经统一静音，提问是唯一需要当场惊动用户的子会话事件。
-      onNeedInput: (session) =>
-        this.notifyOs("question", vscode.l10n.t("子会话「{0}」在等你回答", session.title)),
+      // 远程派发的任务还要把这条提问提醒转发给 QQ 发起者（本地任务不受影响：
+      // 服务侧找不到对应的 QQ 任务就会直接忽略）。
+      onNeedInput: (session) => {
+        this.notifyOs("question", vscode.l10n.t("子会话「{0}」在等你回答", session.title));
+        if (session.pending?.kind === "question") {
+          this.forwardQqTaskQuestion(session.id, session.pending.questions);
+        }
+      },
       // 自动集成没能把子会话的改动带回主分支 → 自动请智能体合并，
       // 不再把这件事留给用户点看板上的按钮。
       onNeedAgentMerge: (session, reason) => this.scheduleSuperMerge(session.id, reason),
@@ -9870,6 +9913,16 @@ export class ChatPanel implements vscode.Disposable {
 
       injectIntoMain: (input) => this.injectQqMainTurn(input),
       cancelMainInjection: (taskId) => this.cancelQqMainInjection(taskId),
+
+      /**
+       * 把 QQ 用户的回答送回远程子会话。`SuperAgentManager.respond` 会命中该
+       * 子会话挂起的 `_iflow/user/questions` 并让 agent 继续；已超时 / 已回答
+       * 时返回 false，服务侧据此如实回执。
+       */
+      answerRemoteQuestion: (superSessionId, answers) => {
+        const manager = this.getSuperAgent();
+        return manager ? manager.respond(superSessionId, { answers }) : false;
+      },
 
       notify: (text) => {
         if (this.disposed) return;
