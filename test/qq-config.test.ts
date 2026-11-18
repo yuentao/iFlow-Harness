@@ -85,6 +85,25 @@ describe("normalizeQqConfig", () => {
     expect(warnings[0]).toContain("4 个无效条目");
   });
 
+  it("白名单历史脏配置（脱敏串 / 非法字符 / 超长 / 过短）在读路径被过滤，只留合法 openid", () => {
+    // 这些脏值过去只靠 webview UI 的 isValidQqId 挡住；手改 settings.json
+    // 或历史遗留配置能绕过面板。归一函数现在统一挡住，读路径随之过滤 ——
+    // 否则运行期精确匹配永远命不中真实用户，表现为「配了却静默失效」。
+    const { config } = normalizeQqConfig({
+      allowedUsers: [
+        "10001",
+        "D754********8D11", // 脱敏串（含 *）
+        { openid: "user-2 ", note: "同事" }, // 首尾空格 trim 后合法
+        { openid: "a".repeat(65) }, // 超长
+        "abc", // 过短
+        "群1234", // 非法字符
+      ],
+      allowedGroups: ["D754********8D11", "20002"],
+    });
+    expect(config.allowedUsers).toEqual(["10001", "user-2"]);
+    expect(config.allowedGroups).toEqual(["20002"]);
+  });
+
   it("带备注的 { openid, note } 条目只取完整 openid（运行期匹配不认备注/脱敏）", () => {
     const { config, warnings } = normalizeQqConfig({
       allowedUsers: [
