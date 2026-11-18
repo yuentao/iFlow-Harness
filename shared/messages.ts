@@ -1374,16 +1374,31 @@ function evictOneBlock(block: Block): Block {
  * into the model context. The CLI itself never estimates (no such source in
  * the bundle), the host must not re-fetch schemas per render, so the host
  * computes it once per reply.
+ *
+ * Super Agent 语义:主面板会话带 `disableMcpServers` 启动,CLI 会把每个 server
+ * 报成 `{status:"disconnected", blocked:true}`——那是设计性屏蔽,不是服务器
+ * 故障。服务器实际由子会话经 host 的共享 MCP broker 使用,所以 `status` 与
+ * `childConnected` 以 broker 的 `statuses()` 为权威覆盖:
+ *   - `childConnected: true`  → 子会话已连通(即使 `blocked` 仍为 true);
+ *   - `childConnected: false` → 子会话连接确实失败(带 `error`);
+ *   - `childConnected: undefined` → broker 未就绪 / 无上报,只能退回 `blocked`
+ *     展示「主会话未加载」,绝不能读成「服务器坏了」。
+ * 详情子页仍消费 CLI 视图的 tools/schema/prompts(被屏蔽时为空),不丢字段。
  */
 export interface McpStatusUi {
   discoveryState?: string;
   /** `scope` is host-computed (the CLI's status report carries merged names
    * only): which settings file(s) declare the server, so the card can say
    * whether a row is the global entry, the project entry, or a name the
-   * project overrides. */
+   * project overrides. `childConnected` is host-computed from the shared MCP
+   * broker that Super Agent child sessions use (see the interface doc). */
   servers: Record<
     string,
-    McpServerStatusView & { contextTokens?: number; scope?: McpScope | "both" }
+    McpServerStatusView & {
+      contextTokens?: number;
+      scope?: McpScope | "both";
+      childConnected?: boolean;
+    }
   >;
 }
 
