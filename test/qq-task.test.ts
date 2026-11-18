@@ -584,6 +584,32 @@ describe("chunkQqText", () => {
     expect(joined.endsWith("tail content")).toBe(true);
   });
 
+  it("极小预算（5..12）：围栏行不切成纯围栏空片，逐片带内容且内容保真", () => {
+    // 探针实证：maxChars∈[8,120] 曾产出 75 个 ` ```j\n``` ` 这类无真实内容的
+    // 空片（围栏行放不下被硬切成 ```j，片尾又补 ```）。默认 3000 无法触发，
+    // 实际影响低，但极小预算仍须守住「每片都带真实内容」的契约。
+    const body = "x".repeat(40);
+    const text = ["```js", body, "```", "tail"].join("\n");
+    const payload = (value: string): string =>
+      value
+        .split("\n")
+        .filter((line) => !line.trimStart().startsWith("```"))
+        .join("");
+    for (let maxChars = 5; maxChars <= 12; maxChars += 1) {
+      const chunks = chunkQqText(text, maxChars);
+      expect(chunks.length).toBeGreaterThan(0);
+      for (const chunk of chunks) {
+        const fences = chunk.split("\n").filter((line) => line.trimStart().startsWith("```"));
+        expect(fences.length % 2).toBe(0);
+        // 无纯围栏空片：每片都必须带真实内容。
+        expect(payload(chunk).length).toBeGreaterThan(0);
+        expect(chunk).not.toBe("```j\n```");
+      }
+      // 内容保真：去掉围栏补齐注入的标记后，真实码点按序全部保留。
+      expect(payload(chunks.join("\n"))).toBe(payload(text));
+    }
+  });
+
   it("非法 maxChars 抛 RangeError", () => {
     expect(() => chunkQqText("x", 0)).toThrow(RangeError);
     expect(() => chunkQqText("x", Number.NaN)).toThrow(RangeError);

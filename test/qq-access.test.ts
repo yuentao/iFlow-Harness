@@ -78,6 +78,47 @@ describe("normalizeQqAllowEntries", () => {
   });
 });
 
+describe("归一函数的合法性防线（Host 读/写路径共用）", () => {
+  it("normalizeQqAllowEntry 拒绝脱敏串 / 内部空白 / 超长 / 过短 / 非法字符", () => {
+    // 这些值过去只有 webview UI 的 isValidQqId 会挡；手改 settings.json、
+    // 历史脏配置、未来的 Host API 都能绕过面板写进白名单。归一函数现在
+    // 统一挡住，读写两条路径共用这一道防线。
+    expect(normalizeQqAllowEntry("D754********8D11")).toBeNull();
+    expect(normalizeQqAllowEntry({ openid: "D754********8D11", note: "同事" })).toBeNull();
+    expect(normalizeQqAllowEntry("********")).toBeNull();
+    expect(normalizeQqAllowEntry("D754 D224")).toBeNull();
+    expect(normalizeQqAllowEntry({ openid: "user\t2" })).toBeNull();
+    expect(normalizeQqAllowEntry("a".repeat(65))).toBeNull();
+    expect(normalizeQqAllowEntry("abc")).toBeNull();
+    expect(normalizeQqAllowEntry("群1234")).toBeNull();
+    expect(normalizeQqAllowEntry("user@example.com")).toBeNull();
+  });
+
+  it("首尾空白 trim 后合法仍接受（先 trim 再校验，不误杀正常复制的 id）", () => {
+    expect(normalizeQqAllowEntry(" D754D2240C503C2ABE2B236DC1E78D11 ")).toEqual({
+      openid: "D754D2240C503C2ABE2B236DC1E78D11",
+    });
+    expect(normalizeQqAllowEntry({ openid: " user-2 ", note: " 同事 " })).toEqual({
+      openid: "user-2",
+      note: "同事",
+    });
+  });
+
+  it("normalizeQqAllowEntries 过滤历史脏配置，只保留合法条目", () => {
+    const entries = normalizeQqAllowEntries([
+      "10001",
+      "D754********8D11", // 脱敏串
+      { openid: "user-2 ", note: "同事" }, // trim 后合法
+      { openid: "  ", note: "空 id" },
+      "   ",
+      "abc", // 过短
+      { openid: "a".repeat(65) }, // 超长
+      "群1234", // 非法字符
+    ]);
+    expect(entries).toEqual([{ openid: "10001" }, { openid: "user-2", note: "同事" }]);
+  });
+});
+
 describe("serializeQqAllowEntries", () => {
   it("有备注写对象、没备注写裸字符串（写路径里绝不出现脱敏星号）", () => {
     const stored = serializeQqAllowEntries([

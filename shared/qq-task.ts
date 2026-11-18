@@ -1040,6 +1040,21 @@ export function chunkQqText(
         lineOffset = 0;
         continue;
       }
+      // 围栏行本身放不下时**不要硬切**：` ```js ` 会被切成 ` ```j ` 碎片，
+      // 片尾再补 ` ``` `，产出 ` ```j\n``` ` 这种没有任何真实内容的空片，
+      // 违背「每片都带真实内容」。沿用上面注释已声明的「退化略超预算」
+      // 策略：整行独立进片（围栏行都很短），并继续尝试把后续内容行纳入
+      // 同一片 —— 下面的守卫 + 硬切分支会保证本片最终带真实内容。
+      if (fenceLine) {
+        parts.push(piece);
+        joinedLen += separator + piecePoints.length;
+        joinedBytes += separator + pieceBytes;
+        open = nextOpen;
+        hasContent = true;
+        lineIndex++;
+        lineOffset = 0;
+        continue;
+      }
       // 当前片装不下这一行，先发出去 —— 但**只含围栏行**的片（例如重开的
       // ``` 头 + 紧跟着的闭合 ``` 行恰好耗尽预算）不能发：那会是一条
       // ```\n``` 的空代码块。此时不 break，把后续内容硬切进本片，保证

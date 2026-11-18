@@ -83,16 +83,28 @@ export function maskQqOpenId(value: string | null | undefined): string {
   return `${raw.slice(0, MASK_EDGE)}${"*".repeat(MASK_STARS)}${raw.slice(-MASK_EDGE)}`;
 }
 
-/** 单个条目归一；结构非法或 openid 为空返回 `null`。 */
+/**
+ * 单个条目归一；结构非法或 openid 不合法返回 `null`。
+ *
+ * 合法性复用 {@link isValidQqId}：先 trim，再拒绝脱敏串（含 `*`）、空白、
+ * 过短 / 超长与非法字符。读路径（`src/qq/config.ts` 的 `readIdList`）与写
+ * 路径（`src/qq/settings-host.ts` 的 `coerceAllowList`）都经这里，因此绕过
+ * 面板写进 settings.json 的历史脏条目会被同一道防线统一挡住 —— 运行期
+ * 准入判定按完整 openid 精确匹配，脏条目永远匹配不上真实用户，只有在这里
+ * 过滤掉才不会出现「配了却静默失效」。
+ *
+ * 校验不做 trim 的纪律见 {@link isValidQqId}：调用方（本函数）必须先 trim
+ * 再校验，否则「带空格的完整 id」会被判合法却匹配不上。
+ */
 export function normalizeQqAllowEntry(value: unknown): QqAllowEntry | null {
   if (typeof value === "string") {
     const openid = value.trim();
-    return openid.length > 0 ? { openid } : null;
+    return isValidQqId(openid) ? { openid } : null;
   }
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
     const openid = typeof record.openid === "string" ? record.openid.trim() : "";
-    if (openid.length === 0) return null;
+    if (!isValidQqId(openid)) return null;
     const note = typeof record.note === "string" ? record.note.trim() : "";
     return note.length > 0 ? { openid, note } : { openid };
   }
