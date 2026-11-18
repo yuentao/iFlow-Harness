@@ -96,12 +96,15 @@ describe("pickQqSettingsUi", () => {
   it("白名单去空白、去空项、去重（保持首次出现顺序），非法项跳过", () => {
     const ui = pickQqSettingsUi(
       {
-        allowedUsers: [" 123 ", "123", "", "456", 789, null],
+        // 保留项用合法 id（长度需 >= QQ_ID_MIN_LENGTH=4）：trim 后 " 1234 " 与
+        // "1234" 视为同一条目，去重只留首次出现的；"5678" 是另一个合法条目。
+        // 空串 / 数字 / null 仍是非法项，被归一防线跳过（与写入侧同口径）。
+        allowedUsers: [" 1234 ", "1234", "", "5678", 789, null],
         allowedGroups: "not-an-array",
       },
       SECRETS_OFF,
     );
-    expect(ui.allowedUsers).toEqual([{ openid: "123" }, { openid: "456" }]);
+    expect(ui.allowedUsers).toEqual([{ openid: "1234" }, { openid: "5678" }]);
     expect(ui.allowedGroups).toEqual([]);
   });
 
