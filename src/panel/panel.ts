@@ -120,6 +120,7 @@ import {
   superSessionsDir,
   writeSuperSessionArchive,
 } from "./super-store.js";
+import { comparisonPathKey } from "./worktree.js";
 import {
   assembleContextSections,
   buildFolderListing,
@@ -1244,8 +1245,14 @@ export class ChatPanel implements vscode.Disposable {
    * 提示不能投进 B 的对话。
    */
   private pendingSuperToolCallCorrections: Array<{ mainSessionId: string | null; text: string }> = [];
-  /** 纠错提示投递正在跑（drain 的重入锁）。 */
-  private superToolCallCorrectionRunning = false;
+  /**
+   * 合并 drain 的一次性唤醒定时器（见 drainSuperMerges）。
+   *
+   * 合并队列的派发与汇报车道互锁：一次派发没成功时不能只等外部回调 ——
+   * 合并子会话可能压根没派出去，于是永远不会有人回调。这个定时器在下一拍
+   * 自己再叫一次 drain，心跳之外多一道保险；有定时器在就不再叠加新的。
+   */
+  private superMergeWakeupTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Rolling buffer of the same MAIN-session text, scanned for management
    * actions (`super-agent-actions` fenced blocks). Kept separate from the
@@ -1963,6 +1970,18 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingSuperReportPrompts = [];
     this.pendingSuperActionReceipts = [];
     this.pendingDelegatedUserTurns = [];
+    // 面板销毁后这四个 drain 可能正卡在 await sendPrompt 上；把队列与车道全
+    // 清掉，避免它们在 finally 里把「已销毁实例」的锁/标志重新写回（也避免
+    // 残留的合并请求在销毁后还能触发一次唤醒）。
+    this.pendingSuperToolCallCorrections = [];
+    this.pendingSuperMerges = [];
+    this.superReportRunning = false;
+    this.superMergeRunning = false;
+    this.mainLane = null;
+    if (this.superMergeWakeupTimer) {
+      clearTimeout(this.superMergeWakeupTimer);
+      this.superMergeWakeupTimer = null;
+    }
     this.autoTurnsStoppedFor = null;
     this.clearDeferredAutoTurnsToast();
     this.promptRequestSessionId = null;
@@ -7374,7 +7393,7 @@ export class ChatPanel implements vscode.Disposable {
     const archive = await readSuperSessionArchive(this.superStoreDir(), mainSessionId);
     // 归档**读不出来**是故障，不是「这个会话没有子会话」。必须如实告诉用户
     // —— 旧实现把两者都当成空数组，用户重启后只看到空板子，完全看不出发生过
-    // 什么。损坏的原件已由读侧留底（.corrupt-<时间戳>），路径一并报出。
+    // 什么。损坏的原件已由读侧留底（归档名.corrupt），路径一并报出。
     if (archive.damaged) {
       this.log.warn(
         `super agent: 子会话归档读不出来（${archive.damage ?? "unknown"}），备份：${archive.backupPath ?? "-"}`,
@@ -7389,7 +7408,23 @@ export class ChatPanel implements vscode.Disposable {
     }
     const records = archive.sessions;
     if (records.length > 0) {
-      const restored = records.map((record) => fromPersistedSuperSession(record));
+      // 归档里的隔离目录可能已被外部手工删除，或上次失败的清理留下半删残迹。
+      // 恢复前核对磁盘事实（realpath 归一，兼容 Windows 目录联接），让
+      // fromPersistedSuperSession 如实校正 released / recycled —— 否则看板会
+      // 对一个早就不存在的目录显示「待清理」。核对失败时不猜（留 undefined =
+      // 保留归档原样）；这里只读盘，**绝不自动删**任何孤儿目录或分支。
+      const restored = await Promise.all(
+        records.map(async (record) => {
+          const kind = record.isolation.kind;
+          if (kind === "repo") return fromPersistedSuperSession(record);
+          try {
+            const key = await comparisonPathKey(record.isolation.path);
+            return fromPersistedSuperSession(record, { worktreePresent: existsSync(key) });
+          } catch {
+            return fromPersistedSuperSession(record);
+          }
+        }),
+      );
       this.log.info(`super agent: restored ${restored.length} historical child session(s) for ${mainSessionId}`);
       this.getSuperAgent()?.restoreSessions(mainSessionId, restored);
     }
@@ -8212,9 +8247,12 @@ export class ChatPanel implements vscode.Disposable {
    * 由心跳重试 —— 丢了它模型就永远不知道自己错在哪。
    */
   private async drainSuperToolCallCorrections(): Promise<void> {
-    if (this.disposed || this.superToolCallCorrectionRunning) return;
+    if (this.disposed || this.superReportRunning) return;
     if (this.autoTurnsHeld()) return;
-    this.superToolCallCorrectionRunning = true;
+    // 与汇报 / 动作回执 / 改道消息补投共用 superReportRunning 这一条车道：
+    // mainLane 的同步申领才是「同一时刻只有一个回合」的实际保证，四个 drain
+    // 用同一把重入锁即可，不需要另立一把（那只会让注释与实现漂移）。
+    this.superReportRunning = true;
     try {
       while (this.pendingSuperToolCallCorrections.length > 0) {
         if (this.disposed) return;
@@ -8249,7 +8287,7 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       this.log.warn(`super agent correction delivery failed: ${errorMessage(error)}`);
     } finally {
-      this.superToolCallCorrectionRunning = false;
+      this.superReportRunning = false;
     }
   }
 
@@ -8541,7 +8579,12 @@ export class ChatPanel implements vscode.Disposable {
       // 回合没跑起来（主会话被别的回合占着）：这条回执**留在队列里**，等空闲
       // 时重投 —— 回执丢了主会话就会重复发同一个动作。
       if (!started) return;
-      this.pendingSuperActionReceipts.splice(index, 1);
+      // 等 sendPrompt 的这几分钟里 deleteSession / dispose 会并发改写队列，
+      // 之前 findIndex 拿到的 index 可能已经指向别人。按对象身份重定位，
+      // 与 drainSuperReports / drainDelegatedUserTurns 同一套出队纪律：
+      // 宁可找不到（已被删除会话清掉）也不误删别的会话刚投出的回执。
+      const pos = this.pendingSuperActionReceipts.indexOf(item);
+      if (pos !== -1) this.pendingSuperActionReceipts.splice(pos, 1);
     } catch (error) {
       this.log.warn(`super agent action receipt delivery failed: ${errorMessage(error)}`);
     } finally {
@@ -8887,12 +8930,20 @@ export class ChatPanel implements vscode.Disposable {
       this.stopSuperHeartbeat();
       return;
     }
-    this.refreshSuperWaitHeartbeat();
-    void this.drainSuperReports();
-    void this.drainSuperActionReceipts();
-    void this.drainDelegatedUserTurns();
-    void this.drainSuperToolCallCorrections();
-    void this.drainSuperMerges();
+    // 心跳是 fire-and-forget 的 interval 回调：任何一步同步抛错都必须吞掉，
+    // 否则下面的 auto-stop 判断不执行，interval 会永久存活（且错误只在
+    // console 里一闪而过）。drain 自身都有 catch，这里主要护住
+    // refreshSuperWaitHeartbeat / syncSuperWaitingState 这类同步 UI 刷新。
+    try {
+      this.refreshSuperWaitHeartbeat();
+      void this.drainSuperReports();
+      void this.drainSuperActionReceipts();
+      void this.drainDelegatedUserTurns();
+      void this.drainSuperToolCallCorrections();
+      void this.drainSuperMerges();
+    } catch (error) {
+      this.log.warn(`super agent heartbeat tick failed: ${errorMessage(error)}`);
+    }
     if (!this.hasSuperWork()) this.stopSuperHeartbeat();
   }
 
@@ -10918,14 +10969,40 @@ export class ChatPanel implements vscode.Disposable {
         if (this.superReportRunning) break;
         // 主仓工作区没有版本隔离：同一时刻只能有一个合并子会话在跑。
         if (this.superMergeChildRunning()) break;
+        // 先把队首**取下**再 request：派发失败时 requestSuperMerge 的 auto
+        // 路径会用 scheduleSuperMerge 把 id 重新排到**队尾**（按 id 去重），
+        // 绝不再把同一个 id 塞回队首反复挡住后面的合并请求。
         const next = this.pendingSuperMerges.shift();
         if (!next) break;
-        await this.requestSuperMerge(next.id, { auto: true, reason: next.reason });
+        const result = await this.requestSuperMerge(next.id, { auto: true, reason: next.reason });
+        if (!result.dispatched && this.pendingSuperMerges.length > 0) {
+          // 没派出去：合并子会话可能压根没起，onMergeResult 永远不会来 ——
+          // 只靠外部回调会卡住整条队列。登记一次性唤醒，下一拍自己再试。
+          this.scheduleSuperMergeWakeup();
+        }
         // 合并子会话跑完才派下一个（onMergeResult 会再叫一次 drain）。
         break;
       }
     } finally {
       this.superMergeRunning = false;
+    }
+  }
+
+  /**
+   * 合并队列的一次性唤醒（与心跳并行的一道保险，见 superMergeWakeupTimer）。
+   *
+   * 有定时器在就不再叠加新的：多次失败重投只留一拍，避免定时器风暴。
+   */
+  private scheduleSuperMergeWakeup(): void {
+    if (this.disposed || this.superMergeWakeupTimer) return;
+    this.superMergeWakeupTimer = setTimeout(() => {
+      this.superMergeWakeupTimer = null;
+      if (this.disposed) return;
+      void this.drainSuperMerges();
+    }, SUPER_HEARTBEAT_MS);
+    // 与心跳同理：别为一个唤醒把扩展宿主钉在内存里。
+    if (typeof this.superMergeWakeupTimer.unref === "function") {
+      this.superMergeWakeupTimer.unref();
     }
   }
 
@@ -11930,7 +12007,13 @@ export class ChatPanel implements vscode.Disposable {
     // children (and their unmerged branches) on the next restore.
     const keptArchiveNames = new Set(kept.map((s) => superSessionFileName(s.id)));
     for (const name of await listSuperSessionArchiveFiles(this.superStoreDir())) {
-      if (name.endsWith(".json") && !keptArchiveNames.has(name)) {
+      // 归档本体（<name>.json）与损坏备份（<name>.json.corrupt）都要 GC。
+      // 备份名是归档名再加 .corrupt：剥掉后缀后按同一份 kept 集合比对——
+      // 正常归档（含仍归属的会话）一律不动，只有其会话已离开列表的残留
+      // 才回收，避免误删正在用的归档或把备份当独立会话。
+      const isBackup = name.endsWith(".corrupt");
+      const archiveName = isBackup ? name.slice(0, -".corrupt".length) : name;
+      if ((isBackup || archiveName.endsWith(".json")) && !keptArchiveNames.has(archiveName)) {
         await rm(path.join(superSessionsDir(this.superStoreDir()), name), { force: true });
       }
     }
