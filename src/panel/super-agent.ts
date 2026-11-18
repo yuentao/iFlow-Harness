@@ -3294,6 +3294,18 @@ export class SuperAgentManager {
    * 会明确「先处理这批结果、此时不要向用户做最终完整汇报」。
    */
   reportPrompt(entries: { session: SuperSessionUi; report: SuperReport }[]): string {
+    return this.reportPromptWithPending(entries).text;
+  }
+
+  /**
+   * 与 {@link reportPrompt} 同文本，额外返回这次汇报的 pendingCount（仍在跑、
+   * 同归属主会话的子会话数）。面板据此把 pendingCount=0 的汇总轮标记为 QQ
+   * 最终答复轮；两处共用同一份计算口径，避免提示词说「还在跑」却标记成最终。
+   */
+  reportPromptWithPending(entries: { session: SuperSessionUi; report: SuperReport }[]): {
+    text: string;
+    pendingCount: number;
+  } {
     // pendingCount 只统计**同一归属主会话**下还在跑的子会话：这份汇报是投给
     // 某个主会话的，别人家的子会话跟它无关。混进来算的话，提示词里的
     // 「还有 N 个在跑」与面板上的「等待 N 个子会话汇报」就对不上当前会话
@@ -3303,7 +3315,7 @@ export class SuperAgentManager {
       (session) =>
         !isTerminalSuperStatus(session.status) && (session.mainSessionId ?? owner) === owner,
     ).length;
-    return buildSuperReportPrompt(entries, { pendingCount });
+    return { text: buildSuperReportPrompt(entries, { pendingCount }), pendingCount };
   }
 
   /**

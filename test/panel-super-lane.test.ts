@@ -101,14 +101,30 @@ type PanelInternals = {
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
   drainSuperAutoTurns: () => Promise<void>;
+  drainSuperReports: () => Promise<void>;
   refreshSuperWaitHeartbeat: () => void;
   queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
   superAutoTurnCursor: number;
-  pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }>;
+  pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean }>;
   pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }>;
   autoTurnsStoppedFor: string | null;
+  qqMainFinalAwaiters: Map<string, string>;
+  qq?: {
+    service?: {
+      completeMainFinalAnswer?: (input: {
+        taskId: string;
+        text: string;
+        stopReason?: string;
+      }) => Promise<void>;
+    };
+  };
   store: {
-    getState: () => { status: string; superWaiting: boolean; [k: string]: unknown };
+    getState: () => {
+      status: string;
+      superWaiting: boolean;
+      blocks: Array<{ kind: string; id?: string; text?: string; system?: boolean }>;
+      [k: string]: unknown;
+    };
     sessionStarted: (meta: { sessionId: string }) => void;
     replaceState: (state: Record<string, unknown>) => void;
     sendToast: (...args: unknown[]) => number;
@@ -270,5 +286,46 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     expect((held!.opts?.action as { actionId: string } | undefined)?.actionId).toBe(
       "resume-super-turns",
     );
+  });
+
+  it("最终汇总轮（final）把本轮 assistant 文本作为 QQ 最终答复回传，进度轮不回执", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.store.getState().blocks.push({ kind: "text", id: "baseline", text: "上一轮文本" });
+
+    // 非 final 进度汇报轮：收尾不回执 QQ。
+    p.pendingSuperReportPrompts = [
+      { mainSessionId: "lane-session", text: "PROGRESS-REPORT", final: false },
+    ];
+    void p.drainSuperReports();
+    await flush();
+    p.store.getState().blocks.push({ kind: "text", id: "mid", text: "中途进度答复" });
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await flush();
+    await flush();
+    expect(complete).not.toHaveBeenCalled();
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(true);
+
+    // final 汇总轮：只取基线之后本轮新增的 assistant 文本。
+    p.pendingSuperReportPrompts = [
+      { mainSessionId: "lane-session", text: "FINAL-REPORT", final: true },
+    ];
+    void p.drainSuperReports();
+    await flush();
+    const call = calls[calls.length - 1]!;
+    expect(call.prompt[0]!.text).toContain("FINAL-REPORT");
+    p.store.getState().blocks.push({ kind: "text", id: "final", text: "真正的最终答复" });
+    call.resolve({ stopReason: "end_turn" });
+    await flush();
+    await flush();
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledWith({
+      taskId: "T-qq",
+      text: "真正的最终答复",
+      stopReason: "end_turn",
+    });
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
   });
 });

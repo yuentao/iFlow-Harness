@@ -218,6 +218,16 @@ export interface QqMainInjectResult {
   reason?: string;
   /** 被取消（`/qq stop` 或通道停止）：调用方不当作失败投递。 */
   canceled?: boolean;
+  /**
+   * 宿主观察到这一轮把任务派给了子会话。
+   *
+   * 主会话被设定为「只委派、不执行」：这一轮的 assistant 文本通常只是
+   * 「已派子会话去做」的占位答复，真正的最终答复会在子会话完成后由宿主以
+   * hidden/reportTurn 另起一轮产生。为 true 时服务**不**把本轮文本当最终回执，
+   * 任务停在 `injected` 等宿主随后调用 `completeMainFinalAnswer` 回传真正答复。
+   * 缺省 / false 保持旧语义（本轮文本即最终答复），兼容直接在主会话作答的情形。
+   */
+  delegated?: boolean;
 }
 
 /**
@@ -1780,27 +1790,6 @@ export class QqService {
       const rawStop = (result.stopReason ?? "").trim();
       const stopReason = rawStop.length > 0 ? rawStop : result.failed ? "error" : "end_turn";
       const summary = (result.text ?? "").trim();
-      const qqResult = this.buildResult({ summary, stopReason }, stopReason, latest, undefined);
-
-      let status: QqTaskStatus;
-      let failure: QqTaskError | undefined;
-      // ACP 的停止原因是英式拼写 `cancelled`；本仓库其它路径用 `canceled`。
-      // 两种都按「用户取消」收尾 —— 取消不是执行故障，不该在 QQ 侧报失败。
-      const stopKey = normalizedStopReason(stopReason);
-      if (stopKey === "canceled" || stopKey === "cancelled") {
-        status = "canceled";
-        failure = { code: "agent_canceled", message: `执行结束：${stopReason}` };
-      } else if (result.failed === true || isFailureStopReason(stopReason)) {
-        status = "failed";
-        failure = {
-          code: "main_turn_failed",
-          message: result.reason && result.reason.trim().length > 0
-            ? result.reason
-            : `执行结束：${stopReason}`,
-        };
-      } else {
-        status = "succeeded";
-      }
 
       // 防御：面板已在轮次开始时回调过 onInjected，但那次落盘可能没走到。
       // 仍停在 queued 就直接收终态会让迁移表拒绝（queued→succeeded 非法），
@@ -1809,31 +1798,122 @@ export class QqService {
         ? await this.commitStatus(latest, "injected")
         : latest;
 
-      const at = this.now();
-      const patched: QqTask = {
-        ...base,
-        result: qqResult,
-        failure,
-        pending: undefined,
-        updatedAt: Math.max(base.updatedAt, at),
-      };
-      const updated = await this.commitStatus(patched, status, {
-        result: qqResult,
-        failure,
-        pending: undefined,
+      // 主会话把任务派给了子会话：这一轮的文本只是「已安排」的占位答复，
+      // 真正的最终答复会在子会话汇报汇总轮由宿主经 completeMainFinalAnswer
+      // 交回。这里绝不写 result / 终态 / resultDeliveredAt —— 否则占位文本会
+      // 被当成最终结果投递，后续真正的答复反而被幂等锚点吞掉（QQ 侧只收到
+      // 「已安排」）。任务停在 injected，等待最终答复。
+      if (result.delegated === true) {
+        const waiting: QqTask = {
+          ...base,
+          pending: undefined,
+          updatedAt: Math.max(base.updatedAt, this.now()),
+        };
+        await this.persist(waiting);
+        // 明确的进度回执（不是最终结果）：用户据此知道任务已被受理并正在处理；
+        // 走节流/指纹去重通道，不碰幂等锚点，绝不与稍后的最终答复冲突。
+        await this.deliverProgressLike(
+          waiting,
+          `任务 ${shortTaskId(taskId)} 已受理，正在处理，完成后会把最终结果发回这里。`,
+          "main-accepted",
+        );
+        return;
+      }
+
+      // 这一轮没有派生子会话：文本就是最终答复（兼容直接在主会话作答）。
+      await this.finalizeMainTask(base, summary, stopReason, {
+        failed: result.failed,
+        reason: result.reason,
+        channel: "main",
       });
-      await this.appendEvent(
-        status === "succeeded" ? "task_succeeded" : "task_finished",
-        updated.taskId,
-        { status, stopReason, channel: "main" },
-      );
-      await this.deliverResult(updated);
     } catch (error) {
       if (this.stopped) return;
       const current = this.tasks.get(taskId);
       if (!current || isTerminalStatus(current.status)) return;
       await this.failTask(current, "host_error", errorText(error));
     }
+  }
+
+  /**
+   * 主会话渠道的最终答复回传：子会话汇报汇总轮结束后由宿主调用。
+   *
+   * 只收尾「已注入、仍在等最终答复」的主渠道任务；终态检查 + `resultDeliveredAt`
+   * 幂等锚点保证重复调用不会给 QQ 发第二条矛盾消息。长任务下被动回复的
+   * `(msg_id, msg_seq)` 窗口（adapter 的 REPLY_SEQ_TTL_MS）往往已关闭，复用它
+   * 会被平台静默去重，因此这里强制走主动消息，确保长任务的最终回执不被吞。
+   */
+  async completeMainFinalAnswer(input: {
+    taskId: string;
+    text: string;
+    stopReason?: string;
+  }): Promise<void> {
+    const current = this.tasks.get(input.taskId);
+    if (!current || current.channel !== "main" || current.status !== "injected") return;
+    const summary = (input.text ?? "").trim();
+    const stopReason = (input.stopReason ?? "").trim() || "end_turn";
+    await this.finalizeMainTask(current, summary, stopReason, {
+      channel: "main",
+      forceActive: true,
+    });
+  }
+
+  /**
+   * 主渠道收尾助手：把一段文本作为任务的最终结果落盘、记事件并回传 QQ。
+   * `runMainTask`（无派生子会话的直答）与 `completeMainFinalAnswer`（汇报汇总轮）
+   * 共用，避免两条路径的状态机/投递纪律漂移。
+   */
+  private async finalizeMainTask(
+    base: QqTask,
+    summary: string,
+    stopReason: string,
+    options: {
+      failed?: boolean;
+      reason?: string;
+      channel?: "main" | "child";
+      forceActive?: boolean;
+    } = {},
+  ): Promise<void> {
+    const current = this.tasks.get(base.taskId) ?? base;
+    if (isTerminalStatus(current.status)) return;
+    const qqResult = this.buildResult({ summary, stopReason }, stopReason, current, undefined);
+    let status: QqTaskStatus;
+    let failure: QqTaskError | undefined;
+    // ACP 的停止原因是英式拼写 `cancelled`；本仓库其它路径用 `canceled`。
+    const stopKey = normalizedStopReason(stopReason);
+    if (stopKey === "canceled" || stopKey === "cancelled") {
+      status = "canceled";
+      failure = { code: "agent_canceled", message: `执行结束：${stopReason}` };
+    } else if (options.failed === true || isFailureStopReason(stopReason)) {
+      status = "failed";
+      failure = {
+        code: "main_turn_failed",
+        message: options.reason && options.reason.trim().length > 0
+          ? options.reason
+          : `执行结束：${stopReason}`,
+      };
+    } else {
+      status = "succeeded";
+    }
+
+    const at = this.now();
+    const patched: QqTask = {
+      ...current,
+      result: qqResult,
+      failure,
+      pending: undefined,
+      updatedAt: Math.max(current.updatedAt, at),
+    };
+    const updated = await this.commitStatus(patched, status, {
+      result: qqResult,
+      failure,
+      pending: undefined,
+    });
+    await this.appendEvent(
+      status === "succeeded" ? "task_succeeded" : "task_finished",
+      updated.taskId,
+      { status, stopReason, channel: options.channel ?? "main" },
+    );
+    await this.deliverResult(updated, options.forceActive === true ? { forceActive: true } : undefined);
   }
 
   private async finalize(

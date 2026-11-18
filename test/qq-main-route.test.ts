@@ -189,7 +189,9 @@ function resultTexts(f: Fixture): string[] {
   return f.delivered
     .filter(
       (item) =>
-        !item.text.startsWith("已受理任务") && !item.text.includes("已排队（第 "),
+        !item.text.startsWith("已受理任务") &&
+        !item.text.includes("已排队（第 ") &&
+        !item.text.includes("已受理，正在处理"),
     )
     .map((item) => item.text);
 }
@@ -457,6 +459,95 @@ describe("主会话路由 · 停止与重启", () => {
     const task = f.service.getTask("T-archived");
     expect(task?.status).toBe("failed");
     expect(task?.failure?.code).toBe("host_restarted");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 最终回执：占位轮不回传，汇总轮回传真正答复
+// ---------------------------------------------------------------------------
+
+describe("主会话路由 · 最终回执归属", () => {
+  /** 走完入站 + 注入，并让注入轮以 delegated=true 收尾。 */
+  async function delegatedTask(): Promise<Fixture> {
+    const f = makeService();
+    await f.service.handleInboundMessage(inbound());
+    await waitFor(() => f.injections.length === 1);
+    await f.injections[0]!.input.onInjected();
+    f.injections[0]!.resolve({
+      injected: true,
+      text: "已派子会话去做，先等一下",
+      stopReason: "end_turn",
+      delegated: true,
+    });
+    // 等服务把进度回执与记账落盘（status 由 onInjected 提前置好，不能拿来当
+    // 「注入轮已收尾」的信号）。
+    await waitFor(() => f.delivered.some((item) => item.text.includes("已受理，正在处理")));
+    return f;
+  }
+
+  it("注入轮只回进度：占位文本不进 result，任务停在 injected 等最终答复", async () => {
+    const f = await delegatedTask();
+    const task = onlyTask(f);
+
+    expect(task.status).toBe("injected");
+    expect(task.result).toBeUndefined();
+    expect(task.resultDeliveredAt).toBeUndefined();
+    // 占位文本绝不能作为最终结果回给 QQ（既不是 result 文本，也不在投递里）。
+    expect(f.delivered.some((item) => item.text.includes("已派子会话去做"))).toBe(false);
+    // 但用户能收到一条明确的「已受理、正在处理」进度，不碰幂等锚点。
+    expect(f.delivered.some((item) => item.text.includes("已受理，正在处理"))).toBe(true);
+  });
+
+  it("汇总轮真正答复单次回传，且只投递一次（非占位文本）", async () => {
+    const f = await delegatedTask();
+    const taskId = onlyTask(f).taskId;
+
+    await f.service.completeMainFinalAnswer({
+      taskId,
+      text: "真正最终答复：三个文件都改好了，测试全过。",
+      stopReason: "end_turn",
+    });
+
+    expect(resultTexts(f).join("\n")).toContain("真正最终答复：三个文件都改好了");
+    expect(resultTexts(f).join("\n")).not.toContain("已派子会话去做");
+    const done = f.service.getTask(taskId);
+    expect(done?.status).toBe("succeeded");
+    expect(done?.result?.summary).toBe("真正最终答复：三个文件都改好了，测试全过。");
+    expect(done?.resultDeliveredAt).toBeTypeOf("number");
+    expect(f.store.events.filter((e) => e.type === "task_result_delivered")).toHaveLength(1);
+
+    // 迟到的第二个汇报轮再调一次：终态幂等，QQ 不会收到第二条矛盾消息。
+    const before = f.delivered.length;
+    await f.service.completeMainFinalAnswer({ taskId, text: "迟到的第二轮结论", stopReason: "end_turn" });
+    expect(f.delivered).toHaveLength(before);
+    expect(f.delivered.some((item) => item.text.includes("迟到的第二轮结论"))).toBe(false);
+  });
+
+  it("长任务最终回执走主动消息，绕开 (msg_id, msg_seq) 的 TTL 去重窗口", async () => {
+    const f = await delegatedTask();
+    const taskId = onlyTask(f).taskId;
+
+    await f.service.completeMainFinalAnswer({ taskId, text: "长任务终于完成了", stopReason: "end_turn" });
+
+    // 主动消息不带 replyToMsgId / dedupeKey —— 长任务下被动回复序号窗口
+    // （REPLY_SEQ_TTL_MS）早已关闭，复用它会让平台把最终回执静默去重。
+    const final = f.delivered.find((item) => item.text.includes("长任务终于完成了"));
+    expect(final).toBeTruthy();
+    expect(final?.replyToMsgId).toBeUndefined();
+    expect(final?.dedupeKey).toBeUndefined();
+  });
+
+  it("未注入 / 非主渠道 / 未知任务不会被汇总轮回执污染", async () => {
+    const f = makeService();
+    await f.service.handleInboundMessage(inbound());
+    await waitFor(() => f.injections.length === 1);
+    const taskId = onlyTask(f).taskId; // 仍 queued，未注入
+
+    const before = f.delivered.length;
+    await f.service.completeMainFinalAnswer({ taskId, text: "不该发出的结论", stopReason: "end_turn" });
+    await f.service.completeMainFinalAnswer({ taskId: "unknown", text: "不该发出的结论", stopReason: "end_turn" });
+    expect(f.delivered).toHaveLength(before);
+    expect(onlyTask(f).status).toBe("queued");
   });
 });
 
