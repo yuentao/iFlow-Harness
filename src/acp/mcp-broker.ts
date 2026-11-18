@@ -987,8 +987,8 @@ export class McpBroker {
       response.end("invalid JSON");
       return;
     }
+    const messages = Array.isArray(parsed) ? parsed : [parsed];
     const batch = Array.isArray(parsed);
-    const messages = batch ? parsed : [parsed];
     const responses: JsonRpcMessage[] = [];
     for (const message of messages) {
       const reply = await this.handleMessage(name, message);
