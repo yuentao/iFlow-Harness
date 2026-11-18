@@ -647,7 +647,36 @@ function classifyNodeInvocation(
   return null;
 }
 
-/** 找出安装类调用（扫每个命令段，取该段第一个包管理器词后的首个非选项词）。 */
+/**
+ * 会「吃掉下一个词」的包管理器选项（取值型）。
+ *
+ * `npm --prefix <dir> ci` / `pnpm --dir <dir> install` / `yarn --cwd <dir>
+ * install` 里的第一个非选项词其实是选项的取值。旧实现把它当成子命令，于是
+ * 整条命令被判成「不是安装」—— 护栏对这类写法完全失明（审计发现的缺陷）。
+ *
+ * 只收这几个（外加 pnpm 的 `-C` 简写）：把所有选项都当成取值型会让
+ * `npm --silent ci` 里的 `ci` 被吞掉，那是反向的失明。`--opt=value` 自带取值，
+ * 不经这里。
+ */
+const VALUE_TAKING_MANAGER_OPTIONS: ReadonlySet<string> = new Set([
+  "--prefix",
+  "--dir",
+  "--cwd",
+  "-c",
+]);
+
+/** 这个选项是否把后一个词当作取值（`--opt=value` 不算）。 */
+function takesValueOption(token: string): boolean {
+  if (!token.startsWith("-") || token.includes("=")) return false;
+  return VALUE_TAKING_MANAGER_OPTIONS.has(token.toLowerCase());
+}
+
+/**
+ * 找出安装类调用（扫每个命令段，取该段包管理器词后的首个**真正的**子命令词）。
+ *
+ * 选项先跳过：取值型选项连它后面那个词一起跳过（见
+ * {@link VALUE_TAKING_MANAGER_OPTIONS}），布尔型选项只跳过自己。
+ */
 function findInstallInvocation(segments: string[][]): { manager: string; subcommand: string } | null {
   for (const tokens of segments) {
     for (let i = 0; i < tokens.length; i++) {
@@ -655,7 +684,17 @@ function findInstallInvocation(segments: string[][]): { manager: string; subcomm
       const subcommands = INSTALL_SUBCOMMANDS[name];
       if (!subcommands) continue;
       const rest = tokens.slice(i + 1);
-      const first = rest.find((token) => !token.startsWith("-"));
+      let first: string | undefined;
+      for (let j = 0; j < rest.length; j += 1) {
+        const token = rest[j]!;
+        if (token.startsWith("-")) {
+          // 取值型选项：下一个词是它的取值，不是子命令。
+          if (takesValueOption(token)) j += 1;
+          continue;
+        }
+        first = token;
+        break;
+      }
       // `yarn` / `yarn --frozen-lockfile` / 裸 `pnpm` 本身就是安装。
       if ((name === "yarn" || name === "pnpm") && !first) {
         return { manager: name, subcommand: "" };

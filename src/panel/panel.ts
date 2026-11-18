@@ -8847,7 +8847,14 @@ export class ChatPanel implements vscode.Disposable {
       case "cleanup": {
         if (!msg.sessionId) return;
         const result = await manager.cleanup(msg.sessionId, { keepBranch: msg.keepBranch });
-        if (result.branchKept) {
+        if (!result.ok) {
+          // 拒绝清理（还在跑 / 工作目录有未提交改动）时目录其实还在磁盘上，
+          // 谎报「已清理」会让用户以为工作已经被回收。
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("未能清理：{0}", result.reason ?? "未知原因"),
+          );
+        } else if (result.branchKept) {
           this.store.sendToast(
             "info",
             vscode.l10n.t("已清理工作目录，分支已保留：{0}", result.reason ?? ""),

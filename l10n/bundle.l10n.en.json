@@ -247,6 +247,7 @@
   "该子会话没有待处理的请求": "This child session has no pending request.",
   "已清理工作目录，分支已保留：{0}": "Working directory removed; the branch was kept: {0}",
   "已清理子会话": "Child session cleaned up.",
+  "未能清理：{0}": "Could not clean up: {0}",
   "已清理 {0} 个子会话": "Cleaned up {0} child session(s).",
   "已清理 {0} 个子会话，{1} 个分支已保留": "Cleaned up {0} child session(s); {1} branch(es) kept.",
   "已清理 {0} 个子会话，{1} 个未能清理": "Cleaned up {0} child session(s); {1} could not be cleaned up.",
