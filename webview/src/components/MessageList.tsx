@@ -1424,6 +1424,11 @@ function InjectedContextCard({ block, chrome = "card" }: { block: Extract<Block,
     ...block.items.filter((i) => i.kind === "knowledge" && i.from).map((i) => i.from!),
   ]).size;
   const knowledgeCount = block.items.filter((i) => i.kind === "knowledge").length;
+  // NOTE (2026-11-18): main-session injected cards no longer carry MCP items
+  // (MCP is disabled at spawn, served by Super Agent child sessions via the
+  // host broker), so these two chips are inert for the main panel today. Kept
+  // for old persisted cards and potential child-session transcript reuse — do
+  // not strip the rendering without handling those sources first.
   const mcpItems = block.items.filter((i) => i.kind === "mcp");
   const mcpCarried = mcpItems.filter((i) => i.connected !== false);
   const mcpProject = mcpItems.filter((i) => i.scope === "project" || i.scope === "both").length;

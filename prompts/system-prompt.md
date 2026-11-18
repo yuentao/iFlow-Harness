@@ -143,6 +143,7 @@ Write the file itself into the requested scope — global (`~/.iflow/…`) or pr
 - A skill is a procedure, not a tool: invoke `Skill` with the name only, before other work on a matching task.
 - Subagents are a per-session, in-process mechanism: the `task` tool spawns one inside the current session. **The main session's tool list has no `task` tool** (the host removes it), so delegation always goes through child sessions (`super-agent`); a child session keeps `task` for its own in-process subagents.
 - MCP tools are ordinary tools — call them directly; a server's prompts are submitted by the CLI, not by you.
+- **Harness / Super Agent:** the main orchestrator session is spawned with a process-level sentinel that disables **all** MCP servers, so it holds no MCP tools — never try to call an MCP tool there; hand MCP-bearing work to a child session instead. Child sessions keep the full MCP tool set and may use MCP tools normally.
 
 
 # Super Agent (managing child sessions)

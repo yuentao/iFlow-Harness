@@ -521,7 +521,7 @@ function createMockHost(): HostApi {
     },
     {
       kind: "injected",
-      notice: "这次请求还自动带上了 7 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档、2 个 MCP 服务器、1 个 MCP 服务器未连接、1 个来自项目配置",
+      notice: "这次请求还自动带上了 4 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档",
       tokens: 31320,
       items: [
         {
@@ -548,24 +548,6 @@ function createMockHost(): HostApi {
           path: "J:\\git\\iflow-harness\\.iflow\\knowledge\\index.md",
           content: "# 项目知识索引\n\n## 概览\n…（mock：知识库正文，由 @.iflow/knowledge/index.md 展开）",
         },
-        {
-          kind: "mcp",
-          label: "apipost-mcp",
-          scope: "global",
-          content:
-            '{"name":"create_api","description":"Create an API endpoint","parameters":{"type":"object","properties":{"name":{"type":"string"}}}}\n' +
-            '{"name":"update_api","description":"Modify an API endpoint","parameters":{"type":"object"}}\n' +
-            '{"name":"list_projects","description":"List API projects","parameters":{"type":"object"}}',
-        },
-        // Declared in both settings files: the Core's merge lets the project
-        // entry win, so this row reads as project-scope overriding global.
-        {
-          kind: "mcp",
-          label: "chrome-devtools",
-          scope: "both",
-          content: '{"name":"navigate","description":"Navigate to a URL","parameters":{"type":"object"}}',
-        },
-        { kind: "mcp", label: "exa", scope: "global", content: "", connected: false },
       ],
     },
     {
