@@ -1426,7 +1426,6 @@ function InjectedContextCard({ block, chrome = "card" }: { block: Extract<Block,
   const knowledgeCount = block.items.filter((i) => i.kind === "knowledge").length;
   const mcpItems = block.items.filter((i) => i.kind === "mcp");
   const mcpCarried = mcpItems.filter((i) => i.connected !== false);
-  const mcpUnloaded = mcpItems.length - mcpCarried.length;
   const mcpProject = mcpItems.filter((i) => i.scope === "project" || i.scope === "both").length;
   const evicted = block.evicted === true;
   const chips: ReactNode[] = [];
@@ -1435,7 +1434,10 @@ function InjectedContextCard({ block, chrome = "card" }: { block: Extract<Block,
   if (fileCount > 0) chips.push(<Chip key="files" tone="muted">{t("项目记忆")} {fileCount}</Chip>);
   if (knowledgeCount > 0) chips.push(<Chip key="knowledge" tone="muted">{t("项目知识库")} {knowledgeCount}</Chip>);
   if (mcpCarried.length > 0) chips.push(<Chip key="mcp" tone="muted">{t("MCP 服务器")} {mcpCarried.length}</Chip>);
-  if (mcpUnloaded > 0) chips.push(<Chip key="mcpUnloaded" tone="warning">{t("MCP 未连接")} {mcpUnloaded}</Chip>);
+  // No "MCP 未连接 N" chip on purpose: the main panel session runs without any
+  // MCP server, so an unconnected server was never injected into the request —
+  // claiming a warning status here is misleading (2026-11-18 user report). The
+  // MCP settings card owns live connection status for servers the user has set.
   if (mcpProject > 0) chips.push(<Chip key="mcpProject" tone="info">{t("MCP 项目级")} {mcpProject}</Chip>);
   return (
     <div
