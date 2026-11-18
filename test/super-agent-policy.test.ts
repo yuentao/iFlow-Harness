@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   SuperAgentManager,
+  SUPER_MERGE_CHILD_DISALLOWED_TOOLS,
   awaitSuperPermissionDecision,
   normalizeDisallowedTools,
   resolvePermissionResponse,
   resolveSpawnPolicy,
+  superMergeChildPolicy,
   toSuperPermissionRequest,
   type SuperPermissionRequest,
   type SuperSpawnPolicy,
@@ -221,6 +223,32 @@ describe("super agent · 审批策略（纯逻辑）", () => {
       summary: "写入 a.txt",
     });
     expect(summary.request?.options).toBe(PERMISSION_OPTIONS);
+  });
+
+  it("合并子会话机械剔除嵌套派发工具，审批仍为 auto（自动合并不受影响）", () => {
+    const policy = superMergeChildPolicy();
+    expect(policy.approval).toBe("auto");
+    expect(policy.disallowedTools).toEqual(["task", "super-agent"]);
+    expect(SUPER_MERGE_CHILD_DISALLOWED_TOOLS).toEqual(["task", "super-agent"]);
+
+    // 合并本身依赖这些工具，一个都不能进黑名单。
+    for (const required of [
+      "run_shell_command",
+      "read_file",
+      "write_file",
+      "replace",
+      "xml_escape",
+    ]) {
+      expect(policy.disallowedTools).not.toContain(required);
+    }
+
+    // 每次返回独立数组：调用方改动不会污染常量或后续子会话。
+    const first = superMergeChildPolicy();
+    first.disallowedTools!.push("extra");
+    expect(superMergeChildPolicy().disallowedTools).toEqual(["task", "super-agent"]);
+
+    // 归一化后仍是同一份黑名单（wire 边界不丢项）。
+    expect(resolveSpawnPolicy({ policy }).disallowedTools).toEqual(["task", "super-agent"]);
   });
 });
 

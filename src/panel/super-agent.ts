@@ -61,11 +61,13 @@ import type {
 import { errorMessage } from "../acp/jsonrpc.js";
 import { applySessionUpdate, estimateTokens, estimateTokensChunked } from "../../shared/session-state.js";
 import {
+  classifyChildFileWrite,
   classifyChildShellCommand,
   classifyChildToolCall,
   extractShellCommand,
   isShellToolCall,
   pickChildPermissionOption,
+  type ChildShellGuardContext,
 } from "../../shared/super-agent-guard.js";
 import { renderPrompt } from "../../prompts/index.js";
 import { estimateCost } from "../../shared/context-window.js";
@@ -264,6 +266,31 @@ export function resolveSpawnPolicy(
   };
   if (raw?.onPermissionRequest) resolved.onPermissionRequest = raw.onPermissionRequest;
   return resolved;
+}
+
+/**
+ * repo 档合并子会话**必须**带上的机械工具黑名单。
+ *
+ * 合并子会话跑在主仓工作区（无版本隔离），任务书里的硬边界只是提示词
+ * 约束。这里从工具层面再收一道：
+ *  - `task`：进程内子代理与合并子会话共享 cwd（主仓工作区）与完整工具集，
+ *    它的写文件工具调用不带命令文本、绕开 shell 命令护栏；派它等于开出
+ *    一块宿主看不见的执行面。合并这件事本身不需要任何子代理。
+ *  - `super-agent`：内置子会话派发工具，同样会把工作扩散到别的执行体。
+ *
+ * **刻意不剔除** `run_shell_command` / `write_file` / `replace` / `read_file`：
+ * `git merge --no-ff`、冲突文件读写、收尾的 `git log` / `git status` 都依赖
+ * 它们，剔除任一项都会让正常合并直接失效（这是本加固的红线）。
+ * 这些工具带来的风险由 wire 帧上的护栏兜住（见 `callbacksFor` 的预检）。
+ */
+export const SUPER_MERGE_CHILD_DISALLOWED_TOOLS: readonly string[] = Object.freeze([
+  "task",
+  "super-agent",
+]);
+
+/** 合并子会话的 spawn 策略：审批维持 `auto`，只叠加机械工具黑名单。 */
+export function superMergeChildPolicy(): SuperSpawnPolicy {
+  return { approval: "auto", disallowedTools: [...SUPER_MERGE_CHILD_DISALLOWED_TOOLS] };
 }
 
 /** 一个值是否是合法的裁决（回调返回脏值时不采纳，按拒绝处理）。 */
@@ -899,7 +926,7 @@ export class SuperAgentManager {
     }
     const child = this.spawn(
       { title: options.title, task: options.task },
-      { isolation: "repo" },
+      { isolation: "repo", policy: superMergeChildPolicy() },
     );
     this.mergeTargets.set(child.id, {
       sourceId: options.source.id,
@@ -2015,33 +2042,40 @@ export class SuperAgentManager {
         // 那里不可逆地丢掉用户未提交的改动。护栏按 `repoWorkspace` 区分档位：
         // 破坏性 git 规则只对 repo 档生效，worktree 档的判定结果不变。
         if (session) {
-          const verdict = classifyChildToolCall(
-            {
-              sessionUpdate: update.sessionUpdate,
-              toolCallId: "toolCallId" in update ? update.toolCallId : undefined,
-              toolName: "toolName" in update ? update.toolName : undefined,
-              kind: "kind" in update ? update.kind : undefined,
-              status: "status" in update ? update.status : undefined,
-              title: "title" in update ? update.title : undefined,
-              args: "args" in update ? update.args : undefined,
+          const guardCtx: ChildShellGuardContext = {
+            cwd: session.isolation.path,
+            repoRoot: this.deps.repoRoot,
+            repoWorkspace: session.isolation.kind === "repo",
+            nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
+            readLocalFile: (filePath) => {
+              try {
+                if (statSync(filePath).size > 1024 * 1024) return null;
+                return readFileSync(filePath, "utf8");
+              } catch {
+                return null;
+              }
             },
-            {
-              cwd: session.isolation.path,
-              repoRoot: this.deps.repoRoot,
-              repoWorkspace: session.isolation.kind === "repo",
-              nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
-              readLocalFile: (filePath) => {
-                try {
-                  if (statSync(filePath).size > 1024 * 1024) return null;
-                  return readFileSync(filePath, "utf8");
-                } catch {
-                  return null;
-                }
-              },
-            },
-          );
+          };
+          const toolFrame = {
+            sessionUpdate: update.sessionUpdate,
+            toolCallId: "toolCallId" in update ? update.toolCallId : undefined,
+            toolName: "toolName" in update ? update.toolName : undefined,
+            kind: "kind" in update ? update.kind : undefined,
+            status: "status" in update ? update.status : undefined,
+            title: "title" in update ? update.title : undefined,
+            args: "args" in update ? update.args : undefined,
+          };
+          const verdict = classifyChildToolCall(toolFrame, guardCtx);
           if (verdict?.decision === "deny" && verdict.severity === "session") {
             this.blockChildSession(id, verdict.reason ?? "blocked by the host guard");
+            return;
+          }
+          // 写 / 编辑工具不带命令文本，shell 护栏对它们完全失明。repo 档
+          // 直接跑在主仓工作区，必须在同一帧上拦住改写 .git/ 元数据或宿主
+          // .iflow/super/ 子会话记录的动作 —— 那会绕过全部安全网。
+          const writeVerdict = classifyChildFileWrite(toolFrame, guardCtx);
+          if (writeVerdict?.decision === "deny" && writeVerdict.severity === "session") {
+            this.blockChildSession(id, writeVerdict.reason ?? "blocked by the host guard");
             return;
           }
         }
