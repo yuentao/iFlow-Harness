@@ -9,8 +9,13 @@
  *   op=2  Identify  —— 客户端鉴权，d.token = "QQBot <access_token>"、intents、
  *                     properties；收到 Hello 后立刻发一次；
  *   op=10 Hello     —— 连接建立后服务器首帧，d.heartbeat_interval（毫秒）；
- *   op=11 Heartbeat ACK —— 心跳回执，忽略即可；
- *   op=7 Reconnect / op=9 Invalid Session —— 仅记录，重连由上层负责。
+ *   op=11 Heartbeat ACK —— 心跳回执，按发出时的序号关联（陈旧 ACK 不清零）；
+ *   op=7 Reconnect / op=9 Invalid Session —— 收到即主动断线重连，绝不等底层 close
+ *     或心跳看门狗（半开连接会静默丢消息）。
+ *
+ * 序号纪律（2026-11-18 加固）：Dispatch 的 s 只在严格递增时覆盖 lastSequence；
+ * lastSequence 归属会话，Identify 建新会话 / op=9 作废会话时清零，Resume 只在
+ * 序号属于当前会话时携带。入站 msgId 有有界去重窗口，防 resume 重放重复建任务。
  *
  * 纪律：token 只出现在发往网关/API 的头与 Identify 载荷里，绝不进日志。
  *
@@ -77,6 +82,11 @@ export interface QqBotAdapterDeps {
   /** 重连退避上限（毫秒，测试注入）；缺省 30000。 */
   reconnectMaxDelayMs?: number;
   /**
+   * 重连退避抖动的随机源（返回 [0,1)）；缺省 Math.random。测试注入固定值以
+   * 断言抖动区间，生产保持随机化以打散多实例同时断线的惊群。
+   */
+  random?: () => number;
+  /**
    * 连续多少个心跳周期收不到 ACK 就判定连接已死；缺省 2。
    * 测试与弱网场景可注入更大值以减少误判，注入 1 表示一个周期未 ACK 即判死。
    */
@@ -113,6 +123,14 @@ export const DEFAULT_QQBOT_HANDSHAKE_TIMEOUT_MS = 20_000;
 /** 重连退避：1s 起、指数增长、封顶 30s（测试可注入更小值）。 */
 const DEFAULT_RECONNECT_BASE_DELAY_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
+
+/**
+ * 入站 msgId 去重窗口：同一条消息在窗口内只投递一次（resume 会重放断线区间，
+ * 重复推送也会造成重复建任务）。TTL 只用于内存回收与「同一消息」判定；容量
+ * 上限兜底防无限增长（超限逐出最旧）。
+ */
+const SEEN_INBOUND_TTL_MS = 2 * 60_000;
+const SEEN_INBOUND_LIMIT = 5_000;
 
 /**
  * Resume 重试上限：连续这么多次重连都没成功（resume 地址不可达 / 会话被判死），
@@ -263,8 +281,28 @@ export class QqBotAdapter implements ChannelAdapter {
   private readonly reconnectMaxDelayMs: number;
   private readonly heartbeatMaxMissedAcks: number;
   private readonly handshakeTimeoutMs: number;
+  /** 退避抖动随机源（注入固定值便于测试；缺省 Math.random）。 */
+  private readonly randomFn: () => number;
 
   private lastSequence: number | null = null;
+  /**
+   * lastSequence 归属的会话 id：只有与当前 sessionId 相同才允许带进 Resume。
+   * Identify 建新会话 / op=9 作废会话时连同 lastSequence 一起清零，防止把旧
+   * 会话的序号带进新会话（心跳与 Resume 都会带错）。
+   */
+  private lastSequenceSessionId: string | undefined;
+  /**
+   * 已发出心跳的序号队列（与 lastSequence 同源；null 表示发出时尚无序号）。
+   * ACK 带回序号时只认领队列中对应项，陈旧 ACK 不再清零在途计数。
+   */
+  private readonly heartbeatAckQueue: Array<number | null> = [];
+  /**
+   * 已投递入站消息的 msgId → 投递时刻（有界去重窗口）。resume 重放 / 平台
+   * 重复推送不会让同一条消息被处理两次。
+   */
+  private readonly seenInbound = new Map<string, number>();
+  /** 窗口内被去重丢弃的入站事件数（health.detail 可观测）。 */
+  private duplicateInbound = 0;
   private lastEventAt: number | undefined;
   private lastError: string | undefined;
   /** lastError 来源：send 类错误在下次成功发送时清除，连接类错误等连接成功才清。 */
@@ -360,6 +398,8 @@ export class QqBotAdapter implements ChannelAdapter {
       typeof deps.handshakeTimeoutMs === "number" && Number.isFinite(deps.handshakeTimeoutMs)
         ? deps.handshakeTimeoutMs
         : DEFAULT_QQBOT_HANDSHAKE_TIMEOUT_MS;
+    this.randomFn =
+      typeof deps.random === "function" ? deps.random : () => Math.random();
   }
 
   /** 注册入站消息回调（可用链式调用；重复注册以最后一次为准）。 */
@@ -536,7 +576,12 @@ export class QqBotAdapter implements ChannelAdapter {
       }
       case QQBOT_OP.DISPATCH: {
         const seq = toFiniteNumber(raw["s"]);
-        if (seq !== undefined) this.lastSequence = seq;
+        // 单调性：较小/重复 seq 是乱序重放，若覆盖基准会让心跳与 Resume 带上
+        // 过期序号（平台可能拒绝或重放错误区间）。只有严格递增才推进。
+        if (seq !== undefined && (this.lastSequence === null || seq > this.lastSequence)) {
+          this.lastSequence = seq;
+          this.lastSequenceSessionId = this.sessionId;
+        }
         this.lastEventAt = this.nowFn();
         const eventType = typeof raw["t"] === "string" ? raw["t"] : "";
         // READY 携带可恢复会话信息（session_id / resume_gateway_url），必须在
@@ -557,6 +602,20 @@ export class QqBotAdapter implements ChannelAdapter {
           );
           break;
         }
+        // 有界 msgId 去重：同一条消息在窗口内只投递一次（resume 会重放断线
+        // 区间，平台重复推送也会造成重复建任务）。计数与日志都可观测。
+        const now = this.nowFn();
+        const seenAt = this.seenInbound.get(inbound.msgId);
+        if (seenAt !== undefined && now - seenAt < SEEN_INBOUND_TTL_MS) {
+          this.duplicateInbound += 1;
+          this.log(`QQBot: dropped duplicate inbound event: msgId=${inbound.msgId}`);
+          break;
+        }
+        this.seenInbound.set(inbound.msgId, now);
+        if (this.seenInbound.size > SEEN_INBOUND_LIMIT) {
+          const oldest = this.seenInbound.keys().next().value;
+          if (oldest !== undefined) this.seenInbound.delete(oldest);
+        }
         if (!this.eventHandler) break;
         // 回调可能异步；失败只记日志，绝不让一根异常打断 socket 消息循环。
         void Promise.resolve(this.eventHandler(inbound)).catch((error: unknown) => {
@@ -572,26 +631,60 @@ export class QqBotAdapter implements ChannelAdapter {
           this.handleDisconnect(`心跳发送失败：${errorText(error)}`, "connection");
         }
         break;
-      case QQBOT_OP.HEARTBEAT_ACK:
-        this.awaitingHeartbeatAcks = 0;
-        break;
-      case QQBOT_OP.RECONNECT:
-        this.log("QQBot: server requested reconnect");
-        this.noteError("connection", "服务端要求重连（op=7）");
-        break;
-      case QQBOT_OP.INVALID_SESSION:
-        // 恢复策略本身不在此实现（需要宿主层协调）；这里只做必要的卫生：
-        // 记录可观测错误，并作废已被平台判死的会话，避免下一次重连拿着同一个
-        // session_id 反复 resume → op=9 的死循环。
-        this.log("QQBot: invalid session");
-        this.noteError("connection", "会话已失效（op=9 invalid session）");
-        const hadSession = this.sessionId !== undefined;
-        this.sessionId = undefined;
-        this.resumeGatewayUrl = undefined;
-        if (hadSession) {
-          this.missedWindowNotice = "断线区间可能丢消息（会话已失效，无法 resume）";
+      case QQBOT_OP.HEARTBEAT_ACK: {
+        // ACK 关联序号：陈旧 ACK（序号不在在途队列里）绝不能清零计数，否则
+        // 心跳断供会被一条迟到回执长期掩盖，半开连接永不判死。
+        const d = raw["d"];
+        const ackSeq =
+          toFiniteNumber(d) ?? (isRecord(d) ? toFiniteNumber(d["seq"] ?? d["s"]) : undefined);
+        if (ackSeq !== undefined) {
+          let index = this.heartbeatAckQueue.indexOf(ackSeq);
+          if (index < 0) {
+            // 心跳发出时尚无 Dispatch 序号（d=null）：ACK 带回的序号视为对
+            // 最早那次心跳的回执（平台首包常见形态）。
+            index = this.heartbeatAckQueue.indexOf(null);
+          }
+          if (index >= 0) this.heartbeatAckQueue.splice(index, 1);
+          // index < 0 → 陈旧 ACK，忽略，awaitingHeartbeatAcks 保持不变。
+        } else if (this.heartbeatAckQueue.length > 0) {
+          // 平台 ACK 不带序号：按 FIFO 认领最早一次心跳（兼容旧行为）。
+          this.heartbeatAckQueue.shift();
         }
+        this.awaitingHeartbeatAcks = this.heartbeatAckQueue.length;
         break;
+      }
+      case QQBOT_OP.RECONNECT:
+        // 服务端明确要求重连：立即断开并重连，不等底层 close 或心跳看门狗
+        // （最坏约两个心跳周期），否则半开连接期间的消息会静默丢失。
+        this.handleDisconnect("服务端要求重连（op=7）", "connection");
+        break;
+      case QQBOT_OP.INVALID_SESSION: {
+        // op=9：会话已被平台判死。不可恢复时立即作废会话与序号，使下一轮重连
+        // 退回 Identify 且不携带旧会话 seq；平台声明可恢复（d.resumable=true）
+        // 时保留两者，让重连先尝试 Resume。无论哪种都**立即**重连。
+        const payload = raw["d"];
+        const resumable =
+          payload === true ||
+          (isRecord(payload) &&
+            (payload["resumable"] === true || toFiniteNumber(payload["resumable"]) === 1));
+        const hadSession = this.sessionId !== undefined;
+        if (!resumable) {
+          this.sessionId = undefined;
+          this.resumeGatewayUrl = undefined;
+          this.lastSequence = null;
+          this.lastSequenceSessionId = undefined;
+          if (hadSession) {
+            this.missedWindowNotice = "断线区间可能丢消息（会话已失效，无法 resume）";
+          }
+        }
+        this.handleDisconnect(
+          resumable
+            ? "会话失效（op=9，平台允许 resume，立即重连）"
+            : "会话已失效（op=9 invalid session，立即重连）",
+          "connection",
+        );
+        break;
+      }
       default:
         break;
     }
@@ -607,12 +700,18 @@ export class QqBotAdapter implements ChannelAdapter {
     try {
       if (this.sessionId && this.token) {
         this.handshake = "resume";
+        // 序号必须属于当前会话：Identify 新建会话 / op=9 作废后 lastSequence
+        // 已清零，这里再按归属会话校验一层，绝不携带上一个会话的 seq。
+        const seq =
+          this.lastSequence !== null && this.lastSequenceSessionId === this.sessionId
+            ? this.lastSequence
+            : 0;
         this.socket?.send({
           op: QQBOT_OP.RESUME,
           d: {
             token: buildAuthHeaders(this.token)["Authorization"],
             session_id: this.sessionId,
-            seq: this.lastSequence ?? 0,
+            seq,
           },
         });
         this.log("QQBot: resume sent");
@@ -649,10 +748,19 @@ export class QqBotAdapter implements ChannelAdapter {
     const frame = isRecord(raw) ? raw : {};
     const d = isRecord(frame["d"]) ? frame["d"] : {};
     const sessionId = d["session_id"] ?? d["sessionId"];
-    if (typeof sessionId === "string" && sessionId) this.sessionId = sessionId;
+    // 无条件刷新：READY 缺 session_id 时必须清掉旧值，否则断线后会拿一个
+    // 已被平台作废的 session_id 去 Resume（静默失败/死循环）。
+    this.sessionId = typeof sessionId === "string" && sessionId ? sessionId : undefined;
     const resumeUrl = d["resume_gateway_url"] ?? d["resumeGatewayUrl"];
-    if (typeof resumeUrl === "string" && resumeUrl) this.resumeGatewayUrl = resumeUrl;
+    this.resumeGatewayUrl = typeof resumeUrl === "string" && resumeUrl ? resumeUrl : undefined;
+    this.lastSequenceSessionId = this.sessionId;
+    this.heartbeatAckQueue.length = 0;
+    this.awaitingHeartbeatAcks = 0;
 
+    if (this.handshake === "identify") {
+      // 新建会话：旧会话的 lastSequence 不能带进心跳 / 下一次 Resume。
+      this.lastSequence = null;
+    }
     if (this.handshake === "resume") {
       this.missedWindowNotice = undefined;
     } else if (this.disconnectedSinceReady) {
@@ -674,7 +782,9 @@ export class QqBotAdapter implements ChannelAdapter {
   private sendHeartbeat(): void {
     if (!this.socket) return;
     this.socket.send({ op: QQBOT_OP.HEARTBEAT, d: this.lastSequence });
-    this.awaitingHeartbeatAcks += 1;
+    // 记录发出时的序号，ACK 到达时按序号认领（而不是无条件清零）。
+    this.heartbeatAckQueue.push(this.lastSequence);
+    this.awaitingHeartbeatAcks = this.heartbeatAckQueue.length;
   }
 
   private startHeartbeat(intervalMs: number): void {
@@ -710,6 +820,7 @@ export class QqBotAdapter implements ChannelAdapter {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
     }
+    this.heartbeatAckQueue.length = 0;
     this.awaitingHeartbeatAcks = 0;
   }
 
@@ -782,15 +893,24 @@ export class QqBotAdapter implements ChannelAdapter {
     if (hadSocket || this.sessionId) this.scheduleReconnect();
   }
 
-  /** 指数退避重连（1s 起、双倍增长、封顶 30s）；用户 close 后不再排队。 */
+  /**
+   * 指数退避重连 + equal jitter（1s 起、双倍增长、封顶 30s）；用户 close 后
+   * 不再排队。抖动让多实例同时断线时不会在同一毫秒集体重连（惊群）。
+   */
   private scheduleReconnect(): void {
     if (this.closing || this.reconnectTimer !== undefined) return;
     this.reconnectAttempts += 1;
-    // 延迟按**连续失败次数**算（READY 才清零）：反复判死时退避单调增长，
+    // 退避基数按**连续失败次数**算（READY 才清零）：反复判死时单调增长，
     // 不会因为「这次 TCP 又连上了」而重置到 1s，避免重连风暴。
     const failures = Math.max(1, this.consecutiveFailures);
-    const delay = Math.min(
+    const fullDelay = Math.min(
       this.reconnectBaseDelayMs * 2 ** (failures - 1),
+      this.reconnectMaxDelayMs,
+    );
+    // equal jitter：延迟落在 [fullDelay/2, fullDelay]，上限仍为 reconnectMaxDelayMs。
+    const jitter = Math.min(1, Math.max(0, this.randomFn()));
+    const delay = Math.min(
+      Math.floor(fullDelay / 2 + jitter * (fullDelay / 2)),
       this.reconnectMaxDelayMs,
     );
     this.log(`QQBot: reconnect in ${delay}ms (attempt ${this.reconnectAttempts})`);
@@ -799,15 +919,20 @@ export class QqBotAdapter implements ChannelAdapter {
       if (this.closing) return;
       if (this.reconnectAttempts > RESUME_MAX_ATTEMPTS && this.sessionId) {
         // resume 地址/会话连续重试仍不可用：放弃恢复，回默认网关新建会话。
-        // 旧会话断线后的事件无法再补发，必须把缺口留在可见状态上。
+        // 旧会话断线后的事件无法再补发，必须把缺口留在可见状态上；序号属于
+        // 旧会话，一并作废，绝不能带进新的 Identify 会话。
         this.log("QQBot: resume retries exhausted, falling back to identify");
         this.sessionId = undefined;
         this.resumeGatewayUrl = undefined;
+        this.lastSequence = null;
+        this.lastSequenceSessionId = undefined;
         this.missedWindowNotice = "断线区间可能丢消息（resume 多次失败，已改为新建会话）";
       }
       void this.openSocket().catch((error: unknown) => {
         const reason = `重连失败：${errorText(error)}`;
-        this.consecutiveFailures += 1;
+        // 不在这里推进 consecutiveFailures：断线时 handleDisconnect 已记过一次，
+        // 二次累加会让单次故障跳两级退避。这里只让重连尝试继续（attempts 由
+        // 下一次 scheduleReconnect 自增），并保留可观测错误。
         this.lastDeathReason = reason;
         this.noteError("connection", reason);
         this.scheduleReconnect();
@@ -930,6 +1055,11 @@ export class QqBotAdapter implements ChannelAdapter {
     this.connected = false;
     this.sessionId = undefined;
     this.resumeGatewayUrl = undefined;
+    this.lastSequence = null;
+    this.lastSequenceSessionId = undefined;
+    this.heartbeatAckQueue.length = 0;
+    this.seenInbound.clear();
+    this.duplicateInbound = 0;
     this.disconnectedSinceReady = false;
     this.missedWindowNotice = undefined;
     this.reconnectAttempts = 0;
@@ -966,6 +1096,9 @@ export class QqBotAdapter implements ChannelAdapter {
     if (this.missedWindowNotice) parts.push(this.missedWindowNotice);
     if (this.droppedInbound > 0) {
       parts.push(`已丢弃 ${this.droppedInbound} 条缺 msgId 的入站事件`);
+    }
+    if (this.duplicateInbound > 0) {
+      parts.push(`已丢弃 ${this.duplicateInbound} 条重复入站事件`);
     }
     return {
       connected: this.connected,

@@ -1064,6 +1064,9 @@ describe("QqBotAdapter — 反复判死不退避重置", () => {
       log: (line) => logs.push(line),
       reconnectBaseDelayMs: 5,
       reconnectMaxDelayMs: 100,
+      // 抖动取上界（jitter=1 → delay=full），保持本用例「退避单调增长」的
+      // 精确断言；抖动区间本身由专门的用例覆盖。
+      random: () => 1,
       // 关掉握手超时，避免它混进「判死次数」的观察。
       handshakeTimeoutMs: 0,
     });
@@ -1168,6 +1171,306 @@ describe("QqBotAdapter — 握手超时（已连接但不干活）", () => {
     first.emit(helloFrame(60_000));
     await waitFor(() => first.closed.value, 1000);
     await waitFor(() => transport.connects.length >= 2);
+
+    await adapter.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 传输层鲁棒性修复（2026-11-18）：服务端指令立即重连 / 序号健壮性 / 抖动
+// ---------------------------------------------------------------------------
+
+describe("QqBotAdapter — 服务端指令立即重连", () => {
+  it("op=7 收到即断线重连，不等底层 close 或心跳看门狗；会话仍有效走 Resume", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+      random: () => 1,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(60_000));
+    first.emit(
+      dispatchFrame(
+        "READY",
+        { session_id: "sess-1", resume_gateway_url: "wss://resume.example/ws" },
+        1,
+      ),
+    );
+    first.emit(dispatchFrame("C2C_MESSAGE_CREATE", { ...c2cPayload, id: "m-1" }, 5));
+
+    // 关键：这里不调用 drop —— op=7 本身必须触发重连。
+    first.emit({ op: QQBOT_OP.RECONNECT });
+    expect(first.closed.value).toBe(true);
+    expect((await adapter.health()).detail).toContain("服务端要求重连");
+    await waitFor(() => transport.connects.length >= 2);
+    expect(transport.connects[1]!.url).toBe("wss://resume.example/ws");
+
+    const second = transport.socket;
+    second.emit(helloFrame(60_000));
+    expect((second.sent[0] as { op: number }).op).toBe(QQBOT_OP.RESUME);
+    await adapter.close();
+  });
+
+  it("op=9 收到即作废会话并立即重连，退回默认网关 Identify 且不携带旧 seq", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+      random: () => 1,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(60_000));
+    first.emit(
+      dispatchFrame(
+        "READY",
+        { session_id: "sess-dead", resume_gateway_url: "wss://resume.example/ws" },
+        3,
+      ),
+    );
+    first.emit(dispatchFrame("C2C_MESSAGE_CREATE", { ...c2cPayload, id: "m-1" }, 8));
+
+    // 关键：不 drop，op=9 必须自己触发断线。
+    first.emit({ op: QQBOT_OP.INVALID_SESSION });
+    expect(first.closed.value).toBe(true);
+    expect((await adapter.health()).detail).toContain("会话已失效");
+    await waitFor(() => transport.connects.length >= 2);
+    expect(transport.connects[1]!.url).toBe(DEFAULT_QQBOT_GATEWAY_URL);
+
+    const second = transport.socket;
+    second.emit(helloFrame(60_000));
+    expect((second.sent[0] as { op: number }).op).toBe(QQBOT_OP.IDENTIFY);
+    // 新会话 READY 后心跳不带旧会话的 seq。
+    second.emit(dispatchFrame("READY", { session_id: "sess-new" }, 9));
+    second.emit({ op: QQBOT_OP.HEARTBEAT });
+    const heartbeat = second.sent.at(-1) as { op: number; d: number | null };
+    expect(heartbeat.d).toBeNull();
+
+    await adapter.close();
+  });
+
+  it("op=9 声明可恢复时保留会话与 seq，立即重连先尝试 Resume", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+      random: () => 1,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(60_000));
+    first.emit(
+      dispatchFrame(
+        "READY",
+        { session_id: "sess-r", resume_gateway_url: "wss://resume.example/ws" },
+        1,
+      ),
+    );
+    first.emit(dispatchFrame("C2C_MESSAGE_CREATE", { ...c2cPayload, id: "m-1" }, 5));
+    first.emit({ op: QQBOT_OP.INVALID_SESSION, d: { resumable: true } });
+
+    expect(first.closed.value).toBe(true);
+    await waitFor(() => transport.connects.length >= 2);
+    expect(transport.connects[1]!.url).toBe("wss://resume.example/ws");
+    const second = transport.socket;
+    second.emit(helloFrame(60_000));
+    const resume = second.sent[0] as { op: number; d: { session_id: string; seq: number } };
+    expect(resume.op).toBe(QQBOT_OP.RESUME);
+    expect(resume.d).toMatchObject({ session_id: "sess-r", seq: 5 });
+
+    await adapter.close();
+  });
+});
+
+describe("QqBotAdapter — Dispatch 序号与去重健壮性", () => {
+  it("序号只在严格递增时更新：乱序/重复 seq 不回退心跳基准", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+
+    await adapter.connect();
+    transport.socket.emit(helloFrame(60_000));
+    transport.socket.emit(dispatchFrame("C2C_MESSAGE_CREATE", { ...c2cPayload, id: "m-1" }, 10));
+
+    const askHeartbeat = (): number | null => {
+      transport.socket.emit({ op: QQBOT_OP.HEARTBEAT });
+      return (transport.socket.sent.at(-1) as { d: number | null }).d;
+    };
+    expect(askHeartbeat()).toBe(10);
+
+    // 较小的 seq（乱序重放）与重复 seq 都不能把基准拉回去。
+    transport.socket.emit(dispatchFrame("C2C_MESSAGE_CREATE", { ...c2cPayload, id: "m-2" }, 7));
+    expect(askHeartbeat()).toBe(10);
+    transport.socket.emit(dispatchFrame("C2C_MESSAGE_CREATE", { ...c2cPayload, id: "m-3" }, 10));
+    expect(askHeartbeat()).toBe(10);
+    // 更大的 seq 正常推进。
+    transport.socket.emit(dispatchFrame("C2C_MESSAGE_CREATE", { ...c2cPayload, id: "m-4" }, 11));
+    expect(askHeartbeat()).toBe(11);
+
+    await adapter.close();
+  });
+
+  it("同一 msgId 在去重窗口内只投递一次，重复被丢弃且 health 可观测", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const received: InboundMessage[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+    }).setEventCallback((msg) => {
+      received.push(msg);
+    });
+
+    await adapter.connect();
+    transport.socket.emit(helloFrame(60_000));
+    const frame = dispatchFrame("C2C_MESSAGE_CREATE", c2cPayload, 1);
+    transport.socket.emit(frame);
+    transport.socket.emit(frame); // 完全相同的一帧（resume 重放 / 重复推送）
+    expect(received).toHaveLength(1);
+    expect(logs.join("\n")).toContain("duplicate inbound");
+    expect((await adapter.health()).detail).toContain("重复入站事件");
+
+    await adapter.close();
+  });
+
+  it("陈旧心跳 ACK（序号不在在途队列）不清零在途计数，连接仍会被判死", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+      handshakeTimeoutMs: 0,
+      reconnectBaseDelayMs: 500,
+      reconnectMaxDelayMs: 500,
+    });
+
+    await adapter.connect();
+    const socket = transport.socket;
+    socket.emit(helloFrame(5));
+    socket.emit(dispatchFrame("C2C_MESSAGE_CREATE", { ...c2cPayload, id: "m-1" }, 1));
+    await waitFor(
+      () =>
+        socket.sent.some((frame) => (frame as { op: number }).op === QQBOT_OP.HEARTBEAT),
+      1000,
+    );
+
+    // 来一条序号完全不匹配的 ACK：不能被当作对在途心跳的回执。
+    socket.emit({ op: QQBOT_OP.HEARTBEAT_ACK, d: 999 });
+    await waitFor(() => socket.closed.value, 1000);
+    expect(logs.join("\n")).toContain("心跳 ACK 超时");
+
+    await adapter.close();
+  });
+
+  it("READY 缺 session_id 时清空旧会话，断线后回默认网关 Identify", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+      random: () => 1,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(60_000));
+    first.emit(
+      dispatchFrame(
+        "READY",
+        { session_id: "sess-old", resume_gateway_url: "wss://resume.example/ws" },
+        1,
+      ),
+    );
+    // 新 READY 没有 session_id：旧的 sess-old 必须被清掉，否则会拿它 resume。
+    first.emit(dispatchFrame("READY", {}, 2));
+    first.drop();
+    await waitFor(() => transport.connects.length >= 2);
+    expect(transport.connects[1]!.url).toBe(DEFAULT_QQBOT_GATEWAY_URL);
+    const second = transport.socket;
+    second.emit(helloFrame(60_000));
+    expect((second.sent[0] as { op: number }).op).toBe(QQBOT_OP.IDENTIFY);
+
+    await adapter.close();
+  });
+});
+
+describe("QqBotAdapter — 退避抖动与失败计数", () => {
+  function delaysFrom(logs: string[]): number[] {
+    return logs
+      .filter((line) => line.includes("reconnect in"))
+      .map((line) => Number(/reconnect in (\d+)ms/.exec(line)?.[1] ?? "NaN"));
+  }
+
+  it("equal jitter：jitter=0 取半程、jitter=1 取满程，且不超上限", async () => {
+    for (const [jitter, expected] of [
+      [0, 5],
+      [1, 10],
+    ] as const) {
+      const transport = new FakeTransport();
+      const logs: string[] = [];
+      const adapter = new QqBotAdapter({
+        appId: "app-1",
+        appSecret: "secret-1",
+        transport,
+        log: (line) => logs.push(line),
+        reconnectBaseDelayMs: 10,
+        reconnectMaxDelayMs: 100,
+        handshakeTimeoutMs: 0,
+        random: () => jitter,
+      });
+
+      await adapter.connect();
+      transport.socket.drop();
+      await waitFor(() => logs.some((line) => line.includes("reconnect in")));
+      expect(delaysFrom(logs)[0]).toBe(expected);
+      await adapter.close();
+    }
+  });
+
+  it("重连尝试失败不二次累加退避基数：单次故障只跳一级", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+      reconnectBaseDelayMs: 5,
+      reconnectMaxDelayMs: 100,
+      handshakeTimeoutMs: 0,
+      random: () => 1,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(60_000));
+    // 建连之后才让后续建连失败，模拟「一次断线 + 重连失败」的单次故障。
+    transport.connectError = new Error("connect gateway down");
+    first.drop();
+    await waitFor(() => delaysFrom(logs).length >= 2);
+
+    // 两次排队的延迟都应是 base=5；若 catch 二次累加，第二次会变成 10。
+    expect(delaysFrom(logs).slice(0, 2)).toEqual([5, 5]);
+    expect((await adapter.health()).detail).toContain("连续失败 1 次");
 
     await adapter.close();
   });

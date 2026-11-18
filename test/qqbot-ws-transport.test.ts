@@ -346,3 +346,50 @@ describe("createNodeQqBotTransport.post", () => {
     expect(String(error)).toMatch(/响应中断|aborted|ECONNRESET|socket hang up/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 传输层鲁棒性修复（2026-11-18）：早到帧缓冲上限 / 响应体上限
+// ---------------------------------------------------------------------------
+
+describe("createNodeQqBotTransport — 有界缓冲与响应上限", () => {
+  it("早到帧缓冲超限：丢弃最旧并告警，onMessage 只拿到窗口内最新的帧", async () => {
+    FakeWebSocket.reset();
+    const logs: string[] = [];
+    const transport = createNodeQqBotTransport({
+      WebSocketImpl: FakeWebSocket,
+      maxPendingFrames: 2,
+      log: (line) => logs.push(line),
+    });
+    const pending = transport.connect("wss://api.sgroup.qq.com/websocket", {});
+    const ws = FakeWebSocket.instances[0]!;
+    ws.open();
+    const socket = await pending;
+
+    // onMessage 注册前灌入 4 帧，上限 2 → 最旧的 2 帧被丢弃。
+    for (let i = 0; i < 4; i += 1) ws.emit("message", { op: 0, i });
+    const seen: unknown[] = [];
+    socket.onMessage((raw) => seen.push(raw));
+
+    expect(seen).toEqual([
+      { op: 0, i: 2 },
+      { op: 0, i: 3 },
+    ]);
+    expect(logs.some((line) => line.includes("early frame buffer overflow"))).toBe(true);
+  });
+
+  it("HTTP 响应体超过上限：明确 reject，不回显响应体", async () => {
+    const { baseUrl } = await startPostServer(() => ({
+      status: 200,
+      body: "x".repeat(500),
+    }));
+    const transport = createNodeQqBotTransport({ maxResponseBytes: 100 });
+    let error: unknown;
+    try {
+      await transport.post(`${baseUrl}/big`, {}, {});
+    } catch (caught) {
+      error = caught;
+    }
+    expect(String(error)).toMatch(/超过上限/);
+    expect(String(error)).not.toContain("xxxxx");
+  });
+});
