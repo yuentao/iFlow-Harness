@@ -13,6 +13,7 @@ import {
   fingerprintChunks,
   qqSpawnPolicyFor,
   qqTaskProjectionChanged,
+  QQ_MAX_TRACKED_PROGRESS_SLOTS,
   type QqServiceDispatchInput,
   type QqServiceHost,
 } from "../src/qq/service.js";
@@ -129,7 +130,8 @@ function makeHost(): HostFixture {
     },
     discardTask: async (id) => {
       discards.push(id);
-      return {};
+      // 与 panel.ts 的 discard 端口同形：显式 ok:true 才是确认成功。
+      return { ok: true };
     },
     readTaskOutcome: () => ({ summary: "完成", stopReason: "end_turn" }),
     deliver: async (msg) => {
@@ -864,7 +866,7 @@ describe("QqService — 回包可靠性缺口回归", () => {
     f.host.readTaskOutcome = () => ({ summary: "", status: "running" });
 
     await f.service.handleInboundMessage(inbound({ msgId: "e-rr-1" }));
-    await waitFor(() => lastTask(f).status === "running");
+    await waitFor(() => f.dispatches.length === 1 && lastTask(f).status === "running");
 
     // 运行中刷新：只回一句进度，不写 result / 锚点。
     await f.service.handleTaskAction(lastTask(f).taskId, "refresh");
@@ -1198,7 +1200,7 @@ describe("QqService — 回包可靠性缺口回归", () => {
     f.host.readTaskOutcome = () => ({ summary: "", status: "running" });
 
     await f.service.handleInboundMessage(inbound({ msgId: "e-throttle-1" }));
-    await waitFor(() => lastTask(f).status === "running");
+    await waitFor(() => f.dispatches.length === 1 && lastTask(f).status === "running");
     const taskId = lastTask(f).taskId;
 
     for (let i = 0; i < 5; i += 1) {
@@ -1432,13 +1434,22 @@ describe("QqService — 命令处理", () => {
     expect(f.delivered.at(-1)?.text).toContain("未找到任务");
   });
 
-  it("unbind 转发给 host；/qq bind 已不是命令（回未知子命令）", async () => {
+  it("unbind 需特权身份 + 二次确认；/qq bind 已不是命令（回未知子命令）", async () => {
     const f = makeService();
     await f.service.handleInboundMessage(inbound({ text: "/qq bind abcd12" }));
     expect(f.delivered.at(-1)?.text).toContain("未知子命令");
     expect(f.pendingUsers).toHaveLength(0);
 
+    // 第一步：白名单首项（扫码绑定者）可发起，但只拿到确认码，不真正解绑。
     await f.service.handleInboundMessage(inbound({ text: "/qq unbind" }));
+    expect(f.unbindCount.value).toBe(0);
+    const prompt = f.delivered.at(-1)?.text ?? "";
+    expect(prompt).toContain("确认请回复验证码");
+    const code = /验证码 (\d{6})/u.exec(prompt)?.[1];
+    expect(code).toMatch(/^\d{6}$/u);
+
+    // 第二步：本人回复一次性确认码，才调用 host。
+    await f.service.handleInboundMessage(inbound({ text: code!, msgId: "m-confirm" }));
     expect(f.unbindCount.value).toBe(1);
     expect(f.delivered.at(-1)?.text).toContain("已解绑");
   });
@@ -1676,7 +1687,9 @@ async function startRunningTask(
     return new Promise<never>(() => undefined);
   };
   await f.service.handleInboundMessage(inbound({ msgId: `run-${superSessionId}` }));
-  await waitFor(() => lastTask(f).status === "running");
+  // 等 dispatchTask 已登记：宿主在派发回调里同步回填 correlation，只等 running
+  // 会在两者之间抢跑，导致 stop/refresh 读不到 superSessionId（真实宿主不会）。
+  await waitFor(() => f.dispatches.length === 1 && lastTask(f).status === "running");
   return f;
 }
 
@@ -2161,7 +2174,7 @@ describe("QqService — 指纹成功后才记账", () => {
     };
 
     await f.service.handleInboundMessage(inbound({ msgId: "e-fp-1" }));
-    await waitFor(() => lastTask(f).status === "running");
+    await waitFor(() => f.dispatches.length === 1 && lastTask(f).status === "running");
     const taskId = lastTask(f).taskId;
 
     // 第一轮刷新：投递失败（确定性拒绝），失败必须可观测。
@@ -2260,7 +2273,7 @@ describe("QqService — /qq refresh 三条分支节流去重", () => {
     };
     f.host.readTaskOutcome = () => null;
     await f.service.handleInboundMessage(inbound({ msgId: "e-rf-unread" }));
-    await waitFor(() => lastTask(f).status === "running");
+    await waitFor(() => f.dispatches.length === 1 && lastTask(f).status === "running");
     await assertFiveClicksSingleMessage(f, lastTask(f).taskId, "暂时读取不到结果");
     release();
   });
@@ -2293,6 +2306,237 @@ describe("QqService — 待审核入队结果诚实化", () => {
     expect(f.pendingUsers).toHaveLength(1);
     expect(f.notes.some((n) => n.includes("已记入待审核"))).toBe(false);
     expect(f.notes.some((n) => n.includes("未能记入待审核"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 核心安全修复回归
+// ---------------------------------------------------------------------------
+
+describe("QqService — 安全修复：unbind 权限边界", () => {
+  it("白名单内非绑定者/非管理员不能解绑，host 不被调用", async () => {
+    const f = makeService({ config: { allowedUsers: ["u1", "u2"] } });
+    await f.service.handleInboundMessage(
+      inbound({ senderId: "u2", chatId: "u2", text: "/qq unbind" }),
+    );
+    expect(f.unbindCount.value).toBe(0);
+    expect(f.delivered.at(-1)?.text).toContain("没有权限");
+  });
+
+  it("独立管理员白名单可发起二次确认，确认码错误不解绑", async () => {
+    const f = makeService();
+    // 用 options 注入管理员（makeService 未暴露该选项，直接构造注入见下例）。
+    const service = new QqService({
+      config: f.config,
+      store: f.store as unknown as QqTaskStore,
+      host: f.host,
+      binderOpenid: "someone-else",
+      adminOpenids: ["u1"],
+    });
+    await service.handleInboundMessage(inbound({ text: "/qq unbind" }));
+    expect(f.unbindCount.value).toBe(0);
+    const prompt = f.delivered.at(-1)?.text ?? "";
+    const code = /验证码 (\d{6})/u.exec(prompt)?.[1] ?? "";
+
+    await service.handleInboundMessage(
+      inbound({ text: "000000" === code ? "111111" : "000000", msgId: "m-wrong" }),
+    );
+    expect(f.unbindCount.value).toBe(0);
+
+    await service.handleInboundMessage(inbound({ text: code, msgId: "m-ok" }));
+    expect(f.unbindCount.value).toBe(1);
+  });
+
+  it("确认码是一次性的：同一码第二次回复不会重复解绑", async () => {
+    const f = makeService();
+    await f.service.handleInboundMessage(inbound({ text: "/qq unbind" }));
+    const code = /验证码 (\d{6})/u.exec(f.delivered.at(-1)?.text ?? "")?.[1] ?? "";
+    await f.service.handleInboundMessage(inbound({ text: code, msgId: "m-c1" }));
+    await f.service.handleInboundMessage(inbound({ text: code, msgId: "m-c2" }));
+    expect(f.unbindCount.value).toBe(1);
+  });
+});
+
+describe("QqService — 安全修复：审批并发与身份", () => {
+  it("并发两次权限请求不会留下悬挂 Promise：一次通过一次拒绝", async () => {
+    const f = makeService();
+    const decisions: SuperPermissionDecision[] = [];
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      const [a, b] = await Promise.all([
+        input.onPermission({ sessionId: "s", toolName: "A" }),
+        input.onPermission({ sessionId: "s", toolName: "B" }),
+      ]);
+      decisions.push(a!, b!);
+      return { superSessionId: "super-race" };
+    };
+    await f.service.handleInboundMessage(inbound({ msgId: "race-1" }));
+    await waitFor(() => lastTask(f).status === "waiting_approval");
+    const code = APPROVAL_CODE_PATTERN.exec(
+      f.delivered.find((item) => item.text.includes("/qq approve"))!.text,
+    )?.[1]!;
+    await f.service.handleTaskAction(lastTask(f).taskId, "approve", code);
+    await waitFor(() => decisions.length === 2);
+    expect(decisions.filter((d) => d === "allow_once")).toHaveLength(1);
+    expect(decisions.filter((d) => d === "deny")).toHaveLength(1);
+  });
+
+  it("群里非发起者即使拿到验证码也不能代批", async () => {
+    const f = makeService({ config: { allowedUsers: ["u1", "u2"], allowedGroups: ["g1"] } });
+    let decision: SuperPermissionDecision | undefined;
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      decision = await input.onPermission({ sessionId: "s", toolName: "write_file" });
+      return { superSessionId: "super-identity" };
+    };
+    await f.service.handleInboundMessage(inbound({ msgId: "identity-1" }));
+    await waitFor(() => lastTask(f).status === "waiting_approval");
+    const taskId = lastTask(f).taskId;
+    const code = APPROVAL_CODE_PATTERN.exec(
+      f.delivered.find((item) => item.text.includes("/qq approve"))!.text,
+    )?.[1]!;
+
+    await f.service.handleInboundMessage(
+      inbound({
+        chatType: "group",
+        chatId: "g1",
+        senderId: "u2",
+        mentionsBot: true,
+        text: `/qq approve ${shortTaskId(taskId)} ${code}`,
+        msgId: "m-other",
+      }),
+    );
+    expect(decision).toBeUndefined();
+    expect(f.delivered.at(-1)?.text).toContain("只能由发起者或管理员");
+    expect(lastTask(f).status).toBe("waiting_approval");
+
+    await f.service.handleTaskAction(taskId, "approve", code);
+    await waitFor(() => decision !== undefined);
+    expect(decision).toBe("allow_once");
+  });
+});
+
+describe("QqService — 安全修复：终态消费 outcome.status", () => {
+  function runWithOutcome(status: string | undefined, stopReason: string | undefined) {
+    const f = makeService();
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-status" };
+    };
+    f.host.readTaskOutcome = () => ({
+      summary: "执行体汇报",
+      ...(status ? { status } : {}),
+      ...(stopReason ? { stopReason } : {}),
+    });
+    return f;
+  }
+
+  it("interrupted + 缺省 end_turn 如实记 canceled，不伪造成功", async () => {
+    const f = runWithOutcome("interrupted", undefined);
+    await f.service.handleInboundMessage(inbound({ msgId: "status-1" }));
+    await waitFor(() => isTerminalStatus(lastTask(f).status));
+    expect(lastTask(f).status).toBe("canceled");
+  });
+
+  it("error + end_turn 如实记 failed", async () => {
+    const f = runWithOutcome("error", undefined);
+    await f.service.handleInboundMessage(inbound({ msgId: "status-2" }));
+    await waitFor(() => isTerminalStatus(lastTask(f).status));
+    expect(lastTask(f).status).toBe("failed");
+  });
+
+  it("merged + 分支不再重复合并，直接记 succeeded", async () => {
+    const f = runWithOutcome("merged", "end_turn");
+    f.host.readTaskOutcome = () => ({
+      summary: "已合并",
+      status: "merged",
+      branch: "iflow/qr/merged",
+    });
+    await f.service.handleInboundMessage(inbound({ msgId: "status-3" }));
+    await waitFor(() => isTerminalStatus(lastTask(f).status));
+    expect(lastTask(f).status).toBe("succeeded");
+    expect(f.merges).toEqual([]);
+  });
+});
+
+describe("QqService — 安全修复：幂等并发与畸形入站", () => {
+  it("同一 msgId 并发到达只建一个任务、只派发一次", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const f = makeService();
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      await gate;
+      return { superSessionId: "super-idem" };
+    };
+    await Promise.all([
+      f.service.handleInboundMessage(inbound({ msgId: "dupe-1" })),
+      f.service.handleInboundMessage(inbound({ msgId: "dupe-1" })),
+    ]);
+    release();
+    await waitFor(() => f.dispatches.length === 1);
+    expect(f.store.records.size).toBe(1);
+  });
+
+  it("msgId 缺失时不建任务、不产生 qq-bot:undefined 幂等键", async () => {
+    const f = makeService();
+    await f.service.handleInboundMessage(inbound({ msgId: "", text: "做点事" }));
+    expect(f.store.records.size).toBe(0);
+    expect(f.dispatches).toHaveLength(0);
+  });
+
+  it("attachments 非数组不会抛错，按空附件处理", async () => {
+    const f = makeService();
+    await f.service.handleInboundMessage(
+      inbound({ msgId: "bad-att", attachments: "not-an-array" as never }),
+    );
+    await waitFor(() => f.dispatches.length === 1);
+    expect(lastTask(f).payload.attachments).toEqual([]);
+  });
+
+  it("完全畸形的入站对象不会打断服务", async () => {
+    const f = makeService();
+    await expect(
+      f.service.handleInboundMessage(undefined as unknown as InboundMessage),
+    ).resolves.toBeUndefined();
+    expect(f.dispatches).toHaveLength(0);
+  });
+});
+
+describe("QqService — 安全修复：内存记账与丢弃诚实性", () => {
+  it("进度记账表超过上限时淘汰最旧键", async () => {
+    const f = makeService();
+    const internals = f.service as unknown as {
+      progressFingerprints: Map<string, string>;
+      trackProgressSlot: (map: Map<string, string>, slot: string, value: string) => void;
+    };
+    for (let i = 0; i < QQ_MAX_TRACKED_PROGRESS_SLOTS + 10; i += 1) {
+      internals.trackProgressSlot(internals.progressFingerprints, `task-${i}:x`, "f");
+    }
+    expect(internals.progressFingerprints.size).toBe(QQ_MAX_TRACKED_PROGRESS_SLOTS);
+  });
+
+  it("任务进入终态时清掉该任务的进度记账键", async () => {
+    const f = await startRunningTask({}, "super-cleanup");
+    const taskId = lastTask(f).taskId;
+    const internals = f.service as unknown as {
+      progressFingerprints: Map<string, string>;
+    };
+    internals.progressFingerprints.set(`${taskId}:progress`, "f");
+    await f.service.handleTaskAction(taskId, "stop");
+    expect(internals.progressFingerprints.has(`${taskId}:progress`)).toBe(false);
+  });
+
+  it("宿主丢弃返回空对象时如实报失败，不谎称已丢弃", async () => {
+    const f = await startRunningTask({}, "super-empty-discard");
+    const taskId = lastTask(f).taskId;
+    f.host.discardTask = async () => ({}) as never;
+    await f.service.handleTaskAction(taskId, "discard", undefined, { force: true });
+    expect(lastTask(f).status).not.toBe("discarded");
+    expect(lastTask(f).failure?.code).toBe("discard_failed");
+    expect(f.delivered.at(-1)?.text).toContain("丢弃失败");
   });
 });
 

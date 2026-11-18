@@ -90,12 +90,59 @@ export function shouldRestartOnPatch(
 // ---------------------------------------------------------------------------
 
 /**
+ * 子会话终态词表（**唯一权威**，大小写不敏感）。
+ *
+ * 除了 `SuperStatus` 的三个标准终态（completed / failed / cancelled），还包含
+ * 上游执行体与归档里真实出现的别名：`done`（完成）、`error`（失败）、
+ * `aborted` / `interrupted`（中断）、`merged`（已完成并合并）。
+ *
+ * 为什么必须收全：`src/panel/panel.ts` 的 QQ `waitForSettle` 用本模块的
+ * {@link isTerminalSuperStatus} 轮询看板状态，漏判任一别名都会让本该收尾的
+ * 子会话一直挂到 2 小时兜底超时；而 `src/qq/store.ts` 的归档清理词表也认这些
+ * 别名 —— 两处口径必须一致，故集中在此导出。
+ */
+export const QQ_SUPER_TERMINAL_STATUSES: readonly string[] = [
+  "completed",
+  "failed",
+  "cancelled",
+  "done",
+  "error",
+  "aborted",
+  "interrupted",
+  "merged",
+];
+
+/** 状态归一化：字符串 trim + 小写；非字符串（脏值）返回空串。 */
+export function qqSuperStatusKey(status: string | null | undefined): string {
+  return typeof status === "string" ? status.trim().toLowerCase() : "";
+}
+
+/** 终态且语义为「失败」的别名。 */
+export function isSuperFailureStatus(status: string | null | undefined): boolean {
+  const key = qqSuperStatusKey(status);
+  return key === "failed" || key === "error";
+}
+
+/** 终态且语义为「取消 / 中断」的别名。 */
+export function isSuperCancelStatus(status: string | null | undefined): boolean {
+  const key = qqSuperStatusKey(status);
+  return key === "cancelled" || key === "canceled" || key === "aborted" || key === "interrupted";
+}
+
+/** 终态且语义为「已合并」的别名。 */
+export function isSuperMergedStatus(status: string | null | undefined): boolean {
+  return qqSuperStatusKey(status) === "merged";
+}
+
+/**
  * 子会话是否已到终态。
  *
  * 入参刻意是 `string`：状态来自 wire / 归档，可能带着旧版本或脏值；用
- * `SuperStatus` 断言会让「未知值」被当成终态或非终态的其中一边。这里只认
- * 三个明确的终态（与 `shared/super-agent.ts` 的 `TERMINAL_STATUSES` 同源）。
+ * `SuperStatus` 断言会让「未知值」被当成终态或非终态的其中一边。词表来自
+ * {@link QQ_SUPER_TERMINAL_STATUSES}，与归档清理、终态映射同一口径。
  */
 export function isTerminalSuperStatus(status: string | null | undefined): boolean {
-  return status === "completed" || status === "failed" || status === "cancelled";
+  const key = qqSuperStatusKey(status);
+  if (key.length === 0) return false;
+  return (QQ_SUPER_TERMINAL_STATUSES as readonly string[]).includes(key);
 }

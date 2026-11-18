@@ -25,6 +25,7 @@
  * 绝不谎称它们还在跑。
  */
 
+import { randomInt } from "node:crypto";
 import type { InboundAttachment, InboundMessage } from "./adapter/types.js";
 import type { QqConfig } from "./config.js";
 import type { QqPendingUserInput } from "./pending-users.js";
@@ -58,6 +59,11 @@ import {
   type QqCommandIntent,
 } from "../../shared/qq-command.js";
 import type { Block, QqTaskUi, TurnChangeUi } from "../../shared/messages.js";
+import {
+  isSuperCancelStatus,
+  isSuperFailureStatus,
+  isSuperMergedStatus,
+} from "./wiring.js";
 
 /**
  * 固定适配器前缀。阶段4 收敛为仅 QQBot 后，`iflow.qq.adapter` 设置项已移除，
@@ -222,7 +228,12 @@ export interface QqMainInjectResult {
  * 回给服务，看板与 QQ 回执才能如实说明「哪些东西真的没了」。
  */
 export interface QqDiscardResult {
-  /** false = 什么都没删（子会话记录不存在 / 已被清理）。缺省按成功处理。 */
+  /**
+   * **必须显式为 `true`** 才算真的丢弃成功。
+   *
+   * 缺省（`undefined`）表示宿主没有给出结论 —— 上层按**失败**处理，绝不把
+   * `undefined` / `{}` 读成成功（那会让「文件夹根本没删」被回执成「已丢弃」）。
+   */
   ok?: boolean;
   /** true = 工作目录已删、分支因未合并提交被保留。 */
   branchKept?: boolean;
@@ -338,6 +349,15 @@ export interface QqServiceOptions {
    * 缺省 `performance.now()`，环境没有时退回 `Date.now()`。
    */
   monotonicNow?: () => number;
+  /**
+   * 扫码绑定者 openid（凭据 `userOpenid`）。`/qq unbind` 仅允许本人或
+   * {@link adminOpenids} 执行。服务层读不到 SecretStorage，缺省时退化为
+   * `config.allowedUsers` 的首项（面板在扫码成功时把扫码者放在白名单里）——
+   * 这是无凭据访问权时的保守近似，仍比「任一白名单用户」严格得多。
+   */
+  binderOpenid?: string;
+  /** 与扫码绑定者等价的解绑 / 审批管理员白名单（openid）。 */
+  adminOpenids?: readonly string[];
 }
 
 /** 任务操作（IPC 与命令处理共用）。 */
@@ -366,6 +386,21 @@ export const QQ_APPROVAL_TIMEOUT_MS = QQ_APPROVAL_TIMEOUT_MINUTES * 60_000;
 export const QQ_ANSWER_TIMEOUT_MS = QQ_APPROVAL_TIMEOUT_MS;
 /** 验证码最多尝试次数：第一次错误后仍保留 2 次机会。 */
 export const QQ_APPROVAL_MAX_ATTEMPTS = 3;
+/**
+ * `/qq unbind` 二次确认的有效期（毫秒）。
+ *
+ * 解绑会让机器人全局下线并清空授权，必须要求「特权身份 + 一次性确认码」两步，
+ * 且确认码有时效，避免一条被旁人看到的旧消息长期有效。
+ */
+export const QQ_UNBIND_CONFIRM_TIMEOUT_MS = 5 * 60_000;
+/**
+ * 内存记账表的最大键数（限流窗口按发送者、进度节流按 `taskId:分支`）。
+ *
+ * 这些表只做内存节流 / 去重，不需要永久保留：超过上限时按最近使用淘汰最旧的
+ * 键（Map 插入序），任务终态时再按 taskId 前缀整批清理。
+ */
+export const QQ_MAX_TRACKED_RATE_SENDERS = 1_000;
+export const QQ_MAX_TRACKED_PROGRESS_SLOTS = 500;
 /** `status` 无编号时回显的最近任务条数。 */
 export const QQ_RECENT_TASK_LIMIT = 5;
 /** 看板条目里提示词预览的字符上限。 */
@@ -579,7 +614,18 @@ function isFailureStopReason(reason: string): boolean {
 interface PendingApproval {
   code: string;
   attemptsLeft: number;
+  /** 请求审批的任务发起者 openid：只有本人或管理员可批准/拒绝，防止群聊冒领。 */
+  requesterOpenid: string;
   resolve: (decision: SuperPermissionDecision) => void;
+  timer: NodeJS.Timeout;
+}
+
+/** 一次等待二次确认的 `/qq unbind`（按发起者 openid 索引）。 */
+interface PendingUnbindConfirm {
+  code: string;
+  at: number;
+  chatType: "private" | "group";
+  chatId: string;
   timer: NodeJS.Timeout;
 }
 
@@ -897,8 +943,12 @@ export class QqService {
   private abortController = new AbortController();
   private stopped = false;
   private started = false;
-  /** 验证码随机源（测试可以替换成确定值）。 */
-  private random: () => number = Math.random;
+  /** 等待二次确认的 `/qq unbind`（发起者 openid → 确认槽位）。 */
+  private readonly pendingUnbindConfirms = new Map<string, PendingUnbindConfirm>();
+  /** 扫码绑定者 openid（解绑/审批特权身份）。 */
+  private readonly binderOpenid: string;
+  /** 解绑/审批管理员白名单。 */
+  private readonly adminOpenids: ReadonlySet<string>;
   /**
    * 正在投递终态结果的任务：taskId → 该次投递的 promise。
    *
@@ -970,6 +1020,17 @@ export class QqService {
       options.questionTimeoutMs > 0
         ? options.questionTimeoutMs
         : QQ_ANSWER_TIMEOUT_MS;
+    const explicitBinder = typeof options.binderOpenid === "string" ? options.binderOpenid.trim() : "";
+    // 服务层读不到 SecretStorage 里的凭据；面板扫码时把绑定者写进白名单，
+    // 因此白名单首项是无注入时的保守近似（仍比「任一白名单用户」严格）。
+    const fallbackBinder = this.config.allowedUsers.find((id) => typeof id === "string" && id.trim())
+      ?.trim();
+    this.binderOpenid = explicitBinder || fallbackBinder || "";
+    this.adminOpenids = new Set(
+      (options.adminOpenids ?? [])
+        .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        .map((id) => id.trim()),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -1101,6 +1162,7 @@ export class QqService {
     try {
       const result = await this.store.pruneTasks(days);
       if (result.deleted.length > 0) {
+        for (const taskId of result.deleted) this.clearTaskRuntimeSlots(taskId);
         this.log(
           `QQ 归档清理：删除 ${result.deleted.length} 个超过 ${days} 天的终态任务` +
             (result.skipped.length > 0 ? `，跳过 ${result.skipped.length} 个` : ""),
@@ -1142,6 +1204,9 @@ export class QqService {
       this.feedAnswerBack(entry.superSessionId, {});
     }
     this.pendingAnswers.clear();
+    // 解绑二次确认同样不能跨生命周期残留（定时器 + 已被撤销的特权身份）。
+    for (const entry of this.pendingUnbindConfirms.values()) clearTimeout(entry.timer);
+    this.pendingUnbindConfirms.clear();
   }
 
   // -------------------------------------------------------------------------
@@ -1159,7 +1224,20 @@ export class QqService {
    * 命令解析失败与未知子命令会回一句可读错误（用户自己打错的字，不是探测）。
    */
   async handleInboundMessage(msg: InboundMessage): Promise<void> {
+    try {
+      await this.handleInboundMessageInner(msg);
+    } catch (error) {
+      // 适配器可能并发投递多条；一条畸形消息不能打断整个入站服务。
+      this.log(`QQ 入站消息处理失败，已忽略：${errorText(error)}`);
+      this.notify("QQ 收到一条格式异常的消息，已忽略（详见面板日志）。");
+    }
+  }
+
+  /** 入站处理主体；所有异常由 {@link handleInboundMessage} 统一兜住。 */
+  private async handleInboundMessageInner(msg: InboundMessage): Promise<void> {
     const rawText = typeof msg?.text === "string" ? msg.text : "";
+    // 解绑二次确认先于命令解析：确认码是纯数字，不能被当成任务正文。
+    if (await this.tryConsumeUnbindConfirm(msg, rawText)) return;
     const accepted = this.acceptInbound(msg);
     if (!accepted.ok) {
       if (accepted.pending) {
@@ -1225,6 +1303,12 @@ export class QqService {
     if (openid.length === 0) {
       return { ok: false, reason: "缺少发送者标识" };
     }
+    // msgId 是幂等键的唯一来源：缺失時拼出 qq-bot:undefined，会让所有畸形
+    // 消息互相误判成「同一条已受理」。宁可整条忽略，也不建这种任务。
+    const msgId = typeof msg.msgId === "string" ? msg.msgId.trim() : "";
+    if (msgId.length === 0) {
+      return { ok: false, reason: "缺少消息标识" };
+    }
     if (!this.config.allowedUsers.includes(openid)) {
       return this.pendingDecision(msg, openid, `发送者 ${maskQqOpenId(openid)} 不在白名单`);
     }
@@ -1283,86 +1367,109 @@ export class QqService {
       return;
     }
 
-    const workspace = this.resolveWorkspace();
-    const validation = validateQqTaskRequest(
-      {
-        authorized: true,
-        chatType: msg.chatType,
-        groupAllowed: msg.chatType === "group" ? true : undefined,
-        mentioned: msg.chatType === "group" ? msg.mentionsBot : undefined,
-        prompt,
-        attachments: msg.attachments.map((attachment) => ({
-          name: attachment.name,
-          size: typeof attachment.sizeBytes === "number" ? attachment.sizeBytes : undefined,
-          kind: attachment.kind,
-        })),
-        workspace: workspace || undefined,
-      },
-      DEFAULT_QQ_TASK_LIMITS,
-    );
-    if (!validation.ok) {
-      this.notify(`QQ 任务被拒绝（${validation.code}）：${validation.message}`);
-      await this.deliver(msg, `任务被拒绝：${validation.message}`);
-      return;
-    }
+    // 同步占位：check 与 reserve 之间不能有 await。否则同一 msgId 的两个并发
+    // 入站事件会各自通过上面的检查、各自建一个任务并执行两次（两者都要到
+    // persist 才写幂等键，期间隔着多次 await commitStatus）。
+    const reservation = `reserve:${randomInt(0x7fffffff).toString(36)}:${Date.now().toString(36)}`;
+    this.idempotency.set(key, reservation);
 
-    if (!this.consumeRateLimit(msg.senderId)) {
-      const limit = Math.max(1, this.config.rateLimitPerMin);
-      this.notify(
-        `QQ 用户 ${maskQqOpenId(msg.senderId)} 触发限流（每分钟 ${limit} 条）`,
-      );
-      await this.deliver(msg, `请求过于频繁，每分钟最多 ${limit} 条任务，请稍后再试。`);
-      return;
-    }
+    // 畸形附件守卫：wire 上的 attachments 可能被塞进非数组或数组里含 null，
+    // 直接 .map 会抛 TypeError 打断整条入站链路。
+    const rawAttachments = (msg as { attachments?: unknown }).attachments;
+    const attachmentsIn: InboundAttachment[] = Array.isArray(rawAttachments)
+      ? rawAttachments.filter(
+          (item): item is InboundAttachment =>
+            Boolean(item) && typeof item === "object" && !Array.isArray(item),
+        )
+      : [];
 
-    const attachments = msg.attachments
-      .map(attachmentRef)
-      .filter((ref): ref is string => typeof ref === "string" && ref.length > 0);
-
-    const created = createQqTask(
-      {
-        adapter: QQ_ADAPTER,
-        source: {
+    try {
+      const workspace = this.resolveWorkspace();
+      const validation = validateQqTaskRequest(
+        {
+          authorized: true,
           chatType: msg.chatType,
-          chatId: msg.chatId,
-          senderId: msg.senderId,
-          msgId: msg.msgId,
+          groupAllowed: msg.chatType === "group" ? true : undefined,
+          mentioned: msg.chatType === "group" ? msg.mentionsBot : undefined,
+          prompt,
+          attachments: attachmentsIn.map((attachment) => ({
+            name: attachment.name,
+            size: typeof attachment.sizeBytes === "number" ? attachment.sizeBytes : undefined,
+            kind: attachment.kind,
+          })),
+          workspace: workspace || undefined,
         },
-        target: { workspace },
-        payload: { prompt, attachments, contexts: [] },
-        policy: {
-          remotePolicy: this.config.remotePolicy as QqRemotePolicy,
-          resultDetail: qqDetailProfile(this.config.resultDetail).detail,
-        },
-        channel: this.channelForNewTask(),
-      },
-      { now: this.now },
-    );
-
-    let task = await this.commitStatus(created, "validated");
-    task = await this.commitStatus(task, "queued");
-    await this.appendEvent("task_created", task.taskId, {
-      chatType: msg.chatType,
-    });
-
-    if (this.taskChannel(task) === "main") {
-      // 主会话渠道：先入队（位次才能算准），**立刻**回一条排队确认 ——
-      // 用户不必等主会话空闲就能知道消息被接住了、排在第几位。
-      // 去重键与被动回复的 msg_id 沿用现有回包通道（重试不会刷出第二条）。
-      this.queue.push(task.taskId);
-      const position = this.mainQueuePosition(task.taskId);
-      await this.deliver(
-        msg,
-        `任务 ${shortTaskId(task.taskId)} 已排队（第 ${position} 位），主会话空闲后开始执行。`,
-        msg.msgId,
-        `qq-queued:${task.taskId}`,
+        DEFAULT_QQ_TASK_LIMITS,
       );
-      this.pump();
-      return;
-    }
+      if (!validation.ok) {
+        this.notify(`QQ 任务被拒绝（${validation.code}）：${validation.message}`);
+        await this.deliver(msg, `任务被拒绝：${validation.message}`);
+        return;
+      }
 
-    await this.deliver(msg, `已受理任务 ${shortTaskId(task.taskId)}，排队中。`, msg.msgId);
-    this.enqueue(task.taskId);
+      if (!this.consumeRateLimit(msg.senderId)) {
+        const limit = Math.max(1, this.config.rateLimitPerMin);
+        this.notify(
+          `QQ 用户 ${maskQqOpenId(msg.senderId)} 触发限流（每分钟 ${limit} 条）`,
+        );
+        await this.deliver(msg, `请求过于频繁，每分钟最多 ${limit} 条任务，请稍后再试。`);
+        return;
+      }
+
+      const attachments = attachmentsIn
+        .map(attachmentRef)
+        .filter((ref): ref is string => typeof ref === "string" && ref.length > 0);
+
+      const created = createQqTask(
+        {
+          adapter: QQ_ADAPTER,
+          source: {
+            chatType: msg.chatType,
+            chatId: msg.chatId,
+            senderId: msg.senderId,
+            msgId: msg.msgId,
+          },
+          target: { workspace },
+          payload: { prompt, attachments, contexts: [] },
+          policy: {
+            remotePolicy: this.config.remotePolicy as QqRemotePolicy,
+            resultDetail: qqDetailProfile(this.config.resultDetail).detail,
+          },
+          channel: this.channelForNewTask(),
+        },
+        { now: this.now },
+      );
+
+      let task = await this.commitStatus(created, "validated");
+      task = await this.commitStatus(task, "queued");
+      await this.appendEvent("task_created", task.taskId, {
+        chatType: msg.chatType,
+      });
+
+      if (this.taskChannel(task) === "main") {
+        // 主会话渠道：先入队（位次才能算准），**立刻**回一条排队确认 ——
+        // 用户不必等主会话空闲就能知道消息被接住了、排在第几位。
+        // 去重键与被动回复的 msg_id 沿用现有回包通道（重试不会刷出第二条）。
+        this.queue.push(task.taskId);
+        const position = this.mainQueuePosition(task.taskId);
+        await this.deliver(
+          msg,
+          `任务 ${shortTaskId(task.taskId)} 已排队（第 ${position} 位），主会话空闲后开始执行。`,
+          msg.msgId,
+          `qq-queued:${task.taskId}`,
+        );
+        this.pump();
+        return;
+      }
+
+      await this.deliver(msg, `已受理任务 ${shortTaskId(task.taskId)}，排队中。`, msg.msgId);
+      this.enqueue(task.taskId);
+    } catch (error) {
+      // 建任务链路上任何一步写盘失败都必须回滚预留键，否则这条 msgId 永久
+      // 被占、用户重发也永远收到「已受理」却没有任何任务在跑。
+      if (this.idempotency.get(key) === reservation) this.idempotency.delete(key);
+      throw error;
+    }
   }
 
   /** 新任务该走的渠道（`iflow.qq.route`；未知值按旧行为 child）。 */
@@ -1410,12 +1517,32 @@ export class QqService {
     const windowStart = at - 60_000;
     const recent = (this.rateWindows.get(senderId) ?? []).filter((ts) => ts > windowStart);
     if (recent.length >= limit) {
-      this.rateWindows.set(senderId, recent);
+      this.setRateWindow(senderId, recent);
       return false;
     }
     recent.push(at);
-    this.rateWindows.set(senderId, recent);
+    this.setRateWindow(senderId, recent);
     return true;
+  }
+
+  /** 写入发送者窗口并施加键数上限（优先淘汰窗口已过期的发送者）。 */
+  private setRateWindow(senderId: string, timestamps: number[]): void {
+    // delete + set 让本次使用的键移动到 Map 末尾（近似 LRU）。
+    this.rateWindows.delete(senderId);
+    this.rateWindows.set(senderId, timestamps);
+    if (this.rateWindows.size <= QQ_MAX_TRACKED_RATE_SENDERS) return;
+    const now = this.monotonic();
+    for (const [key, window] of this.rateWindows) {
+      if (this.rateWindows.size <= QQ_MAX_TRACKED_RATE_SENDERS) break;
+      if (window.length === 0 || window.every((ts) => ts <= now - 60_000)) {
+        this.rateWindows.delete(key);
+      }
+    }
+    while (this.rateWindows.size > QQ_MAX_TRACKED_RATE_SENDERS) {
+      const oldest = this.rateWindows.keys().next();
+      if (oldest.done) break;
+      this.rateWindows.delete(oldest.value);
+    }
   }
 
   private enqueue(taskId: string): void {
@@ -1664,23 +1791,36 @@ export class QqService {
       return;
     }
 
-    const stopReason =
+    // outcome.status 是执行体的权威观测。旧实现只依据 stopReason，而 stopReason
+    // 缺省会被填成 end_turn —— 一个 interrupted / error / merged 的子会话会被
+    // 静默记成 succeeded（假成功）。这里先把状态别名折算进停止原因与终态。
+    const observed = outcome.status;
+    let stopReason =
       typeof outcome.stopReason === "string" && outcome.stopReason.length > 0
         ? outcome.stopReason
         : "end_turn";
+    if (isSuperFailureStatus(observed)) stopReason = "error";
+    else if (isSuperCancelStatus(observed)) stopReason = "canceled";
     const branch = outcome.branch ?? task.correlation.branch;
     const result = this.buildResult(outcome, stopReason, task, branch);
 
     let status: QqTaskStatus;
     let failure: QqTaskError | undefined;
-    // 执行体确认取消（子会话被 cancel 后的终态 / 停止原因 "canceled"）：
-    // 终态与 `/qq stop` 直接路径对齐为 canceled，不再记成 failed —— 取消是
-    // 用户主动动作，不是执行故障，看板与失败告警都不该把它当失败。其余
-    // 失败类停止原因（error / failed / interrupted…）仍按失败处理。
-    if (normalizedStopReason(stopReason) === "canceled") {
+    if (isSuperCancelStatus(observed)) {
+      // 执行体上报 cancelled / aborted / interrupted：如实记为取消（用户主动
+      // 中断），不再让缺省的 end_turn 把它伪装成成功。
       status = "canceled";
-      // 取消是用户主动动作：`failure.code` 保留给状态机判别，消息本身是中性的
-      // 「停止原因」，看板/摘要各自渲染成「已取消（…）」，不再显示「执行失败」。
+      failure = { code: "agent_canceled", message: `停止原因：${stopReason}` };
+    } else if (isSuperFailureStatus(observed)) {
+      status = "failed";
+      failure = { code: "agent_failed", message: `执行结束：${stopReason}` };
+    } else if (isSuperMergedStatus(observed)) {
+      // merged 是「已经合并」这一事实：直接收成功，绝不再调用一次 mergeTask
+      // （重复合并既无意义又可能对同一分支产生副作用）。
+      status = "succeeded";
+    } else if (normalizedStopReason(stopReason) === "canceled") {
+      // 仅有停止原因（无 status 字段）时按原口径收尾：取消记 canceled。
+      status = "canceled";
       failure = { code: "agent_canceled", message: `停止原因：${stopReason}` };
     } else if (isFailureStopReason(stopReason)) {
       status = "failed";
@@ -1832,57 +1972,90 @@ export class QqService {
 
     const code = this.generateApprovalCode();
     const at = this.now();
-    const toolLabel = request.toolName ?? request.summary ?? "工具调用";
-    const pending = {
-      kind: "approval" as const,
-      text: `审批 ${toolLabel}（验证码 ${code}）`,
-      at,
-    };
-    const waiting = await this.commitStatus(task, "waiting_approval", {
-      pending,
-      updatedAt: Math.max(task.updatedAt, at),
-    });
-    if (isTerminalStatus(waiting.status)) {
-      resolveDecision("deny");
-      return decision;
-    }
-
     const timer = setTimeout(() => {
       void this.expireApproval(taskId, code);
     }, QQ_APPROVAL_TIMEOUT_MS);
     timer.unref?.();
-    this.pendingApprovals.set(taskId, {
+    const entry: PendingApproval = {
       code,
       attemptsLeft: QQ_APPROVAL_MAX_ATTEMPTS,
+      requesterOpenid: typeof task.source.senderId === "string" ? task.source.senderId.trim() : "",
       resolve: resolveDecision,
       timer,
-    });
+    };
 
-    const detail = request.summary ? `：${request.summary}` : "";
-    await this.deliverTaskNotice(
-      waiting,
-      [
-        `任务 ${shortTaskId(taskId)} 请求审批${detail}`,
-        `回复 /qq approve ${shortTaskId(taskId)} ${code} 批准，`,
-        `/qq deny ${shortTaskId(taskId)} 拒绝（${QQ_APPROVAL_TIMEOUT_MINUTES} 分钟内有效）。`,
-      ].join("\n"),
-      `approval:${taskId}:${code}`,
+    // 临界区必须完全同步：has 检查与 set 占位之间不能有 await。旧实现把 set
+    // 放在两次 await commitStatus 之后，并发的 A/B 都能通过检查，B 覆盖 A，
+    // A 的 decision Promise 永远挂着、timer 成为孤儿。
+    this.pendingApprovals.set(taskId, entry);
+
+    try {
+      const toolLabel = request.toolName ?? request.summary ?? "工具调用";
+      const pending = {
+        kind: "approval" as const,
+        text: `审批 ${toolLabel}（验证码 ${code}）`,
+        at,
+      };
+      const waiting = await this.commitStatus(task, "waiting_approval", {
+        pending,
+        updatedAt: Math.max(task.updatedAt, at),
+      });
+      if (isTerminalStatus(waiting.status)) {
+        this.settleApproval(taskId, entry, "deny");
+        return decision;
+      }
+
+      const detail = request.summary ? `：${request.summary}` : "";
+      await this.deliverTaskNotice(
+        waiting,
+        [
+          `任务 ${shortTaskId(taskId)} 请求审批${detail}`,
+          `回复 /qq approve ${shortTaskId(taskId)} ${code} 批准，`,
+          `/qq deny ${shortTaskId(taskId)} 拒绝（${QQ_APPROVAL_TIMEOUT_MINUTES} 分钟内有效）。`,
+        ].join("\n"),
+        `approval:${taskId}:${code}`,
+      );
+      return decision;
+    } catch (error) {
+      // 投递/写盘失败也要让 agent 的等待 Promise 正确收在 deny，绝不悬挂。
+      this.log(`QQ 任务 ${taskId} 审批请求处理失败：${errorText(error)}`);
+      this.settleApproval(taskId, entry, "deny");
+      return decision;
+    }
+  }
+
+  /** 摘掉审批槽位、停表，并**总是**把原 Promise 收在给定决策上（含被覆盖的旧 entry）。 */
+  private settleApproval(
+    taskId: string,
+    entry: PendingApproval,
+    decision: SuperPermissionDecision,
+  ): void {
+    if (this.pendingApprovals.get(taskId) === entry) this.pendingApprovals.delete(taskId);
+    clearTimeout(entry.timer);
+    entry.resolve(decision);
+  }
+
+  /** 应答者是否是发起者本人 / 管理员；面板本地动作（无 actor）视为可信操作者。 */
+  private isApprovalActor(actor: string | undefined, entry: PendingApproval): boolean {
+    const id = typeof actor === "string" ? actor.trim() : "";
+    if (!id) return true; // 面板 IPC 的本地操作：不是 QQ 群里的陌生人
+    return (
+      (entry.requesterOpenid.length > 0 && id === entry.requesterOpenid) ||
+      this.adminOpenids.has(id) ||
+      (this.binderOpenid.length > 0 && id === this.binderOpenid)
     );
-    return decision;
   }
 
   private generateApprovalCode(): string {
-    const raw = this.random();
-    const normalized = Number.isFinite(raw) ? Math.min(0.9999, Math.max(0, raw)) : 0;
-    return String(Math.floor(normalized * 10_000)).padStart(4, "0");
+    // 密码学随机：Math.random 可被预测，4 位码只给 3 次尝试也挡不住有准备的
+    // 冒领；randomInt 是 CSPRNG，且不引入新依赖（node:crypto 内置）。
+    return String(randomInt(0, 10_000)).padStart(4, "0");
   }
 
   private async expireApproval(taskId: string, code: string): Promise<void> {
     const entry = this.pendingApprovals.get(taskId);
     if (!entry || entry.code !== code) return;
-    this.pendingApprovals.delete(taskId);
-    clearTimeout(entry.timer);
-    entry.resolve("deny");
+    this.settleApproval(taskId, entry, "deny");
 
     const task = this.tasks.get(taskId);
     if (!task) return;
@@ -2022,7 +2195,7 @@ export class QqService {
     taskId: string,
     action: QqTaskAction,
     text?: string,
-    options?: { force?: boolean },
+    options?: { force?: boolean; actorOpenid?: string },
   ): Promise<void> {
     const resolved = this.resolveTaskRef(taskId);
     if (resolved.kind === "ambiguous") {
@@ -2041,10 +2214,10 @@ export class QqService {
     const task = resolved.task;
     switch (action) {
       case "approve":
-        await this.approveTask(task, text);
+        await this.approveTask(task, text, options?.actorOpenid);
         return;
       case "deny":
-        await this.denyTask(task);
+        await this.denyTask(task, options?.actorOpenid);
         return;
       case "answer":
         await this.answerTask(task, text);
@@ -2064,10 +2237,22 @@ export class QqService {
     }
   }
 
-  private async approveTask(task: QqTask, code: string | undefined): Promise<void> {
+  private async approveTask(
+    task: QqTask,
+    code: string | undefined,
+    actorOpenid?: string,
+  ): Promise<void> {
     const entry = this.pendingApprovals.get(task.taskId);
     if (!entry) {
       await this.deliverTask(task, `任务 ${shortTaskId(task.taskId)} 当前没有等待审批的请求。`);
+      return;
+    }
+    // 验证码 + 身份双校验：群里围观者看到验证码也不能替发起者批准。
+    if (!this.isApprovalActor(actorOpenid, entry)) {
+      await this.deliverTask(
+        task,
+        `任务 ${shortTaskId(task.taskId)} 的审批只能由发起者或管理员处理。`,
+      );
       return;
     }
     if (!code) {
@@ -2078,9 +2263,7 @@ export class QqService {
       return;
     }
     if (code === entry.code) {
-      this.pendingApprovals.delete(task.taskId);
-      this.releaseApproval(entry);
-      entry.resolve("allow_once");
+      this.settleApproval(task.taskId, entry, "allow_once");
       const updated = await this.clearPendingAndResume(task.taskId, task);
       await this.deliverTaskNotice(
         updated,
@@ -2098,9 +2281,7 @@ export class QqService {
       );
       return;
     }
-    this.pendingApprovals.delete(task.taskId);
-    this.releaseApproval(entry);
-    entry.resolve("deny");
+    this.settleApproval(task.taskId, entry, "deny");
     const updated = await this.clearPendingAndResume(task.taskId, task);
     await this.deliverTaskNotice(
       updated,
@@ -2109,15 +2290,20 @@ export class QqService {
     );
   }
 
-  private async denyTask(task: QqTask): Promise<void> {
+  private async denyTask(task: QqTask, actorOpenid?: string): Promise<void> {
     const entry = this.pendingApprovals.get(task.taskId);
     if (!entry) {
       await this.deliverTask(task, `任务 ${shortTaskId(task.taskId)} 当前没有等待审批的请求。`);
       return;
     }
-    this.pendingApprovals.delete(task.taskId);
-    this.releaseApproval(entry);
-    entry.resolve("deny");
+    if (!this.isApprovalActor(actorOpenid, entry)) {
+      await this.deliverTask(
+        task,
+        `任务 ${shortTaskId(task.taskId)} 的审批只能由发起者或管理员处理。`,
+      );
+      return;
+    }
+    this.settleApproval(task.taskId, entry, "deny");
     const updated = await this.clearPendingAndResume(task.taskId, task);
     await this.deliverTaskNotice(
       updated,
@@ -2335,9 +2521,9 @@ export class QqService {
       return;
     }
 
-    let outcome: QqDiscardResult;
+    let outcome: QqDiscardResult | undefined;
     try {
-      outcome = (await this.host.discardTask(superSessionId)) ?? {};
+      outcome = await this.host.discardTask(superSessionId);
     } catch (error) {
       await this.recordDiscardFailure(
         current,
@@ -2346,11 +2532,13 @@ export class QqService {
       );
       return;
     }
-    if (outcome.ok === false) {
+    // 严格判定：host 没给出 ok:true（undefined / {} / 缺字段）就不是确认的
+    // 成功。旧实现把 `?? {}` 后的空对象当成成功，明明什么都没删也回「已丢弃」。
+    if (!outcome || outcome.ok !== true) {
       await this.recordDiscardFailure(
         current,
         "discard_failed",
-        `任务 ${label} 丢弃失败：${outcome.reason ?? "子会话不存在或已被清理"}`,
+        `任务 ${label} 丢弃失败：${outcome?.reason ?? "宿主未确认丢弃结果（可能不存在或已被清理）"}`,
       );
       return;
     }
@@ -2544,7 +2732,7 @@ export class QqService {
     }
 
     // 先记尝试时刻：投递窗口（重试退避可达数十秒）内的并发刷新不再重复发送。
-    this.progressRefreshes.set(slot, at);
+    this.trackProgressSlot(this.progressRefreshes, slot, at);
     const ok = await this.deliverTaskNotice(
       task,
       text,
@@ -2552,7 +2740,7 @@ export class QqService {
     );
     if (ok) {
       // 只有投递成功才记指纹：失败不记账，下次刷新立即重试（绝不永久静默）。
-      this.progressFingerprints.set(slot, fingerprint);
+      this.trackProgressSlot(this.progressFingerprints, slot, fingerprint);
     } else {
       // 失败可观测：清掉尝试时刻让下次刷新立即重试；toast 已由
       // deliverTaskNotice 给出（「仍未送达 QQ」），这里补日志与归档事件。
@@ -2582,7 +2770,7 @@ export class QqService {
     ) {
       return;
     }
-    this.progressNoticeAt.set(slot, at);
+    this.trackProgressSlot(this.progressNoticeAt, slot, at);
     const id = shortTaskId(taskId);
     this.notify(
       unchanged
@@ -2591,6 +2779,92 @@ export class QqService {
             QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS / 1000,
           )} 秒一条。`,
     );
+  }
+
+  /** 写入进度类记账表并施加键数上限（delete + set 让最近使用的键排到末尾）。 */
+  private trackProgressSlot<T>(map: Map<string, T>, slot: string, value: T): void {
+    map.delete(slot);
+    map.set(slot, value);
+    while (map.size > QQ_MAX_TRACKED_PROGRESS_SLOTS) {
+      const oldest = map.keys().next();
+      if (oldest.done) break;
+      map.delete(oldest.value);
+    }
+  }
+
+  /** 任务终态 / 归档清理后，删除其全部进度记账键（`taskId:` 前缀）。 */
+  private clearTaskRuntimeSlots(taskId: string): void {
+    const prefix = `${taskId}:`;
+    for (const map of [
+      this.progressRefreshes,
+      this.progressFingerprints,
+      this.progressNoticeAt,
+    ]) {
+      for (const key of map.keys()) {
+        if (key.startsWith(prefix)) map.delete(key);
+      }
+    }
+  }
+
+  /** openid 是否属于扫码绑定者本人或解绑管理员白名单。 */
+  private isUnbindPrivileged(openid: string): boolean {
+    const id = typeof openid === "string" ? openid.trim() : "";
+    if (!id) return false;
+    return (
+      (this.binderOpenid.length > 0 && id === this.binderOpenid) || this.adminOpenids.has(id)
+    );
+  }
+
+  /** 解绑二次确认码：6 位密码学随机（比 4 位审批码更高的一性强度）。 */
+  private generateUnbindConfirmCode(): string {
+    return String(randomInt(0, 1_000_000)).padStart(6, "0");
+  }
+
+  /**
+   * 解绑二次确认入口：纯数字回复命中发起者自己的确认槽位才真正解绑。
+   *
+   * 槽位按 senderId 索引，因此群里其他人即使看到验证码也无法代确认；
+   * 命中即消费（一次性），权限在等待期间被撤销时重新判定。
+   */
+  private async tryConsumeUnbindConfirm(msg: InboundMessage, rawText: string): Promise<boolean> {
+    const openid = typeof msg?.senderId === "string" ? msg.senderId.trim() : "";
+    if (!openid) return false;
+    const pending = this.pendingUnbindConfirms.get(openid);
+    if (!pending) return false;
+    if (typeof rawText !== "string" || rawText.trim() !== pending.code) return false;
+
+    this.pendingUnbindConfirms.delete(openid);
+    clearTimeout(pending.timer);
+    if (!this.isUnbindPrivileged(openid)) {
+      await this.deliver(msg, "解绑权限已被撤销，本次确认无效。");
+      return true;
+    }
+
+    let result: { ok: boolean; message: string };
+    try {
+      result = await this.host.unbindAccount();
+    } catch (error) {
+      result = { ok: false, message: errorText(error) };
+    }
+    this.log(`QQ 用户 ${maskQqOpenId(openid)} 完成解绑二次确认：${result.ok ? "成功" : "失败"}`);
+    await this.deliver(msg, result.message);
+    return true;
+  }
+
+  /** 确认码超时：只清槽位、停表，不执行任何解绑。 */
+  private async expireUnbindConfirm(openid: string, code: string): Promise<void> {
+    const pending = this.pendingUnbindConfirms.get(openid);
+    if (!pending || pending.code !== code) return;
+    this.pendingUnbindConfirms.delete(openid);
+    clearTimeout(pending.timer);
+    try {
+      await this.deliver(
+        { chatType: pending.chatType, chatId: pending.chatId },
+        `解绑确认码已超时（${Math.round(QQ_UNBIND_CONFIRM_TIMEOUT_MS / 60_000)} 分钟），未执行解绑。请重新发送 /qq unbind。`,
+      );
+    } catch (error) {
+      this.log(`QQ 解绑确认超时通知失败：${errorText(error)}`);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -2607,13 +2881,38 @@ export class QqService {
         await this.deliver(msg, buildQqHelpText());
         return;
       case "unbind": {
-        let result: { ok: boolean; message: string };
-        try {
-          result = await this.host.unbindAccount();
-        } catch (error) {
-          result = { ok: false, message: errorText(error) };
+        const openid = typeof msg.senderId === "string" ? msg.senderId.trim() : "";
+        if (!this.isUnbindPrivileged(openid)) {
+          // 白名单只授权「派任务」，不授权拆掉整条通道：只有扫码者本人或
+          // 显式管理员可以发起解绑，其他人均不回执差异（避免探测特权）。
+          this.log(`QQ 拒绝非特权用户 ${maskQqOpenId(openid)} 的 unbind 请求`);
+          await this.deliver(msg, "没有权限解除绑定：仅扫码绑定者或管理员可执行 /qq unbind。");
+          return;
         }
-        await this.deliver(msg, result.message);
+        // 二次确认：第一步只发一次性确认码，绝不直接调用 host.unbindAccount()。
+        const previous = this.pendingUnbindConfirms.get(openid);
+        const code = previous?.code ?? this.generateUnbindConfirmCode();
+        const at = this.now();
+        const timer = setTimeout(() => {
+          void this.expireUnbindConfirm(openid, code);
+        }, QQ_UNBIND_CONFIRM_TIMEOUT_MS);
+        timer.unref?.();
+        if (previous) clearTimeout(previous.timer);
+        this.pendingUnbindConfirms.set(openid, {
+          code,
+          at,
+          chatType: msg.chatType,
+          chatId: msg.chatId,
+          timer,
+        });
+        this.log(`QQ 用户 ${maskQqOpenId(openid)} 发起解绑二次确认`);
+        await this.deliver(
+          msg,
+          [
+            "解除绑定会让机器人全局下线并清空本地授权，且影响所有使用者。",
+            `确认请回复验证码 ${code}（${Math.round(QQ_UNBIND_CONFIRM_TIMEOUT_MS / 60_000)} 分钟内有效）。`,
+          ].join("\n"),
+        );
         return;
       }
       case "status": {
@@ -2670,7 +2969,10 @@ export class QqService {
           resolved.task.taskId,
           intent.kind,
           text,
-          intent.kind === "discard" && intent.force === true ? { force: true } : undefined,
+          {
+            ...(intent.kind === "discard" && intent.force === true ? { force: true } : {}),
+            actorOpenid: msg.senderId,
+          },
         );
         return;
       }
@@ -2889,6 +3191,8 @@ export class QqService {
     this.tasks.set(task.taskId, task);
     this.idempotency.set(task.idempotencyKey, task.taskId);
     await this.store.saveTask(task as unknown as QqTaskRecord);
+    // 终态任务的进度/刷新记账不再有用：联动清掉，防止按 taskId 无界增长。
+    if (isTerminalStatus(task.status)) this.clearTaskRuntimeSlots(task.taskId);
     // 只有真变了才通知：同一份记录被重复 persist（例如收尾后的回包写回）
     // 不该再推一次快照。比较的是「看板会展示的关键字段集合」：updatedAt 是
     // 必变项，但同毫秒内只有 pending / result / failure / correlation 变化的

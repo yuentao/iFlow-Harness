@@ -183,7 +183,12 @@ async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {
 async function runningRemoteTask(fixture: Fixture): Promise<QqTask> {
   await fixture.service.start();
   await fixture.service.handleInboundMessage(inbound("/qq task 修一下这个问题"));
-  await waitFor(() => fixture.service.listTasks().some((task) => task.status === "running"));
+  // 只等 running 会在「状态已落、派发回调尚未回填 correlation」之间抢跑；
+  // forwardTaskQuestion 是按 superSessionId 找任务的，必须等回填完成。
+  await waitFor(() => {
+    const running = fixture.service.listTasks().find((task) => task.status === "running");
+    return Boolean(running && fixture.service.getTask(running.taskId)?.correlation.superSessionId);
+  });
   const id = fixture.service.listTasks().find((task) => task.status === "running")!.taskId;
   return fixture.service.getTask(id)!;
 }
