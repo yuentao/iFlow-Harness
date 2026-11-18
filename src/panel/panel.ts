@@ -1397,6 +1397,13 @@ export class ChatPanel implements vscode.Disposable {
   /** Serializes per-session transcript file writes (P2): overlapping persists
    * must not interleave inside one file's temp+rename sequence. */
   private persistChain: Promise<void> = Promise.resolve();
+  /**
+   * Transcript writes currently queued or in flight on `persistChain`.
+   * `cleanupEmptySession` awaits the chain before the new-session state swap;
+   * while that wait is non-trivial the new-session projection must say
+   * 「正在等待后台任务结束」 instead of looking frozen (see NewSessionPhase).
+   */
+  private persistPending = 0;
   /** P6: workspace file list for the @-mention popup — `findFiles` is a full
    * workspace scan; cache it and invalidate on file-system changes. */
   private fileSearchCache: { rels: string[] } | null = null;
@@ -11354,10 +11361,15 @@ export class ChatPanel implements vscode.Disposable {
    * the synchronous JSON.stringify no longer sits on the event path (P1).
    */
   private enqueueTranscriptWrite(sessionId: string, payloadFactory: () => string): Promise<void> {
+    this.persistPending += 1;
     const run = this.persistChain
       .then(() => new Promise<void>((resolve) => setImmediate(resolve)))
       .then(() => this.writeTranscriptFile(sessionId, payloadFactory()));
-    this.persistChain = run.catch(() => {});
+    this.persistChain = run
+      .catch(() => {})
+      .finally(() => {
+        this.persistPending = Math.max(0, this.persistPending - 1);
+      });
     return run;
   }
 
@@ -11637,21 +11649,41 @@ export class ChatPanel implements vscode.Disposable {
   private async startNewSession(options?: { bypassSuperWait?: boolean }): Promise<void> {
     const running = this.newSessionRun;
     if (running) {
+      // 进行中重复点击：直接忽略，不重复发 `session/new`（join 同一个 run
+      // 只为让调用方的 await 语义保持一致），也不改写投影。
       this.log.info("new session: joining the in-flight run");
       await running;
       return;
     }
+    // 投影必须在第一个 await 之前落库：webview 收到快照后立刻禁用按钮并显示
+    // 「正在新建会话…」（webview 侧另有一层本地乐观锁覆盖 IPC 往返窗口）。
+    if (!this.disposed) this.store.setNewSessionPhase("starting");
     const run = this.runStartNewSession(options);
     this.newSessionRun = run;
     try {
       await run;
+    } catch (error) {
+      // 失败要可见：错误横幅（status=error）之外，继续抛给
+      // handleWebviewMessage 的统一 catch 打 toast —— 静默失败会让用户以为
+      // 按钮只是「点了没反应」。
+      if (!this.disposed && !(error instanceof DisposedError)) {
+        this.store.markError(errorMessage(error));
+      }
+      throw error;
     } finally {
       if (this.newSessionRun === run) this.newSessionRun = null;
+      // 成功 / 被拒 / 失败一律收回 idle，否则按钮会永久锁在加载态。
+      if (!this.disposed) this.store.setNewSessionPhase(null);
     }
   }
 
   private async runStartNewSession(options?: { bypassSuperWait?: boolean }): Promise<void> {
-    if (this.historySyncBusy) return;
+    if (this.historySyncBusy) {
+      // 不静默：命令面板会绕过 webview 的禁用按钮，点了却毫无反应会被读成
+      // 「按钮坏了」。投影由 startNewSession 的 finally 收回。
+      this.store.appendNotice(vscode.l10n.t("正在处理其他会话操作，请稍后再新建会话"));
+      return;
+    }
     // A3: never start a session into a destroyed panel.
     if (this.disposed) throw new DisposedError();
     // 等待子会话汇报期间不能新建会话：排队里的汇报与在飞的汇报回合会落到
@@ -11682,8 +11714,11 @@ export class ChatPanel implements vscode.Disposable {
       this.restoreAbort = true;
       this.pendingNewSession = true;
       this.log.info("new session requested during a restore: asking the restore to abort");
+      // 在等一个后台恢复收尾：明确告诉用户不是卡住了。
+      if (!this.disposed) this.store.setNewSessionPhase("waiting");
       const outcome = await restoreSettle.promise;
       this.pendingNewSession = false;
+      if (!this.disposed) this.store.setNewSessionPhase("starting");
       if (outcome === "aborted") {
         this.store.appendNotice(vscode.l10n.t("已取消正在进行的恢复，正在新建会话"));
       } else if (outcome === "completed") {
@@ -11708,9 +11743,14 @@ export class ChatPanel implements vscode.Disposable {
     // records every fresh session up front, so without this each reset /
     // profile switch would strand an empty "(无标题会话)" husk in the
     // switcher (empty sessions have no transcript → unrestorable).
+    // 清空转录前要先等落盘链收尾（profile 切换 / 上一轮的 transcript 写可能
+    // 还在飞）。真的在等就投影成 waiting —— 否则这段等待在 UI 上和卡死没区别。
+    const waitingOnPersist = this.persistPending > 0;
+    if (waitingOnPersist && !this.disposed) this.store.setNewSessionPhase("waiting");
     await this.cleanupEmptySession(
       this.store.getState().activeSessionId ?? this.store.getState().sessionId,
     );
+    if (waitingOnPersist && !this.disposed) this.store.setNewSessionPhase("starting");
     // Cancel an in-flight turn before anything else: `session/cancel` is a
     // no-op on an idle session, and without this the abandoned turn keeps
     // streaming server-side — its trailing updates would repopulate the
@@ -11787,7 +11827,12 @@ export class ChatPanel implements vscode.Disposable {
     // switches must not race the in-flight `session/new`).
     this.store.setInitializing(true, "newSession");
     try {
+    // 已有握手在飞（warmStart / 重启 / 首次连接）：ensureClient 会等它完成，
+    // 这段等待同样要如实投影，不能让面板看起来停在「正在新建会话」。
+    const waitingOnConnect = !this.client && this.connecting !== null;
+    if (waitingOnConnect && !this.disposed) this.store.setNewSessionPhase("waiting");
     const client = await this.ensureClient();
+    if (waitingOnConnect && !this.disposed) this.store.setNewSessionPhase("starting");
     // A3: a dispose during the handshake rejects ensureClient with
     // DisposedError; a dispose AFTER it must not write into the destroyed
     // store either.

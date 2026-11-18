@@ -384,6 +384,55 @@ describe("主会话 session settings · 剔除 task 与读写执行工具", () =
     expect(settings.mcpServers).toBeUndefined();
     expect(JSON.stringify(settings)).not.toContain("new_page");
   });
+
+  it("新建会话流程中投影为 starting，结束后回到 null", async () => {
+    let seen: string | null | undefined;
+    p.cleanupEmptySession = async () => {
+      // The pre-session window is exactly where the old UI had zero feedback.
+      seen = p.store.getState().newSessionPhase;
+    };
+
+    await p.startNewSession();
+
+    expect(seen).toBe("starting");
+    expect(p.store.getState().newSessionPhase ?? null).toBeNull();
+    expect(client.newSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("进行中重复点击直接忽略：只发一次 session/new", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    client.newSession.mockImplementation(async () => {
+      await gate;
+      return {
+        sessionId: "main-gated",
+        modes: { currentModeId: "default", availableModes: [{ id: "default" }] },
+        _meta: { models: { currentModelId: "m1" }, availableCommands: [], availableSkills: [] },
+      };
+    });
+
+    const first = p.startNewSession();
+    // The first run is registered synchronously (before its first await).
+    const second = p.startNewSession();
+    release();
+    await Promise.all([first, second]);
+
+    expect(client.newSession).toHaveBeenCalledTimes(1);
+    expect(p.store.getState().newSessionPhase ?? null).toBeNull();
+  });
+
+  it("失败可见：投影回到 null，错误横幅拿到真实报错", async () => {
+    client.newSession.mockImplementation(async () => {
+      throw new Error("session/new rejected");
+    });
+
+    await expect(p.startNewSession()).rejects.toThrow("session/new rejected");
+
+    expect(p.store.getState().newSessionPhase ?? null).toBeNull();
+    expect(p.store.getState().errorMessage).toContain("session/new rejected");
+  });
 });
 
 /**

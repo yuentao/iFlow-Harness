@@ -781,6 +781,20 @@ export type InitializingReason =
   | "restore";
 
 /**
+ * 「新建会话」流程的宿主投影（从用户点击到新会话就绪、被拒或失败）。
+ *
+ * `initializing` 只覆盖流程的后半段（真正发 `session/new` 时持有），而点击后
+ * 先要等后台落盘链 / 在飞的恢复收尾 / 已有握手，这段时间过去完全没有反馈，
+ * 按钮也仍可点（用户实测「新建会话无加载反馈、可重复点击」）。因此单独投影
+ * 整个窗口：
+ * - `starting`：正在新建会话（准备 / `session/new` / 收尾）。
+ * - `waiting`：正在等待后台任务结束（落盘链、在飞的恢复或握手）。
+ * null 表示没有新建流程在跑。webview 据此禁用按钮、显示对应文案并置
+ * `aria-busy`；宿主在流程结束（成功 / 被拒 / 失败）时一律清回 null。
+ */
+export type NewSessionPhase = "starting" | "waiting";
+
+/**
  * QQ 远程任务（Wave2-B）的前端投影：一个来自 QQ 的任务从「收到」走到终态的
  * 看板条目。它是**非 blocks 元数据**，搭 blockPatch 的 tail 通道，绝不进入
  * `blocks`——远程任务的转录不污染主会话的渲染真值，也不破坏 blockPatch 的
@@ -897,6 +911,13 @@ export interface SessionState {
    * falls back to the new-session wording).
    */
   initializingReason?: InitializingReason | null;
+  /**
+   * 「新建会话」整个流程的宿主投影：从点击那一刻起就是非 null，直到新会话
+   * 就绪 / 被拒 / 失败才清回 null。`initializing` 只覆盖流程后半段，这个
+   * 字段补上「点击后立刻有反馈 + 期间禁止重复点击」的窗口，并区分
+   * `waiting`（在等后台任务收尾）与 `starting`。缺失（旧宿主 / mock）= null。
+   */
+  newSessionPhase?: NewSessionPhase | null;
   /**
    * Monotonic count of Core boot attempts that re-entered `connecting` (hot
    * restart / profile-switch reconnect). A restart keeps the splash on
@@ -1103,6 +1124,7 @@ export function initialSessionState(): SessionState {
     replaying: false,
     initializing: false,
     initializingReason: null,
+    newSessionPhase: null,
     compressing: false,
     usage: emptySessionUsage(),
     queue: [],
