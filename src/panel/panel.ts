@@ -1141,13 +1141,23 @@ export class ChatPanel implements vscode.Disposable {
   private qqFinalRescueMs = QQ_FINAL_RESCUE_MS;
   private qqFinalHardRescueMs = QQ_FINAL_HARD_RESCUE_MS;
   /**
-   * 属于当前 QQ 主渠道注入回合的本地提问卡 id（`pendingQuestions` 的键）。
+   * 属于 QQ 主渠道对话的本地提问卡（卡片 id → 归属 QQ 任务 id）。
    *
-   * 主会话 agent 的 `_iflow/user/questions` 与本地回合共用同一个单数提问卡槽位，
-   * 这里单独记账：QQ 用户的 `/qq answer` 只回灌这些 id，绝不误答本地提问；本地
-   * 用户先作答时也从这里摘除，避免同一问题被 QQ 再答一次（双重应答）。
+   * 主会话/子会话的 `_iflow/user/questions` 与本地回合共用同一个单数提问卡槽位，
+   * 这里单独记账：QQ 用户的 `/qq answer` 只回灌这里登记的卡，绝不误答本地提问；
+   * 本地用户先作答时也从这里摘除，避免同一问题被 QQ 再答一次（双重应答）。
+   * 记 taskId 而非只用 Set，是为了回灌时不依赖「当前回合」这个易变状态 ——
+   * 回合结束后 qqInjectedTaskId 会清空，但那张卡仍属于诞生它的那个任务。
    */
-  private readonly qqMainQuestionIds = new Set<string>();
+  private readonly qqMainQuestionIds = new Map<string, string>();
+  /**
+   * QQ 主渠道任务派生的子会话 → 发起它的 QQ 主任务 id。
+   *
+   * main 渠道任务没有 `correlation.superSessionId`（那是 child 渠道专属），子会话
+   * 的提问因此无法按旧路径匹配到 QQ 任务。这里在派发子会话的当场打上归属标签，
+   * `onNeedInput` 据此把提问提醒回灌到正确的 QQ 任务。
+   */
+  private readonly qqTaskBySuperSession = new Map<string, string>();
   /** 主动停止中：防止与在飞的启停重叠。 */
   private qqStopping = false;
   /** 最近一次推给 webview 的连接状态（用于「面板重新打开时」的立即回显）。 */
@@ -1985,6 +1995,7 @@ export class ChatPanel implements vscode.Disposable {
     this.qqMainFinalAwaiters.clear();
     this.qqMainFinalAwaiterSince.clear();
     this.qqFinalRescueText.clear();
+    this.qqTaskBySuperSession.clear();
     // Final flush: a turn interrupted by window close / extension reload has
     // no later persist point (completion never runs) — write the tail now so
     // the session survives a restart intact. No-op when blocks are empty.
@@ -4678,7 +4689,6 @@ export class ChatPanel implements vscode.Disposable {
     // 捕获快照而非实时读 qqInjectedTaskId —— 回合结束后它会清空，回灌必须按
     // 提问诞生时所属的那一个任务寻址。
     const qqMainTaskId = this.qqInjectedTaskId;
-    const isQqMainQuestion = qqMainTaskId !== null;
 
     return new Promise<UserQuestionsResponse>((resolve) => {
       const timer = setTimeout(() => {
@@ -4693,7 +4703,7 @@ export class ChatPanel implements vscode.Disposable {
       }, APPROVAL_TIMEOUT_MS);
 
       this.pendingQuestions.set(id, { resolve, timer });
-      if (isQqMainQuestion) this.qqMainQuestionIds.add(id);
+      if (qqMainTaskId) this.qqMainQuestionIds.set(id, qqMainTaskId);
       this.store.showQuestions({
         id,
         questions: req.questions,
@@ -4717,14 +4727,17 @@ export class ChatPanel implements vscode.Disposable {
   private handleQuestionAnswers(id: string, answers: Record<string, string | string[]>): void {
     const pending = this.pendingQuestions.get(id);
     if (!pending) return;
-    const wasQqMainQuestion = this.qqMainQuestionIds.delete(id);
+    // 用卡片诞生时记录的 taskId，不读实时 qqInjectedTaskId —— 后者在回合收尾
+    // 后会清空，本机作答若发生在那时候就撤不掉 QQ 侧的等待槽位。
+    const wasQqTaskId = this.qqMainQuestionIds.get(id);
+    this.qqMainQuestionIds.delete(id);
     this.pendingQuestions.delete(id);
     clearTimeout(pending.timer);
     this.store.clearQuestions(id);
     // 本机先作答 → 撤销 QQ 侧那条等待槽位，避免 `/qq answer` 二次回灌同一个问题。
-    if (wasQqMainQuestion && this.qqInjectedTaskId) {
+    if (wasQqTaskId) {
       try {
-        this.qq?.service.clearQuestionWait(this.qqInjectedTaskId);
+        this.qq?.service.clearQuestionWait(wasQqTaskId);
       } catch (error) {
         this.log.warn(`QQ 提问等待槽位清理失败：${errorMessage(error)}`);
       }
@@ -4822,15 +4835,61 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * QQ 主渠道任务派生的子会话提问 → 转发给发起者，答案回灌到该子会话。
+   *
+   * 主会话是纯委派者，真正干活的提问多来自子会话。旧路径 `forwardTaskQuestion`
+   * 只认 `correlation.superSessionId && channel !== "main"` 的任务，而 main 渠道
+   * QQ 任务两者都没有 —— 提问卡因此只在看板显示、QQ 永远收不到。这里按派生时
+   * 记录的 QQ 主任务 id 定位任务（与 forwardMainTaskQuestion 同口径），但把应答
+   * 端口指向 child：答案经 `answerRemoteQuestion(superSessionId)` 回到真正提问的
+   * 子会话（`SuperAgentManager.respond`），不是主会话那张不存在的卡。
+   */
+  private forwardQqMainTaskChildQuestion(
+    taskId: string,
+    superSessionId: string,
+    questions: readonly UserQuestion[],
+  ): void {
+    const service = this.qq?.service;
+    if (!service) return;
+    try {
+      void service
+        .forwardMainTaskChildQuestion({
+          taskId,
+          superSessionId,
+          questions: questions.map((question) => ({
+            header: question.header,
+            question: question.question,
+            ...(question.options
+              ? {
+                  options: question.options.map((option) => ({
+                    label: option.label,
+                    description: option.description,
+                  })),
+                }
+              : {}),
+            multiSelect: question.multiSelect === true,
+          })),
+        })
+        .catch((error: unknown) => {
+          this.log.warn(`QQ 子会话提问提醒转发失败：${errorMessage(error)}`);
+        });
+    } catch (error) {
+      this.log.warn(`QQ 子会话提问提醒转发失败：${errorMessage(error)}`);
+    }
+  }
+
+  /**
    * QQ 用户的 `/qq answer` 回灌：命中本回合的提问卡并 resolve，agent 继续。
    * 只认 `qqMainQuestionIds` 里的卡 —— 本地回合的提问绝不会被 QQ 回答误答。
    * 端口被服务超时 / 停止调用时 answers 是 `{}`（按未回答继续），语义一致。
    * 返回是否真的命中，供服务如实回执（绝不假装提交成功）。
    */
   private answerQqMainQuestion(taskId: string, answers: Record<string, string | string[]>): boolean {
-    if (this.qqInjectedTaskId !== taskId) return false;
+    // 只认「诞生时归属这个任务」的卡 —— 本地回合的提问绝不会被 QQ 回答误答。
+    // 不读实时 qqInjectedTaskId：回合收尾后它会清空，迟到的合法回答应仍可命中。
     let answered = false;
-    for (const id of [...this.qqMainQuestionIds]) {
+    for (const [id, ownerTaskId] of [...this.qqMainQuestionIds]) {
+      if (ownerTaskId !== taskId) continue;
       const pending = this.pendingQuestions.get(id);
       if (!pending) {
         this.qqMainQuestionIds.delete(id);
@@ -7808,7 +7867,14 @@ export class ChatPanel implements vscode.Disposable {
       onNeedInput: (session) => {
         this.notifyOs("question", vscode.l10n.t("子会话「{0}」在等你回答", session.title));
         if (session.pending?.kind === "question") {
-          this.forwardQqTaskQuestion(session.id, session.pending.questions);
+          // main 渠道 QQ 任务派生的子会话：按 QQ 主任务寻址，答案回灌子会话。
+          // 旧 child 渠道仍走 superSessionId 匹配，两者互不干扰。
+          const qqMainTaskId = this.qqTaskBySuperSession.get(session.id);
+          if (qqMainTaskId) {
+            this.forwardQqMainTaskChildQuestion(qqMainTaskId, session.id, session.pending.questions);
+          } else {
+            this.forwardQqTaskQuestion(session.id, session.pending.questions);
+          }
         }
       },
       // 自动集成没能把子会话的改动带回主分支 → 自动请智能体合并，
@@ -8101,6 +8167,12 @@ export class ChatPanel implements vscode.Disposable {
           droppedAttachments += count;
         });
         const session = manager.spawn(spec);
+        // 注入回合（qqInjectedTaskId 非空）里派生的子会话归属该 QQ 主任务：记下
+        // 映射，子会话随后 ask_user_question 时才能把提醒转发给同一个 QQ 用户。
+        // 本地回合派生（qqInjectedTaskId 为空）不登记，保持本地提问不转发。
+        if (this.qqInjectedTaskId) {
+          this.qqTaskBySuperSession.set(session.id, this.qqInjectedTaskId);
+        }
         this.rememberDispatchedDirective(dedupeKey);
         dispatched++;
         this.log.info(`super agent: dispatched ${session.id} 「${spec.title}」`);
@@ -10820,6 +10892,7 @@ export class ChatPanel implements vscode.Disposable {
     this.qqMainFinalAwaiters.clear();
     this.qqMainFinalAwaiterSince.clear();
     this.qqFinalRescueText.clear();
+    this.qqTaskBySuperSession.clear();
     this.stopQqFinalRescueTimer();
     if (activeTaskId !== null) {
       this.qqInjectedTaskId = null;

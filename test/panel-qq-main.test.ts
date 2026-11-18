@@ -76,7 +76,13 @@ type PanelInternals = {
   cancelQqMainInjection: (taskId: string) => boolean;
   sendPrompt: (...args: unknown[]) => Promise<boolean>;
   qqInjectedTaskId: string | null;
-  qqMainQuestionIds: Set<string>;
+  qqMainQuestionIds: Map<string, string>;
+  qqTaskBySuperSession: Map<string, string>;
+  forwardQqMainTaskChildQuestion: (
+    taskId: string,
+    superSessionId: string,
+    questions: readonly Record<string, unknown>[],
+  ) => void;
   getSuperAgent: () => {
     list: () => Array<{ id: string; mainSessionId?: string | null; status: string }>;
   } | null;
@@ -100,6 +106,11 @@ type PanelInternals = {
     service?: {
       forwardMainTaskQuestion?: (input: {
         taskId: string;
+        questions: readonly Record<string, unknown>[];
+      }) => Promise<void>;
+      forwardMainTaskChildQuestion?: (input: {
+        taskId: string;
+        superSessionId: string;
         questions: readonly Record<string, unknown>[];
       }) => Promise<void>;
       clearQuestionWait?: (taskId: string) => void;
@@ -635,6 +646,41 @@ describe("QQ 主渠道提问转发与回灌", () => {
     expect(clearWait).toHaveBeenCalledWith(TASK.taskId);
     // QQ 再来回答时已无可命中的卡。
     expect(p.answerQqMainQuestion(TASK.taskId, { 颜色: "红色" })).toBe(false);
+  });
+
+  it("回合结束后迟到的 QQ 回答仍能命中提问卡（不依赖实时 qqInjectedTaskId）", async () => {
+    p.qq = { service: { forwardMainTaskQuestion: vi.fn(async () => undefined) } };
+    p.qqInjectedTaskId = TASK.taskId;
+
+    const pending = p.userQuestionsFromAgent({ questions: [{ header: "确认", question: "继续吗？" }] });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // 模拟回合收尾：实时字段被清空，但卡还挂着（answer 走服务端口在稍后才到）。
+    p.qqInjectedTaskId = null;
+
+    expect(p.answerQqMainQuestion(TASK.taskId, { 确认: "是" })).toBe(true);
+    await expect(pending).resolves.toEqual({ answers: { 确认: "是" } });
+  });
+
+  it("QQ 主任务派生的子会话提问转发到 QQ，并携带子会话 id 供回答回灌", async () => {
+    const forwardChild = vi.fn(async () => undefined);
+    p.qq = { service: { forwardMainTaskChildQuestion: forwardChild } };
+    // 派发子会话时登记的归属映射：子会话 super-1 属于 QQ 主任务 TASK。
+    p.qqTaskBySuperSession.set("super-1", TASK.taskId);
+
+    p.forwardQqMainTaskChildQuestion(TASK.taskId, "super-1", [
+      { header: "颜色", question: "选哪个颜色？", options: [{ label: "红", description: "热情" }] },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(forwardChild).toHaveBeenCalledTimes(1);
+    expect(forwardChild.mock.calls[0]![0]).toMatchObject({
+      taskId: TASK.taskId,
+      superSessionId: "super-1",
+    });
+    expect(forwardChild.mock.calls[0]![0]!.questions[0]).toMatchObject({
+      header: "颜色",
+      question: "选哪个颜色？",
+    });
   });
 });
 
