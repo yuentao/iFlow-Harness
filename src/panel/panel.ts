@@ -24,6 +24,7 @@ import {
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
 import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
+import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
 import { deleteKernelApiProfile, migrateKernelApiProfiles, readKernelApiProfiles, setKernelActiveProfile, writeKernelApiProfile } from "../acp/api-profiles.js";
 import {
   getActiveProfileName,
@@ -1030,6 +1031,18 @@ export class ChatPanel implements vscode.Disposable {
    */
   private superAgent: SuperAgentManager | null = null;
   /**
+   * Host-side MCP broker: ONE process per configured MCP server, shared by all
+   * Super Agent children (they reach it over loopback streamable HTTP). Started
+   * lazily on the first child spawn; disposed with the panel.
+   *
+   * Without it every child CLI process would spawn its own copy of every
+   * configured server (Windows: ~3 node processes per server per child), which
+   * is exactly why child MCP used to be switched off entirely.
+   */
+  private mcpBroker: McpBroker | null = null;
+  /** Single-flight guard for broker startup (several children can spawn at once). */
+  private mcpBrokerStarting: Promise<McpBroker | null> | null = null;
+  /**
    * QQ 远程任务通道的运行期现场（QQBot 单一路径）。
    *
    * 现场 = QqService + 任务落盘 + 启动时的配置快照 + 设置 IO + 官方 adapter。
@@ -1919,6 +1932,15 @@ export class ChatPanel implements vscode.Disposable {
       // best-effort teardown
     }
     this.superAgent = null;
+    // MCP broker: kill the shared server processes now that no child can use
+    // them. Best-effort — teardown must not be blocked by a wedged server.
+    try {
+      await this.mcpBroker?.dispose();
+    } catch (error) {
+      this.log.warn(`MCP broker dispose failed: ${errorMessage(error)}`);
+    }
+    this.mcpBroker = null;
+    this.mcpBrokerStarting = null;
     this.pendingSuperReports.clear();
     this.pendingSuperReportPrompts = [];
     this.pendingSuperActionReceipts = [];
@@ -7436,6 +7458,10 @@ export class ChatPanel implements vscode.Disposable {
     this.superAgent = new SuperAgentManager({
       repoRoot,
       createClient: (params) => this.createSuperClient(params),
+      // createSuperClient awaits ensureMcpBroker() first, so by the time the
+      // manager asks for entries the broker (when any server is configured) is
+      // already listening. Read lazily: a child spawned later still sees it.
+      childMcpServers: () => this.mcpBroker?.sessionServers() ?? [],
       onSessionsChanged: (sessions) => {
         this.store.setSuperSessions(sessions);
         // 子会话状态一变就把记录落盘：扩展随时可能被重启（窗口关闭、宿主
@@ -7528,6 +7554,60 @@ export class ChatPanel implements vscode.Disposable {
     return this.superAgent;
   }
 
+  /**
+   * Start (once) the host MCP broker for the configured servers.
+   *
+   * Merging mirrors the CLI: `{...user, ...workspace}` — the project entry of a
+   * name wins. Disabled / unusable entries are skipped and logged; because the
+   * child's `--allowed-mcp-server-names` list comes from the broker's names, a
+   * skipped server is also absent from the child instead of being silently
+   * spawned per child.
+   *
+   * Returns null when there is nothing to broker, or when startup itself
+   * failed — callers then scope the child to the sentinel (no MCP). A broker
+   * whose UPSTREAM fails is not a startup failure: the failure surfaces on the
+   * child's first request and in the panel log, and never blocks spawning.
+   */
+  private async ensureMcpBroker(): Promise<McpBroker | null> {
+    if (this.mcpBroker) return this.mcpBroker;
+    if (this.mcpBrokerStarting) return this.mcpBrokerStarting;
+    this.mcpBrokerStarting = (async (): Promise<McpBroker | null> => {
+      const scopes = this.readMcpScopes();
+      const servers: Record<string, unknown> = { ...scopes.global, ...(scopes.project ?? {}) };
+      const { servers: usable, skipped } = normalizeBrokerServers(servers);
+      for (const entry of skipped) {
+        this.log.warn(`MCP broker: 跳过 "${entry.name}"（${entry.reason}）`);
+      }
+      if (usable.length === 0) return null;
+      try {
+        const broker = await McpBroker.start({
+          servers,
+          cwd: this.mcpProjectCwd() ?? undefined,
+          log: (level, message) => this.log[level](`[mcp-broker] ${message}`),
+        });
+        this.mcpBroker = broker;
+        // Eager handshake so failures land in the log early instead of only on
+        // the first tool call; never awaited — a slow `npx` must not delay the
+        // child spawn (the child's own initialize waits on the same promise).
+        void broker.prewarm();
+        this.log.info(
+          `MCP broker listening on ${broker.baseUrl} for: ${broker.names().join(", ")}`,
+        );
+        return broker;
+      } catch (error) {
+        this.log.error(`MCP broker failed to start: ${errorMessage(error)}`);
+        this.store.sendToast(
+          "error",
+          vscode.l10n.t("MCP 共享代理启动失败，子会话将无 MCP 工具：{0}", errorMessage(error)),
+        );
+        return null;
+      }
+    })().finally(() => {
+      this.mcpBrokerStarting = null;
+    });
+    return this.mcpBrokerStarting;
+  }
+
   /** Spawn a CLI client for a child session (own process, own worktree). */
   private async createSuperClient(params: {
     cwd: string;
@@ -7547,12 +7627,16 @@ export class ChatPanel implements vscode.Disposable {
     // a merge child gets the main repo root so the CLI's own workspace check
     // and our fs boundary agree on what it may read.
     const includeDirectories = params.includeDirectories;
-    // 子会话默认不连 MCP：`session/new` 的 `mcpServers: []` 只覆盖**请求里**
-    // 的服务器，settings.json 里配置的那些仍会被 CLI 拉起 —— 每个 server
-    // 一整条 stdio 进程链（Windows 上约 3 个 node），每个子会话复制一份。
-    // 子会话的产出靠工作目录里的文件与 shell，用不到 MCP；需要时再去掉这个
-    // 选项（目前没有「子会话启用 MCP」的设置项，所以只改默认，不加设置）。
-    const { args } = buildAcpCommand(entry, includeDirectories, { disableMcpServers: true });
+    // 子会话必须能用 MCP，但**不能**每个子会话各起一套服务器：宿主 broker
+    // 先认领每个配置的 server（每 server 只一份进程），子会话经 loopback
+    // streamable-HTTP 连它。这里把子会话的 CLI 进程作用域收窄到 broker 的
+    // server 名，用户配置里的 stdio server 因此在子会话进程里根本不会被拉起。
+    // broker 为空（没有配置 / 启动失败）时传空数组 → 哨兵 → 子会话无 MCP，
+    // 与启动失败时的 toast 一起如实暴露，绝不伪造共享。
+    const broker = await this.ensureMcpBroker();
+    const { args } = buildAcpCommand(entry, includeDirectories, {
+      mcpServerNames: broker?.names() ?? [],
+    });
     const systemPromptFile = await this.materializeSystemPrompt();
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
@@ -10656,9 +10740,10 @@ export class ChatPanel implements vscode.Disposable {
       // them — and their names are per-user (every install configures different
       // servers), so they must never be enumerated. `--allowed-mcp-server-names`
       // with a never-matching sentinel filters the resolved server map down to
-      // nothing: nothing is spawned and no MCP tool is ever registered. Child
-      // spawns (createSuperClient) deliberately omit this — children keep their
-      // MCP servers.
+      // nothing: nothing is spawned and no MCP tool is ever registered.
+      // Child spawns (createSuperClient) pass the host BROKER's server names
+      // instead: one shared server process per configuration, reached over
+      // loopback HTTP — never a per-child copy.
       const { args } = buildAcpCommand(entry, allowedRoots, { disableMcpServers: true });
       // Log the ACTUAL spawn executable (node, not buildAcpCommand's
       // process.execPath default): the old line printed buildAcpCommand's
