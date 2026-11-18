@@ -801,6 +801,21 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   // Board order + folding: children that still need attention come first,
   // done-and-merged ones are folded away (pure logic, shared/super-agent.ts).
   const { visible, folded } = useMemo(() => groupSuperSessionsForBoard(list), [list]);
+  // Folded children hold TWO different integration outcomes: `merged` (their
+  // changes really landed) and `not_needed` (they produced no commit at all —
+  // see `isSuperSessionSettled`). The collapsed row used to lump both under
+  // 「已完成并合并」, which reads as “your changes landed” for a child that never
+  // made any. Split the counts so the header only claims a merge when one
+  // actually happened.
+  const foldedOutcomes = useMemo(() => {
+    let merged = 0;
+    let nothingToMerge = 0;
+    for (const session of folded) {
+      if (session.integration?.state === "merged") merged += 1;
+      else nothingToMerge += 1;
+    }
+    return { merged, nothingToMerge };
+  }, [folded]);
   // Non-terminal children (the interrupt-all gate + the elapsed timer). The
   // per-state COUNTS come from the shared summarizer — computing them here
   // with a status filter is how “2 个进行中” ended up double-counting the
@@ -952,14 +967,15 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
     setOpenRow(null);
   }, [counts.awaiting]);
 
-  // Every child finished AND merged → nothing left to manage (failed,
-  // cancelled and unmerged rows keep the board open). Fold back to one line.
-  const allMerged = visible.length === 0 && folded.length > 0;
+  // Every child settled (merged, or nothing to merge) → nothing left to
+  // manage (failed, cancelled and unmerged rows keep the board open). Fold
+  // back to one line.
+  const allSettled = visible.length === 0 && folded.length > 0;
   useEffect(() => {
-    if (!allMerged) return;
+    if (!allSettled) return;
     setExpanded(false);
     setOpenRow(null);
-  }, [allMerged]);
+  }, [allSettled]);
 
   // Popup dismissal (the panel is a dropdown, not a persistent panel): Esc and
   // any click outside the control + panel fold it back to the header control.
@@ -1237,9 +1253,10 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   onCancel={() => setConfirmCancel(session)}
                 />
               ))}
-              {/* Finished + already merged children collapse into ONE history row:
-                  their changes are in the working tree, so there is nothing left
-                  to act on — they only get in the way of the live ones. */}
+              {/* Settled children (already merged, or nothing to merge) collapse
+                  into ONE history row: nothing left to act on — they only get
+                  in the way of the live ones. The header splits the two
+                  outcomes so 「无需合并」 is never shown as 「已合并」. */}
               {folded.length > 0 && (
                 <div className="shrink-0">
                   <DisclosureButton
@@ -1250,8 +1267,15 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                     onClick={() => setShowFolded((v) => !v)}
                   >
                     {showFolded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
-                    <span className="shrink-0">{t("已完成并合并的 {0} 个子会话", folded.length)}</span>
-                    <Chip tone="success">{t("已自动合并")}</Chip>
+                    <span className="shrink-0">
+                      {foldedOutcomes.nothingToMerge === 0
+                        ? t("已完成并合并的 {0} 个子会话", folded.length)
+                        : foldedOutcomes.merged === 0
+                          ? t("已完成、无需合并的 {0} 个子会话", folded.length)
+                          : t("已完成的 {0} 个子会话", folded.length)}
+                    </span>
+                    {foldedOutcomes.merged > 0 && <Chip tone="success">{t("已自动合并")}</Chip>}
+                    {foldedOutcomes.nothingToMerge > 0 && <Chip tone="muted">{t("无需合并")}</Chip>}
                   </DisclosureButton>
                   {showFolded && (
                     <div className="divide-y divide-border/40 border-t border-border/40">

@@ -55,6 +55,8 @@ const en: Record<string, string> = {
   "展开已完成的子会话": "Expand the finished child sessions",
   "收起已完成的子会话": "Collapse the finished child sessions",
   "已完成并合并的 {0} 个子会话": "Finished and merged child sessions ({0})",
+  "已完成、无需合并的 {0} 个子会话": "Finished child sessions with nothing to merge ({0})",
+  "已完成的 {0} 个子会话": "Finished child sessions ({0})",
   "派发": "Dispatch",
   "已派出": "Dispatched",
   "已启动": "Started",
