@@ -162,10 +162,54 @@ describe("super agent · 子会话归档", () => {
   });
 
   it("文件名限制成文件系统安全的字符集，恶意 id 不能逃出目录", () => {
-    // 点与斜杠都被替换掉：归档名不可能再是路径片段。
-    expect(superSessionFileName("../../evil")).toBe("------evil.json");
-    expect(superSessionFileName("a/b\\c")).toBe("a-b-c.json");
+    // 点与斜杠都被替换掉：归档名不可能再是路径片段；被折叠的 id 追加短 hash。
+    expect(superSessionFileName("../../evil")).toMatch(/^------evil-[0-9a-f]{8}\.json$/);
+    expect(superSessionFileName("a/b\\c")).toMatch(/^a-b-c-[0-9a-f]{8}\.json$/);
+    // 本身就安全的 id 保持原名：旧归档零迁移可读。
     expect(superSessionFileName("main-1")).toBe("main-1.json");
+  });
+
+  it("折叠映射是单射：a.b / a-b / a/b 不再撞名", () => {
+    const names = [
+      superSessionFileName("a.b"),
+      superSessionFileName("a-b"),
+      superSessionFileName("a/b"),
+    ];
+    expect(new Set(names).size).toBe(3);
+    // hash 稳定：同一个 id 永远得到同一个文件名。
+    expect(superSessionFileName("a.b")).toBe(names[0]);
+  });
+
+  it("兼容旧文件名：无 hash 的归档仍可读", async () => {
+    const dir = superSessionsDir(baseDir);
+    mkdirSync(dir, { recursive: true });
+    // 旧版本写出的归档名（id 含点号，旧实现折叠成 a-b.json）。
+    writeFileSync(
+      path.join(dir, "a-b.json"),
+      JSON.stringify({ version: 1, sessions: [record({ id: "super-old" })] }),
+      "utf8",
+    );
+    const loaded = await readSuperSessionArchive(baseDir, "a.b");
+    expect(loaded.damaged).toBe(false);
+    expect(loaded.sessions.map((s) => s.id)).toEqual(["super-old"]);
+  });
+
+  it("损坏备份固定单份：反复读取不再新增带时间戳的副本", async () => {
+    const dir = superSessionsDir(baseDir);
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, superSessionFileName("main-1"));
+    writeFileSync(file, "{ 截断的 JSON", "utf8");
+
+    const first = await readSuperSessionArchive(baseDir, "main-1");
+    const second = await readSuperSessionArchive(baseDir, "main-1");
+    expect(first.damaged).toBe(true);
+    expect(second.damaged).toBe(true);
+    expect(first.backupPath).toBe(second.backupPath);
+    const backups = (await listSuperSessionArchiveFiles(baseDir)).filter((n) =>
+      n.endsWith(".corrupt"),
+    );
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(path.join(dir, backups[0]!), "utf8")).toBe("{ 截断的 JSON");
   });
 
   it("删除归档后读不出来", async () => {
