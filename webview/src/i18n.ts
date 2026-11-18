@@ -256,6 +256,9 @@ const en: Record<string, string> = {
   "更新任务清单": "Updating todos",
   "正在恢复历史会话…": "Restoring session…",
   "正在创建新会话…": "Creating new session…",
+  // 新建会话流程（NewSessionPhase）：starting / waiting 两个阶段。
+  "正在新建会话…": "Creating a new session…",
+  "正在等待后台任务结束": "Waiting for a background task to finish",
   "正在删除会话…": "Deleting session…",
   "正在删除消息…": "Deleting message…",
   "正在回滚对话…": "Rolling back the conversation…",

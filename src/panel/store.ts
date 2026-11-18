@@ -10,6 +10,7 @@ import type {
   HostToWebview,
   InjectedContextItem,
   InitializingReason,
+  NewSessionPhase,
   SessionState,
   ToolBlock,
 } from "../../shared/messages.js";
@@ -506,6 +507,16 @@ export class SessionStore {
   setInitializing(initializing: boolean, reason: InitializingReason = "newSession"): void {
     this.state.initializing = initializing;
     this.state.initializingReason = initializing ? reason : null;
+    this.flush();
+  }
+
+  /**
+   * 「新建会话」流程的宿主投影（见 NewSessionPhase）。从点击那一刻起下发，
+   * 流程结束（成功 / 被拒 / 失败）清回 null；幂等——同值不重复推送。
+   */
+  setNewSessionPhase(phase: NewSessionPhase | null): void {
+    if ((this.state.newSessionPhase ?? null) === phase) return;
+    this.state.newSessionPhase = phase;
     this.flush();
   }
 

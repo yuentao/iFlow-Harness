@@ -2236,6 +2236,10 @@ export function newSessionState(state: SessionState): SessionState {
   // （清空后要等下一次宿主写入才恢复，而终态任务不会再写）。
   fresh.qqTasks = state.qqTasks;
   fresh.replaying = state.replaying;
+  // 新建会话流程的投影是「流程级」而非转录级：本函数就在该流程中途被调用
+  // （清空转录），这里若丢掉它，加载态会在流程还没结束时闪回空闲、按钮重新
+  // 可点。清空由 startNewSession 的 finally 统一负责。
+  fresh.newSessionPhase = state.newSessionPhase ?? null;
   // Connection-scoped like status/auth: a restart does replaceState FIRST and
   // then markConnecting (which stamps the next epoch), so dropping the counter
   // here would restart every restart back to 1 and the splash could not tell

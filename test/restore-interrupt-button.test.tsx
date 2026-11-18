@@ -168,3 +168,41 @@ describe("恢复进行中顶栏「新会话」按钮", () => {
     expect(button!.getAttribute("title")).toBe("新会话");
   });
 });
+
+describe("新建会话的加载态", () => {
+  it("starting：按钮禁用、带 aria-busy、显示「正在新建会话…」，重复点击不发请求", () => {
+    render({ newSessionPhase: "starting" });
+
+    const button = newSessionButton();
+    expect(button).toBeTruthy();
+    expect(button!.disabled).toBe(true);
+    expect(button!.getAttribute("aria-busy")).toBe("true");
+    expect(container.textContent).toContain("正在新建会话…");
+
+    act(() => button!.click());
+    expect(send).not.toHaveBeenCalledWith({ type: "newSession" });
+  });
+
+  it("waiting：显示「正在等待后台任务结束」，按钮同样禁用", () => {
+    render({ newSessionPhase: "waiting" });
+
+    expect(newSessionButton()!.disabled).toBe(true);
+    expect(newSessionButton()!.getAttribute("aria-busy")).toBe("true");
+    expect(container.textContent).toContain("正在等待后台任务结束");
+  });
+
+  it("点击后立即进入加载态（不等宿主回包），第二次点击被忽略", () => {
+    render();
+    act(() => newSessionButton()!.click());
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({ type: "newSession" });
+    const button = newSessionButton();
+    expect(button!.disabled).toBe(true);
+    expect(button!.getAttribute("aria-busy")).toBe("true");
+    expect(container.textContent).toContain("正在新建会话…");
+
+    act(() => button!.click());
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+});

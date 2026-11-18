@@ -256,6 +256,9 @@ export function App() {
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
   const initializingReason = useChat((s) => s.state?.initializingReason ?? null);
+  // 「新建会话」整个流程的宿主投影（见 shared/messages.ts NewSessionPhase）。
+  // 它比 initializing 早——从点击那一刻就非 null。
+  const newSessionPhase = useChat((s) => s.state?.newSessionPhase ?? null);
   const compressing = useChat((s) => s.state?.compressing ?? false);
   // 宿主正在等子会话汇报：禁用顶栏「新会话」（等待期新建会话会让排队里的
   // 汇报落到已被替换的会话上）。它是 orthogonal 于 status 的标记，所以等待期
@@ -311,6 +314,14 @@ export function App() {
   // 用户按停止后汇报被压住时点「新会话」：先弹如实确认（结果不丢、切回原会话
   // 才继续投递），确认后才发 newSession —— 这是被停止后唯一的显式出路。
   const [confirmNewSessionHeld, setConfirmNewSessionHeld] = useState(false);
+  // 本地乐观锁：点击「新会话」后立刻禁用按钮并显示加载态，不等宿主回包
+  // （IPC + 宿主处理有往返窗口，期间重复点击会再发一次 newSession）。
+  // 宿主投影一到（starting / waiting）就退场；投影清空（成功 / 被拒 / 失败）
+  // 也一并退场。只在投影变化时执行，点击到回包之间的窗口里本地锁保持不变。
+  const [newSessionRequested, setNewSessionRequested] = useState(false);
+  useEffect(() => {
+    setNewSessionRequested(false);
+  }, [newSessionPhase]);
   const [sessionQuery, setSessionQuery] = useState("");
   // Inline rename: the id being edited and its draft label. Kept in App so the
   // dropdown's close callback can drop a half-typed name.
@@ -483,7 +494,11 @@ export function App() {
   // in-flight ACP request, and a profile switch is itself an optimistic lock.
   // 活跃子会话也并入 locked（它同时是 SettingsModal 的 busy）：在跑的子会话
   // 用错配置 / 汇报落到被替换的会话，比 mid-turn 切换更隐蔽。busy 保持原义。
-  const busy = status === "streaming" || replaying || initializing;
+  // 新建会话进行中：本地乐观锁覆盖 IPC 往返窗口，宿主投影覆盖整个流程
+  // （含等后台落盘 / 恢复 / 握手的 waiting 阶段）。
+  const newSessionBusy = newSessionRequested || newSessionPhase !== null;
+  const newSessionWaiting = newSessionPhase === "waiting";
+  const busy = status === "streaming" || replaying || initializing || newSessionBusy;
   const switching = pending !== null;
   const locked = busy || switching || superActive;
 
@@ -530,7 +545,10 @@ export function App() {
         if (superWaiting && !superHeld) return;
         e.preventDefault();
         if (superHeld) setConfirmNewSessionHeld(true);
-        else send({ type: "newSession" });
+        else {
+          setNewSessionRequested(true);
+          send({ type: "newSession" });
+        }
       }
     };
     window.addEventListener("keydown", handler);
@@ -862,9 +880,23 @@ export function App() {
               {t("会话历史")}
             </div>
           )}
-          {replaying ? (
+          {newSessionWaiting ? (
+            <Chip tone="primary">
+              <Loader2 className="size-2.5 animate-spin" />{" "}
+              <span aria-busy="true" className="@max-[320px]:hidden">
+                {t("正在等待后台任务结束")}
+              </span>
+            </Chip>
+          ) : replaying ? (
             <Chip tone="info">
               <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{t("正在恢复历史会话…")}</span>
+            </Chip>
+          ) : newSessionBusy ? (
+            <Chip tone="primary">
+              <Loader2 className="size-2.5 animate-spin" />{" "}
+              <span aria-busy="true" className="@max-[320px]:hidden">
+                {t("正在新建会话…")}
+              </span>
             </Chip>
           ) : initializing ? (
             <Chip tone="primary">
@@ -897,22 +929,31 @@ export function App() {
               // IconButton 的默认 title 就是 label —— 只有需要解释「为什么现在
               // 不能/能新建会话」时才覆盖它（title={undefined} 会把默认
               // tooltip 抹掉）。
-              {...(superWaiting && !superHeld
-                ? { title: t("子会话还在运行，等它们汇报完才能新建会话") }
-                : superWaiting && superHeld
-                  ? { title: t("已停止：可以新建会话，待处理的汇报仍留在原会话") }
-                  : replaying
-                    ? { title: t("取消正在进行的会话恢复并新建会话") }
-                    : {})}
+              aria-busy={newSessionBusy ? true : undefined}
+              {...(newSessionBusy
+                ? { title: newSessionWaiting ? t("正在等待后台任务结束") : t("正在新建会话…") }
+                : superWaiting && !superHeld
+                  ? { title: t("子会话还在运行，等它们汇报完才能新建会话") }
+                  : superWaiting && superHeld
+                    ? { title: t("已停止：可以新建会话，待处理的汇报仍留在原会话") }
+                    : replaying
+                      ? { title: t("取消正在进行的会话恢复并新建会话") }
+                      : {})}
               // 恢复中（replaying）不禁用：宿主会放弃这次恢复并立刻新建会话，
-              // 用户不必等恢复跑完再点一次。其余忙碌态（生成中 / 正在创建新
-              // 会话 / 正在切换会话）仍然禁用。
+              // 用户不必等恢复跑完再点一次。其余忙碌态（生成中 / 正在新建会话 /
+              // 正在切换会话）仍然禁用；newSessionBusy 显式优先，因为恢复中发起
+              // 新建后 `busy && !replaying` 仍会为 false。
               // superWaiting 且是「用户已停止、汇报被压住」时**不禁用** —— 那时
               // 没有汇报在飞，新建会话不会串台，而是用户停止后唯一的出路。
-              disabled={switching || (superWaiting && !superHeld) || (busy && !replaying)}
+              disabled={newSessionBusy || switching || (superWaiting && !superHeld) || (busy && !replaying)}
               onClick={() => {
+                // 进行中重复点击直接忽略：不发第二次请求（宿主侧也会 join 同一个 run）。
+                if (newSessionBusy) return;
                 if (superWaiting && superHeld) setConfirmNewSessionHeld(true);
-                else send({ type: "newSession" });
+                else {
+                  setNewSessionRequested(true);
+                  send({ type: "newSession" });
+                }
               }}
             />
             {/* Settings hub: profiles & credentials, MCP servers, approval
@@ -1055,6 +1096,7 @@ export function App() {
           )}
           onConfirm={() => {
             setConfirmNewSessionHeld(false);
+            setNewSessionRequested(true);
             send({ type: "newSession" });
           }}
           onCancel={() => setConfirmNewSessionHeld(false)}
