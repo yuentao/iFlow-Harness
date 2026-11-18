@@ -2858,7 +2858,8 @@ export class SuperReportBuffer {
    *
    * 仍在跑的子会话：条目**留在缓冲里**，等它结束后再取（同一个子会话的条目
    * 会被新汇报覆盖，不会重复转述）。来源子会话已经不在列表里（被清理 /
-   * 合并后释放）的条目不取也不删 —— 交由 {@link dropMissing} 处理。
+   * 合并后释放）的条目不取也不删 —— 交由 {@link takeMissing} 处理（把迟到
+   * 结论如实呈现给用户）。
    *
    * 无可取时返回 null（继续积累）。
    */
@@ -2877,21 +2878,35 @@ export class SuperReportBuffer {
   }
 
   /**
-   * 丢掉来源子会话已经不存在的条目，返回被丢掉的子会话 id。
+   * 移除来源子会话已经不存在的条目，**连同汇报正文一起返回**。
    *
-   * 子会话被用户清理 / 合并完释放后，它的那条汇报再也没人能接 —— 如实记一
-   * 笔然后丢掉，不能让面板永久停在忙碌态。
+   * 子会话被用户清理 / 合并完释放后，它那条汇报再没人能作为「实时汇报」接
+   * 收 —— 但结论本身不该就此消失。宿主用返回值把结论以「已归档子会话的迟
+   * 到结论」形式落到看板提示里（不伪装成活跃子会话的实时汇报）。返回后条
+   * 目从缓冲移除，面板不会卡在忙碌态，也不会重复提示。
+   *
+   * 仍存在于列表里的条目（含别的会话的子会话）一律保留。
    */
-  dropMissing(sessions: readonly SuperSessionUi[]): string[] {
+  takeMissing(sessions: readonly SuperSessionUi[]): SuperReportEntry[] {
     if (this.pending.size === 0) return [];
     const liveIds = new Set(sessions.map((session) => session.id));
-    const dropped: string[] = [];
-    for (const id of [...this.pending.keys()]) {
+    const dropped: SuperReportEntry[] = [];
+    for (const [id, entry] of [...this.pending]) {
       if (liveIds.has(id)) continue;
       this.pending.delete(id);
-      dropped.push(id);
+      dropped.push(entry);
     }
     return dropped;
+  }
+
+  /**
+   * 丢掉来源子会话已经不存在的条目，返回被丢掉的子会话 id。
+   *
+   * 保留此接口只为兼容只关心 id 的既有调用方；新代码应优先用
+   * {@link takeMissing} 拿到完整汇报并如实呈现迟到结论。
+   */
+  dropMissing(sessions: readonly SuperSessionUi[]): string[] {
+    return this.takeMissing(sessions).map((entry) => entry.session.id);
   }
 
   clear(): void {

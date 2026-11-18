@@ -1159,6 +1159,28 @@ describe("super agent · 合并汇报", () => {
     expect(buffer.dropMissing([session({ id: "b", status: "running" })])).toEqual([]);
   });
 
+  it("takeMissing 返回被清理子会话的完整汇报（迟到结论可如实呈现）", () => {
+    const buffer = new SuperReportBuffer();
+    buffer.add([
+      {
+        session: session({ id: "gone", title: "已归档的任务", status: "completed" }),
+        report: { state: "ready", summary: "迟到的结论正文", at: 1 },
+      },
+      {
+        session: session({ id: "live", title: "仍在跑", status: "running" }),
+        report: { state: "ready", summary: "保住", at: 2 },
+      },
+    ]);
+    const dropped = buffer.takeMissing([session({ id: "live", status: "running" })]);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]?.session.id).toBe("gone");
+    expect(dropped[0]?.session.title).toBe("已归档的任务");
+    expect(dropped[0]?.report.summary).toBe("迟到的结论正文");
+    // 取走后缓冲只剩仍在跑那个，不会让面板卡忙碌，也不会重复提示。
+    expect(buffer.size).toBe(1);
+    expect(buffer.takeMissing([session({ id: "live", status: "running" })])).toEqual([]);
+  });
+
   it("同一子会话只保留最后一条汇报（blocked 被 ready 覆盖）", () => {
     const buffer = new SuperReportBuffer();
     buffer.add([
