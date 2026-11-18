@@ -152,8 +152,9 @@ export const SUPER_PENDING_TIMEOUT_MS = 5 * 60_000;
  *   （安全默认）。提问不是权限，仍落到看板作答。
  * - `deny`：**不推 `yolo`**；所有权限请求直接拒绝（取消输出）；提问仍走看板。
  *
- * 计划模式已移除（2026-11-18）：`_iflow/plan/exit` 不再走审批策略，宿主一律
- * 记警告后自动放行（见 `autoApproveRemovedPlanExit`）。
+ * - 计划模式已移除（2026-11-18）：`_iflow/plan/exit` 遗留请求按 spawn 审批策略
+ *   处置 —— `auto` 快速放行、`deny` 拒绝、`supervised` 走策略回调（见
+ *   `autoApproveRemovedPlanExit`），绝不让它成为 supervised 的策略后门。
  */
 export type SuperApprovalMode = "auto" | "supervised" | "deny";
 
@@ -361,8 +362,16 @@ export const SUPER_PROGRESS_THROTTLE_MS = 700;
  */
 export const SUPER_TEXT_MAX_CHARS = 120_000;
 
-/** 作为视觉块直接送给子会话的图片上限（与主会话的图片附件上限同口径）。 */
-const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
+/**
+ * 作为视觉块直接送给子会话的图片上限（与主会话的 `ATTACHMENT_IMAGE_MAX_BYTES`
+ * 同口径 5MB）。
+ *
+ * 刻意**不**用 8MB：base64 膨胀约三分之一，8MB 的图片块序列化后会超过 ACP
+ * NDJSON 帧的 8MB 上限（见 `src/acp/jsonrpc.ts` 的帧护栏），prompt 会被解析端
+ * 丢弃而永久悬挂。超过阈值的图片仍会落盘并作为文件路径交给子会话（它可读到），
+ * 只是不作为内联视觉块发送。
+ */
+export const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
 /** 单份附件超过这个大小就不复制 —— 提示词里如实说明，不静默丢。 */
 const MAX_ATTACHMENT_FILE_BYTES = 50 * 1024 * 1024;
 
@@ -562,6 +571,8 @@ export interface SuperAgentDeps {
 interface PendingResolver {
   resolve: (value: unknown) => void;
   timer: NodeJS.Timeout | null;
+  /** 这个 resolver（及其定时器）属于哪一次 `needs_input`；与 session.pending.requestId 比对。 */
+  requestId: string;
 }
 
 /**
@@ -933,6 +944,9 @@ export class SuperAgentManager {
     }
     // 还在排队的话先撤掉 —— 否则槽位空出后 pump 会把它启动起来。
     this.dequeue(id);
+    // 提问定时器随中断一起收口：会话已终态，不该再有到点的定时器去 resolve
+    // 一个早被丢弃的提问（更不该误删此处之后新尝试的 resolver）。
+    this.discardQuestionResolver(id);
     // 先记「这一轮被用户喊停」：收尾路径（代提交 + 自动合并）靠它决定
     // 还能不能动这轮的结果。必须落在 apply 之前 —— apply 之后状态已是终态，
     // 再也分不清「正常完成」与「被中断」。
@@ -1009,11 +1023,8 @@ export class SuperAgentManager {
       ) {
         worktrees.push({ id, path: session.isolation.path, branch: session.isolation.branch });
       }
-      const resolver = this.resolvers.get(id);
-      if (resolver) {
-        if (resolver.timer) clearTimeout(resolver.timer);
-        this.resolvers.delete(id);
-      }
+      // 提问定时器随会话删除一起收口（统一走 discardQuestionResolver）。
+      this.discardQuestionResolver(id);
       this.forgetChild(id);
       this.transcripts.delete(id);
       this.policies.delete(id);
@@ -1046,6 +1057,9 @@ export class SuperAgentManager {
     // 排在自己前面。
     await this.disposeClient(id);
     this.started.delete(id);
+    // 上一轮若正卡在提问上，它的 resolver/定时器必须随旧尝试一起收口 ——
+    // 否则旧定时器到点会误删新一轮刚挂上的 resolver（跨尝试串包）。
+    this.discardQuestionResolver(id);
     // 重试是一次**新的尝试**（序号 +1）：上一轮的中断标记不该命中新一轮。
     this.interrupted.delete(id);
 
@@ -1071,6 +1085,26 @@ export class SuperAgentManager {
   }
 
   /**
+   * 清掉一个子会话的提问 resolver 与定时器（**跨尝试收口的唯一入口**）。
+   *
+   * resolver 与定时器按会话 id 只存一份，但一个会话可能经历「提问 → 失败 →
+   * 重试 → 再提问」：上一轮的定时器若到点无条件 `delete(id)`，会删掉新一轮
+   * 刚挂上的 resolver。所有清理入口（超时 / 应答 / 重试 / 清理 / 中断 / 面板
+   * 关闭）统一走这里，且调用前必须先用 `requestId` 确认对象是自己的那一份。
+   *
+   * 刻意**不** resolve promise：retry / cancel / cleanup 时旧 CLI 进程即将被
+   * 回收，若用空答案 resolve 它，那条在途的 `onUserQuestions` 会让旧内核继续
+   * 往下跑，并通过同一个 id 的回调污染新一轮的状态。让它随旧客户端一起 GC。
+   */
+  private discardQuestionResolver(id: string): PendingResolver | undefined {
+    const resolver = this.resolvers.get(id);
+    if (!resolver) return undefined;
+    if (resolver.timer) clearTimeout(resolver.timer);
+    this.resolvers.delete(id);
+    return resolver;
+  }
+
+  /**
    * 回答子会话的提问（`_iflow/user/questions`）。
    *
    * 子会话的审批不经过这里 —— 它们始终免确认，由宿主直接放行。返回 false 表示
@@ -1081,9 +1115,11 @@ export class SuperAgentManager {
     const pending = session?.pending;
     const resolver = this.resolvers.get(id);
     if (!session || !pending || !resolver) return false;
+    // 只认当前 pending 的那一份：旧尝试残留的 resolver 绝不能被新 pending
+    // 的应答消费（反之亦然），否则一次应答会收口错轮的 promise。
+    if (resolver.requestId !== pending.requestId) return false;
 
-    if (resolver.timer) clearTimeout(resolver.timer);
-    this.resolvers.delete(id);
+    this.discardQuestionResolver(id);
     resolver.resolve({ answers: answer.answers ?? {} });
     this.apply(id, { type: "input_resolved", at: Date.now() });
     return true;
@@ -1137,6 +1173,8 @@ export class SuperAgentManager {
     this.started.delete(id);
     this.lastText.delete(id);
     this.policies.delete(id);
+    // 提问定时器/recorder 随记录一起收口 —— 清理后不该再有定时器去动已删的会话。
+    this.discardQuestionResolver(id);
     await this.disposeClient(id);
     this.forgetChild(id);
     // 排队中就被清理的合并子会话不会走到 prepare 的收尾（它根本没启动）——
@@ -1168,11 +1206,20 @@ export class SuperAgentManager {
     }
     const probe = await probeGitRepo(this.deps.repoRoot);
     if (session.isolation.kind === "git_worktree" && probe.isRepo && session.isolation.branch) {
+      // 合并成功后，分支的提交已并入 HEAD、不再以 baseRef 为祖先，
+      // `baseRef..branch` 会把它们数成「未合并」，导致手动清理误判「有未合并
+      // 提交」而保留分支。与 releaseMergedIsolation 同一口径：先用只读的
+      // isBranchMerged 核验，通过则不传 baseRef、显式给出已核验信号。
+      const merged =
+        session.integration?.state === "merged" &&
+        (await isBranchMerged({ repoRoot: this.deps.repoRoot, branch: session.isolation.branch }));
       const result = await removeWorktree({
         repoRoot: this.deps.repoRoot,
         targetPath: session.isolation.path,
         branch: session.isolation.branch,
-        baseRef: session.isolation.baseRef,
+        ...(merged
+          ? { branchDeletionVerified: true }
+          : { baseRef: session.isolation.baseRef }),
         keepBranch: options.keepBranch,
       });
       this.removeSession(id);
@@ -1634,6 +1681,22 @@ export class SuperAgentManager {
       }
     }
 
+    // 隔离一建好就**先写回记录**，再判 early-return：此前 cancel 只 apply
+    // cancelled，prepareInner 在这里（worktree 已建好、isolation 还没写回）命中
+    // 终态守卫直接 return，磁盘上的 worktree 与分支不在任何记录里，成为无人
+    // 认领的孤儿（清理/清扫都找不到它）。写回按 attempt 号守住 —— 已被一次
+    // 重试取代的旧一轮不得把它的 isolation 盖到新一轮头上。
+    const beforeGuards = this.sessions.get(id);
+    if (beforeGuards && !this.disposed && (beforeGuards.attempts ?? 1) === attempt) {
+      this.sessions.set(id, {
+        ...beforeGuards,
+        isolation,
+        queued: false,
+        updatedAt: Date.now(),
+      });
+      this.emit();
+    }
+
     const current = this.sessions.get(id);
     if (!current || this.disposed || isTerminalSuperStatus(current.status)) {
       this.started.delete(id);
@@ -1641,8 +1704,6 @@ export class SuperAgentManager {
     }
     // 准备期间又发生了一次重试 —— 让新的一次执行接管。
     if ((current.attempts ?? 1) !== attempt) return;
-    this.sessions.set(id, { ...current, isolation, queued: false, updatedAt: Date.now() });
-    this.emit();
 
     let model: string | null = null;
     let usageReport: TurnUsageReport | undefined;
@@ -2039,8 +2100,9 @@ export class SuperAgentManager {
       onRequestPermission: async (request) => this.decidePermission(id, request),
       onUserQuestions: async (request) =>
         (await this.awaitQuestion(id, request.questions)) as UserQuestionsResponse,
-      // Plan 模式已移除（2026-11-18）：CLI 仍可能发来 `_iflow/plan/exit`，
-      // 记警告后直接放行，绝不阻塞子会话（见 autoApproveRemovedPlanExit）。
+      // Plan 模式已移除（2026-11-18）：CLI 仍可能发来 stale `_iflow/plan/exit`，
+      // 按 spawn 审批策略处置（auto 放行 / deny 拒绝 / supervised 走回调），
+      // 绝不让它成为 supervised 的策略后门（见 autoApproveRemovedPlanExit）。
       onExitPlanMode: async (request) => this.autoApproveRemovedPlanExit(id, request),
       onExit: (code) => {
         const session = this.sessions.get(id);
@@ -2183,20 +2245,47 @@ export class SuperAgentManager {
   }
 
   /**
-   * 计划模式已移除（2026-11-18）。
+   * 处理遗留的 `_iflow/plan/exit`（计划模式已移除，2026-11-18）。
    *
    * 子会话理论上不会再进入 plan 模式（宿主在 `session/new` 后推 yolo），但 CLI
    * 内部仍保留该模式与 `exit_plan_mode` 工具。旧会话归档、外部
    * `~/.iflow/settings.json` 的 `approvalMode: "plan"` 仍可能让它发来
-   * `_iflow/plan/exit`。不弹卡、不阻塞、不按审批策略拒绝：记一条警告后直接
-   * 放行，让子会话继续跑。
+   * `_iflow/plan/exit`。这条 stale 请求**不能成为策略绕过的后门**：
+   *
+   *  - `auto`（缺省）：无审批语义，记警告后快速放行，与既有行为一致；
+   *  - `deny`：一律拒绝；
+   *  - `supervised`：走与权限请求同一个策略回调裁决（未提供/抛错/超时按拒绝），
+   *    决不允许一个已移除模式的遗留请求悄悄拿到批准、使 supervised 子会话
+   *    在该节点上变成无审批执行。
    */
-  private autoApproveRemovedPlanExit(id: string, request: ExitPlanModeRequest): ExitPlanModeResponse {
+  private async autoApproveRemovedPlanExit(
+    id: string,
+    request: ExitPlanModeRequest,
+  ): Promise<ExitPlanModeResponse> {
     const planChars = (request.plan ?? "").length;
+    const policy = this.policyFor(id);
+    if (policy.approval === "auto") {
+      this.deps.log.warn(
+        `[${id}] plan mode removed: auto-approving stale _iflow/plan/exit (${planChars} chars of plan text)`,
+      );
+      return { approved: true };
+    }
+    if (policy.approval === "deny") {
+      this.deps.log.warn(`[${id}] plan mode removed: 审批策略 deny 拒绝 stale _iflow/plan/exit`);
+      return { approved: false, reason: "审批策略 deny 拒绝了已移除的 Plan 模式退出请求" };
+    }
+    // supervised：按策略回调裁决，安全默认（回调缺失/抛错/超时）为 deny。
+    const decision = await awaitSuperPermissionDecision(policy.onPermissionRequest, {
+      sessionId: request.sessionId || id,
+      summary: `退出已移除的 Plan 模式（计划 ${planChars} 字符）`,
+    });
+    const approved = decision === "allow_once" || decision === "allow_always";
     this.deps.log.warn(
-      `[${id}] plan mode removed: auto-approving stale _iflow/plan/exit (${planChars} chars of plan text)`,
+      `[${id}] plan mode removed: supervised 策略 ${approved ? "批准" : "拒绝"} stale _iflow/plan/exit（${decision}）`,
     );
-    return { approved: true } as ExitPlanModeResponse;
+    return approved
+      ? { approved: true }
+      : { approved: false, reason: `审批策略未批准 stale _iflow/plan/exit（裁决：${decision}）` };
   }
 
   /** Lazily create the transcript buffer for a child session. */
@@ -2275,17 +2364,26 @@ export class SuperAgentManager {
     const requestId = `${id}-question-${Date.now().toString(36)}`;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        this.resolvers.delete(id);
+        // 旧定时器（上一轮提问留下的）到点时，若 resolver 或 pending 已不是
+        // 这一份，绝不能碰当前状态 —— 那会把新一轮正在等回答的子会话误复位，
+        // 或删掉它的 resolver 让真正的应答永远收不了口。
+        const resolver = this.resolvers.get(id);
+        if (!resolver || resolver.requestId !== requestId) return;
         const session = this.sessions.get(id);
-        if (session) {
-          this.sessions.set(id, { ...session, pending: undefined, updatedAt: Date.now() });
-          this.emit();
+        if (session?.pending?.requestId !== requestId) {
+          this.discardQuestionResolver(id);
+          return;
         }
+        this.discardQuestionResolver(id);
+        // 与 respond() 走同一条 reducer 迁移：status 从 awaiting_input 回到
+        // running、pending 清空。原来只清 pending 不动 status，看板会永远显示
+        // 「等待你回答」却无可答问题，心跳的等待计数也一直虚高。
+        this.apply(id, { type: "input_resolved", at: Date.now() });
         resolve({ answers: {} });
       }, SUPER_PENDING_TIMEOUT_MS);
       if (typeof timer.unref === "function") timer.unref();
 
-      this.resolvers.set(id, { resolve, timer });
+      this.resolvers.set(id, { resolve, timer, requestId });
       const pending: SuperPending = {
         kind: "question",
         requestId,
@@ -2305,7 +2403,24 @@ export class SuperAgentManager {
     this.integrationChain = this.integrationChain
       .then(() => this.runIntegration(id, attempt))
       .catch((error) => {
-        this.deps.log.error(`子会话集成失败：${errorMessage(error)}`);
+        const reason = errorMessage(error);
+        this.deps.log.error(`子会话集成失败：${reason}`);
+        // runIntegration 抛错时若还没写下任何结论，看板会停在旧状态、
+        // maybeRequestAgentMerge 读到空直接 return —— 集成结果彻底丢失。补写
+        // 一条 failed + needsAction：看板有明确去向，主会话也会被请去处理分支。
+        // 若抛错前已记下结论（例如 record 之后才失败），不覆盖它。
+        if (this.sessions.get(id)?.integration) return;
+        this.recordIntegration(
+          id,
+          {
+            mode: this.deps.integrationMode(),
+            state: "failed",
+            needsAction: true,
+            detail: `自动集成失败：${reason}；分支已保留，请手动合并或让智能体合并`,
+            at: Date.now(),
+          },
+          `automatic integration failed: ${reason}; the branch is kept and still has to be merged`,
+        );
       });
     await this.integrationChain;
   }
