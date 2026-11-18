@@ -845,6 +845,57 @@ export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuper
 }
 
 /**
+ * 恢复时宿主核对过的磁盘事实（纯函数不碰磁盘，事实由调用方传入）。
+ *
+ * - `worktreePresent`：归档里的隔离目录此刻是否还在磁盘上；
+ * - `branchPresent`：归档里的 git 分支此刻是否还存在（省去时按归档自身的
+ *   `released` / `recycled` 推断，宿主无需为恢复特意跑一条 git 子进程）。
+ *
+ * 字段缺省 = 无法确定，此时不做对应校正，保留归档原样。
+ */
+export interface RestoredIsolationDiskFacts {
+  worktreePresent?: boolean;
+  branchPresent?: boolean;
+}
+
+/**
+ * 用磁盘事实校正恢复出来的隔离**展示态**（只改显示，绝不删目录/分支）。
+ *
+ * 归档记的是「上次运行结束时的状态」，目录 / 分支可能已被外部手工删除，
+ * 或上次失败的清理留下半删残迹。原样恢复会让看板对一个磁盘上早就不存在的
+ * 目录显示「清理工作目录」（点下去只能报错），或对一个其实还在的目录显示
+ * 「已清理」。这里只修正 `released` / `recycled` 两个标记；「孤儿一律不自动
+ * 删」的取舍保持不变 —— 要不要处理留给用户在看板上确认。
+ *
+ * `repo` 档的 path 就是主仓根、不是隔离产物，永不标 released / recycled。
+ */
+export function reconcileRestoredIsolation(
+  isolation: SuperIsolation,
+  disk?: RestoredIsolationDiskFacts,
+): SuperIsolation {
+  if (!disk || disk.worktreePresent === undefined || isolation.kind === "repo") return isolation;
+
+  if (disk.worktreePresent) {
+    // 归档说已清理，目录其实还在：撤销过期的 released / recycled。
+    if (!isolation.released && !isolation.recycled) return isolation;
+    const { released: _released, recycled: _recycled, ...rest } = isolation;
+    return rest;
+  }
+
+  // 目录已不在磁盘上：不能再显示「待清理」。分支是否还在决定措辞：
+  // 分支明确没了 → released（目录+分支都没了）；分支还在或无法确定 →
+  // recycled（目录已删、分支保留），保守提示用户去核对分支，绝不谎报
+  // 「什么都没有了」而让用户丢掉可能存在的未合并提交。
+  const branchPresent =
+    disk.branchPresent ??
+    (isolation.released ? (isolation.recycled ? true : false) : undefined);
+  if (isolation.kind === "directory" || branchPresent === false) {
+    return { ...isolation, released: true, recycled: false };
+  }
+  return { ...isolation, released: true, recycled: true };
+}
+
+/**
  * 落盘记录 → 恢复出来的子会话。
  *
  * 恢复必须**如实**：进程已经没了，所以任何非终态（准备中 / 运行中 / 等你
@@ -852,7 +903,10 @@ export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuper
  * 汇报永远等不到「全部结束」，也会让看板谎报进度。分支与工作目录照旧保留：
  * 它们在磁盘上还在，清理与合并仍然可用。
  */
-export function fromPersistedSuperSession(record: PersistedSuperSession): SuperSessionUi {
+export function fromPersistedSuperSession(
+  record: PersistedSuperSession,
+  disk?: RestoredIsolationDiskFacts,
+): SuperSessionUi {
   const terminal = isTerminalSuperStatus(record.status);
   return {
     id: record.id,
@@ -861,7 +915,7 @@ export function fromPersistedSuperSession(record: PersistedSuperSession): SuperS
     status: terminal ? record.status : "cancelled",
     mainSessionId: record.mainSessionId,
     restored: true,
-    isolation: normalizeIsolation(record.isolation),
+    isolation: reconcileRestoredIsolation(normalizeIsolation(record.isolation), disk),
     model: record.model,
     attempts: record.attempts,
     createdAt: record.createdAt,

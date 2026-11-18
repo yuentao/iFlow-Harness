@@ -83,6 +83,10 @@ type PanelInternals = {
   getSuperAgent: () => unknown;
   superAgent: unknown;
   superHeartbeatTimer: NodeJS.Timeout | null;
+  pruneUnrestorableSessions: () => Promise<unknown[]>;
+  persistSessions: (sessions: unknown[], activeId: string | null) => Promise<void>;
+  hasPersistedTranscript: (id: string) => boolean;
+  migrateLegacyTranscripts: () => Promise<void>;
   ensureSuperHeartbeat: () => void;
   pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }>;
   pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }>;
@@ -123,7 +127,12 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
   }
 
   /** 看板投影（管理器 emit 后落到 store 上的内容）。 */
-  function board(): { id: string; status: string; restored?: boolean }[] {
+  function board(): {
+    id: string;
+    status: string;
+    restored?: boolean;
+    isolation?: { kind?: string; released?: boolean; recycled?: boolean };
+  }[] {
     return p.store.getState().superSessions ?? [];
   }
 
@@ -317,5 +326,69 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
     expect(board()).toEqual([]);
     // 没有待办 → 心跳停表（旧实现让它常驻）。
     expect(p.superHeartbeatTimer).toBeNull();
+  });
+
+  it("#6 prune 会一并回收 .corrupt 损坏备份，且不误删仍归属会话的归档", async () => {
+    // 损坏备份名固定为「归档名.corrupt」（SA-D）；旧 prune 只删 .json，
+    // 备份会永久堆积。这里钉住：会话离开列表时本体与备份一起回收，仍归属
+    // 的会话其本体和备份都原样保留。
+    await p.persistSessions([{ id: "main-1", label: "main-1" }], "main-1");
+    vi.spyOn(p, "hasPersistedTranscript").mockReturnValue(true);
+    vi.spyOn(p, "migrateLegacyTranscripts").mockResolvedValue(undefined);
+
+    const dir = path.join(storageDir, "super-sessions");
+    fs.mkdirSync(dir, { recursive: true });
+    const names = [
+      "main-1.json",
+      "main-1.json.corrupt",
+      "main-gone.json",
+      "main-gone.json.corrupt",
+    ];
+    for (const name of names) fs.writeFileSync(path.join(dir, name), "[]", "utf8");
+
+    await p.pruneUnrestorableSessions();
+
+    expect(fs.existsSync(path.join(dir, "main-1.json"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "main-1.json.corrupt"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "main-gone.json"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "main-gone.json.corrupt"))).toBe(false);
+  });
+
+  it("#7 恢复时目录已不在磁盘 → 校正为已清理状态（不再显示待清理）", async () => {
+    // 归档里的 worktree 路径指向一个不存在的目录（被外部删除），恢复出来的
+    // 记录不该再显示「清理工作目录」。分支事实无法确定时保守显示「目录已删、
+    // 分支保留」，绝不谎报什么都没有 —— 也不自动删任何东西。
+    const missing = path.join(storageDir, "already-gone");
+    await writeSuperSessionArchive(storageDir, "main-1", [
+      record({ isolation: { kind: "git_worktree", path: missing, branch: "iflow/super/old" } }),
+    ]);
+
+    await p.restoreSuperSessions("main-1");
+
+    const isolation = board()[0]?.isolation;
+    expect(isolation?.released).toBe(true);
+    expect(isolation?.recycled).toBe(true); // 分支事实未知 → 保守保留
+    expect(fs.existsSync(missing)).toBe(false); // 只读校正，绝不自动删
+  });
+
+  it("#7 恢复时目录其实还在 → 撤销归档里过期的 released 标记", async () => {
+    const live = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-superrestore-live-"));
+    try {
+      await writeSuperSessionArchive(storageDir, "main-1", [
+        record({
+          status: "completed",
+          isolation: { kind: "git_worktree", path: live, branch: "iflow/super/old", released: true },
+        }),
+      ]);
+
+      await p.restoreSuperSessions("main-1");
+
+      const isolation = board()[0]?.isolation;
+      // 归档说已清理，目录实际还在：撤销过期标记，看板恢复可清理入口。
+      expect(isolation?.released).toBeFalsy();
+      expect(isolation?.recycled).toBeFalsy();
+    } finally {
+      fs.rmSync(live, { recursive: true, force: true });
+    }
   });
 });
