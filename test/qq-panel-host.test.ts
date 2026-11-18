@@ -409,6 +409,21 @@ describe("createQqServiceHost — readTaskOutcome", () => {
       expect(outcomeOf(host, "super-1")!.stopReason).toBeUndefined();
     }
   });
+
+  it("终态别名也映射到可核对的 stopReason（done/error/aborted/interrupted）", () => {
+    const samples: Array<[string, string]> = [
+      ["done", "end_turn"],
+      ["error", "error"],
+      ["aborted", "canceled"],
+      ["interrupted", "canceled"],
+    ];
+    for (const [status, expected] of samples) {
+      const f = makeFixture();
+      f.state.snapshot = { summary: "结果", status };
+      const host = createQqServiceHost(f.ports);
+      expect(outcomeOf(host, "super-1")!.stopReason).toBe(expected);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

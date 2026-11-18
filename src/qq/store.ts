@@ -24,6 +24,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { TERMINAL_STATUSES } from "../../shared/qq-task.js";
+import { QQ_SUPER_TERMINAL_STATUSES } from "./wiring.js";
 
 /** 任务记录的最小形状（其余字段原样序列化，不做改写）。 */
 export interface QqTaskRecord {
@@ -86,18 +87,14 @@ export interface QqPruneResult {
  * 默认的终态状态集。
  *
  * 权威词表在 `shared/qq-task.ts` 的 {@link TERMINAL_STATUSES}（与
- * `isTerminalStatus` 同源）；这里额外补上历史 / 上游执行体可能写进归档的
- * 别名（`completed` / `done` / `error` / `aborted` / `interrupted` 等），
- * 让清理逻辑对旧数据同样保守 —— 只有确认是终态才会删。
+ * `isTerminalStatus` 同源）与 `src/qq/wiring.ts` 的
+ * {@link QQ_SUPER_TERMINAL_STATUSES}（子会话终态及别名）。这里取两者并集，
+ * 让清理逻辑对旧数据 / 上游别名同样保守 —— 只有确认是终态才会删，且与
+ * `waitForSettle`、终态映射共用同一份词表，不再各写一份漂移。
  */
 export const DEFAULT_TERMINAL_STATUSES: readonly string[] = [
   ...TERMINAL_STATUSES,
-  "completed",
-  "cancelled",
-  "done",
-  "error",
-  "aborted",
-  "interrupted",
+  ...QQ_SUPER_TERMINAL_STATUSES,
 ];
 
 const INDEX_FILE = "index.json";

@@ -18,6 +18,11 @@
  */
 
 import { shortTaskId } from "../../shared/qq-task.js";
+import {
+  isSuperCancelStatus,
+  isSuperFailureStatus,
+  qqSuperStatusKey,
+} from "./wiring.js";
 import type { QqPendingUserInput } from "./pending-users.js";
 import type {
   SuperApprovalMode,
@@ -201,16 +206,13 @@ export interface QqHostTaskOutcome extends QqServiceTaskOutcome {
 export function stopReasonForSuperStatus(
   status: string | null | undefined,
 ): string | undefined {
-  switch (status) {
-    case "completed":
-      return "end_turn";
-    case "failed":
-      return "error";
-    case "cancelled":
-      return "canceled";
-    default:
-      return undefined;
-  }
+  const key = qqSuperStatusKey(status);
+  if (isSuperFailureStatus(key)) return "error";
+  if (isSuperCancelStatus(key)) return "canceled";
+  // completed / done 都是「正常收尾」；merged 的合并事实由 status/merged 字段
+  // 承载，这里不编造 stopReason（服务侧 finalize 会直接消费 outcome.status）。
+  if (key === "completed" || key === "done") return "end_turn";
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------

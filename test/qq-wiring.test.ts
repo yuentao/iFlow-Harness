@@ -20,18 +20,28 @@ function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
 }
 
 describe("isTerminalSuperStatus", () => {
-  it("只认三个终态", () => {
-    expect(isTerminalSuperStatus("completed")).toBe(true);
-    expect(isTerminalSuperStatus("failed")).toBe(true);
-    expect(isTerminalSuperStatus("cancelled")).toBe(true);
+  it("标准终态与上游别名都判终态（大小写/空白不敏感）", () => {
+    for (const status of [
+      "completed",
+      "failed",
+      "cancelled",
+      "done",
+      "error",
+      "aborted",
+      "interrupted",
+      "merged",
+      " COMPLETED ",
+    ]) {
+      expect(isTerminalSuperStatus(status)).toBe(true);
+    }
   });
 
   it("运行态 / 未知值 / 缺省都不是终态", () => {
     expect(isTerminalSuperStatus("preparing")).toBe(false);
     expect(isTerminalSuperStatus("running")).toBe(false);
     expect(isTerminalSuperStatus("awaiting_input")).toBe(false);
-    expect(isTerminalSuperStatus("merged")).toBe(false);
     expect(isTerminalSuperStatus("")).toBe(false);
+    expect(isTerminalSuperStatus("???")).toBe(false);
     expect(isTerminalSuperStatus(undefined)).toBe(false);
     expect(isTerminalSuperStatus(null)).toBe(false);
   });
