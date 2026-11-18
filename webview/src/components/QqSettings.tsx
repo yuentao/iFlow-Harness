@@ -302,7 +302,13 @@ function AccessList({
   return (
     <div className="flex flex-col gap-2 px-4 py-4">
       <FieldLabel>{label}</FieldLabel>
-      {entries.length === 0 && !adding && <Hint>{t("尚未添加条目")}</Hint>}
+      {/* 空态走项目既有的虚线空态盒（与 QqTaskList / McpCard / AssetCard 同一
+          视觉语言），不用裸 Hint 段落——后者读起来像未完成的占位说明。 */}
+      {entries.length === 0 && !adding && (
+        <div className="rounded-lg border border-dashed border-border px-2 py-2 text-center text-ui-label text-muted-foreground">
+          {t("尚未添加条目")}
+        </div>
+      )}
       {entries.length > 0 && (
         <Hint>{t("{0} 已脱敏显示，无法在此修改；如需更换请删除后重新添加。", idLabel)}</Hint>
       )}

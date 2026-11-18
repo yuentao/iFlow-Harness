@@ -598,6 +598,23 @@ describe("QqSettings", () => {
     expect(container.textContent).not.toContain("操作");
   });
 
+  it("空态：两张表都用项目既有虚线空态盒，而非裸 Hint 段落", () => {
+    render(<Harness />);
+    const empties = [...container.querySelectorAll<HTMLElement>("div")].filter(
+      (node) => node.textContent?.trim() === "尚未添加条目",
+    );
+    // 用户表与群表各一个空态盒。
+    expect(empties).toHaveLength(2);
+    for (const box of empties) {
+      expect(box.className).toContain("border-dashed");
+      expect(box.className).toContain("rounded-lg");
+      expect(box.className).toContain("text-center");
+      expect(box.className).toContain("text-ui-label");
+      // 关键回归：不能退回裸 <p> Hint 段落。
+      expect(box.tagName).toBe("DIV");
+    }
+  });
+
   it("窄屏：两列表格不横向溢出，操作列固定宽度，脱敏值换行而非截尾", () => {
     const openid = "D754D2240C503C2ABE2B236DC1E78D11";
     render(<Harness initial={{ allowedUsers: [{ openid, note: "很长的备注".repeat(8) }] }} />);
