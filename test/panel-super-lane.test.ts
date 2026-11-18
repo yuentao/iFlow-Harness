@@ -109,6 +109,11 @@ type PanelInternals = {
   pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }>;
   autoTurnsStoppedFor: string | null;
   qqMainFinalAwaiters: Map<string, string>;
+  qqMainFinalAwaiterSince: Map<string, number>;
+  qqFinalRescueText: Map<string, string>;
+  qqFinalRescueMs: number;
+  qqFinalHardRescueMs: number;
+  rescueStaleQqFinalAwaiters: () => void;
   qq?: {
     service?: {
       completeMainFinalAnswer?: (input: {
@@ -327,5 +332,62 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
       stopReason: "end_turn",
     });
     expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
+  });
+
+  it("pendingCount 长期>0 且 awaiter 等过阈值时，汇报轮仍被标为 final（R2 迟到补发）", async () => {
+    const done = child({ id: "super-done", status: "completed" });
+    const stuck = child({ id: "super-stuck", status: "running" });
+    manager.list = () => [done, stuck];
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    // 该 awaiter 已等很久；把软阈值注入成 1ms 即可判定「迟到」。
+    p.qqMainFinalAwaiterSince.set("T-qq", Date.now() - 100_000);
+    p.qqFinalRescueMs = 1;
+
+    p.queueSuperReport([{ session: done, report: READY_REPORT }]);
+    await flush();
+
+    // pendingCount=1（stuck 子会话仍非终态），但 awaiter 迟到 → 该轮放宽为 final，
+    // 主会话这一轮的正文就能作为 QQ 真正最终答复投递（不再永远停在已受理）。
+    const item = p.pendingSuperReportPrompts.find((i) => i.mainSessionId === "lane-session");
+    expect(item).toBeTruthy();
+    expect(item!.final).toBe(true);
+  });
+
+  it("无新汇报轮时，超时 awaiter 由迟到补发兜底并摘除（R2）", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    manager.list = () => [];
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.qqMainFinalAwaiterSince.set("T-qq", Date.now() - 100_000);
+    p.qqFinalRescueMs = 1;
+    p.qqFinalHardRescueMs = 1_000_000;
+    p.qqFinalRescueText.set("lane-session", "缓存的真实结论");
+
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    await flush();
+
+    expect(complete).toHaveBeenCalledWith({
+      taskId: "T-qq",
+      text: "缓存的真实结论",
+      stopReason: "end_turn",
+    });
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
+  });
+
+  it("软阈值下仍有活跃子会话时不提前补发（不误伤正常长任务）", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    manager.list = () => [child({ id: "super-running", status: "running" })];
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.qqMainFinalAwaiterSince.set("T-qq", Date.now() - 100_000);
+    p.qqFinalRescueMs = 1;
+    p.qqFinalHardRescueMs = 1_000_000; // 硬上限还远未到
+
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+
+    expect(complete).not.toHaveBeenCalled();
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(true);
   });
 });
