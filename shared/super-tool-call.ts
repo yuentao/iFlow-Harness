@@ -68,6 +68,29 @@ export function classifySuperToolName(name: string): SuperToolCallKind | null {
 }
 
 /**
+ * 从工具调用的**标题**识别协议类别。
+ *
+ * 内置 `super-agent` 工具的 `getDescription()` 返回的是短标签，不是工具名：
+ * `Delegate N task(s)` / `Manage N child session action(s)`。而 CLI 的
+ * **智能审批（SMART）权限请求**只带 `{toolCallId,status,title,content,locations,kind}`
+ * —— 没有 `toolName`，也**没有 `args`**（bundle 实证 0.5.19：
+ * `[...].evaluateToolCall(...)` 的 RISKY 分支构造 toolCall 时只填 title）。
+ * 只按名字判定会让这类请求落进普通审批卡，5 分钟超时后按「拒绝」回给内核
+ * （表现为派发静默消失）。
+ *
+ * 匹配是锚定的整串比较（允许任意空白），不做包含匹配 —— 其它工具的标题
+ * 里碰巧出现 "delegate" 也不会被误判成派发。
+ */
+export function classifySuperToolTitle(title: string): SuperToolCallKind | null {
+  if (typeof title !== "string") return null;
+  const compact = title.trim().replace(/\s+/g, " ");
+  if (!compact) return null;
+  if (/^delegate \d+ tasks?$/i.test(compact)) return "dispatch";
+  if (/^manage \d+ child session actions?$/i.test(compact)) return "actions";
+  return null;
+}
+
+/**
  * 把工具调用的参数归一成 JSON 文本。
  *
  * 接受对象 / 数组，以及装着 JSON 的字符串（先 trim；空串与非法 JSON 返回
@@ -120,6 +143,52 @@ export function resolveSuperToolCallKind(
   const hasActions = Array.isArray(record.actions) && record.actions.length > 0;
   const hasTasks = Array.isArray(record.tasks) && record.tasks.length > 0;
   return hasActions && !hasTasks ? "actions" : kind;
+}
+
+/** 管理动作的合法名字（与 `shared/super-agent.ts` 的解析器一致）。 */
+const SUPER_ACTION_KINDS = new Set(["retry", "cancel", "answer", "cleanup"]);
+
+/**
+ * 只凭**载荷结构**识别协议类别（名字完全缺失时的最后一道依据）。
+ *
+ * 权限请求在智能审批形态下既没有 `toolName` 也没有 `args`，但旧版 / 其它
+ * 适配器可能带上 args 而不带名字。这里按结构严格判定：派发要求 `tasks`
+ * 非空且每个元素是带非空字符串 `task` 的对象；管理要求 `actions` 非空且
+ * 每个元素带合法 `action` 与非空 `sessionId`。**不做宽松匹配** —— 这只是
+ * 「名字缺失」时的兜底，误判会跳过对真实工具的审批，宁可漏认让它走审批卡。
+ */
+export function classifySuperToolArgs(args: unknown): SuperToolCallKind | null {
+  const value = normalizeArgsValue(args);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const isRecord = (item: unknown): item is Record<string, unknown> =>
+    Boolean(item) && typeof item === "object" && !Array.isArray(item);
+  const tasks = record.tasks;
+  if (
+    Array.isArray(tasks) &&
+    tasks.length > 0 &&
+    tasks.every(
+      (task) => isRecord(task) && typeof task.task === "string" && task.task.trim().length > 0,
+    )
+  ) {
+    return "dispatch";
+  }
+  const actions = record.actions;
+  if (
+    Array.isArray(actions) &&
+    actions.length > 0 &&
+    actions.every(
+      (action) =>
+        isRecord(action) &&
+        typeof action.action === "string" &&
+        SUPER_ACTION_KINDS.has(action.action) &&
+        typeof action.sessionId === "string" &&
+        action.sessionId.trim().length > 0,
+    )
+  ) {
+    return "actions";
+  }
+  return null;
 }
 
 /**

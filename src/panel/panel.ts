@@ -102,7 +102,9 @@ import {
   type SuperTaskSpec,
 } from "../../shared/super-agent.js";
 import {
+  classifySuperToolArgs,
   classifySuperToolName,
+  classifySuperToolTitle,
   parseSuperToolCall,
 } from "../../shared/super-tool-call.js";
 import {
@@ -310,6 +312,18 @@ const DISCARDED_SESSION_IDS_CAP = 8;
  * ("已取消…" vs "恢复完成后将自动新建会话").
  */
 type RestoreOutcome = "aborted" | "completed" | "failed";
+/**
+ * 结构化 super-agent 工具调用（`super-agent` / `super-agent-actions`）的
+ * 宿主侧处理结果，按 toolCallId 记账：
+ *  - `dispatched`：载荷可用，已交给派发链路；
+ *  - `actions`：载荷可用，已交给管理动作链路；
+ *  - `rejected`：载荷不可用，已 toast + 入队纠错提示；
+ *  - `dropped`：直到 completed 帧都没拿到可用载荷，已 toast + 入队纠错提示。
+ *
+ * 存在的意义：工具层对任何合法参数都回 ack，模型因此以为派发成功。若宿主
+ * 因为「帧里没带 args」而静默跳过，completed 帧必须能把这件事查出来并回话。
+ */
+type SuperToolCallOutcome = "dispatched" | "actions" | "rejected" | "dropped";
 /** Cap for abandonedRestoreSessionIds (one entry per abandoned restore). */
 const ABANDONED_RESTORE_IDS_CAP = 8;
 /** A promise whose resolver is captured for later (settle handles). */
@@ -1157,6 +1171,20 @@ export class ChatPanel implements vscode.Disposable {
   private readonly superToolCallActionsDone = new Set<string>();
   /** {@link superToolCallActionsDone} 的容量上限。 */
   private static readonly SUPER_TOOL_CALL_ACTIONS_CAP = 100;
+  /**
+   * 结构化 super-agent 工具调用的处理结果，key = toolCallId。
+   *
+   * 工具层对合法参数一律回 ack（`execute()` 只校验形状，不做任何 I/O），
+   * 所以「模型收到 accepted」不等于「宿主真的派了」。载荷只随 in_progress
+   * 帧到达，pending 帧通常没有 args；如果某次调用从头到尾都没带载荷，
+   * completed 帧就会是唯一的补救点 —— 这里按 id 记账，completed 帧据此
+   * 判断要不要留痕（见 {@link auditSuperToolCallCompletion}）。
+   *
+   * 有界：工具帧数量不设界；换会话 / 恢复会话 / 热重认证时清空。
+   */
+  private readonly superToolCallOutcomes = new Map<string, SuperToolCallOutcome>();
+  /** {@link superToolCallOutcomes} 的容量上限（工具帧数量不设界，Map 必须有界）。 */
+  private static readonly SUPER_TOOL_CALL_OUTCOME_CAP = 100;
   /**
    * 同一个主会话、同一轮里最多发几次「super-agent 参数纠错提示」。
    *
@@ -4187,11 +4215,27 @@ export class ChatPanel implements vscode.Disposable {
    * 没有 allow 选项时按现有取消路径回 `cancelled`，绝不伪造批准。
    */
   private autoApproveSuperAgentTool(req: RequestPermissionRequest): RequestPermissionResponse | null {
-    // 归一规则见 shared/super-tool-call.ts（含命名空间前缀）；CLI 0.5.19 的
-    // 权限请求经常省略 toolName，因此退回 title。
-    const name = (req.toolCall.toolName ?? "").trim() || (req.toolCall.title ?? "").trim();
-    if (!name || classifySuperToolName(name) === null) return null;
-    const label = req.toolCall.toolName || req.toolCall.title || "super-agent";
+    // 识别顺序按证据强度从强到弱（全部只对「命中即放行」生效，未命中仍走
+    // 规则表 / 审批卡）：
+    //  1. 工具名归一（含命名空间前缀与分隔符变体）；
+    //  2. 标题里直接写着工具名（CLI 0.5.19 的权限请求经常省略 toolName）；
+    //  3. 标题是内置工具的短标签 —— 智能审批（SMART）的 RISKY 分支构造
+    //     toolCall 时只填 `title: getDescription(params)`，派发形态是
+    //     `Delegate 1 task`、管理形态是 `Manage 1 child session action`
+    //     （bundle 实证 0.5.19，见 shared/super-tool-call.ts 的
+    //     classifySuperToolTitle）；
+    //  4. 以上都没有时按**真实载荷结构**兜底（tasks / actions 严格校验）。
+    // 只看 title 会漏掉无标题形态、只看载荷会漏掉智能审批（它不带 args），
+    // 两者叠加才覆盖当前已知的全部形态。
+    const toolName = (req.toolCall.toolName ?? "").trim();
+    const title = (req.toolCall.title ?? "").trim();
+    const kind =
+      (toolName ? classifySuperToolName(toolName) : null) ??
+      (title ? classifySuperToolName(title) : null) ??
+      (title ? classifySuperToolTitle(title) : null) ??
+      classifySuperToolArgs(req.toolCall.args);
+    if (!kind) return null;
+    const label = toolName || title || "super-agent";
     const option =
       req.options.find((o) => o.kind === "allow_always") ??
       req.options.find((o) => o.kind.startsWith("allow"));
@@ -4199,7 +4243,7 @@ export class ChatPanel implements vscode.Disposable {
       this.log.warn(`super agent: "${label}" permission request offers no allow option — cancelling`);
       return { outcome: { outcome: "cancelled" } };
     }
-    this.log.info(`super agent: auto-allowed built-in tool "${label}" (${option.kind})`);
+    this.log.info(`super agent: auto-allowed built-in tool "${label}" (${kind}, ${option.kind})`);
     return { outcome: { outcome: "selected", optionId: option.optionId } };
   }
 
@@ -6321,13 +6365,17 @@ export class ChatPanel implements vscode.Disposable {
     // `super-agent-actions` 工具调用（内核 registry 里没有这两个工具），
     // 旧实现既不执行也不提示，用户以为已经派了。这里从 args 取载荷，按
     // 同一套协议执行。只认主会话自己的工具帧（带 agentId 的 SubAgent 事件
-    // 跳过），且只看「即将执行」的两帧 —— completed / failed 帧重放同一份
-    // 载荷没有意义。
+    // 跳过）。**completed 帧也要过一遍**：工具层对合法参数一律回 ack，
+    // 若载荷整轮都没到达（pending 帧无 args、in_progress 帧缺失），
+    // completed 是最后一次核对「到底派没派」的机会（见 handleSuperToolCall）。
     if (
       !this.restoring &&
       (n.update.sessionUpdate === "tool_call" || n.update.sessionUpdate === "tool_call_update") &&
       !(n.update as { agentId?: string }).agentId &&
-      (n.update.status === "pending" || n.update.status === "in_progress")
+      (n.update.status === "pending" ||
+        n.update.status === "in_progress" ||
+        n.update.status === "completed" ||
+        n.update.status === "failed")
     ) {
       this.handleSuperToolCall(n.update);
     }
@@ -7506,6 +7554,7 @@ export class ChatPanel implements vscode.Disposable {
     this.superDispatchedDirectives.clear();
     this.superToolCallWarned.clear();
     this.superToolCallActionsDone.clear();
+    this.superToolCallOutcomes.clear();
     this.superToolCallCorrections.clear();
     this.superActionScanText = "";
     this.superActionScanOffset = 0;
@@ -7634,13 +7683,30 @@ export class ChatPanel implements vscode.Disposable {
    */
   private handleSuperToolCall(update: ToolCallBase): void {
     const name = (update.toolName ?? update.title ?? "").trim();
-    const kind = classifySuperToolName(name);
+    // 名字归一之外也认 getDescription 的短标签：智能审批形态的权限请求 /
+    // 工具帧可能只带标题（`Delegate 1 task` / `Manage 1 child session action`），
+    // 见 shared/super-tool-call.ts 的 classifySuperToolTitle。
+    const kind = classifySuperToolName(name) ?? classifySuperToolTitle(name);
     if (!kind) return;
-    // Wire 实证（CLI 0.5.19，见 protocol.ts 的 `args` 注释）：原始参数只随
-    // `tool_call_update(in_progress)` 到达，pending 帧通常没有 args。此时还
-    // 不能下结论 —— 下一帧就会带载荷；在这里弹「未派发子会话」是误报
-    // （用户先看到「没派」，紧接着又看到真的派了）。
-    if (update.status === "pending" && (update.args === undefined || update.args === null)) return;
+    // 账本键与 superToolCallWarned 用同一个原始 id（不裁剪），否则同一个
+    // 工具调用的告警记录与结果记录会被当成两个键。
+    const toolCallId = update.toolCallId ?? "";
+    // 失败帧已经由内核把真实错误回给模型（functionResponse.error），宿主
+    // 不需要再核对 —— 再说一遍只会制造重复噪音。
+    if (update.status === "failed") return;
+    // 同一条调用已经处理过（派发 / 动作 / 已留痕），后续帧一律跳过：
+    // 否则 in_progress 与 completed 各带一次载荷会各派一遍。
+    if (toolCallId && this.superToolCallOutcomes.has(toolCallId)) return;
+    const hasArgs = update.args !== undefined && update.args !== null;
+    if (!hasArgs) {
+      // Wire 实证（CLI 0.5.19，见 protocol.ts 的 `args` 注释）：原始参数只随
+      // `tool_call_update(in_progress)` 到达，pending 帧通常没有 args。此时还
+      // 不能下结论 —— 下一帧就会带载荷；在 pending 帧弹「未派发子会话」是
+      // 误报。但 completed 帧仍然没有载荷，就说明这次调用整轮都没把东西交给
+      // 宿主，必须核对（工具层只回 ack，模型会以为派成功）。
+      if (update.status === "completed") this.auditSuperToolCallCompletion(update, name);
+      return;
+    }
     const parsed = parseSuperToolCall(kind, update.args);
     if (!parsed.ok) {
       this.warnUnsupportedSuperToolCall(update, name, parsed.reason, parsed.issues);
@@ -7654,6 +7720,9 @@ export class ChatPanel implements vscode.Disposable {
     );
     if (parsed.kind === "dispatch") {
       this.dispatchSuperTasks(parsed.tasks, parsed.issues);
+      // 记账放在派发之后：dispatchSuperTasks 是同步的，完成后才写终态，
+      // 避免「记了已派发、实际抛错」的假账。
+      this.recordSuperToolCallOutcome(toolCallId, "dispatched");
       return;
     }
     // 同一工具帧会在 pending / in_progress 两帧各带一次载荷；动作没有载荷
@@ -7665,12 +7734,67 @@ export class ChatPanel implements vscode.Disposable {
       this.log.info(
         `super agent: skipped-duplicate structured actions tool call (${update.toolCallId || "no-id"})`,
       );
+      this.recordSuperToolCallOutcome(toolCallId, "actions");
       return;
     }
     this.rememberSuperToolCallActions(actionKey);
+    // 记账在启动前：runSuperActions 是异步的，completed 帧可能在它 settle 前
+    // 到达，先记才能保证不重复执行同一条动作。
+    this.recordSuperToolCallOutcome(toolCallId, "actions");
     // 带上 toolCallId：runSuperActions 收尾时把每条动作的真实结果回填到这张
     // 工具帧，动作卡才能显示「中断成功 / not-found」而不是绿色「已完成」。
     void this.runSuperActions(parsed.actions, update.toolCallId);
+  }
+
+  /**
+   * completed 帧核对：这次结构化工具调用到底有没有把载荷交给宿主。
+   *
+   * 触发条件是「载荷整轮都没到达」（见 {@link handleSuperToolCall} 的
+   * `!hasArgs` 分支）。此时工具层已经向模型回了 `Delegation request accepted.`，
+   * 但宿主什么都没做 —— 用户会看到「模型说已派发、看板空空如也」。这里补上
+   * 两条留痕：用户可见 toast + 回给主会话的纠错提示（带原因与正确格式），
+   * 让模型能在同一轮里重发。
+   *
+   * 之前报过「载荷不合法」的调用不再重复报（toast 已经在
+   * {@link warnUnsupportedSuperToolCall} 里弹过），只补记终态。
+   */
+  private auditSuperToolCallCompletion(update: ToolCallBase, name: string): void {
+    const id = update.toolCallId ?? "";
+    if (id && this.superToolCallOutcomes.has(id)) return;
+    if (id && this.superToolCallWarned.has(id)) {
+      this.recordSuperToolCallOutcome(id, "rejected");
+      return;
+    }
+    this.recordSuperToolCallOutcome(id, "dropped");
+    this.log.warn(
+      `super agent: tool call 「${name}」 (${id || "no-id"}) completed without a usable payload — NOTHING was dispatched`,
+    );
+    this.store.sendToast(
+      "warning",
+      vscode.l10n.t("super-agent 工具调用已完成，但宿主没有收到派发载荷，未派发任何子会话"),
+    );
+    this.queueSuperToolCallCorrection(
+      "the tool call completed without a usable payload — no tasks/actions ever reached the host, so nothing was dispatched",
+    );
+  }
+
+  /**
+   * 记一条结构化工具调用的终态（有界 Map，超了丢最早一条）。
+   *
+   * 与 {@link superToolCallWarned} / {@link superToolCallActionsDone} 同一套
+   * 有界做法：工具帧数量本身不设界，账本必须有上限；换会话 / 恢复会话 /
+   * 热重认证时由 {@link resetSuperDirectiveScans} 清空。
+   */
+  private recordSuperToolCallOutcome(
+    toolCallId: string,
+    outcome: SuperToolCallOutcome,
+  ): void {
+    if (!toolCallId) return;
+    if (this.superToolCallOutcomes.size >= ChatPanel.SUPER_TOOL_CALL_OUTCOME_CAP) {
+      const oldest = this.superToolCallOutcomes.keys().next().value;
+      if (oldest !== undefined) this.superToolCallOutcomes.delete(oldest);
+    }
+    this.superToolCallOutcomes.set(toolCallId, outcome);
   }
 
   /** 记住一条已执行的动作工具调用（有界 Set，超了丢最早一条）。 */
