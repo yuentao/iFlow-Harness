@@ -225,6 +225,41 @@ const GIT_GLOBAL_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 const DESTRUCTIVE_GIT_REASON =
   "Blocked by the host guard: this working directory is the MAIN repository workspace (no isolation), so destructive git commands are not allowed. `git reset --hard`, `git clean -fd`, `git checkout -- .` and `git restore` irreversibly discard the user's uncommitted work. Stop and report the repository state instead of throwing changes away.";
 
+/**
+ * repo 档合并子会话的「任务书硬边界」拒绝文案（`session` 档）。
+ *
+ * 与上面的破坏性 git 规则分开：这些命令不一定毁掉工作区文件，但都越过
+ * 了合并任务书明确写死的边界 —— push 会把结果推到远端（不可逆、外部可见），
+ * rebase 改写历史，删分支会丢掉来源子会话的工作，切分支会离开合并现场，
+ * stash 会把用户的改动藏进栈里。任何一条都说明执行者没有遵守硬边界，
+ * 必须在命令执行前终止整个子会话。
+ */
+const MERGE_BOUNDARY_GIT_REASON =
+  "Blocked by the host guard: this merge child session runs in the MAIN repository workspace under a merge-only boundary. `git push`, `git rebase`, branch deletion, branch switching and `git stash` are not part of the merge task and are not allowed. Finish the merge in the current branch and report faithfully.";
+
+/**
+ * repo 档合并子会话「会把用户其它改动卷进合并」的拒绝文案（`tool` 档）。
+ *
+ * 只拒这一次调用而非终止会话：这类命令最可能出现在冲突解决的中途，终止
+ * 会把仓库留在 MERGE_HEAD 中间态（任务书明令禁止），而拒掉单次调用后
+ * 执行者可以改用 `git add <具体文件>` / `git commit` 继续完成合并。
+ *
+ * 注意：预检路径（yolo 免确认）只能终止会话，无法拒单次调用，因此本条
+ * 只在审批路径生效；这正是「不把合成提交风险升级成半合并仓库」的取舍。
+ */
+const MERGE_STAGE_GIT_REASON =
+  "Blocked by the host guard: `git add -A` / `git add .` / `git commit -a` would stage the user's unrelated uncommitted changes into the merge. Stage only the conflicted files you resolved (e.g. `git add src/foo.ts`) and let `git merge` create the merge commit.";
+
+/**
+ * repo 档写/编辑工具命中受保护路径的拒绝文案（`session` 档）。
+ *
+ * `.git/` 是仓库元数据（config / hooks / MERGE_HEAD / refs），`.iflow/super/`
+ * 是宿主自己的子会话工作树与归档元数据 —— 两者都不是合并产物，改写它们
+ * 等于绕过宿主的安全网。命令还没执行就终止，避免留下半改写的元数据。
+ */
+const PROTECTED_PATH_REASON =
+  "Blocked by the host guard: this merge child session must not write to protected repository metadata (.git/) or the host's Super Agent metadata (.iflow/super/). Only resolve the conflicted source files and let git create the merge commit.";
+
 const LINK_REASON =
   "Blocked by the host guard: creating a link (mklink / junction / symlink) that points at node_modules is not allowed. A child session must not share the main workspace's dependencies — deleting a linked node_modules (e.g. `npm ci`) destroys the real dependency tree. Install dependencies inside your own working directory instead.";
 
@@ -279,7 +314,11 @@ function classifyText(
 
   // ① repo 档（主仓工作区）的破坏性 git 命令 —— 不可逆地丢掉用户未提交
   //    改动。worktree 档不走这条规则（毁掉的是自己的临时目录）。
-  const gitVerdict = classifyDestructiveGit(segments, ctx);
+  //    紧随其后的是 repo 档合并任务书的硬边界（push / rebase / 删分支 /
+  //    切分支 / stash / 扫走用户改动的 add -A）—— 同样只作用于 repo 档，
+  //    在命令执行的那一帧就终止，不等它真的跑起来。
+  const gitVerdict =
+    classifyDestructiveGit(segments, ctx) ?? classifyMergeBoundaryGit(segments, ctx);
   if (gitVerdict) return gitVerdict;
 
   // ② 创建指向 node_modules 的链接（mklink / New-Item -ItemType Junction /
@@ -346,6 +385,86 @@ export function classifyChildToolCall(
   const command = extractShellCommand({ title: frame.title, args: frame.args });
   if (!command) return null;
   return classifyChildShellCommand(command, ctx);
+}
+
+/**
+ * repo 档合并子会话的「写/编辑工具」预检（纯逻辑）。
+ *
+ * 背景：`run_shell_command` 的命令文本走 {@link classifyChildToolCall}，
+ * 但 `write_file` / `replace` 这类工具根本不带命令文本，护栏对它们完全失明
+ * —— 而合并子会话就跑在主仓工作区，能直接改写 `.git/config`、hooks、
+ * MERGE_HEAD 或宿主的 `.iflow/super/` 子会话元数据，绕过全部安全网。
+ * 这条检查补上这个缺口：只对 repo 档（`repoWorkspace`）生效，只看「即将
+ * 执行」的两帧，目标落在受保护路径下即终止会话。
+ *
+ * 目标取不到时返回 null（放行，不猜）—— 与 shell 护栏同一纪律：参数形态
+ * 未知时不假装拦得住，避免误伤正常的冲突文件编辑。
+ */
+export function classifyChildFileWrite(
+  frame: {
+    sessionUpdate?: string;
+    toolName?: string;
+    kind?: string;
+    status?: string;
+    args?: unknown;
+  },
+  ctx: ChildShellGuardContext,
+): ChildShellGuardResult | null {
+  if (!ctx.repoWorkspace) return null;
+  if (frame.sessionUpdate !== "tool_call" && frame.sessionUpdate !== "tool_call_update") {
+    return null;
+  }
+  if (frame.status !== "pending" && frame.status !== "in_progress") return null;
+  const name = (frame.toolName ?? "").trim().toLowerCase();
+  if (!WRITE_TOOL_NAMES.has(name) && frame.kind !== "edit") return null;
+  const target = extractWritePath(frame.args);
+  if (!target) return null;
+  const base = normalizePath(ctx.cwd).replace(/\/+$/, "");
+  if (!base) return null;
+  const resolved = resolvePath(base, target);
+  for (const protectedRel of PROTECTED_REPO_PATHS) {
+    const forbidden = `${base}/${protectedRel}`;
+    if (resolved === forbidden || resolved.startsWith(`${forbidden}/`)) {
+      return { decision: "deny", reason: PROTECTED_PATH_REASON, severity: "session" };
+    }
+  }
+  return null;
+}
+
+/** 会写文件的工具名（内核内置 + 常见编辑类 MCP 工具）。 */
+const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "write_file",
+  "replace",
+  "xml_escape",
+  "edit_block",
+  "fast_edit_block",
+  "edit_file",
+  "create_file",
+]);
+
+/** repo 档里禁止子会话直接改写的路径（相对主仓根，都是宿主 / git 元数据）。 */
+const PROTECTED_REPO_PATHS: readonly string[] = [".git", ".iflow/super"];
+
+/** 写工具参数里可能出现的路径键（与 shared/session-state.ts 的口径一致）。 */
+const WRITE_PATH_KEYS: readonly string[] = [
+  "file_path",
+  "absolute_path",
+  "filePath",
+  "path",
+  "file",
+  "filename",
+  "target_file",
+];
+
+/** 从写工具参数里取第一个能识别的路径字符串。 */
+function extractWritePath(args: unknown): string | null {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const record = args as Record<string, unknown>;
+  for (const key of WRITE_PATH_KEYS) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
 }
 
 /**
@@ -525,6 +644,90 @@ function classifyDestructiveGit(
     }
   }
   return null;
+}
+
+/**
+ * repo 档合并子会话的「任务书硬边界」git 规则（仅 `repoWorkspace` 生效）。
+ *
+ * {@link classifyDestructiveGit} 管的是「丢用户未提交文件」，这里管的是
+ * 「越过合并任务书写死的边界」：push / rebase / 删分支 / 切分支 / stash
+ * 都是不可逆或会脱离合并现场的动作 —— 它们一旦执行，宿主就再也收不回
+ * 结果（推送到远端、改写历史、丢掉来源分支、藏起用户改动）。预检帧据此
+ * 终止整个子会话。
+ *
+ * 另一类 `git add -A` / `git commit -a` 会把用户**其它**未提交改动卷进
+ * 合并提交：后果严重但可由用户恢复，且这类命令常出现在冲突解决中途 ——
+ * 终止会话会把仓库留在 MERGE_HEAD 中间态（任务书明令禁止）。因此按
+ * `tool` 档处理：审批路径拒掉单次调用，预检路径刻意不终止（见
+ * MERGE_STAGE_GIT_REASON 的说明）。
+ *
+ * worktree 档完全不受这些规则约束：那些子会话本就被允许 push / 建 PR。
+ */
+function classifyMergeBoundaryGit(
+  segments: string[][],
+  ctx: ChildShellGuardContext,
+): ChildShellGuardResult | null {
+  if (!ctx.repoWorkspace) return null;
+  for (const tokens of segments) {
+    const invocation = findGitInvocation(tokens);
+    if (!invocation) continue;
+    const { subcommand, args } = invocation;
+    if (subcommand === "push" || subcommand === "rebase" || subcommand === "stash") {
+      return { decision: "deny", reason: MERGE_BOUNDARY_GIT_REASON, severity: "session" };
+    }
+    if (deletesBranch(subcommand, args) || switchesBranch(subcommand, args)) {
+      return { decision: "deny", reason: MERGE_BOUNDARY_GIT_REASON, severity: "session" };
+    }
+    if (stagesAllChanges(subcommand, args)) {
+      return { decision: "deny", reason: MERGE_STAGE_GIT_REASON, severity: "tool" };
+    }
+  }
+  return null;
+}
+
+/** `git branch -d/-D/--delete`（删分支会丢掉来源子会话的工作）。 */
+function deletesBranch(subcommand: string, args: readonly string[]): boolean {
+  if (subcommand !== "branch") return false;
+  return args.some((arg) => {
+    const lower = arg.toLowerCase();
+    return (
+      lower === "-d" || lower === "--delete" || shortFlagBundleIncludes(lower, "d")
+    );
+  });
+}
+
+/**
+ * `git checkout <分支>` / `git switch`（切分支会离开合并现场）。
+ *
+ * 刻意放行 `git checkout -b/-B/--orphan`（建分支而非切分支），与既有
+ * worktree 档 allowCase 一致；`git checkout -- .` / `-f` 已由破坏性规则先拦，
+ * 这里不再重复判定（返回 false 只是让破坏性 reason 保留）。
+ */
+function switchesBranch(subcommand: string, args: readonly string[]): boolean {
+  if (subcommand === "switch") return true;
+  if (subcommand !== "checkout") return false;
+  const lower = args.map((arg) => arg.toLowerCase());
+  if (lower.some((arg) => arg === "-b" || arg === "-B" || arg === "--orphan")) return false;
+  if (lower.includes("--")) return false;
+  return lower.some((arg) => !arg.startsWith("-") && arg !== "." && arg !== "./" && arg !== ".\\");
+}
+
+/** `git add -A` / `git add .` / `git commit -a`（把用户其它改动卷进合并）。 */
+function stagesAllChanges(subcommand: string, args: readonly string[]): boolean {
+  const lower = args.map((arg) => arg.toLowerCase());
+  if (subcommand === "add") {
+    return (
+      lower.some((arg) => arg === "-a" || arg === "--all") ||
+      lower.some((arg) => arg === "." || arg === "./" || arg === ".\\")
+    );
+  }
+  if (subcommand === "commit") {
+    return (
+      lower.includes("--all") ||
+      lower.some((arg) => shortFlagBundleIncludes(arg, "a"))
+    );
+  }
+  return false;
 }
 
 /**

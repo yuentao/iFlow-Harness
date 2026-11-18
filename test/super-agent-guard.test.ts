@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  classifyChildFileWrite,
   classifyChildShellCommand,
   classifyChildToolCall,
   extractShellCommand,
@@ -596,5 +597,179 @@ describe("子会话 shell 护栏 · 审批选项", () => {
 
   it("非 shell 工具没有 allow_always 时退到任意允许项", () => {
     expect(pickChildPermissionOption([options[0]!], false)?.optionId).toBe("once");
+  });
+});
+
+describe("子会话 shell 护栏 · repo 档合并子会话的任务书硬边界", () => {
+  function repoCtx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
+    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, ...overrides };
+  }
+
+  // 越界动作在「即将执行」的那一帧就终止整个合并子会话 —— 推送 / 改写历史
+  // / 删分支 / 切分支 / stash 都是不可逆或会脱离合并现场的。
+  const sessionDenyCases: Array<{ name: string; command: string }> = [
+    { name: "git push", command: "git push" },
+    { name: "git push origin main", command: "git push origin main" },
+    { name: "git rebase", command: "git rebase" },
+    { name: "git rebase -i HEAD~3", command: "git rebase -i HEAD~3" },
+    { name: "git branch -d 来源分支", command: "git branch -d iflow/super/fix-login-abcd1234" },
+    { name: "git branch -D 来源分支", command: "git branch -D iflow/super/fix-login-abcd1234" },
+    { name: "git checkout 切到别的分支", command: "git checkout main" },
+    { name: "git switch 切分支", command: "git switch main" },
+    { name: "git stash", command: "git stash" },
+    { name: "git stash pop", command: "git stash pop" },
+    { name: "cmd /c 包装的 git push", command: 'cmd /c "git push origin main"' },
+    { name: "git -C 全局选项后的 push", command: `git -C "${REPO}" push` },
+  ];
+
+  for (const testCase of sessionDenyCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, repoCtx());
+      expect(result.decision).toBe("deny");
+      expect(result.severity).toBe("session");
+      expect(result.reason).toContain("merge-only boundary");
+    });
+  }
+
+  // 会把用户其它改动卷进合并提交的命令按 tool 档处理：审批路径拒单次，
+  // 预检路径刻意不终止（否则把仓库留在 MERGE_HEAD 中间态）。
+  const toolDenyCases: Array<{ name: string; command: string }> = [
+    { name: "git add -A", command: "git add -A" },
+    { name: "git add .", command: "git add ." },
+    { name: "git add --all", command: "git add --all" },
+    { name: "git commit -a", command: "git commit -a" },
+    { name: "git commit -am", command: 'git commit -am "merge"' },
+  ];
+
+  for (const testCase of toolDenyCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, repoCtx());
+      expect(result.decision).toBe("deny");
+      expect(result.severity).toBe("tool");
+      expect(result.reason).toContain("stage the user's unrelated uncommitted changes");
+    });
+  }
+
+  // 正常合并的每一步都必须保持放行 —— 这是加固不能碰的红线。
+  const allowCases: Array<{ name: string; command: string }> = [
+    { name: "git status", command: "git status" },
+    { name: "git merge --no-ff <分支>", command: "git merge --no-ff iflow/super/fix-login-abcd1234" },
+    { name: "git merge --abort（安全阀）", command: "git merge --abort" },
+    { name: "git log --oneline -3", command: "git log --oneline -3" },
+    { name: "git diff", command: "git diff" },
+    { name: "git add 单个冲突文件", command: "git add src/auth.ts" },
+    { name: "git commit（无 -a）", command: 'git commit -m "merge branch"' },
+    { name: "git branch（只读列举）", command: "git branch" },
+    { name: "git checkout -b（建分支而非切分支）", command: "git checkout -b feature/x" },
+    { name: "git restore --staged", command: "git restore --staged a.txt" },
+  ];
+
+  for (const testCase of allowCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, repoCtx());
+      expect(result.decision).toBe("allow");
+    });
+  }
+
+  it("worktree 档完全不受合并边界约束（那些子会话允许 push / 建 PR）", () => {
+    for (const command of [
+      "git push",
+      "git rebase",
+      "git branch -D feature/x",
+      "git checkout main",
+      "git add -A",
+    ]) {
+      expect(classifyChildShellCommand(command, ctx()).decision).toBe("allow");
+    }
+  });
+
+  it("预检帧上的 push 同样在 repo 档被拦下", () => {
+    const verdict = classifyChildToolCall(
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "run_shell_command",
+        kind: "execute",
+        status: "in_progress",
+        title: "git push origin main",
+        args: { command: "git push origin main" },
+      },
+      repoCtx(),
+    );
+    expect(verdict?.decision).toBe("deny");
+    expect(verdict?.severity).toBe("session");
+  });
+});
+
+describe("子会话写工具护栏 · repo 档受保护路径预检", () => {
+  function repoCtx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
+    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, ...overrides };
+  }
+
+  function writeFrame(path: string, toolName = "write_file") {
+    return {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      toolName,
+      kind: toolName === "read_file" ? "read" : "edit",
+      status: "in_progress",
+      args: { file_path: path, content: "// changed" },
+    };
+  }
+
+  const protectedCases: Array<{ name: string; path: string; tool?: string }> = [
+    { name: "改写 .git/config", path: `${REPO}\\.git\\config` },
+    { name: "改写 .git/hooks/pre-push", path: `${REPO}/.git/hooks/pre-push` },
+    { name: "改写 .git/MERGE_HEAD", path: `${REPO}\\.git\\MERGE_HEAD` },
+    { name: "改写宿主子会话元数据", path: `${REPO}\\.iflow\\super\\worktrees\\x\\child.txt` },
+    { name: "相对路径指向 .git", path: ".git/config" },
+    { name: "replace 工具改写 .git", path: `${REPO}\\.git\\config`, tool: "replace" },
+    { name: "edit_block 工具改写宿主元数据", path: `${REPO}\\.iflow\\super\\archive.json`, tool: "edit_block" },
+  ];
+
+  for (const testCase of protectedCases) {
+    it(testCase.name, () => {
+      const verdict = classifyChildFileWrite(
+        writeFrame(testCase.path, testCase.tool),
+        repoCtx(),
+      );
+      expect(verdict?.decision).toBe("deny");
+      expect(verdict?.severity).toBe("session");
+      expect(verdict?.reason).toContain("protected repository metadata");
+    });
+  }
+
+  const allowedCases: Array<{ name: string; path: string }> = [
+    { name: "普通冲突源文件", path: `${REPO}\\src\\auth.ts` },
+    { name: ".gitignore 不是 .git 目录内文件", path: `${REPO}\\.gitignore` },
+    { name: ".github 工作流不是 .git 目录内文件", path: `${REPO}\\.github\\workflows\\ci.yml` },
+    { name: "兄弟仓库的 .git 不在主仓内", path: "J:\\git\\proj2\\.git\\config" },
+  ];
+
+  for (const testCase of allowedCases) {
+    it(testCase.name, () => {
+      expect(classifyChildFileWrite(writeFrame(testCase.path), repoCtx())).toBeNull();
+    });
+  }
+
+  it("非 repo 档不受此检查约束", () => {
+    expect(
+      classifyChildFileWrite(writeFrame(`${REPO}\\.git\\config`), ctx()),
+    ).toBeNull();
+  });
+
+  it("非写工具 / 非即将执行帧 / 取不到路径都不猜（放行）", () => {
+    expect(
+      classifyChildFileWrite(writeFrame(`${REPO}\\.git\\config`, "read_file"), repoCtx()),
+    ).toBeNull();
+    expect(
+      classifyChildFileWrite(
+        { ...writeFrame(`${REPO}\\.git\\config`), status: "completed" },
+        repoCtx(),
+      ),
+    ).toBeNull();
+    expect(
+      classifyChildFileWrite({ ...writeFrame(`${REPO}\\.git\\config`), args: {} }, repoCtx()),
+    ).toBeNull();
   });
 });

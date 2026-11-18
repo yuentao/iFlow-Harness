@@ -1186,6 +1186,11 @@ describe("super agent · 合并子会话（主仓工作区档）", () => {
     // CLI 侧 isPathWithinWorkspace 与宿主 resolveAgentPath 同源：主仓根必须
     // 显式交给 CLI，否则它读不到主仓文件。
     expect(client.includeDirectories).toEqual([repo]);
+    // 合并子会话必须带上机械工具黑名单（嵌套派发工具被剔除），否则任务书
+    // 里的硬边界就只是提示词约束。
+    expect(client.newSessionRequests[0]?.settings).toEqual({
+      disallowed_tools: ["task", "super-agent"],
+    });
 
     // 隔离档位是 repo：没有自己的分支，也没有 worktree。
     const mergeSession = harness.sessions.find((s) => s.id === merge!.id);
