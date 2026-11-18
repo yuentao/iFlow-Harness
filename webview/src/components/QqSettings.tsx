@@ -145,6 +145,14 @@ function Row({
  * 的其它条目与脱敏 id）恰恰是判断依据，弹窗会把这份上下文挡掉；添加也
  * 天然落在表格末尾，两种操作共用一套心智模型。
  *
+ * 编辑态的视觉统一（2026-11 再优化，用户反馈「点编辑后很割裂」）：
+ *  - 输入框用 kit 的 `dense` 变体：13px 字、24px 高，与表格正文和右侧 24px
+ *    图标按钮同一档，不再是一个 14px/35px 的表单盒砸进扁平表格；
+ *  - 备注槽固定 `min-h-6`：展示态纯文本与编辑态输入都占 24px，切换不再
+ *    把整行撑高、推动下方内容（布局跳动）；
+ *  - 编辑 / 添加行整行铺一层 `bg-accent/40`，图标按钮 `hoverSurface="row"`
+ *    顺势借色，让「正在编辑的这一行」读成一个连续的表面而非散落的控件。
+ *
  * 删除走 {@link ConfirmDialog}：条目一旦删除就找不回完整 openid（脱敏显示
  * 无法反推），误点的代价是重新找对方要 id，值得一次确认。
  */
@@ -341,30 +349,40 @@ function AccessList({
               const masked = maskQqOpenId(entry.openid);
               const displayNote = entry.note?.trim() ?? "";
               return (
-                <tr key={entry.openid} className="border-b border-border/40 last:border-b-0">
+                <tr
+                  className={`border-b border-border/40 last:border-b-0${editingThis ? " bg-accent/40" : ""}`}
+                >
                   {/* 条目列：上行备注（空备注用低调占位，最多两行），
                       下行脱敏 id。脱敏串**绝不 truncate**（截掉后 4 位就等于
-                      不可辨识）：宽度不够时靠 `break-all` 换行，始终完整可见。 */}
-                  <td className="min-w-0 py-1.5 pr-2 align-top">
+                      不可辨识）：宽度不够时靠 `break-all` 换行，始终完整可见。
+
+                      备注槽固定占一行高度（min-h-6）：展示态纯文本与编辑态
+                      dense 输入框都落在这 24px 里，点击编辑不再把整行
+                      撑高 16px 推动下方内容；字号也统一到 13px（text-ui-label），
+                      不再出现 14px 表单框混进 13px 表格的割裂感。 */}
+                  <td className="min-w-0 py-1.5 pr-2 align-middle">
                     <div className="flex min-w-0 flex-col gap-0.5">
-                      {editingThis ? (
-                        <TextInput
-                          autoFocus
-                          className="w-full min-w-0"
-                          value={noteDraft}
-                          placeholder={t("备注")}
-                          aria-label={t("备注 {0}", name)}
-                          onChange={(event) => setNoteDraft(event.target.value)}
-                          onKeyDown={editorKeyDown(commitEdit)}
-                        />
-                      ) : (
-                        <span
-                          className={`line-clamp-2 min-w-0 break-words${displayNote ? " text-foreground" : " text-muted-foreground/70"}`}
-                          title={displayNote || t("未命名")}
-                        >
-                          {displayNote || t("未命名")}
-                        </span>
-                      )}
+                      <div className="flex min-h-6 min-w-0 items-center">
+                        {editingThis ? (
+                          <TextInput
+                            autoFocus
+                            dense
+                            className="w-full min-w-0"
+                            value={noteDraft}
+                            placeholder={t("备注")}
+                            aria-label={t("备注 {0}", name)}
+                            onChange={(event) => setNoteDraft(event.target.value)}
+                            onKeyDown={editorKeyDown(commitEdit)}
+                          />
+                        ) : (
+                          <span
+                            className={`line-clamp-2 min-w-0 break-words${displayNote ? " text-foreground" : " text-muted-foreground/70"}`}
+                            title={displayNote || t("未命名")}
+                          >
+                            {displayNote || t("未命名")}
+                          </span>
+                        )}
+                      </div>
                       {/* 脱敏值只读，任何状态下都不出现完整 id。 */}
                       <span
                         className="block min-w-0 whitespace-normal break-all font-mono text-ui-caption text-muted-foreground"
@@ -382,12 +400,14 @@ function AccessList({
                           <IconButton
                             size="sm"
                             tone="primary"
+                            hoverSurface="row"
                             icon={<Check className={ICON_INLINE} />}
                             label={t("保存")}
                             onClick={commitEdit}
                           />
                           <IconButton
                             size="sm"
+                            hoverSurface="row"
                             icon={<X className={ICON_INLINE} />}
                             label={t("取消")}
                             onClick={cancelEditing}
@@ -416,12 +436,15 @@ function AccessList({
               );
             })}
             {adding && (
-              <tr className="border-b border-border/40 last:border-b-0">
-                {/* 添加行与行内编辑同构：标识输入占满条目列，可选备注在其下。 */}
-                <td className="min-w-0 py-1.5 pr-2 align-top">
+              <tr className="border-b border-border/40 bg-accent/40 last:border-b-0">
+                {/* 添加行与行内编辑同构：标识输入占满条目列，可选备注在其下。
+                    两个字段都用 dense 紧凑输入框，与表格文字同一档，
+                    gap-1 保持上下两行呼吸感又不把行撑成表单块。 */}
+                <td className="min-w-0 py-1.5 pr-2 align-middle">
                   <div className="flex min-w-0 flex-col gap-1">
                     <TextInput
                       autoFocus
+                      dense
                       mono
                       className="w-full min-w-0"
                       value={idDraft}
@@ -434,6 +457,7 @@ function AccessList({
                       onKeyDown={editorKeyDown(commitAdd)}
                     />
                     <TextInput
+                      dense
                       className="w-full min-w-0"
                       value={noteDraft}
                       placeholder={t("备注（可选）")}
@@ -448,12 +472,14 @@ function AccessList({
                     <IconButton
                       size="sm"
                       tone="primary"
+                      hoverSurface="row"
                       icon={<Check className={ICON_INLINE} />}
                       label={t("确认添加")}
                       onClick={commitAdd}
                     />
                     <IconButton
                       size="sm"
+                      hoverSurface="row"
                       icon={<X className={ICON_INLINE} />}
                       label={t("取消添加")}
                       onClick={cancelEditing}

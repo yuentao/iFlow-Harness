@@ -344,6 +344,36 @@ describe("QqSettings", () => {
     expect(masked.textContent).toBe("D754********8D11");
   });
 
+  it("编辑态视觉统一：紧凑输入框 + 固定 24px 备注槽 + 整行表面色，不再割裂/跳动", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
+    const row = () => accessTable("允许的用户").querySelector<HTMLElement>("tbody tr")!;
+
+    // 展示态：备注包在固定高度槽里，行本身无编辑表面色。
+    const noteSlot = row().querySelector<HTMLElement>("td div > div")!;
+    expect(noteSlot.className).toContain("min-h-6");
+    expect(row().className).not.toContain("bg-accent");
+
+    clickEdit("允许的用户", "同事");
+
+    // 输入框用 kit 的 size="sm"：13px 字（text-ui-label），24px 高（h-6），
+    // 不再是 14px / 35px 的表单盒砸进 13px 表格。
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='备注 同事']")!;
+    expect(input.className).toContain("text-ui-label");
+    expect(input.className).not.toContain("text-ui-body");
+    expect(input.className).toContain("h-6");
+    // 展示态与编辑态共用同一个 min-h-6 槽：切换不撑高整行（布局不跳动）。
+    expect(row().querySelector<HTMLElement>("td div > div")!.className).toContain("min-h-6");
+
+    // 编辑行整行铺一层浅色表面，让「这一行正在编辑」读成连续表面。
+    expect(row().className).toContain("bg-accent/40");
+    // 行内动作按钮把 hover 底色让给行，不再叠出第三种色调。
+    for (const label of ["保存", "取消"]) {
+      const btn = row().querySelector<HTMLButtonElement>(`button[aria-label='${label}']`)!;
+      expect(btn.className).not.toContain("hover:bg-accent");
+    }
+  });
+
   it("分组标题与提示上下排版：标题独占一行，提示在下一行且不被截断", () => {
     render(<Harness />);
     const heading = [...container.querySelectorAll("h3")].find(
