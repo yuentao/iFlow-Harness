@@ -315,4 +315,47 @@ describe("super agent · 审批策略（编排接线）", () => {
       disallowed_tools: ["task", "read_file", "write_file"],
     });
   });
+
+  const planExit = (): { sessionId: string; plan: string } => ({
+    sessionId: "sub-1",
+    plan: "1. 改代码 2. 跑测试",
+  });
+
+  it("遗留 plan/exit：auto 快速放行", async () => {
+    const { client } = await spawnRunning({ approval: "auto" });
+    expect(await client.callbacks.onExitPlanMode?.(planExit())).toEqual({ approved: true });
+  });
+
+  it("遗留 plan/exit：deny 一律拒绝", async () => {
+    const { client } = await spawnRunning({ approval: "deny" });
+    const response = await client.callbacks.onExitPlanMode?.(planExit());
+    expect(response?.approved).toBe(false);
+    expect(response?.reason).toBeTruthy();
+  });
+
+  it("遗留 plan/exit：supervised 走策略回调，不成为策略后门", async () => {
+    let seen: SuperPermissionRequest | undefined;
+    const allowing = await spawnRunning({
+      approval: "supervised",
+      onPermissionRequest: async (request) => {
+        seen = request;
+        return "allow_once";
+      },
+    });
+    expect(await allowing.client.callbacks.onExitPlanMode?.(planExit())).toEqual({ approved: true });
+    expect(seen?.summary).toContain("Plan");
+    expect(seen?.sessionId).toBe("sub-1");
+
+    const denying = await spawnRunning({
+      approval: "supervised",
+      onPermissionRequest: async () => "deny",
+    });
+    const denied = await denying.client.callbacks.onExitPlanMode?.(planExit());
+    expect(denied?.approved).toBe(false);
+    expect(denied?.reason).toBeTruthy();
+
+    // 回调缺失安全默认 = 拒绝。
+    const missing = await spawnRunning({ approval: "supervised" });
+    expect((await missing.client.callbacks.onExitPlanMode?.(planExit()))?.approved).toBe(false);
+  });
 });
