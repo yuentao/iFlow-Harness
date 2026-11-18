@@ -22,7 +22,7 @@ import {
   type QqAllowEntry,
   type QqAllowEntryInput,
 } from "./qq-access.js";
-import type { SuperActionReceipt, SuperDirectiveAction, SuperSessionUi } from "./super-agent.js";
+import type { SuperActionReceipt, SuperDirectiveAction, SuperIntegrationMode, SuperSessionUi } from "./super-agent.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
@@ -1640,6 +1640,12 @@ export interface HostSettingsUi {
   /** Simultaneously running child sessions (`iflow.superAgent.maxConcurrent`).
    * Extra dispatches queue in FIFO order instead of being rejected. */
   superAgentMaxConcurrent: number;
+  /** How a finished child session's branch is integrated
+   * (`iflow.superAgent.integration`). */
+  superAgentIntegration: SuperIntegrationMode;
+  /** Max kept worktree directories of finished child sessions
+   * (`iflow.superAgent.maxWorktrees`); 0 = unlimited. */
+  superAgentMaxWorktrees: number;
 }
 
 /**

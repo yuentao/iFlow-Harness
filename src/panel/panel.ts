@@ -98,6 +98,7 @@ import {
   type SuperActionReceipt,
   type SuperAttachment,
   type SuperDirectiveAction,
+  type SuperIntegrationMode,
   type SuperReportEntry,
   type SuperSessionUi,
   type SuperStatus,
@@ -827,6 +828,12 @@ function asCliLanguage(value: unknown): (typeof CLI_LANGUAGES)[number] {
   return CLI_LANGUAGES.includes(value as (typeof CLI_LANGUAGES)[number])
     ? (value as (typeof CLI_LANGUAGES)[number])
     : "";
+}
+
+/** `iflow.superAgent.integration` values — stale settings.json values fall
+ * back to `merge`, matching the runtime guard in `integrationMode()`. */
+function asSuperIntegrationMode(value: unknown): SuperIntegrationMode {
+  return value === "pr" || value === "manual" ? value : "merge";
 }
 
 /** Cap on the per-workspace recent-session list. */
@@ -2639,6 +2646,12 @@ export class ChatPanel implements vscode.Disposable {
         if (msg.superAgentMaxConcurrent !== undefined && Number.isFinite(msg.superAgentMaxConcurrent)) {
           writes.push(["superAgent.maxConcurrent", clampMaxConcurrentSuperSessions(msg.superAgentMaxConcurrent)]);
         }
+        if (msg.superAgentIntegration !== undefined) {
+          writes.push(["superAgent.integration", asSuperIntegrationMode(msg.superAgentIntegration)]);
+        }
+        if (msg.superAgentMaxWorktrees !== undefined && Number.isFinite(msg.superAgentMaxWorktrees)) {
+          writes.push(["superAgent.maxWorktrees", clampMaxSuperWorktrees(msg.superAgentMaxWorktrees)]);
+        }
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
         // 调高上限后排队的子会话立刻有机会起跑；调低不影响已在运行的会话，
         // 但 pump 本身是幂等且只按新上限放行，所以两种情况都能直接调。
@@ -2921,6 +2934,10 @@ export class ChatPanel implements vscode.Disposable {
       // 子会话并发上限：手改 settings.json 可能留下 0 / Infinity，归一化后再给 UI。
       superAgentMaxConcurrent: clampMaxConcurrentSuperSessions(
         config.get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
+      ),
+      superAgentIntegration: asSuperIntegrationMode(config.get<string>("superAgent.integration", "merge")),
+      superAgentMaxWorktrees: clampMaxSuperWorktrees(
+        config.get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
       ),
     });
   }

@@ -612,6 +612,28 @@ function ChatSection() {
           unit={t("个")}
           onCommit={(superAgentMaxConcurrent) => update({ superAgentMaxConcurrent })}
         />
+        <ChoiceRow
+          label={t("集成模式")}
+          description={t("子会话完成后，把它的改动并回当前分支的方式。")}
+          detail={t("自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的子会话生效。")}
+          value={settings.superAgentIntegration}
+          options={[
+            { value: "merge", label: t("自动合并") },
+            { value: "pr", label: t("创建 PR") },
+            { value: "manual", label: t("手动") },
+          ]}
+          onChange={(superAgentIntegration) => update({ superAgentIntegration })}
+        />
+        <NumberRow
+          label={t("工作目录上限")}
+          description={t("磁盘上最多保留几个已结束子会话的工作目录。")}
+          detail={t("默认 10，可设 0–100；填 0 表示不限。超出时按修改时间从旧到新回收，分支一律保留，有未提交改动的目录不会被回收。")}
+          value={settings.superAgentMaxWorktrees}
+          min={0}
+          max={100}
+          unit={t("个")}
+          onCommit={(superAgentMaxWorktrees) => update({ superAgentMaxWorktrees })}
+        />
       </SettingsGroup>
       <SettingsGroup title={t("回合结束后")} hint={t("每轮结束可能多花一次模型调用")}>
         <div>

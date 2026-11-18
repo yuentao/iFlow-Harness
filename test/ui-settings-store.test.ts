@@ -43,6 +43,8 @@ const baseSettings: HostSettingsUi = {
   costTable: [],
   thinkingModelRules: [],
   superAgentMaxConcurrent: 5,
+  superAgentIntegration: "merge",
+  superAgentMaxWorktrees: 10,
 };
 
 beforeEach(() => {

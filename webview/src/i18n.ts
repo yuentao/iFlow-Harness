@@ -640,6 +640,17 @@ const en: Record<string, string> = {
   "会话": "Session",
   "并发上限": "Concurrency limit",
   "个": "sessions",
+  "集成模式": "Integration mode",
+  "子会话完成后，把它的改动并回当前分支的方式。": "How a finished child session's changes are merged back into the current branch.",
+  "自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的子会话生效。":
+    "Auto-merge: merge into the current branch (conflicts are previewed first and your uncommitted changes are protected); Open PR: push the branch and open a pull request (needs the gh CLI); Manual: just keep the branch for you to merge from the board. Takes effect on the next child session that finishes.",
+  "自动合并": "Auto-merge",
+  "创建 PR": "Open PR",
+  "手动": "Manual",
+  "工作目录上限": "Worktree limit",
+  "磁盘上最多保留几个已结束子会话的工作目录。": "How many finished child-session worktrees to keep on disk at most.",
+  "默认 10，可设 0–100；填 0 表示不限。超出时按修改时间从旧到新回收，分支一律保留，有未提交改动的目录不会被回收。":
+    "Defaults to 10, range 0–100; 0 means no limit. When exceeded, the oldest are removed first by modification time; branches are always kept and worktrees with uncommitted changes are never removed.",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
   "调整面板整体字号。": "Adjust the panel font size.",
   "审批/提问阻塞时，或整轮完成时发送。":

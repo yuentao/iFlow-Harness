@@ -106,6 +106,8 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   costTable: [],
   thinkingModelRules: [],
   superAgentMaxConcurrent: 5,
+  superAgentIntegration: "merge",
+  superAgentMaxWorktrees: 10,
 };
 
 // --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------
