@@ -22,7 +22,6 @@ import { copyText } from "./components/Markdown";
 import { Button, Chip, ConfirmDialog, Dropdown, ICON_INLINE, ICON_TOOLBAR, IconButton, SearchInput, TextInput } from "./components/ui";
 import { MessageList } from "./components/MessageList";
 import { SuperAgentBoard } from "./components/SuperAgentBoard";
-import { QqTasksPanel } from "./components/QqTaskList";
 import { Composer } from "./components/Composer";
 import { PendingCards } from "./components/PendingCards";
 import { ProfileSwitchCard } from "./components/ProfileSwitchCard";
@@ -971,10 +970,6 @@ export function App() {
           </div>
         </div>
       </header>
-
-      {/* QQ 远程任务区：与子会话看板相邻，只在有任务时出现（空列表渲染 null），
-          动作统一转成 qqTaskAction 交给宿主。 */}
-      <QqTasksPanel />
 
       {/* UI-audit 4.9: persistent notification tier — one inline banner row
           under the header for everything that needs handling (errors, missing

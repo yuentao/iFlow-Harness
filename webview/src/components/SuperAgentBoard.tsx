@@ -28,6 +28,8 @@ import {
   X,
 } from "lucide-react";
 import type { Block } from "../../../shared/messages";
+import { findQqTaskForSuperSession } from "../../../shared/qq-task";
+import { maskQqOpenId } from "../../../shared/qq-access";
 import type {
   SuperIntegrationState,
   SuperIsolation,
@@ -142,6 +144,29 @@ function statusVisual(session: SuperSessionUi): {
   const visual =
     session.queued && session.status === "preparing" ? QUEUED_VISUAL : STATUS_VISUAL[session.status];
   return { tone: visual.tone, label: statusLabel(session), icon: visual.icon };
+}
+
+/**
+ * QQ 远程任务的元信息 tag，挂在对应子会话 title 后面。
+ *
+ * 数据来自 store 的 `qqTasks` 投影，靠 `findQqTaskForSuperSession` 关联到当前
+ * 子会话。只有「远程发起的子会话」才渲染：关联不到（普通本地子会话、或投影
+ * 还没到）就返回 null，绝不留空壳。渠道 = 私聊 / 群聊，发起人 = 脱敏 openid。
+ */
+function QqTaskTags({ session }: { session: SuperSessionUi }) {
+  const tasks = useChat((s) => s.state?.qqTasks);
+  const qqTask = tasks ? findQqTaskForSuperSession(tasks, session) : undefined;
+  if (!qqTask) return null;
+  return (
+    <>
+      <Chip tone="muted" className="shrink-0">
+        {t("渠道：{0}", qqTask.chatType === "private" ? t("私聊") : t("群聊"))}
+      </Chip>
+      <Chip tone="muted" className="shrink-0">
+        {t("发起人：{0}", maskQqOpenId(qqTask.senderId))}
+      </Chip>
+    </>
+  );
 }
 
 /** Integration result → text tone. Rendered as inline text rather than a
@@ -1173,6 +1198,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   >
                     {session.title}
                   </span>
+                  <QqTaskTags session={session} />
                 </div>
                 <SuperPendingArea session={session} />
               </div>
@@ -1600,6 +1626,7 @@ function SuperSessionRow({
           <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
             {session.title}
           </span>
+          <QqTaskTags session={session} />
           <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground">
             {formatElapsed(ended - started)}
           </span>
