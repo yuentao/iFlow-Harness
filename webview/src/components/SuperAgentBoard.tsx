@@ -1525,6 +1525,27 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   );
 }
 
+/** 卡片短描述的单行上限（含省略号）。看板行只有几十像素高，绝不铺开长文本。 */
+const CARD_DESCRIPTION_MAX = 96;
+
+/**
+ * 子会话卡片上的短任务描述。
+ *
+ * 用户要的是「委派时那种一句话短描述」，而不是实时 agent 输出的长文本。
+ * 委派记录里 `task` 是完整任务书（可能是文字墙），`title` 是它的一句话概括；
+ * 任务书的首句有效正文正是委派时写下的短描述。取它、单行截断，避免在卡片上
+ * 铺开 `progress`（助手输出尾快照）那种几十行日志。完整实时进度仍可从行内
+ * 「查看实时进度」按钮打开独立弹窗查看。
+ */
+export function shortSuperSessionDescription(session: SuperSessionUi): string {
+  const lines = (session.task ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const first = lines
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !/^(#{1,6}\s|【[^】]+】$)/.test(line));
+  const text = first || session.title || "";
+  return text.length > CARD_DESCRIPTION_MAX ? `${text.slice(0, CARD_DESCRIPTION_MAX - 1)}…` : text;
+}
+
 /**
  * One child session row.
  *
@@ -1598,7 +1619,7 @@ function SuperSessionRow({
         icon: <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />,
       }
     : statusVisual(session);
-  const preview = session.progress ?? session.summary;
+  const description = shortSuperSessionDescription(session);
   // A restored child ran in a PREVIOUS extension lifetime: its CLI process
   // is gone, so there is no live transcript to show and nothing to retry.
   // What survives is the record — the branch and its worktree — so the merge
@@ -1710,9 +1731,9 @@ function SuperSessionRow({
           {/* 阶段轨只在展开后出现一次：折叠行只报状态，展开区不再重复状态 chip。 */}
           <SuperTimeline session={session} labeled />
 
-          {preview && (
-            <div className="whitespace-pre-wrap break-words text-ui-caption text-muted-foreground">
-              {preview}
+          {description && (
+            <div className="min-w-0 truncate text-ui-caption text-muted-foreground" title={description}>
+              {description}
             </div>
           )}
 
