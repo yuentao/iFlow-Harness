@@ -634,6 +634,13 @@ function ChatSection() {
           unit={t("个")}
           onCommit={(superAgentMaxWorktrees) => update({ superAgentMaxWorktrees })}
         />
+        <ToggleRow
+          label={t("保留工作目录")}
+          description={t("子会话完成后，是否保留它的工作目录。")}
+          detail={t("默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的子会话从不回收。开启后工作目录会留在磁盘上，可随时手动清理。")}
+          checked={settings.superAgentKeepWorktree}
+          onChange={(superAgentKeepWorktree) => update({ superAgentKeepWorktree })}
+        />
       </SettingsGroup>
       <SettingsGroup title={t("回合结束后")} hint={t("每轮结束可能多花一次模型调用")}>
         <div>

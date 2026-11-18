@@ -45,6 +45,7 @@ const baseSettings: HostSettingsUi = {
   superAgentMaxConcurrent: 5,
   superAgentIntegration: "merge",
   superAgentMaxWorktrees: 10,
+  superAgentKeepWorktree: false,
 };
 
 beforeEach(() => {
