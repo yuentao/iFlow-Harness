@@ -154,8 +154,15 @@ export class QqBotBindSession {
   private started = false;
   private stopped = false;
   private lastPhase: QrProgressPhase | null = null;
-  /** onQrDisplayed 可能在 start() 返回前同步触发，用这个槽接住渲染 Promise。 */
+  /**
+   * onQrDisplayed 可能在 start() 返回前同步触发，用这个槽接住渲染 Promise。
+   */
   private qrRender: Promise<void> | null = null;
+  /**
+   * 二维码代次：每次 onQrDisplayed / stop 都递增。渲染是异步的，慢渲染若晚于
+   * 新二维码或 stop 才 resolve，必须按代次作废，绝不发布旧二维码。
+   */
+  private qrGeneration = 0;
   private cbs: QrSessionCallbacks | null = null;
 
   constructor(private readonly deps: QqBotBindDeps) {}
@@ -228,6 +235,8 @@ export class QqBotBindSession {
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
+    // 代次递增：在飞的渲染 resolve 时会被识别为过期，不再发布二维码。
+    this.qrGeneration += 1;
     this.log("stop");
     this.controller.abort();
     this.cbs = null;
@@ -257,15 +266,17 @@ export class QqBotBindSession {
     if (this.stopped || !this.cbs) return;
     this.log("qrDisplayed");
     this.emitProgress("waiting_scan");
-    this.qrRender = this.renderAndPublish(url);
+    this.qrGeneration += 1;
+    this.qrRender = this.renderAndPublish(url, this.qrGeneration);
   }
 
-  private async renderAndPublish(url: string): Promise<void> {
+  private async renderAndPublish(url: string, generation: number): Promise<void> {
     try {
       const dataUrl = await this.deps.renderQr(url);
-      if (this.stopped || !this.cbs) return;
+      if (this.stopped || !this.cbs || generation !== this.qrGeneration) return;
       if (!isQrDataUrl(dataUrl)) {
         this.log("qrInvalid");
+        this.cbs.onFailure("二维码渲染结果非法（不是合法的 PNG data URL）");
         return;
       }
       const now = this.deps.now ?? Date.now;
@@ -274,7 +285,9 @@ export class QqBotBindSession {
       this.log("qrReady");
     } catch {
       this.log("qrRenderError");
-      if (!this.stopped && this.cbs) this.cbs.onFailure("二维码渲染失败");
+      if (!this.stopped && this.cbs && generation === this.qrGeneration) {
+        this.cbs.onFailure("二维码渲染失败");
+      }
     }
   }
 

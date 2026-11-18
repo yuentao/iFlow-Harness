@@ -41,8 +41,13 @@ export const POLL_BIND_RESULT_URL = "https://q.qq.com/lite/poll_bind_result";
 export const CONNECT_URL_BASE = "https://q.qq.com/qqbot/openclaw/connect.html";
 /** 默认 source 参数。 */
 export const DEFAULT_QQBOT_SOURCE = "iflow-harness";
-/** 单次 HTTP 请求默认超时。 */
+/** 单次 HTTP 请求默认超时（墙钟总时长，不是 socket 空闲时间）。 */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+/**
+ * 单次 HTTP 响应体上限（字节）：超限立即 destroy 连接并明确 reject，防止
+ * 服务端/代理无限 chunk 流把内存吃满。扫码协议响应只有几 KB，1MB 足够宽裕。
+ */
+export const DEFAULT_MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
 /** 轮询间隔默认 2s。 */
 export const DEFAULT_POLL_INTERVAL_MS = 2_000;
 /** 二维码展示有效期（仅作 expiresAt 展示提示，真实生命周期由 status 3 驱动）。 */
@@ -162,8 +167,21 @@ function toFiniteNumber(value: unknown): number | undefined {
 // 默认 IO 实现
 // ---------------------------------------------------------------------------
 
+/** createNodeHttp 的可注入依赖；生产不传参时用 node:https + 默认字节上限。 */
+export interface NodeQqBotHttpDeps {
+  /** 注入 request（测试用假实现），缺省 `https.request`。 */
+  request?: typeof https.request;
+  /** 响应体字节上限，缺省 {@link DEFAULT_MAX_RESPONSE_BYTES}。 */
+  maxResponseBytes?: number;
+}
+
 /** node:https 直连实现（禁全局 fetch，见文件头注释 / 陷阱 #2）。 */
-export function createNodeHttp(): QqBotHttp {
+export function createNodeHttp(deps: NodeQqBotHttpDeps = {}): QqBotHttp {
+  const requestFn = deps.request ?? https.request;
+  const maxResponseBytes =
+    typeof deps.maxResponseBytes === "number" && deps.maxResponseBytes > 0
+      ? deps.maxResponseBytes
+      : DEFAULT_MAX_RESPONSE_BYTES;
   return {
     post(url, body, timeoutMs) {
       return new Promise<unknown>((resolve, reject) => {
@@ -176,18 +194,30 @@ export function createNodeHttp(): QqBotHttp {
         }
         const payload = JSON.stringify(body);
         let settled = false;
+        let totalBytes = 0;
+        let overLimit = false;
+        let wallTimer: ReturnType<typeof setTimeout> | undefined;
+
+        const clearWallTimer = (): void => {
+          if (wallTimer !== undefined) {
+            clearTimeout(wallTimer);
+            wallTimer = undefined;
+          }
+        };
         const succeed = (value: unknown): void => {
           if (settled) return;
           settled = true;
+          clearWallTimer();
           resolve(value);
         };
         const fail = (err: Error): void => {
           if (settled) return;
           settled = true;
+          clearWallTimer();
           reject(err);
         };
 
-        const req = https.request(
+        const req = requestFn(
           target,
           {
             method: "POST",
@@ -200,9 +230,24 @@ export function createNodeHttp(): QqBotHttp {
           (res) => {
             const status = res.statusCode ?? 0;
             const chunks: Buffer[] = [];
-            res.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+            res.on("data", (chunk: Buffer) => {
+              if (overLimit) return;
+              totalBytes += chunk.length;
+              if (totalBytes > maxResponseBytes) {
+                overLimit = true;
+                fail(new Error(`QQBot response too large (limit ${maxResponseBytes} bytes)`));
+                try {
+                  req.destroy();
+                } catch {
+                  // destroy 失败不影响已 reject 的结果
+                }
+                return;
+              }
+              chunks.push(Buffer.from(chunk));
+            });
             res.on("error", (err: Error) => fail(new Error(`QQBot response failed: ${err.message}`)));
             res.on("end", () => {
+              if (overLimit) return;
               if (status !== 200) {
                 fail(new Error(`QQBot HTTP ${status}`));
                 return;
@@ -216,7 +261,18 @@ export function createNodeHttp(): QqBotHttp {
             });
           },
         );
-        req.setTimeout(timeoutMs, () => req.destroy(new Error(`QQBot request timed out after ${timeoutMs}ms`)));
+        // 墙钟总超时：req.setTimeout 只是 socket 空闲超时，服务端持续滴流即可
+        // 无限拖延；这里从发起请求起算，无论是否一直在收数据都按时失败。
+        wallTimer = setTimeout(() => {
+          wallTimer = undefined;
+          fail(new Error(`QQBot request timed out after ${timeoutMs}ms`));
+          try {
+            req.destroy();
+          } catch {
+            // destroy 失败不影响已 reject 的结果
+          }
+        }, timeoutMs);
+        wallTimer.unref?.();
         req.on("error", (err: Error) => fail(new Error(`QQBot request failed: ${err.message}`)));
         req.end(payload);
       });
@@ -405,7 +461,9 @@ export class QqBotQrProtocol {
 
     if (!isQrDataUrl(dataUrl)) {
       this.log("qrInvalid");
-      return taskId;
+      // 绝不能只记日志就继续轮询：那样用户永远看不到二维码，只会空等超时。
+      // 抛错让 start() 明确 onFailure；过期刷新路径会把它计入连续失败。
+      throw new Error("二维码渲染结果非法（不是合法的 PNG data URL）");
     }
     const expiresAt = this.now() + this.qrTtlMs;
     cbs.onQr(dataUrl, expiresAt);

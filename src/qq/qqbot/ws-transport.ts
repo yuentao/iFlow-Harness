@@ -29,11 +29,24 @@ export interface NodeQqBotTransportDeps {
   WebSocketImpl?: unknown;
   /** post 超时（毫秒）；缺省 15000，<=0 时取缺省。 */
   timeoutMs?: number;
+  /** HTTP 响应体上限（字节）；缺省 1MB。 */
+  maxResponseBytes?: number;
+  /** 早到帧缓冲上限（条）；缺省 64。 */
+  maxPendingFrames?: number;
+  /** 诊断日志（缓冲溢出等告警）；缺省 console.warn（不进 NDJSON 协议通道）。 */
+  log?: (line: string) => void;
   /** 保留字段：与 adapter 工厂签名一致的注入时钟（transport 本身不读时间）。 */
   now?: () => number;
 }
 
 export const DEFAULT_QQBOT_HTTP_TIMEOUT_MS = 15_000;
+/** HTTP 响应体上限（字节）：超限 destroy 连接并明确 reject，防无限累积。 */
+export const DEFAULT_QQBOT_MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
+/**
+ * onMessage 注册前缓存的早到帧上限：超限丢弃最旧并告警，避免异常网关在
+ * 握手前灌入海量帧把内存吃满。正常握手只会收到 1~2 帧 HELLO/READY。
+ */
+export const DEFAULT_QQBOT_MAX_PENDING_FRAMES = 64;
 
 /**
  * OpenAPI 非 2xx 错误：携带 HTTP status 供适配器分类重试。
@@ -191,7 +204,11 @@ function normalizeFrame(data: unknown): unknown {
 }
 
 /** 把底层 ws 包成 M2 的 QqBotSocket；早到的帧先缓冲，等 onMessage 注册后补发。 */
-function wrapSocket(ws: WsLike): QqBotSocket {
+function wrapSocket(
+  ws: WsLike,
+  maxPendingFrames: number,
+  warn: (line: string) => void,
+): QqBotSocket {
   let handler: ((raw: unknown) => void) | undefined;
   const pending: unknown[] = [];
   let closeHandler: ((error?: unknown) => void) | undefined;
@@ -201,7 +218,14 @@ function wrapSocket(ws: WsLike): QqBotSocket {
   attach(ws, "message", (arg?: unknown) => {
     const raw = normalizeFrame(arg);
     if (handler) handler(raw);
-    else pending.push(raw);
+    else {
+      pending.push(raw);
+      if (pending.length > maxPendingFrames) {
+        // 有界缓冲：握手前被异常灌帧时丢弃最旧并告警，绝不无限增长。
+        pending.shift();
+        warn(`QQBot: early frame buffer overflow, dropped oldest (limit ${maxPendingFrames})`);
+      }
+    }
   });
 
   // 底层断开通知：ws 的 "close" 与 "error" 都可能是终态（网络断开时 ws 通常
@@ -242,6 +266,8 @@ function buildSocket(
   url: string,
   headers: Record<string, string>,
   timeoutMs: number,
+  maxPendingFrames: number,
+  warn: (line: string) => void,
 ): Promise<QqBotSocket> {
   let Ctor: WsCtor;
   try {
@@ -257,7 +283,7 @@ function buildSocket(
   }
 
   // 尽早挂 message，避免 open 与首个 Hello 同帧到达时丢帧。
-  const socket = wrapSocket(ws);
+  const socket = wrapSocket(ws, maxPendingFrames, warn);
   return new Promise<QqBotSocket>((resolve, reject) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -316,10 +342,19 @@ export function createNodeQqBotTransport(deps: NodeQqBotTransportDeps = {}): QqB
     typeof deps.timeoutMs === "number" && deps.timeoutMs > 0
       ? deps.timeoutMs
       : DEFAULT_QQBOT_HTTP_TIMEOUT_MS;
+  const maxResponseBytes =
+    typeof deps.maxResponseBytes === "number" && deps.maxResponseBytes > 0
+      ? deps.maxResponseBytes
+      : DEFAULT_QQBOT_MAX_RESPONSE_BYTES;
+  const maxPendingFrames =
+    typeof deps.maxPendingFrames === "number" && deps.maxPendingFrames > 0
+      ? deps.maxPendingFrames
+      : DEFAULT_QQBOT_MAX_PENDING_FRAMES;
+  const warn = deps.log ?? ((line: string) => console.warn(line));
 
   return {
     connect(url: string, headers: Record<string, string>): Promise<QqBotSocket> {
-      return buildSocket(injected, url, headers, timeoutMs);
+      return buildSocket(injected, url, headers, timeoutMs, maxPendingFrames, warn);
     },
 
     async post(
@@ -352,6 +387,9 @@ export function createNodeQqBotTransport(deps: NodeQqBotTransportDeps = {}): QqB
 
         /** 响应流中途断开：与「请求超时」区分，避免把对端断开误报成超时。 */
         let responseBroken = false;
+        /** 已收响应字节数；超限即 destroy 并明确 reject。 */
+        let responseBytes = 0;
+        let overLimit = false;
 
         const req = send(options, (res) => {
           const chunks: Buffer[] = [];
@@ -362,6 +400,23 @@ export function createNodeQqBotTransport(deps: NodeQqBotTransportDeps = {}): QqB
             }
           };
           res.on("data", (chunk: Buffer | string) => {
+            if (overLimit) return;
+            responseBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+            if (responseBytes > maxResponseBytes) {
+              overLimit = true;
+              clearTimer();
+              reject(
+                new Error(
+                  `QQBot: 响应体超过上限（${maxResponseBytes} 字节）from ${url.pathname}`,
+                ),
+              );
+              try {
+                req.destroy();
+              } catch {
+                // destroy 失败不影响已 reject 的结果
+              }
+              return;
+            }
             chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
           });
           // 响应尚未读完就断开（对端 reset / 代理中断）：必须显式失败，否则
@@ -378,6 +433,7 @@ export function createNodeQqBotTransport(deps: NodeQqBotTransportDeps = {}): QqB
             reject(new Error(`QQBot: 响应中断（连接被对端提前关闭）: ${url.pathname}`));
           });
           res.on("end", () => {
+            if (overLimit) return;
             clearTimer();
             const status = res.statusCode ?? 0;
             const text = Buffer.concat(chunks).toString("utf8");

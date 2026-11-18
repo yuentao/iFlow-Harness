@@ -11,7 +11,9 @@ import {
   buildConnectUrl,
   createBindTask,
   createNodeCrypto,
+  createNodeHttp,
   decryptBotSecret,
+  DEFAULT_MAX_RESPONSE_BYTES,
   generateBindKey,
   pollBindResult,
   redactSecrets,
@@ -317,7 +319,7 @@ describe("QqBotQrProtocol / 全流程", () => {
     expect(log.mock.calls.filter((c) => c[0] === "stop")).toHaveLength(1);
   });
 
-  it("renderQr 返回非法 dataUrl 时不回调 onQr，仅记录 qrInvalid", async () => {
+  it("renderQr 返回非法 dataUrl 时不回调 onQr，明确 onFailure（不再静默轮询）", async () => {
     const { crypto } = makeCapturingCrypto();
     const { http } = makeHttp((url) =>
       url === CREATE_BIND_TASK_URL
@@ -332,6 +334,8 @@ describe("QqBotQrProtocol / 全流程", () => {
 
     const stop = await protocol.start(cbs);
     expect(cbs.onQr).not.toHaveBeenCalled();
+    expect(cbs.onFailure).toHaveBeenCalledTimes(1);
+    expect(cbs.onFailure).toHaveBeenCalledWith(expect.stringContaining("二维码渲染结果非法"));
     expect(log).toHaveBeenCalledWith("qrInvalid");
     stop();
   });
@@ -452,5 +456,95 @@ describe("QqBotBindSession / M3-A 协议接线", () => {
     session.stop();
     expect(fake.stop).toHaveBeenCalledTimes(1);
     expect(log.mock.calls.filter((c) => c[0] === "stop")).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createNodeHttp：墙钟总超时 + 响应体上限（注入假 request，不起真实网络）
+// ---------------------------------------------------------------------------
+
+class FakeEmitter {
+  private readonly listeners = new Map<string, Array<(...args: any[]) => void>>();
+
+  on(event: string, cb: (...args: any[]) => void): this {
+    const list = this.listeners.get(event) ?? [];
+    list.push(cb);
+    this.listeners.set(event, list);
+    return this;
+  }
+
+  emit(event: string, ...args: unknown[]): void {
+    for (const cb of [...(this.listeners.get(event) ?? [])]) cb(...args);
+  }
+}
+
+class FakeRes extends FakeEmitter {
+  statusCode = 200;
+}
+
+class FakeReq extends FakeEmitter {
+  destroyed = false;
+  destroy(): void {
+    this.destroyed = true;
+  }
+  end(): void {
+    // no-op
+  }
+}
+
+function makeFakeHttp(onRequest: (res: FakeRes) => void): {
+  request: typeof import("node:https").request;
+  getReq: () => FakeReq;
+} {
+  let req: FakeReq | undefined;
+  const request = ((_url: unknown, _options: unknown, cb: (res: FakeRes) => void) => {
+    const created = new FakeReq();
+    req = created;
+    const res = new FakeRes();
+    // 异步触发，确保 createNodeHttp 内的 `const req = ...` 已初始化。
+    setImmediate(() => {
+      cb(res);
+      onRequest(res);
+    });
+    return created;
+  }) as unknown as typeof import("node:https").request;
+  return { request, getReq: () => req! };
+}
+
+describe("createNodeHttp / 墙钟超时与响应体上限", () => {
+  const URL_UNDER_TEST = "https://q.qq.com/lite/create_bind_task";
+
+  it("正常响应仍可解析（假 request 走通完整 happy path）", async () => {
+    const { request } = makeFakeHttp((res) => {
+      res.emit("data", Buffer.from('{"ok":1}'));
+      res.emit("end");
+    });
+    const http = createNodeHttp({ request });
+    await expect(http.post(URL_UNDER_TEST, {}, 1_000)).resolves.toEqual({ ok: 1 });
+  });
+
+  it("响应体超过上限：destroy 连接并明确 reject（不累积到内存）", async () => {
+    const { request, getReq } = makeFakeHttp((res) => {
+      res.emit("data", Buffer.from("12345"));
+      res.emit("data", Buffer.from("67890"));
+      res.emit("end");
+    });
+    const http = createNodeHttp({ request, maxResponseBytes: 8 });
+    await expect(http.post(URL_UNDER_TEST, {}, 1_000)).rejects.toThrow(/too large/i);
+    expect(getReq().destroyed).toBe(true);
+  });
+
+  it("墙钟总超时：服务端持续滴流（socket 永不算空闲）也按时失败", async () => {
+    let drip: ReturnType<typeof setInterval> | undefined;
+    const { request, getReq } = makeFakeHttp((res) => {
+      drip = setInterval(() => res.emit("data", Buffer.from("x")), 5);
+    });
+    const http = createNodeHttp({ request, maxResponseBytes: DEFAULT_MAX_RESPONSE_BYTES });
+    try {
+      await expect(http.post(URL_UNDER_TEST, {}, 30)).rejects.toThrow(/timed out/i);
+      expect(getReq().destroyed).toBe(true);
+    } finally {
+      if (drip !== undefined) clearInterval(drip);
+    }
   });
 });

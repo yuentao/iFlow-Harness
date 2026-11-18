@@ -138,7 +138,7 @@ describe("QqBotBindSession / 扫码全流程", () => {
 // ---------------------------------------------------------------------------
 
 describe("QqBotBindSession / 安全护栏", () => {
-  it("renderQr 返回非法 dataUrl 时不回调 onQr，只记日志", async () => {
+  it("renderQr 返回非法 dataUrl 时不回调 onQr，明确 onFailure（不再静默空等）", async () => {
     const log = vi.fn();
     const h = makeHarness({
       log,
@@ -152,7 +152,8 @@ describe("QqBotBindSession / 安全护栏", () => {
     await flush();
 
     expect(cbs.onQr).not.toHaveBeenCalled();
-    expect(cbs.onFailure).not.toHaveBeenCalled();
+    expect(cbs.onFailure).toHaveBeenCalledTimes(1);
+    expect(cbs.onFailure).toHaveBeenCalledWith(expect.stringContaining("二维码渲染结果非法"));
     expect(log).toHaveBeenCalledWith("qrInvalid");
   });
 
@@ -227,6 +228,59 @@ describe("QqBotBindSession / 安全护栏", () => {
     h.holder.sdk!.onSuccess([{ appId: "x", appSecret: "y" }]);
     h.holder.sdk!.onFailure("boom");
     expect(cbs.onSuccess).not.toHaveBeenCalled();
+    expect(cbs.onFailure).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 二维码代次守卫（防慢渲染乱序 / stop 后发布旧二维码）
+// ---------------------------------------------------------------------------
+
+describe("QqBotBindSession / 二维码代次守卫", () => {
+  it("旧渲染晚于新二维码 resolve 时不覆盖，只发布最新一张", async () => {
+    const secondPng = QR_DATA_URL_PREFIX + "aGVsbG8=";
+    let resolveFirst!: (value: string) => void;
+    let resolveSecond!: (value: string) => void;
+    const renderQr = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<string>((resolve) => (resolveFirst = resolve)))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => (resolveSecond = resolve)));
+    const h = makeHarness({ renderQr });
+    const cbs = makeCallbacks();
+    const session = new QqBotBindSession(h.deps);
+
+    await session.start(cbs);
+    h.holder.sdk!.onQrDisplayed(QR_URL + "&n=1");
+    h.holder.sdk!.onQrDisplayed(QR_URL + "&n=2");
+
+    // 第二张先完成 → 正常发布。
+    resolveSecond(secondPng);
+    await flush();
+    expect(cbs.onQr).toHaveBeenCalledTimes(1);
+    expect(cbs.onQr).toHaveBeenCalledWith(secondPng, NOW + 60_000);
+
+    // 第一张（旧代次）晚到 → 必须被丢弃，不能覆盖新二维码。
+    resolveFirst(VALID_PNG);
+    await flush();
+    expect(cbs.onQr).toHaveBeenCalledTimes(1);
+    expect(cbs.onQr).toHaveBeenCalledWith(secondPng, NOW + 60_000);
+  });
+
+  it("stop 后迟到的渲染 resolve 也不再发布二维码", async () => {
+    let resolveRender!: (value: string) => void;
+    const h = makeHarness({
+      renderQr: () => new Promise<string>((resolve) => (resolveRender = resolve)),
+    });
+    const cbs = makeCallbacks();
+    const session = new QqBotBindSession(h.deps);
+
+    await session.start(cbs);
+    h.holder.sdk!.onQrDisplayed(QR_URL);
+    session.stop();
+    resolveRender(VALID_PNG);
+    await flush();
+
+    expect(cbs.onQr).not.toHaveBeenCalled();
     expect(cbs.onFailure).not.toHaveBeenCalled();
   });
 });
