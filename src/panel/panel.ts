@@ -996,6 +996,28 @@ export type SuperMergeDispatchResult =
  */
 const QQ_MAIN_IDLE_POLL_MS = 300;
 
+/**
+ * QQ 最终答复「迟到补发」阈值（R2）。
+ *
+ * 汇报轮的 final 标记由 pendingCount===0 决定；当同会话里还有别的非终态子会话
+ * （典型是主 Agent 派出的复核子会话）时 pendingCount 长期 >0，汇总轮会被判成
+ * 非 final，QQ 于是永远停在「已受理」。这里给等最终答复的 awaiter 两道兜底：
+ *  - 软阈值：awaiter 已等超过 QQ_FINAL_RESCUE_MS 且本会话已无活跃子会话 → 补发；
+ *  - 硬上限：即使还有子会话卡在非终态，等超过 QQ_FINAL_HARD_RESCUE_MS 也补发
+ *    （宁可给一条如实兜底，也不让 QQ 永久停在已受理）。
+ * 轮询间隔远小于阈值，仅为让补发在阈值到点后尽快发生。
+ */
+const QQ_FINAL_RESCUE_MS = 120_000;
+const QQ_FINAL_HARD_RESCUE_MS = 600_000;
+const QQ_FINAL_RESCUE_POLL_MS = 10_000;
+
+/**
+ * 注入轮结束时判定 delegated 的宽限期（R3）：子会话登记可能与回合收尾差错一拍，
+ * 留一个很短的窗口再核对子会话列表，避免把「已派子会话」误判成直答而提前撤销
+ * 等最终答复的记账。测试可注入更小值。
+ */
+const QQ_DELEGATION_GRACE_MS = 120;
+
 export class DisposedError extends Error {
   constructor(message = "panel disposed") {
     super(message);
@@ -1100,6 +1122,24 @@ export class ChatPanel implements vscode.Disposable {
    * / 会话切换时摘除，避免迟到的汇报回错任务。
    */
   private readonly qqMainFinalAwaiters = new Map<string, string>();
+  /**
+   * 每个 awaiter 的登记时刻（taskId → Date.now()）：迟到补发（R2）按等待时长判定。
+   * 与 qqMainFinalAwaiters 同生命周期，同增同删；缺省视为「刚登记」（不触发补发）。
+   */
+  private readonly qqMainFinalAwaiterSince = new Map<string, number>();
+  /**
+   * 每个归属主会话最近一次汇报回合产出的 assistant 文本（sessionId → text）。
+   * 补发时优先用它（保留真实结论），没有才退回如实兜底文案。仅作补发缓存，
+   * 不参与正常 final 回执；awaiter 清空时一并清理。
+   */
+  private readonly qqFinalRescueText = new Map<string, string>();
+  /** 迟到补发的轮询定时器（仅在有 awaiter 时存活）。 */
+  private qqFinalRescueTimer: ReturnType<typeof setInterval> | null = null;
+  /** 注入轮 delegated 判定的宽限期；测试可注入更小值。 */
+  private qqDelegationGraceMs = QQ_DELEGATION_GRACE_MS;
+  /** 迟到补发的软 / 硬阈值；测试可注入更小值。 */
+  private qqFinalRescueMs = QQ_FINAL_RESCUE_MS;
+  private qqFinalHardRescueMs = QQ_FINAL_HARD_RESCUE_MS;
   /**
    * 属于当前 QQ 主渠道注入回合的本地提问卡 id（`pendingQuestions` 的键）。
    *
@@ -1941,6 +1981,10 @@ export class ChatPanel implements vscode.Disposable {
     for (const controller of this.qqInjectAborts.values()) controller.abort();
     this.qqInjectAborts.clear();
     this.qqInjectedTaskId = null;
+    this.stopQqFinalRescueTimer();
+    this.qqMainFinalAwaiters.clear();
+    this.qqMainFinalAwaiterSince.clear();
+    this.qqFinalRescueText.clear();
     // Final flush: a turn interrupted by window close / extension reload has
     // no later persist point (completion never runs) — write the tail now so
     // the session survives a restart intact. No-op when blocks are empty.
@@ -8870,10 +8914,13 @@ export class ChatPanel implements vscode.Disposable {
     const batch = buffer.takeSettled(mine);
     if (!batch) return; // 全都还在跑：继续积累。
     const manager = this.superAgent;
+    // 汇报归属会话：pendingCount 与 QQ awaiter 归属都用它，避免从 entries[0]
+    // 推断时因异步归属回填而与 awaiter 漂移（R2）。
+    const reportOwner = this.currentMainSessionId();
     let text = "";
     let pendingCount: number | undefined;
     if (manager && typeof manager.reportPromptWithPending === "function") {
-      const prompt = manager.reportPromptWithPending(batch);
+      const prompt = manager.reportPromptWithPending(batch, { pendingOwner: reportOwner });
       text = prompt.text;
       pendingCount = prompt.pendingCount;
     } else {
@@ -8890,12 +8937,19 @@ export class ChatPanel implements vscode.Disposable {
       ).length;
     }
     this.log.info(`super agent: queued report for ${batch.length} settled child session(s)`);
+    // pendingCount=0 即「所有子会话都已结束」的汇总轮 —— 主 Agent 在这一轮
+    // 给出最终完整汇报，是 QQ 最终回执应当采用的那一轮文本。
+    // R2 迟到补发：若该会话的 QQ awaiter 已等过阈值，而 pendingCount 因别的
+    // 非终态子会话（复核子会话等）长期 >0，就别让 final 永远=false —— 以本轮
+    // 文本作为最终回执（空文本再由 deliverQqMainFinalAnswer 兜底）。
+    const rescueDue = this.qqFinalRescueDue(reportOwner);
+    if (rescueDue && pendingCount !== 0) {
+      this.log.warn(`QQ 最终回执迟到补发：汇报轮 pendingCount=${pendingCount}，仍按 final 投递`);
+    }
     this.pendingSuperReportPrompts.push({
-      mainSessionId: this.currentMainSessionId(),
+      mainSessionId: reportOwner,
       text,
-      // pendingCount=0 即「所有子会话都已结束」的汇总轮 —— 主 Agent 在这一轮
-      // 给出最终完整汇报，是 QQ 最终回执应当采用的那一轮文本。
-      final: pendingCount === 0,
+      final: pendingCount === 0 || rescueDue,
     });
     this.ensureSuperHeartbeat();
     // 用户按过停止时补一次常驻「继续处理」提示：此后才结束的子会话此前不会
@@ -8978,6 +9032,14 @@ export class ChatPanel implements vscode.Disposable {
         const item = this.pendingSuperReportPrompts[index]!;
         this.clearSuperWaitHeartbeat();
         this.log.info("super agent: delivering the settled child report as a fresh main-session turn");
+        // R2 迟到补发缓存：记下本轮开始前的可见文本锚点，回合结束后提取本轮
+        // 新增的 assistant 文本。正常 final 投递不受影响；仅当 QQ  awaiter 迟到
+        // 补发时才用到它（而没有真实正文时由兜底文案接管）。
+        const visibleBefore = this.store.getState().blocks.filter(
+          (block) => block.kind === "text" && !block.system,
+        );
+        const reportAnchorId = visibleBefore[visibleBefore.length - 1]?.id;
+        const reportTextBefore = visibleBefore.length;
         const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
           delegateOnBusy: false,
           hidden: true,
@@ -8995,6 +9057,11 @@ export class ChatPanel implements vscode.Disposable {
         }
         const pos = this.pendingSuperReportPrompts.indexOf(item);
         if (pos !== -1) this.pendingSuperReportPrompts.splice(pos, 1);
+        // R2：缓存本轮正文供迟到补发复用（只在该会话仍有 awaiter 时才有意义）。
+        const rescueText = this.captureQqReportTurnText(reportAnchorId, reportTextBefore);
+        if (rescueText && owner && this.qqFinalRescueOwnerPending(owner)) {
+          this.qqFinalRescueText.set(owner, rescueText);
+        }
         // 这一轮失败了（端点 / 内核报错）：别在心跳里连续喂下一批，留给用户
         // 处理错误后自然的下一轮。
         if (this.store.getState().status === "error") break;
@@ -10417,7 +10484,13 @@ export class ChatPanel implements vscode.Disposable {
             this.qqInjectedTaskId = taskId;
             // 先登记再发：汇报轮可能在注入轮收尾的同一拍就被仲裁投递，记账
             // 必须在这之前存在。轮末若确认没派生子会话会撤销（见 finally）。
-            if (sessionIdBefore) this.qqMainFinalAwaiters.set(taskId, sessionIdBefore);
+            if (sessionIdBefore) {
+              this.qqMainFinalAwaiters.set(taskId, sessionIdBefore);
+              this.qqMainFinalAwaiterSince.set(taskId, Date.now());
+              // 新一轮开始：清掉上一轮遗留的补发缓存，避免迟到补发误用旧结论。
+              this.qqFinalRescueText.delete(sessionIdBefore);
+              this.ensureQqFinalRescueTimer();
+            }
             superIdsBefore = new Set(
               (this.getSuperAgent()?.list() ?? [])
                 .filter((s) => (s.mainSessionId ?? sessionIdBefore) === sessionIdBefore)
@@ -10473,10 +10546,21 @@ export class ChatPanel implements vscode.Disposable {
           // 登记为「等最终答复」：这一轮文本只是占位，真正的答复将在子会话
           // 汇报汇总轮结束时经 completeMainFinalAnswer 回传 QQ。
           if (!failed && sessionIdBefore) {
+            // R3：子会话的登记（onSessionsChanged → list()）可能与回合收尾差错一拍，
+            // 立刻判定会把「已派子会话」误判成直答、在 finally 里提前摘掉 awaiter。
+            // 留一个很短的宽限期再核对一次（不阻塞主机、只延迟本轮结果一小段）。
+            if (this.qqDelegationGraceMs > 0 && !controller.signal.aborted) {
+              await new Promise<void>((resolve) =>
+                setTimeout(resolve, this.qqDelegationGraceMs),
+              );
+            }
             delegated = (this.getSuperAgent()?.list() ?? []).some(
               (s) =>
                 (s.mainSessionId ?? sessionIdBefore) === sessionIdBefore &&
                 !superIdsBefore.has(s.id),
+            );
+            this.log.info(
+              `QQ 注入轮 delegated 判定：task=${taskId} delegated=${delegated} baseline=${superIdsBefore.size} current=${this.getSuperAgent()?.list().length ?? 0}`,
             );
           }
           return {
@@ -10493,7 +10577,11 @@ export class ChatPanel implements vscode.Disposable {
     } finally {
       // 只有确认派生了子会话才保留记账等最终答复；其余（未派生 / 失败 /
       // 会话切换 / 取消 / 注入未成功）一律撤销，避免迟到的汇报回错任务。
-      if (!delegated) this.qqMainFinalAwaiters.delete(taskId);
+      if (!delegated) {
+        this.qqMainFinalAwaiters.delete(taskId);
+        this.qqMainFinalAwaiterSince.delete(taskId);
+      }
+      if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
       this.qqInjectAborts.delete(taskId);
       if (this.qqInjectedTaskId === taskId) this.qqInjectedTaskId = null;
       input.signal.removeEventListener("abort", onServiceAbort);
@@ -10505,26 +10593,127 @@ export class ChatPanel implements vscode.Disposable {
    * 真正最终答复回传给对应的 QQ 任务。
    *
    * 按归属会话取所有登记过的任务（一轮汇总结论覆盖该主会话里正在等答案的
-   * QQ 任务）；空文本不摘记账 —— 汇报轮可能只派了复核子会话而没有正文，留待
-   * 后续轮次补上真正的结论。单次投递 / 幂等由服务的 resultDeliveredAt 保证。
+   * QQ 任务）。空文本不再静默留账：改为回传一条如实兜底文案并摘除记账，
+   * 避免 QQ 永久停在「已受理」（R1）。单次投递 / 幂等由服务的 resultDeliveredAt
+   * 保证。onlyTaskIds 供 R2 迟到补发精确命中单个任务，避免误伤同会话其它 awaiter。
    */
   private async deliverQqMainFinalAnswer(
     sessionId: string | null,
-    text: string,
+    rawText: string,
     stopReason: string,
+    onlyTaskIds?: ReadonlySet<string>,
   ): Promise<void> {
-    if (this.disposed || !sessionId || text.trim().length === 0) return;
+    if (this.disposed || !sessionId) return;
+    // R1：汇总轮可能只调了合并/复核动作而没有 assistant 正文。旧实现在这里
+    // 静默 return 且不摘记账 —— QQ 永远停在「已受理」。改为如实兜底：摘除记账
+    // 并回传一条明确文案（走 completeMainFinalAnswer 的 forceActive 主动消息，
+    // 长任务下也真能发出），绝不伪造「已完成」之类内容。
+    const text =
+      rawText.trim().length > 0
+        ? rawText.trim()
+        : vscode.l10n.t("子会话任务已完成，但未产生可转发的正文摘要。");
     const taskIds = [...this.qqMainFinalAwaiters.entries()]
       .filter(([, owner]) => owner === sessionId)
-      .map(([taskId]) => taskId);
+      .map(([taskId]) => taskId)
+      .filter((taskId) => (onlyTaskIds ? onlyTaskIds.has(taskId) : true));
     for (const taskId of taskIds) {
       this.qqMainFinalAwaiters.delete(taskId);
+      this.qqMainFinalAwaiterSince.delete(taskId);
       try {
         await this.qq?.service.completeMainFinalAnswer({ taskId, text, stopReason });
       } catch (error) {
         this.log.warn(`QQ 主会话最终答复回传失败：${errorMessage(error)}`);
       }
     }
+    // 该会话已无 awaiter：清掉补发缓存，避免下一条任务误用上一轮的旧结论。
+    if (![...this.qqMainFinalAwaiters.values()].includes(sessionId)) {
+      this.qqFinalRescueText.delete(sessionId);
+    }
+    if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
+  }
+
+  /** 该归属会话是否还有 QQ awaiter（决定是否值得缓存汇报正文供补发）。 */
+  private qqFinalRescueOwnerPending(owner: string): boolean {
+    return [...this.qqMainFinalAwaiters.values()].includes(owner);
+  }
+
+  /** 该归属会话是否存在已等过软阈值的 QQ awaiter（R2 汇报轮 final 放宽的依据）。 */
+  private qqFinalRescueDue(owner: string | null): boolean {
+    if (!owner) return false;
+    const now = Date.now();
+    for (const [taskId, taskOwner] of this.qqMainFinalAwaiters.entries()) {
+      if (taskOwner !== owner) continue;
+      const since = this.qqMainFinalAwaiterSince.get(taskId) ?? now;
+      if (now - since >= this.qqFinalRescueMs) return true;
+    }
+    return false;
+  }
+
+  /** 迟到补发定时器：仅在有 awaiter 时存活，避免无谓唤醒宿主。 */
+  private ensureQqFinalRescueTimer(): void {
+    if (this.disposed || this.qqFinalRescueTimer) return;
+    const timer = setInterval(() => this.rescueStaleQqFinalAwaiters(), QQ_FINAL_RESCUE_POLL_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.qqFinalRescueTimer = timer;
+  }
+
+  private stopQqFinalRescueTimer(): void {
+    if (this.qqFinalRescueTimer) {
+      clearInterval(this.qqFinalRescueTimer);
+      this.qqFinalRescueTimer = null;
+    }
+  }
+
+  /**
+   * R2 迟到补发：等最终答复的 awaiter 若等得太久，强制以「最近一次汇报文本（或兜底）」
+   * 收尾，避免 QQ 永久停在「已受理」。
+   *  - 软阈值：已超 qqFinalRescueMs 且本会话已无活跃子会话（正常长任务的收尾窗口）；
+   *  - 硬上限：已超 qqFinalHardRescueMs，即便还有子会话卡在非终态也补发
+   *    （复核子会话卡在等输入时不能让发起者永远等下去）。
+   * 只补发到点的那一个 taskId（onlyTaskIds 过滤），不误伤同会话刚开始的其它 awaiter。
+   */
+  private rescueStaleQqFinalAwaiters(): void {
+    if (this.disposed || this.qqMainFinalAwaiters.size === 0) return;
+    const now = Date.now();
+    const live = this.getSuperAgent()?.list() ?? [];
+    for (const [taskId, owner] of [...this.qqMainFinalAwaiters.entries()]) {
+      const since = this.qqMainFinalAwaiterSince.get(taskId) ?? now;
+      const age = now - since;
+      const activeChildren = live.filter(
+        (s) => (s.mainSessionId ?? owner) === owner && !isTerminalSuperStatus(s.status),
+      ).length;
+      const due =
+        age >= this.qqFinalHardRescueMs ||
+        (age >= this.qqFinalRescueMs && activeChildren === 0);
+      if (!due) continue;
+      this.log.warn(
+        `QQ 主会话最终答复迟到补发：task=${taskId} waited=${age}ms activeChildren=${activeChildren}`,
+      );
+      void this.deliverQqMainFinalAnswer(
+        owner,
+        this.qqFinalRescueText.get(owner) ?? "",
+        "end_turn",
+        new Set([taskId]),
+      );
+    }
+    if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
+  }
+
+  /** 汇报回合收尾后提取「本轮新增」的 assistant 文本，供迟到补发复用。 */
+  private captureQqReportTurnText(anchorId: string | undefined, beforeCount: number): string {
+    const visible = this.store.getState().blocks.filter(
+      (block) => block.kind === "text" && !block.system,
+    );
+    let start = beforeCount;
+    if (anchorId !== undefined) {
+      const idx = visible.findIndex((block) => block.id === anchorId);
+      start = idx >= 0 ? idx + 1 : beforeCount;
+    }
+    return visible
+      .slice(start)
+      .map((block) => (block.kind === "text" ? block.text : ""))
+      .join("\n")
+      .trim();
   }
 
   /**
@@ -10577,7 +10766,13 @@ export class ChatPanel implements vscode.Disposable {
     const activeTaskId = this.qqInjectedTaskId;
     for (const controller of this.qqInjectAborts.values()) controller.abort();
     this.qqInjectAborts.clear();
+    // 只有「整条 QQ 通道停止」才会走到这里（stopQq）：撤销全部等最终答复的
+    // 记账是正确语义。R3 不变量：普通任务收尾 / 汇报轮绝不调本方法，绝不因
+    // 本地回合收尾而把 delegated=true 的 awaiter 误摘。
     this.qqMainFinalAwaiters.clear();
+    this.qqMainFinalAwaiterSince.clear();
+    this.qqFinalRescueText.clear();
+    this.stopQqFinalRescueTimer();
     if (activeTaskId !== null) {
       this.qqInjectedTaskId = null;
       this.cancelSeen = true;
@@ -10596,6 +10791,8 @@ export class ChatPanel implements vscode.Disposable {
     const controller = this.qqInjectAborts.get(taskId);
     const isActiveTurn = this.qqInjectedTaskId === taskId;
     const wasAwaitingFinal = this.qqMainFinalAwaiters.delete(taskId);
+    if (wasAwaitingFinal) this.qqMainFinalAwaiterSince.delete(taskId);
+    if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
     if (!controller && !isActiveTurn && !wasAwaitingFinal) return false;
     controller?.abort();
     if (isActiveTurn) {

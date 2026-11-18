@@ -15,6 +15,7 @@ import type { QqConfig } from "../src/qq/config.js";
 import {
   QqService,
   QQ_EMPTY_SUMMARY_NOTICE,
+  QQ_MAIN_FINAL_EMPTY_NOTICE,
   buildQqMainPrompt,
   type QqMainInjectInput,
   type QqMainInjectResult,
@@ -548,6 +549,20 @@ describe("主会话路由 · 最终回执归属", () => {
     await f.service.completeMainFinalAnswer({ taskId: "unknown", text: "不该发出的结论", stopReason: "end_turn" });
     expect(f.delivered).toHaveLength(before);
     expect(onlyTask(f).status).toBe("queued");
+  });
+
+  it("汇总轮回执为空摘要时服务侧防御性兜底（不双重发送）", async () => {
+    const f = await delegatedTask();
+    const taskId = onlyTask(f).taskId;
+
+    await f.service.completeMainFinalAnswer({ taskId, text: "   ", stopReason: "end_turn" });
+
+    expect(resultTexts(f).join("\n")).toContain(QQ_MAIN_FINAL_EMPTY_NOTICE);
+    expect(f.service.getTask(taskId)?.status).toBe("succeeded");
+    // 只有一条终态结果，兜底文案不会被 QQ_EMPTY_SUMMARY_NOTICE 再拼一遍。
+    expect(resultTexts(f).length).toBe(1);
+    expect(resultTexts(f).join("\n")).not.toContain(QQ_EMPTY_SUMMARY_NOTICE);
+    expect(f.store.events.filter((e) => e.type === "task_result_delivered")).toHaveLength(1);
   });
 });
 

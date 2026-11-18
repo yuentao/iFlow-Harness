@@ -441,6 +441,12 @@ export const QQ_DELIVERY_ATTEMPTS = 3;
 export const QQ_DELIVERY_RETRY_DELAY_MS = 400;
 /** 执行体没有产出任何摘要正文时的如实说明（不编造内容）。 */
 export const QQ_EMPTY_SUMMARY_NOTICE = "（执行体未返回摘要内容）";
+/**
+ * 主渠道子会话汇报汇总轮没有正文时的如实说明。宿主侧 deliverQqMainFinalAnswer
+ * 已保证传非空文案；这里是服务入口的防御性兜底（其它宿主 / 测试直接调用时生效）。
+ * 与面板兜底文案逐字一致，避免两处漂移。
+ */
+export const QQ_MAIN_FINAL_EMPTY_NOTICE = "子会话任务已完成，但未产生可转发的正文摘要。";
 /** 结果彻底没能送达 QQ 时记录在任务上的文案。 */
 export const QQ_RESULT_UNDELIVERED = "结果未能送达 QQ（被动回复与主动消息均失败）";
 /**
@@ -1849,7 +1855,11 @@ export class QqService {
   }): Promise<void> {
     const current = this.tasks.get(input.taskId);
     if (!current || current.channel !== "main" || current.status !== "injected") return;
-    const summary = (input.text ?? "").trim();
+    // 防御性兜底：宿主侧 deliverQqMainFinalAnswer 已保证传非空文案，但服务是
+    // 独立入口（其它宿主 / 测试直接调用也可能传空）。空摘要在这里补一条如实
+    // 说明，绝不让 QQ 只收到一行「状态 成功」。summary 变为非空后，
+    // deliverResultLocked 的空摘要分支不会重复追加通知（无双重发送）。
+    const summary = (input.text ?? "").trim() || QQ_MAIN_FINAL_EMPTY_NOTICE;
     const stopReason = (input.stopReason ?? "").trim() || "end_turn";
     await this.finalizeMainTask(current, summary, stopReason, {
       channel: "main",
