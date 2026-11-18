@@ -1,11 +1,9 @@
 // @vitest-environment jsdom
 /**
- * Wave3-C2 — QQ 远程任务的 webview 挂载。
+ * Wave3-C2 — QQ 机器人设置页的 webview 挂载。
  *
- * 覆盖两处挂载点与它们对宿主通道的接线：
- *  - 设置弹窗的「QQ 机器人」页签：吃 `qqSettings` 快照、显示连接状态与待审核
- *    用户列表、普通改动走 `qqSettingsPatch`（凭据只由扫码写入，页面上没有输入框）；
- *  - 看板附近的「远程任务」区：只在有任务时出现，动作走 `qqTaskAction`。
+ * 覆盖设置弹窗的「QQ 机器人」页签：吃 `qqSettings` 快照、显示连接状态与待审核
+ * 用户列表、普通改动走 `qqSettingsPatch`（凭据只由扫码写入，页面上没有输入框）。
  *
  * 用真实 store（只 mock `acquireVsCodeApi`），因此同时验证了 store 对
  * `qqSettings` / `qqStatus` / `qqPendingUsers` 三条消息的处理不会被快照覆盖。
@@ -13,7 +11,7 @@
 import { act, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AuthUiState, QqTaskUi } from "../shared/messages";
+import type { AuthUiState } from "../shared/messages";
 
 /** jsdom ships neither ResizeObserver nor scrollIntoView; the kit controls
  * need the members to exist. */
@@ -39,7 +37,6 @@ const postMessage = vi.fn();
 
 const { useChat } = await import("../webview/src/store");
 const { SettingsModal } = await import("../webview/src/components/SettingsModal");
-const { QqTasksPanel } = await import("../webview/src/components/QqTaskList");
 const { initialSessionState, pickQqSettingsUi } = await import("../shared/messages");
 
 const AUTH: AuthUiState = {
@@ -69,27 +66,6 @@ function settings(values: Record<string, unknown> = {}, secrets?: {
       values: pickQqSettingsUi(values, secrets ?? { hasAppSecret: false }),
     }),
   );
-}
-
-function clickText(text: string): void {
-  const button = [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === text);
-  expect(button, `button 「${text}」`).toBeTruthy();
-  act(() => button!.click());
-}
-
-function task(overrides: Partial<QqTaskUi> = {}): QqTaskUi {
-  return {
-    taskId: "task-1",
-    shortId: "A1",
-    chatType: "private",
-    chatId: "1234567890",
-    senderId: "42",
-    status: "running",
-    promptPreview: "把 README 的安装段改成内网镜像",
-    createdAt: 0,
-    updatedAt: 30_000,
-    ...overrides,
-  };
 }
 
 beforeEach(() => {
@@ -217,38 +193,5 @@ describe("QQ 机器人设置页", () => {
     expect(container.textContent).not.toContain("openid-123456");
     expect(container.textContent).toContain("群 9876********1098");
     expect(container.textContent).toContain("帮我跑一下测试");
-  });
-});
-
-describe("远程任务区", () => {
-  function setTasks(tasks: QqTaskUi[]): void {
-    act(() =>
-      useChat.setState({
-        state: { ...initialSessionState(), qqTasks: tasks },
-      }),
-    );
-  }
-
-  it("renders nothing when there are no remote tasks", () => {
-    setTasks([]);
-    render(<QqTasksPanel />);
-    expect(container.textContent).toBe("");
-    expect(container.querySelector("[data-qq-task]")).toBeNull();
-  });
-
-  it("renders the task list next to the board and posts qqTaskAction", () => {
-    setTasks([task()]);
-    render(<QqTasksPanel />);
-
-    expect(container.textContent).toContain("远程任务");
-    expect(container.querySelector("[data-qq-task='task-1']")).toBeTruthy();
-    expect(container.textContent).toContain("把 README 的安装段改成内网镜像");
-
-    clickText("停止");
-    expect(postMessage).toHaveBeenCalledWith({
-      type: "qqTaskAction",
-      taskId: "task-1",
-      action: "stop",
-    });
   });
 });
