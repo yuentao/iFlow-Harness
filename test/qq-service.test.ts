@@ -2543,3 +2543,54 @@ describe("QqService — 安全修复：内存记账与丢弃诚实性", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 主会话纯文本正文轮同步：中间正文走独立进度分支，与最终结果严格隔离
+// ---------------------------------------------------------------------------
+
+describe("QqService — 主会话中间正文轮同步", () => {
+  function seedInjected(f: ServiceFixture, taskId: string, overrides: Partial<QqTask> = {}): QqTask {
+    const task = seedTask(taskId, "injected", { channel: "main", ...overrides });
+    const internals = f.service as unknown as { tasks: Map<string, QqTask> };
+    internals.tasks.set(taskId, task);
+    return task;
+  }
+
+  it("只投 injected 的 main 任务，且整轮正文指纹去重（同一段不重复发）", async () => {
+    let clock = 1_000;
+    const f = makeService({ monotonicNow: () => clock });
+    seedInjected(f, "mt-1");
+    const text = "我先看一下项目结构，已经拆成两个子任务";
+
+    await f.service.deliverMainTurnText("mt-1", text);
+    expect(f.delivered).toHaveLength(1);
+    expect(f.delivered[0]!.text).toBe(text);
+
+    // 过了节流窗口再投同一段：指纹未变仍不重发。
+    clock += QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS + 1;
+    await f.service.deliverMainTurnText("mt-1", text);
+    expect(f.delivered).toHaveLength(1);
+  });
+
+  it("终态任务 / child 渠道任务 / 过短正文一律不投（不与最终结果重复）", async () => {
+    const f = makeService();
+    seedInjected(f, "mt-done", { status: "succeeded" });
+    seedInjected(f, "mt-child", { channel: "child" as QqTask["channel"] });
+    seedInjected(f, "mt-ok");
+
+    await f.service.deliverMainTurnText("mt-done", "已经完成的任务正文");
+    await f.service.deliverMainTurnText("mt-child", "子会话的正文");
+    await f.service.deliverMainTurnText("mt-ok", "  ");
+    await f.service.deliverMainTurnText("mt-ok", "嗯");
+    expect(f.delivered).toHaveLength(0);
+  });
+
+  it("超长正文复用 chunkQqText 分片，不自己造轮子", async () => {
+    const f = makeService();
+    seedInjected(f, "mt-long");
+    const text = `${"甲".repeat(3_500)}尾部标记`;
+    await f.service.deliverMainTurnText("mt-long", text);
+    expect(f.delivered.length).toBeGreaterThan(1);
+    expect(f.delivered.map((d) => d.text).join("")).toBe(text);
+  });
+});
+
