@@ -450,6 +450,11 @@ const INTERNAL_PROMPT_IDLE_MS = 90_000;
  */
 const SUPER_HEARTBEAT_MS = 1_500;
 /**
+ * 已归档子会话迟到结论提示的正文上限：toast 是浮层胶囊不是转录卡，长 summary
+ * 必须截断，否则一条汇报能把 toast 栈撑爆。
+ */
+const SUPER_ARCHIVED_REPORT_MAX_CHARS = 480;
+/**
  * Tool gating for the MAIN panel session: a WHITELIST for built-in tools plus a
  * process-level MCP scope — never a blacklist of names.
  *
@@ -1324,6 +1329,28 @@ export class ChatPanel implements vscode.Disposable {
   private pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }> = [];
   /** 汇报 turn 正在跑（drain 的重入锁，与合并队列互斥）。 */
   private superReportRunning = false;
+  /**
+   * 5 条宿主自动回合队列的**明确优先级**（数组先后即投递先后）。
+   *
+   * 旧实现把 5 个 drain 逐个 fire-and-forget，调用顺序（汇报在最前）事实上
+   * 成了隐式优先级；配合汇报 drain 的 while 一次投多条，任一队列卡在 error /
+   * Stop 上时其它队列只能等「用户下次发消息」这个唯一解除点。这里把优先级
+   * 显式化，并配合 {@link superAutoTurnCursor} 轮转，保证每条队列每几拍都能
+   * 拿到一次车道，不会饿死。
+   *
+   * 汇报优先是刻意保持既有语义（只有汇报在排队时行为与旧版一致）；其后依次
+   * 是动作回执（防主会话重复发同一动作）、被改道的用户消息（用户原话）、
+   * 参数纠错（让卡住的调用往前走）、合并（要动主工作区，最保守）。
+   */
+  private static readonly SUPER_AUTO_TURN_PRIORITY = [
+    "reports",
+    "actionReceipts",
+    "delegated",
+    "corrections",
+    "merges",
+  ] as const;
+  /** 轮转游标：下一次仲裁从 {@link SUPER_AUTO_TURN_PRIORITY} 的哪一位起步。 */
+  private superAutoTurnCursor = 0;
   /**
    * 主会话车道（同步互斥）：同一时刻只允许**一个**回合在准备阶段。
    *
@@ -4132,9 +4159,7 @@ export class ChatPanel implements vscode.Disposable {
       if (this.autoTurnsHeld()) {
         this.autoTurnsStoppedFor = null;
         this.syncSuperWaitingState();
-        void this.drainSuperReports();
-        void this.drainDelegatedUserTurns();
-        void this.drainSuperToolCallCorrections();
+        void this.drainSuperAutoTurns();
       }
       return;
     }
@@ -8234,9 +8259,9 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingSuperToolCallCorrections.push({ mainSessionId: owner, text });
     this.log.info("super agent: queued a parameter-correction prompt for the main session");
     // 工具调用必然发生在主会话生成中，几乎一定等不到空闲 —— 点着心跳，
-    // 回合结束后由 drain 补投；心跳也会在没有其它待办时自行停表。
+    // 回合结束后由统一仲裁补投；心跳也会在没有其它待办时自行停表。
     this.ensureSuperHeartbeat();
-    void this.drainSuperToolCallCorrections();
+    void this.drainSuperAutoTurns();
   }
 
   /**
@@ -8547,7 +8572,7 @@ export class ChatPanel implements vscode.Disposable {
     this.superActionReceiptLast = text;
     this.pendingSuperActionReceipts.push({ mainSessionId: this.currentMainSessionId(), text });
     this.ensureSuperHeartbeat();
-    void this.drainSuperActionReceipts();
+    void this.drainSuperAutoTurns();
   }
 
   /**
@@ -8755,8 +8780,10 @@ export class ChatPanel implements vscode.Disposable {
    * 只取**当前主会话**的子会话：别的会话的孩子还在跑（或者刚跑完），它的
    * 汇报要等用户切到那个会话再投。
    *
-   * 来源子会话已经被清理（用户点清理 / 合并完释放）时，它的汇报再也没人能
-   * 接 —— 如实记一笔然后丢掉，不能让面板卡在忙碌态。
+   * 来源子会话已经被清理（用户点清理 / 合并完释放）时，它的汇报没法再作为
+   * 一次「实时汇报」投进主会话 —— 但结论不静默丢失：以「已归档子会话的迟到
+   * 结论」提示落到看板（见 {@link announceArchivedLateReports}），既不伪造活
+   * 跃子会话的汇报，也让用户真正看到那个结论。面板不会卡在忙碌态。
    *
    * 心跳与看板变化时都补一次重算：子会话被清理之后可能再没有人来触发取件
    * （它的 onReport 不会再来第二次）。
@@ -8765,14 +8792,15 @@ export class ChatPanel implements vscode.Disposable {
     if (this.disposed || this.superReportRunning) return;
     if (this.pendingSuperReports.size === 0) return;
     const live = this.superAgent?.list() ?? [];
-    // 来源子会话已不存在：这份汇报没人能接，丢掉（否则面板永久忙碌）。
-    // 用**全部**活子会话判：别的会话的汇报也得保住（只是现在没人接）。
+    // 来源子会话已不存在：结论不能静默丢 —— 用**全部**活子会话判（别的会话
+    // 的汇报也得保住，只是现在没人接），取回完整条目交给看板提示。
     for (const buffer of this.pendingSuperReports.values()) {
-      const dropped = buffer.dropMissing(live);
-      if (dropped.length > 0) {
+      const archived = buffer.takeMissing(live);
+      if (archived.length > 0) {
         this.log.warn(
-          `super agent: dropped ${dropped.length} child report(s) whose session(s) were cleaned up before delivery: ${dropped.join(", ")}`,
+          `super agent: ${archived.length} child report(s) arrived after their session(s) were cleaned up; surfacing as archived late conclusion(s)`,
         );
+        this.announceArchivedLateReports(archived);
       }
     }
     // 只取当前主会话那一桶：别的会话的汇报留在它自己的桶里等用户切过去。
@@ -8786,7 +8814,35 @@ export class ChatPanel implements vscode.Disposable {
     this.log.info(`super agent: queued report for ${batch.length} settled child session(s)`);
     this.pendingSuperReportPrompts.push({ mainSessionId: this.currentMainSessionId(), text });
     this.ensureSuperHeartbeat();
-    void this.drainSuperReports();
+    // 用户按过停止时补一次常驻「继续处理」提示：此后才结束的子会话此前不会
+    // 触发 announceDeferredAutoTurns（那时待处理数还是 0），于是恢复只剩「下
+    // 条消息」这一个解除点。这里让新到的汇报也点亮那个可点动作。
+    if (this.autoTurnsHeld()) this.announceDeferredAutoTurns();
+    void this.drainSuperAutoTurns();
+  }
+
+  /**
+   * 已归档（被清理 / 合并释放）子会话的迟到结论：以可关闭的 `sticky` 提示落到
+   * 看板，明确标注来源已不存在，绝不伪装成活跃子会话的实时汇报或 hidden 回合
+   * （那会伪造用户气泡 / 会话标题 / checkpoint）。
+   *
+   * 每条结论单独一条提示并截断到摘要长度，避免长 summary 把 toast 栈撑爆；
+   * 文案只含本地标题与汇报正文，不含 id / 路径 / 凭据。
+   */
+  private announceArchivedLateReports(entries: readonly SuperReportEntry[]): void {
+    if (entries.length === 0 || this.disposed) return;
+    for (const entry of entries) {
+      const summary = entry.report.summary.trim() || vscode.l10n.t("（该汇报没有正文）");
+      const clipped =
+        summary.length > SUPER_ARCHIVED_REPORT_MAX_CHARS
+          ? `${summary.slice(0, SUPER_ARCHIVED_REPORT_MAX_CHARS)}…`
+          : summary;
+      this.store.sendToast(
+        "info",
+        vscode.l10n.t("已归档子会话「{0}」的迟到结论（该子会话已被清理，主会话未能在当时收取）：{1}", entry.session.title, clipped),
+        { sticky: true },
+      );
+    }
   }
 
   /**
@@ -8925,6 +8981,81 @@ export class ChatPanel implements vscode.Disposable {
     this.superHeartbeatTimer = timer;
   }
 
+  /**
+   * 5 条宿主自动回合队列的**统一仲裁点**。
+   *
+   * 心跳 / 回合收尾 / 压制解除都只调它，不再各自按固定顺序 fire-and-forget 5
+   * 个 drain：每一拍只仲裁**一条**队列并把轮转游标挪到下一位；被选中的队列
+   * 仍沿用自己原有的顺序投递语义（一次可投完自己队列里当前可投的几条）。于是：
+   *  - **明确优先级**：数组先后即投递先后（见 {@link SUPER_AUTO_TURN_PRIORITY}）；
+   *  - **不饿死**：卡在 error / Stop / 主会话忙的高优先级队列只占一拍，下一拍
+   *    轮到别人 —— 不再把「用户下次发消息」当成唯一恢复点；
+   *  - **不破坏单回合不变量**：每个 drain 内部照旧同步申领 `superReportRunning`，
+   *    `mainLane` 仍是「同一 ACP 会话同时只有一个回合」的唯一保证；这里只决定
+   *    「先叫谁」，一条回合在飞时其余 drain 仍被重入锁挡在门外。
+   *
+   * 合并队列不带主会话归属、用独立的 `superMergeRunning` 锁，因此同样由它仲裁
+   * （选中时让它的既有互斥门控生效），但不改变合并串行执行、主工作区单一窗口
+   * 的纪律。
+   */
+  private async drainSuperAutoTurns(): Promise<void> {
+    if (this.disposed || this.superReportRunning) return;
+    const order = ChatPanel.SUPER_AUTO_TURN_PRIORITY;
+    const owner = this.currentMainSessionId();
+    for (let i = 0; i < order.length; i++) {
+      if (this.disposed || this.superReportRunning) return;
+      const slot = (this.superAutoTurnCursor + i) % order.length;
+      const kind = order[slot]!;
+      if (!this.superAutoTurnHasWork(kind, owner)) continue;
+      // 给过机会就往后挪：卡住的队列（error / Stop 压住 / 主会话忙 / 合并
+      // 互斥）下一拍不再排在最前，其余队列因此有稳定的唤醒机会。
+      this.superAutoTurnCursor = (slot + 1) % order.length;
+      switch (kind) {
+        case "reports":
+          await this.drainSuperReports();
+          break;
+        case "actionReceipts":
+          await this.drainSuperActionReceipts();
+          break;
+        case "delegated":
+          await this.drainDelegatedUserTurns();
+          break;
+        case "corrections":
+          await this.drainSuperToolCallCorrections();
+          break;
+        case "merges":
+          await this.drainSuperMerges();
+          break;
+      }
+      return; // 一条队列一拍：其余队列交给下一拍 / 回合收尾的再次仲裁。
+    }
+  }
+
+  /**
+   * 某条自动回合队列此刻是否有「属于当前主会话」的待投递项。
+   *
+   * 只做轻量非空判断（真正的门控 —— mainSessionFree / error / Stop / 合并互斥
+   * —— 仍留在各 drain 里，避免两处规则漂移）。合并队列不带主会话归属，只看
+   * 非空。
+   */
+  private superAutoTurnHasWork(
+    kind: (typeof ChatPanel.SUPER_AUTO_TURN_PRIORITY)[number],
+    owner: string | null,
+  ): boolean {
+    switch (kind) {
+      case "reports":
+        return this.pendingSuperReportPrompts.some((item) => item.mainSessionId === owner);
+      case "actionReceipts":
+        return this.pendingSuperActionReceipts.some((item) => item.mainSessionId === owner);
+      case "delegated":
+        return this.pendingDelegatedUserTurns.some((item) => item.mainSessionId === owner);
+      case "corrections":
+        return this.pendingSuperToolCallCorrections.some((item) => item.mainSessionId === owner);
+      case "merges":
+        return this.pendingSuperMerges.length > 0;
+    }
+  }
+
   private superHeartbeatTick(): void {
     if (this.disposed) {
       this.stopSuperHeartbeat();
@@ -8936,11 +9067,7 @@ export class ChatPanel implements vscode.Disposable {
     // refreshSuperWaitHeartbeat / syncSuperWaitingState 这类同步 UI 刷新。
     try {
       this.refreshSuperWaitHeartbeat();
-      void this.drainSuperReports();
-      void this.drainSuperActionReceipts();
-      void this.drainDelegatedUserTurns();
-      void this.drainSuperToolCallCorrections();
-      void this.drainSuperMerges();
+      void this.drainSuperAutoTurns();
     } catch (error) {
       this.log.warn(`super agent heartbeat tick failed: ${errorMessage(error)}`);
     }
@@ -12933,20 +13060,11 @@ export class ChatPanel implements vscode.Disposable {
       // (cancelled) also drains: Stop interrupts the CURRENT turn, the queue
       // keeps steering (roadmap Steer semantics).
       void this.dispatchQueue();
-      // 主会话空闲了 → 发起排队的「让智能体合并」（子会话完成后自动合并的
-      // 那一路）。串行执行，一次只合并一个。
-      void this.drainSuperMerges();
-      // 同理：子会话汇报可能在别的事件里就绪（流式期间 / 恢复历史期间），
-      // 回合结束时补一次投递，并刷新「等待子会话」心跳 —— 主会话空闲而子会话
-      // 仍在跑时，这条常驻提示就是「流程没断，宿主在等」的唯一可见证据。
-      void this.drainSuperReports();
-      // 本回合里若有用户消息被改道给子会话，现在主会话空闲了 → 补投成下一
-      // 回合（hidden，不伪造用户气泡）。与汇报/合并共用同一条车道，谁先申领
-      // superReportRunning 谁跑；没抢到的留给心跳重投。
-      void this.drainDelegatedUserTurns();
-      // 本轮里 super-agent 参数不合法时排下的纠错提示，等主会话空闲后作为
-      // 一次 hidden 回合投出（模型据此修正后重新调用）。
-      void this.drainSuperToolCallCorrections();
+      // 主会话空闲了 → 统一仲裁 5 条自动回合队列（汇报 / 动作回执 / 被改道
+      // 消息 / 纠错 / 合并），按明确优先级 + 轮转每拍取一条队列投出（该队列
+      // 沿用既有顺序投递语义）。剩下的交给下一次仲裁或心跳 —— 任一队列卡住
+      // 都不会挡死其余。
+      void this.drainSuperAutoTurns();
       this.refreshSuperWaitHeartbeat();
       if (this.hasSuperWork()) this.ensureSuperHeartbeat();
     } catch (error) {
