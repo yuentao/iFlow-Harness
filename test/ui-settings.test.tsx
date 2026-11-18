@@ -42,6 +42,7 @@ const hostSettings = vi.hoisted(() => ({
   superAgentMaxConcurrent: 5,
   superAgentIntegration: "merge",
   superAgentMaxWorktrees: 10,
+  superAgentKeepWorktree: false,
 } as HostSettingsUi));
 const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,

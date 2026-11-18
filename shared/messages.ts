@@ -1646,6 +1646,9 @@ export interface HostSettingsUi {
   /** Max kept worktree directories of finished child sessions
    * (`iflow.superAgent.maxWorktrees`); 0 = unlimited. */
   superAgentMaxWorktrees: number;
+  /** Keep the worktree directory after a child session finishes
+   * (`iflow.superAgent.keepWorktree`); default false = clean up. */
+  superAgentKeepWorktree: boolean;
 }
 
 /**

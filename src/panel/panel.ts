@@ -2652,6 +2652,9 @@ export class ChatPanel implements vscode.Disposable {
         if (msg.superAgentMaxWorktrees !== undefined && Number.isFinite(msg.superAgentMaxWorktrees)) {
           writes.push(["superAgent.maxWorktrees", clampMaxSuperWorktrees(msg.superAgentMaxWorktrees)]);
         }
+        if (typeof msg.superAgentKeepWorktree === "boolean") {
+          writes.push(["superAgent.keepWorktree", msg.superAgentKeepWorktree]);
+        }
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
         // 调高上限后排队的子会话立刻有机会起跑；调低不影响已在运行的会话，
         // 但 pump 本身是幂等且只按新上限放行，所以两种情况都能直接调。
@@ -2939,6 +2942,7 @@ export class ChatPanel implements vscode.Disposable {
       superAgentMaxWorktrees: clampMaxSuperWorktrees(
         config.get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
       ),
+      superAgentKeepWorktree: config.get<boolean>("superAgent.keepWorktree", false),
     });
   }
 

@@ -651,6 +651,10 @@ const en: Record<string, string> = {
   "磁盘上最多保留几个已结束子会话的工作目录。": "How many finished child-session worktrees to keep on disk at most.",
   "默认 10，可设 0–100；填 0 表示不限。超出时按修改时间从旧到新回收，分支一律保留，有未提交改动的目录不会被回收。":
     "Defaults to 10, range 0–100; 0 means no limit. When exceeded, the oldest are removed first by modification time; branches are always kept and worktrees with uncommitted changes are never removed.",
+  "保留工作目录": "Keep worktree",
+  "子会话完成后，是否保留它的工作目录。": "Whether to keep a finished child session's working directory.",
+  "默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的子会话从不回收。开启后工作目录会留在磁盘上，可随时手动清理。":
+    "Off by default: finished worktrees are reclaimed automatically (branches are always kept); failed or interrupted sessions are never reclaimed. When on, worktrees stay on disk for manual cleanup.",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
   "调整面板整体字号。": "Adjust the panel font size.",
   "审批/提问阻塞时，或整轮完成时发送。":
