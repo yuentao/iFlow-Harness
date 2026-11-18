@@ -1564,6 +1564,12 @@ export function appendInjectedContext(
   if (fileCount > 0) parts.push(l10n.t("{0} 个项目记忆文件", String(fileCount)));
   const knowledgeCount = items.filter((i) => i.kind === "knowledge").length;
   if (knowledgeCount > 0) parts.push(l10n.t("{0} 个知识库文档", String(knowledgeCount)));
+  // NOTE (2026-11-18): the main panel session is spawned with all MCP servers
+  // disabled (process-level sentinel) and no longer queries mcp-status, so it
+  // does not produce MCP items in practice. This branch is intentionally kept
+  // intact: it is still covered by session-state.test.ts and may be reused when
+  // a child session's context is projected into an injected card. Do not strip
+  // it as "dead" without revisiting those call sites first.
   const mcpItems = items.filter((i) => i.kind === "mcp");
   if (mcpItems.length > 0) {
     const unloaded = mcpItems.filter((i) => i.connected === false).length;
