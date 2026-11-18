@@ -9057,10 +9057,19 @@ export class ChatPanel implements vscode.Disposable {
         }
         const pos = this.pendingSuperReportPrompts.indexOf(item);
         if (pos !== -1) this.pendingSuperReportPrompts.splice(pos, 1);
+        // 本轮 assistant 正文：只含 agent 的 text 块（thought / tool / diff /
+        // 子会话卡都不在其中），与最终结果取文本同口径。
+        const reportTurnText = this.captureQqReportTurnText(reportAnchorId, reportTextBefore);
         // R2：缓存本轮正文供迟到补发复用（只在该会话仍有 awaiter 时才有意义）。
-        const rescueText = this.captureQqReportTurnText(reportAnchorId, reportTextBefore);
-        if (rescueText && owner && this.qqFinalRescueOwnerPending(owner)) {
-          this.qqFinalRescueText.set(owner, rescueText);
+        if (reportTurnText && owner && this.qqFinalRescueOwnerPending(owner)) {
+          this.qqFinalRescueText.set(owner, reportTurnText);
+        }
+        // 中间正文轮同步：非汇总的汇报轮正文只是进度，转发给该会话所有在等
+        // 最终答复的 QQ 任务。汇总轮（final=true）绝不在这里转发 —— 它的正文
+        // 由 sendPrompt 收尾时的 deliverQqMainFinalAnswer 作为最终结果投递，
+        // 两边同时发就是重复。
+        if (!item.final && reportTurnText) {
+          void this.deliverQqMainIntermediateText(owner, reportTurnText);
         }
         // 这一轮失败了（端点 / 内核报错）：别在心跳里连续喂下一批，留给用户
         // 处理错误后自然的下一轮。
@@ -10563,6 +10572,14 @@ export class ChatPanel implements vscode.Disposable {
               `QQ 注入轮 delegated 判定：task=${taskId} delegated=${delegated} baseline=${superIdsBefore.size} current=${this.getSuperAgent()?.list().length ?? 0}`,
             );
           }
+          // 中间正文轮同步：派生子会话的注入轮，其 assistant 正文只是「已安排」
+          // 的占位说明，永远不会被当成最终结果（真正答复在汇报汇总轮经
+          // completeMainFinalAnswer 回传）。这里把这段正文作为进度文本转发一次，
+          // 让 QQ 发起者看到主会话真实说了什么。直答轮（未派生）不转发 —— 那段
+          // 正文马上由 finalizeMainTask 作为最终结果投递，再转一次就是重复。
+          if (delegated && !failed) {
+            void this.deliverQqMainIntermediateText(sessionIdBefore, text, [taskId]);
+          }
           return {
             injected: true,
             text,
@@ -10717,7 +10734,38 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 等主会话进入可注入状态。
+   * 把主会话某一轮的 assistant 正文经 QQ 进度通道转发一次。
+   *
+   * 只投给该归属会话里仍在等最终答复的 QQ 任务 —— `qqMainFinalAwaiters` 就是
+   * 权威记账，任务取消 / 通道停止 / 会话切换 / dispose 都会清它，天然不串台；
+   * 服务侧再以 status=injected + 独立分支节流 / 指纹去重 + 终态短路作二次防线。
+   * 最终汇报轮的正文不走这里（由 {@link deliverQqMainFinalAnswer} 投递），
+   * 因此同一段正文绝不会被当成中间正文再发一次。
+   */
+  private async deliverQqMainIntermediateText(
+    owner: string | null,
+    text: string,
+    taskIds?: readonly string[],
+  ): Promise<void> {
+    if (this.disposed || !owner || !text.trim()) return;
+    const service = this.qq?.service;
+    // 部分测试夹具只提供最终答复通道：没有中间正文通道就安静跳过，不误伤。
+    if (!service || typeof service.deliverMainTurnText !== "function") return;
+    const targets =
+      taskIds ??
+      [...this.qqMainFinalAwaiters.entries()]
+        .filter(([, sessionId]) => sessionId === owner)
+        .map(([taskId]) => taskId);
+    for (const taskId of targets) {
+      try {
+        await service.deliverMainTurnText(taskId, text);
+      } catch (error) {
+        this.log.warn(`QQ 主会话中间正文回传失败：${errorMessage(error)}`);
+      }
+    }
+  }
+
+  /** 等主会话进入可注入状态。
    *
    * 判定口径与 `sendPrompt` 自己的门一致（`mainSessionFree`：会话就绪、非
    * streaming / initializing / replaying / historySync、且主会话车道空闲）。

@@ -447,6 +447,16 @@ export const QQ_EMPTY_SUMMARY_NOTICE = "（执行体未返回摘要内容）";
  * 与面板兜底文案逐字一致，避免两处漂移。
  */
 export const QQ_MAIN_FINAL_EMPTY_NOTICE = "子会话任务已完成，但未产生可转发的正文摘要。";
+/**
+ * 主会话「中间正文轮」同步的进度分支名。与 main-accepted 等分支各占一个
+ * 节流 / 指纹槽位，互不挤占；同一分支的整轮正文按指纹永久去重。
+ */
+export const QQ_MAIN_TURN_TEXT_BRANCH = "main-turn-text";
+/**
+ * 中间正文轮的最小投递长度：过短的语气词（「好」「嗯」「ok」）不值得占一条
+ * QQ 被动回复配额（同一 msg_id 的被动回复条数有限，见 deliverTaskText）。
+ */
+export const QQ_MAIN_TURN_TEXT_MIN_CHARS = 2;
 /** 结果彻底没能送达 QQ 时记录在任务上的文案。 */
 export const QQ_RESULT_UNDELIVERED = "结果未能送达 QQ（被动回复与主动消息均失败）";
 /**
@@ -1868,6 +1878,29 @@ export class QqService {
   }
 
   /**
+   * 主会话「中间正文轮」同步：把主 Agent 某一轮里累积的 assistant 纯文本正文
+   * 作为进度消息投递到 QQ，让发起者看到实际的推进过程，而不只是「已受理」+
+   * 最终结果。
+   *
+   * 与最终结果严格分离（不会重复发送）：
+   *  - 只接仍停在 `injected` 的 main 渠道任务。直答任务与本轮最终答复任务的
+   *    结果都经 finalizeMainTask 写成终态并落下 `resultDeliveredAt` 幂等锚点；
+   *    终态任务在这里被彻底挡住，中间正文绝不碰那个锚点。
+   *  - 走 {@link deliverProgressLike} 的独立分支 `main-turn-text`：最小间隔节流
+   *    + 整轮正文指纹去重 + 失败不记指纹（可重试），与「已受理」等分支互不影响。
+   *
+   * 正文只来自面板侧 agent 的文本块（thought / tool / diff / 子会话卡不在其中）；
+   * 超长正文复用 {@link chunkQqText} 与现有投递原语，不另造分片轮子。
+   */
+  async deliverMainTurnText(taskId: string, text: string): Promise<void> {
+    const trimmed = (text ?? "").trim();
+    if (trimmed.length < QQ_MAIN_TURN_TEXT_MIN_CHARS) return;
+    const task = this.tasks.get(taskId);
+    if (!task || task.channel !== "main" || task.status !== "injected") return;
+    await this.deliverProgressLike(task, trimmed, QQ_MAIN_TURN_TEXT_BRANCH, { chunked: true });
+  }
+
+  /**
    * 主渠道收尾助手：把一段文本作为任务的最终结果落盘、记事件并回传 QQ。
    * `runMainTask`（无派生子会话的直答）与 `completeMainFinalAnswer`（汇报汇总轮）
    * 共用，避免两条路径的状态机/投递纪律漂移。
@@ -2916,6 +2949,7 @@ export class QqService {
     task: QqTask,
     text: string,
     branch: string,
+    options?: { chunked?: boolean },
   ): Promise<void> {
     const slot = `${task.taskId}:${branch}`;
     const fingerprint = fingerprintText(text);
@@ -2942,11 +2976,27 @@ export class QqService {
 
     // 先记尝试时刻：投递窗口（重试退避可达数十秒）内的并发刷新不再重复发送。
     this.trackProgressSlot(this.progressRefreshes, slot, at);
-    const ok = await this.deliverTaskNotice(
-      task,
-      text,
-      `${branch}:${task.taskId}:${fingerprint}`,
-    );
+    let ok: boolean;
+    if (options?.chunked === true) {
+      // 中间正文轮：指纹/节流按「整轮正文」判定（上面的 slot 与指纹未变），
+      // 投递则复用结果回包同款 chunkQqText 分片档位；首片走被动回复，续片
+      // 一律主动消息（与 deliverResultLocked 的纪律一致，避免 seq 撞车被吞）。
+      const profile = qqDetailProfile(this.config.resultDetail);
+      const chunks = chunkQqText(text, profile.chunkChars);
+      ok = chunks.length > 0;
+      for (let i = 0; i < chunks.length; i += 1) {
+        if (!(await this.deliverTaskTextWithRetry(task, chunks[i]!, undefined, { passive: i === 0 }))) {
+          ok = false;
+          break;
+        }
+      }
+    } else {
+      ok = await this.deliverTaskNotice(
+        task,
+        text,
+        `${branch}:${task.taskId}:${fingerprint}`,
+      );
+    }
     if (ok) {
       // 只有投递成功才记指纹：失败不记账，下次刷新立即重试（绝不永久静默）。
       this.trackProgressSlot(this.progressFingerprints, slot, fingerprint);

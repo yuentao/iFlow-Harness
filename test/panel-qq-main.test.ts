@@ -86,6 +86,11 @@ type PanelInternals = {
     stopReason: string,
     onlyTaskIds?: ReadonlySet<string>,
   ) => Promise<void>;
+  deliverQqMainIntermediateText: (
+    owner: string | null,
+    text: string,
+    taskIds?: readonly string[],
+  ) => Promise<void>;
   qqMainFinalAwaiters: Map<string, string>;
   qqMainFinalAwaiterSince: Map<string, number>;
   qqFinalRescueText: Map<string, string>;
@@ -103,6 +108,7 @@ type PanelInternals = {
         text: string;
         stopReason?: string;
       }) => Promise<void>;
+      deliverMainTurnText?: (taskId: string, text: string) => Promise<void>;
     };
   };
   userQuestionsFromAgent: (req: {
@@ -783,5 +789,125 @@ describe("QQ 注入轮与最终答复轮的衔接", () => {
 
     await p.deliverQqMainFinalAnswer("main-session", "再来的结论", "end_turn");
     expect(complete).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 新功能：主会话纯文本正文轮同步到 QQ（工具/思考等不同步）
+// ---------------------------------------------------------------------------
+
+describe("QQ 主会话中间正文轮同步", () => {
+  let panel: ChatPanel;
+  let p: PanelInternals;
+  let storageDir: string;
+  let iflowHome: string;
+
+  beforeEach(async () => {
+    iflowHome = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-turntext-home-"));
+    process.env.IFLOW_HOME = iflowHome;
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-turntext-storage-"));
+    setConfigOverrides({});
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as PanelInternals;
+    const state = p.store.getState();
+    state.sessionId = "main-session";
+    state.status = "idle";
+    state.initializing = false;
+    state.replaying = false;
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    delete process.env.IFLOW_HOME;
+    fs.rmSync(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
+
+  it("委派注入轮只把 assistant 纯文本正文转发一次，thought/tool 不进正文", async () => {
+    const deliver = vi.fn(async () => undefined);
+    p.qq = { service: { deliverMainTurnText: deliver } };
+    const children: Array<{ id: string; mainSessionId?: string | null; status: string }> = [];
+    p.getSuperAgent = () => ({ list: () => children });
+    p.sendPrompt = async (...args: unknown[]) => {
+      const options = args[4] as { onTurnStarted?: () => Promise<void> | void };
+      p.store.userPrompt("原文");
+      await options.onTurnStarted?.();
+      children.push({ id: "child-1", mainSessionId: "main-session", status: "running" });
+      const blocks = p.store.getState().blocks;
+      blocks.push({ kind: "thought", text: "内部思考，不该转发" });
+      blocks.push({ kind: "tool", toolName: "run_shell_command", text: "rm -rf" });
+      blocks.push({ kind: "text", text: "我先看一下项目结构，已经拆成两个子任务" });
+      p.store.getState().status = "idle";
+      return true;
+    };
+
+    const result = await p.injectQqMainTurn({
+      task: TASK,
+      text: "包裹正文",
+      displayText: "原文",
+      origin: "qq",
+      onInjected: () => undefined,
+      signal: new AbortController().signal,
+      timeoutMs: 2_000,
+    });
+    await tick();
+
+    expect(result.delegated).toBe(true);
+    expect(result.text).toBe("我先看一下项目结构，已经拆成两个子任务");
+    // thought / tool 块都被过滤：只投这一段纯文本正文，且只投一次。
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver).toHaveBeenCalledWith(
+      TASK.taskId,
+      "我先看一下项目结构，已经拆成两个子任务",
+    );
+  });
+
+  it("直答轮（未委派）不转发中间正文，避免与最终结果重复", async () => {
+    const deliver = vi.fn(async () => undefined);
+    p.qq = { service: { deliverMainTurnText: deliver } };
+    p.getSuperAgent = () => ({ list: () => [] });
+    p.sendPrompt = fakeSendPrompt(p, []);
+
+    await p.injectQqMainTurn({
+      task: TASK,
+      text: "包裹正文",
+      displayText: "原文",
+      origin: "qq",
+      onInjected: () => undefined,
+      signal: new AbortController().signal,
+      timeoutMs: 2_000,
+    });
+    await tick();
+
+    // 这一段正文马上由 finalizeMainTask 作为最终结果发出，这里绝不重复投递。
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it("最终答复只走 completeMainFinalAnswer，不再经中间正文通道重复投递", async () => {
+    const deliver = vi.fn(async () => undefined);
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { deliverMainTurnText: deliver, completeMainFinalAnswer: complete } };
+    p.qqMainFinalAwaiters.set(TASK.taskId, "main-session");
+
+    await p.deliverQqMainFinalAnswer("main-session", "真正的最终结论", "end_turn");
+    await tick();
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it("中间正文只投归属会话的等待任务，别的会话不误投", async () => {
+    const deliver = vi.fn(async () => undefined);
+    p.qq = { service: { deliverMainTurnText: deliver } };
+    p.qqMainFinalAwaiters.set(TASK.taskId, "main-session");
+    p.qqMainFinalAwaiters.set("T-other", "other-session");
+
+    await p.deliverQqMainIntermediateText("main-session", "进度正文");
+    await tick();
+
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver).toHaveBeenCalledWith(TASK.taskId, "进度正文");
   });
 });
