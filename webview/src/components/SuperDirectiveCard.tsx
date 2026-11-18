@@ -424,8 +424,13 @@ function ActionRows({ actions }: { actions: SuperDirectiveAction[] }) {
           <Chip tone={ACTION_TONES[action.action] ?? "muted"}>
             {t(ACTION_LABELS[action.action] ?? action.action)}
           </Chip>
+          {/* 标题在前、id 在后：用户第一眼能认出针对哪个子会话，id 仍保留
+              便于精确排障。取不到标题（围栏路径 / 记录已清理）时退回裸 id，
+              不留空的括号或分隔符（分层纪律：webview 只渲染宿主给的字段）。 */}
           <code className="min-w-0 break-all font-mono text-ui-micro text-muted-foreground">
-            {action.sessionId || t("未指定子会话")}
+            {action.title?.trim()
+              ? t("{0}（{1}）", action.title.trim(), action.sessionId)
+              : action.sessionId || t("未指定子会话")}
           </code>
           {action.keepBranch && (
             <span className="text-ui-micro text-muted-foreground">{t("保留分支")}</span>
@@ -1018,6 +1023,11 @@ function superActionsFailureDetail(block: ToolBlock): string {
 }
 
 function parseSuperActionsToolCall(block: ToolBlock): SuperActionsToolParse {
+  // 单一真源 = 宿主回填的 block.superActions（含每项目标子会话 title）。
+  // input 是有损展示串且只有裸 id，标题只在宿主的 super-session 记录里 ——
+  // 卡片不查表，直接用宿主给的结构。没有该字段（流式中 / 旧转录）才回解 input。
+  const host = block.superActions;
+  if (host && host.length > 0) return { ok: true, actions: host };
   const parsed = parseSuperToolCall("actions", block.input);
   if (parsed.ok && parsed.actions.length > 0) {
     return {
@@ -1042,7 +1052,7 @@ function parseSuperActionsToolCall(block: ToolBlock): SuperActionsToolParse {
 }
 
 export function SuperActionsToolCallCard({ block }: { block: ToolBlock }) {
-  const parsed = useMemo(() => parseSuperActionsToolCall(block), [block.input]);
+  const parsed = useMemo(() => parseSuperActionsToolCall(block), [block.input, block.superActions]);
   return (
     <DirectiveSurface
       className="my-2"
