@@ -1185,6 +1185,45 @@ describe("super agent · 合并子会话（主仓工作区档）", () => {
     expect(mergeSession?.isolation.branch).toBeUndefined();
   }, 30000);
 
+  it("repo 档预检拦截破坏性 git 命令：终止合并子会话并留下可见原因", async () => {
+    const repo = makeRepo();
+    // 合并子会话停在 prompt 里，测试在「命令即将执行」的帧上注入破坏性命令。
+    const harness = makeManager(repo, ["commit", "hang"], "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    const branch = harness.sessions[0]!.isolation.branch!;
+
+    const merge = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(merge).not.toBeNull();
+    await until(() => harness.clients.length === 2);
+    const client = harness.clients[1]!;
+    await until(() => client.prompts.length === 1);
+
+    client.callbacks.onSessionUpdate?.({
+      sessionId: "sub",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "run_shell_command",
+        kind: "execute",
+        status: "in_progress",
+        title: "git reset --hard",
+        args: { command: "git reset --hard" },
+      },
+    } as never);
+
+    await until(() => harness.sessions.find((s) => s.id === merge!.id)?.status === "failed");
+    const mergeSession = harness.sessions.find((s) => s.id === merge!.id);
+    // 不能静默放行：子会话被终止，原因写进 failed（主会话汇报读的正是它）。
+    expect(mergeSession?.error).toContain("Host guard");
+    expect(mergeSession?.error).toContain("git reset --hard");
+    expect(client.disposed).toBe(true);
+  }, 30000);
+
   it("清理合并子会话只移除记录，绝不删主仓工作区", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, ["commit", "merge-noop"], "manual");

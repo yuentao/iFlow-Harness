@@ -51,6 +51,17 @@ export interface ChildShellGuardContext {
    */
   nodeModulesIsLink?: boolean;
   /**
+   * 子会话是否直接跑在**主仓工作区**（repo 档 / 合并子会话，无隔离）。
+   *
+   * 这一档没有自己的分支与临时工作目录：`git reset --hard` / `git clean -fd`
+   * / `git checkout -- .` 会直接在用户的工作区里丢掉未提交改动，不可逆。
+   * worktree 档的同一条命令只毁掉自己的临时工作目录（删掉即可重建），因此
+   * 破坏性 git 规则的判定**只在这一档生效** —— 由宿主按
+   * `session.isolation.kind === "repo"` 显式传入，不靠路径猜测（repo 档的
+   * 子会话可以 `cd` 到子目录里执行 git，路径相等判断会漏）。
+   */
+  repoWorkspace?: boolean;
+  /**
    * 读取子会话工作目录内的脚本文件内容（可选）。
    *
    * 由宿主注入（护栏本身零文件系统依赖，纯函数才能单测）。用途：判定
@@ -187,6 +198,33 @@ const INSTALL_CALL_IN_SCRIPT =
 /** 脚本里「创建链接」的 API 调用形态。 */
 const LINK_CALL_IN_SCRIPT = /symlinksync|symlink\s*\(|fs\.symlink|junction|mklink|hardlink/i;
 
+/** git 可执行名（basename，小写）。 */
+const GIT_BINARIES: ReadonlySet<string> = new Set(["git"]);
+
+/**
+ * git 的**取值型全局选项**：`git -C <dir> reset` / `git -c <k=v> ...` 里的
+ * 第一个非选项词其实是选项取值，不是子命令。不跳过它们会把子命令读成路径，
+ * 破坏性命令因此逃过判定。带 `=` 的形态（`--git-dir=x`）自带取值，不经这里。
+ */
+const GIT_GLOBAL_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+  "-c",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--exec-path",
+  "--super-prefix",
+  "--config-env",
+]);
+
+/**
+ * repo 档的破坏性 git 命令拒绝文案（英文，面向模型）。
+ *
+ * 这类命令在 worktree 档是允许的（毁掉的是自己的临时目录），所以文案必须
+ * 点名「这里是主仓工作区」，否则模型会以为自己被无理由拦下。
+ */
+const DESTRUCTIVE_GIT_REASON =
+  "Blocked by the host guard: this working directory is the MAIN repository workspace (no isolation), so destructive git commands are not allowed. `git reset --hard`, `git clean -fd`, `git checkout -- .` and `git restore` irreversibly discard the user's uncommitted work. Stop and report the repository state instead of throwing changes away.";
+
 const LINK_REASON =
   "Blocked by the host guard: creating a link (mklink / junction / symlink) that points at node_modules is not allowed. A child session must not share the main workspace's dependencies — deleting a linked node_modules (e.g. `npm ci`) destroys the real dependency tree. Install dependencies inside your own working directory instead.";
 
@@ -239,24 +277,29 @@ function classifyText(
   const segments = splitSegments(text).map(tokenize);
   const lower = text.toLowerCase();
 
-  // ① 创建指向 node_modules 的链接（mklink / New-Item -ItemType Junction /
+  // ① repo 档（主仓工作区）的破坏性 git 命令 —— 不可逆地丢掉用户未提交
+  //    改动。worktree 档不走这条规则（毁掉的是自己的临时目录）。
+  const gitVerdict = classifyDestructiveGit(segments, ctx);
+  if (gitVerdict) return gitVerdict;
+
+  // ② 创建指向 node_modules 的链接（mklink / New-Item -ItemType Junction /
   //    ln -s / os.symlink / junction.exe ...）。
   if (mentionsNodeModules(text) && createsLink(lower)) {
     return { decision: "deny", reason: LINK_REASON, severity: linkSeverity(segments) };
   }
 
-  // ② Node 内联脚本 / 脚本文件 —— 命令藏在 JS 里，按词切分看不见。
+  // ③ Node 内联脚本 / 脚本文件 —— 命令藏在 JS 里，按词切分看不见。
   //    放在安装/删除规则之前：这类写法的命令文本里根本没有包管理器词。
   const nodeVerdict = classifyNodeInvocation(segments, ctx);
   if (nodeVerdict) return nodeVerdict;
 
-  // ③ 包管理器安装类命令 —— 只在「会动到主工作区依赖」时拒绝。
+  // ④ 包管理器安装类命令 —— 只在「会动到主工作区依赖」时拒绝。
   if (findInstallInvocation(segments)) {
     const reason = installDenyReason(segments, text, ctx);
     if (reason) return { decision: "deny", reason, severity: "session" };
   }
 
-  // ④ 显式删除依赖树（同一段里既有删除动词又提到 node_modules）。
+  // ⑤ 显式删除依赖树（同一段里既有删除动词又提到 node_modules）。
   if (deletesNodeModules(segments)) {
     return {
       decision: "deny",
@@ -452,6 +495,124 @@ function createsLink(lowerCommand: string): boolean {
   if (/\bsymlink\b/.test(lowerCommand)) return true;
   if (/\bjunction\b/.test(lowerCommand)) return true;
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// repo 档：破坏性 git 命令
+// ---------------------------------------------------------------------------
+
+/**
+ * 判定命令里是否有「在主仓工作区里不可逆丢改动」的 git 调用。
+ *
+ * **只在 `ctx.repoWorkspace` 为真时生效**：worktree 档的目录是宿主建的临时
+ * 副本，`git reset --hard` / `git clean -fd` 毁掉的只是子会话自己的现场
+ * （而且这类命令在 worktree 里本来就是正常操作），拦它属于误伤。
+ *
+ * 处置档位是 `session`：预检路径（wire 上的 tool_call 帧）只能终止整个子会话，
+ * 而这些命令的后果是用户工作区里不可逆的数据丢失 —— 宁可停掉子会话，也绝不
+ * 让命令跑下去。审批路径下则拒掉这一次调用。
+ */
+function classifyDestructiveGit(
+  segments: string[][],
+  ctx: ChildShellGuardContext,
+): ChildShellGuardResult | null {
+  if (!ctx.repoWorkspace) return null;
+  for (const tokens of segments) {
+    const invocation = findGitInvocation(tokens);
+    if (!invocation) continue;
+    if (isDestructiveGitCommand(invocation.subcommand, invocation.args)) {
+      return { decision: "deny", reason: DESTRUCTIVE_GIT_REASON, severity: "session" };
+    }
+  }
+  return null;
+}
+
+/**
+ * 在一个命令段里找 git 调用，返回子命令与它之后的参数。
+ *
+ * 跳过 git 的全局选项：取值型（`-C <dir>` / `-c <k=v>` / `--git-dir <path>`）
+ * 连它后面那个词一起跳过，布尔型（`--no-pager`）只跳过自己 —— 否则
+ * `git -C repo reset --hard` 的子命令会被读成 `repo`，规则直接失明。
+ */
+function findGitInvocation(tokens: string[]): { subcommand: string; args: string[] } | null {
+  for (let i = 0; i < tokens.length; i++) {
+    if (!GIT_BINARIES.has(commandName(tokens[i]!))) continue;
+    let j = i + 1;
+    while (j < tokens.length) {
+      const token = tokens[j]!;
+      if (!token.startsWith("-")) break;
+      if (token.includes("=")) {
+        j += 1;
+        continue;
+      }
+      if (GIT_GLOBAL_VALUE_OPTIONS.has(token.toLowerCase())) {
+        j += 2;
+        continue;
+      }
+      j += 1;
+    }
+    const subcommand = tokens[j];
+    if (!subcommand) return null;
+    return { subcommand: commandName(subcommand), args: tokens.slice(j + 1) };
+  }
+  return null;
+}
+
+/** 该子命令+参数是否会不可逆地丢改动（repo 档口径）。 */
+function isDestructiveGitCommand(subcommand: string, args: readonly string[]): boolean {
+  const lower = args.map((arg) => arg.toLowerCase());
+  switch (subcommand) {
+    // git reset --hard 丢掉工作区与暂存区的全部未提交改动。
+    case "reset":
+      return lower.some((arg) => arg === "--hard" || arg.startsWith("--hard="));
+    // git clean -fd 删除未跟踪文件/目录；`-n` 是 dry-run，不实际删除。
+    case "clean": {
+      const dryRun =
+        lower.some((arg) => arg === "--dry-run") ||
+        lower.some((arg) => shortFlagBundleIncludes(arg, "n"));
+      const force =
+        lower.some((arg) => arg === "--force") ||
+        lower.some((arg) => shortFlagBundleIncludes(arg, "f"));
+      return force && !dryRun;
+    }
+    // git checkout -- . / git checkout . / -f：用索引/HEAD 覆盖工作区。
+    case "checkout":
+      return discardsWorktreeViaCheckout(lower);
+    // git restore 默认就是把工作区文件恢复成索引版本（丢改动）；只暂存区
+    // 操作（`--staged` 且不带 `--worktree`）是安全的。
+    case "restore": {
+      const stagedOnly = lower.includes("--staged") && !lower.includes("--worktree");
+      return !stagedOnly;
+    }
+    default:
+      return false;
+  }
+}
+
+/** `-fd` / `-fdx` 这类短选项串里是否含某个字母（`-f` 单独出现也算）。 */
+function shortFlagBundleIncludes(token: string, letter: string): boolean {
+  if (!/^-[A-Za-z]+$/.test(token)) return false;
+  return token.slice(1).includes(letter);
+}
+
+/**
+ * checkout 是否在用路径/强制方式覆盖工作区。
+ *
+ * 判据（宁可多拦一点，也不放过不可逆丢失）：
+ *  - 出现 `--`：明确的路径检出（`git checkout -- .` / `[...] -- src/a.ts`）；
+ *  - `-f` / `--force`：强制覆盖；
+ *  - `-b` / `-B` / `--orphan`：这是建分支/切分支，不是用路径覆盖工作区（放行）；
+ *  - 位置参数是 `.`（`git checkout .`）。
+ */
+function discardsWorktreeViaCheckout(lower: readonly string[]): boolean {
+  if (lower.includes("--")) return true;
+  if (lower.some((arg) => arg === "-f" || arg === "--force" || shortFlagBundleIncludes(arg, "f"))) {
+    return true;
+  }
+  if (lower.some((arg) => arg === "-b" || arg === "-B" || arg === "--orphan")) return false;
+  return lower
+    .filter((arg) => !arg.startsWith("-"))
+    .some((arg) => arg === "." || arg === "./" || arg === ".\\");
 }
 
 /**

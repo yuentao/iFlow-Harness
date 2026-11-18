@@ -1855,7 +1855,12 @@ export class SuperAgentManager {
       onSessionUpdate: (notification) => {
         const update = notification.update;
         const session = this.sessions.get(id);
-        if (session && session.isolation.kind !== "repo") {
+        // **所有隔离档位都要过预检**：此前这里跳过了 repo 档（`kind !== "repo"`），
+        // 而 repo 档（主仓工作区 / 合并子会话）恰恰是唯一一档「命令直接作用于
+        // 用户工作区」的隔离方式 —— `git reset --hard` / `git clean -fd` 会在
+        // 那里不可逆地丢掉用户未提交的改动。护栏按 `repoWorkspace` 区分档位：
+        // 破坏性 git 规则只对 repo 档生效，worktree 档的判定结果不变。
+        if (session) {
           const verdict = classifyChildToolCall(
             {
               sessionUpdate: update.sessionUpdate,
@@ -1869,6 +1874,7 @@ export class SuperAgentManager {
             {
               cwd: session.isolation.path,
               repoRoot: this.deps.repoRoot,
+              repoWorkspace: session.isolation.kind === "repo",
               nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
               readLocalFile: (filePath) => {
                 try {
@@ -1881,8 +1887,7 @@ export class SuperAgentManager {
             },
           );
           if (verdict?.decision === "deny" && verdict.severity === "session") {
-            this.deps.log.warn(`[${id}] 预检拒绝子会话命令并终止会话：${verdict.reason ?? ""}`);
-            void this.cancel(id);
+            this.blockChildSession(id, verdict.reason ?? "blocked by the host guard");
             return;
           }
         }
@@ -2036,9 +2041,52 @@ export class SuperAgentManager {
     const verdict = classifyChildShellCommand(command, {
       cwd: session.isolation.path,
       repoRoot: this.deps.repoRoot,
+      repoWorkspace: session.isolation.kind === "repo",
       nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
     });
     return verdict.decision === "deny" ? { reason: verdict.reason } : null;
+  }
+
+  /**
+   * 预检命中（`session` 档）时终止子会话，并让原因可见。
+   *
+   * 预检路径只能终止整个子会话（wire 上没有「拒掉单次调用」的通道），而
+   * `session` 档的规则都意味着命令会在用户工作区里造成不可逆损失 —— 停掉
+   * 子会话是唯一能保证命令不执行的处置。
+   *
+   * 原因可见性分档：
+   *  - worktree 档沿用既有行为（`cancel` + 日志）：它的命中只关乎子会话自己的
+   *    临时目录，看板显示「已中断」足够；
+   *  - repo 档改用 `failed` 并把原因写进 `error`：`cancel` 只会留下「被打断」，
+   *    主会话与看板看不出为什么 —— 那是刚被补齐的护栏，原因必须可追溯。
+   *    同时打上 `interrupted` 标记，收尾路径不会代提交、不会自动合并。
+   */
+  private blockChildSession(id: string, reason: string): void {
+    const session = this.sessions.get(id);
+    if (!session || isTerminalSuperStatus(session.status)) return;
+    this.deps.log.warn(`[${id}] 预检拒绝子会话命令并终止会话：${reason}`);
+    if (session.isolation.kind !== "repo") {
+      void this.cancel(id);
+      return;
+    }
+    // 先占住终态再杀进程：内核退出会被记成 failed，终态粘性让随后的迟到
+    // 事件无法改写这条结论（与 cancel 的顺序纪律一致）。
+    this.interrupted.set(id, session.attempts ?? 1);
+    this.apply(id, {
+      type: "failed",
+      error: `Host guard blocked a destructive command and stopped the child session: ${reason}`,
+      at: Date.now(),
+    });
+    const client = this.clients.get(id);
+    if (client && session.cliSessionId) {
+      try {
+        client.cancel(session.cliSessionId);
+      } catch {
+        // 进程可能已经死了 —— 下面的 dispose 会兜住。
+      }
+    }
+    void this.disposeClient(id);
+    this.notifyReport(id);
   }
 
   /**
