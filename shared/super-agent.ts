@@ -3811,6 +3811,14 @@ export interface SuperDirectiveAction {
   /** 原样动作名（retry / cancel / cleanup / answer / 未知）。 */
   action: string;
   sessionId: string;
+  /**
+   * 目标子会话的人可读标题（宿主在构造动作记录时用 super-session 记录回填）。
+   *
+   * 操作卡据此显示「标题（id）」而不是裸 id —— 用户第一眼就能看出针对的是
+   * 哪个子会话。取不到（记录已清理 / 围栏文本解析没有 session 上下文）时必须
+   * 留空，渲染侧优雅退回只显示 id，不要伪造占位符。
+   */
+  title?: string;
   /** `cleanup` 显式要求保留分支。 */
   keepBranch?: boolean;
   /** `answer` 动作携带的回答条数。 */

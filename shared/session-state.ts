@@ -39,7 +39,7 @@ import {
   type UsageBreakdownUi,
 } from "./messages.js";
 import { classifySuperToolName, resolveSuperToolCallKind } from "./super-tool-call.js";
-import { parseSuperDelegationPayload } from "./super-agent.js";
+import { parseSuperDelegationPayload, type SuperDirectiveAction } from "./super-agent.js";
 
 // --- merging helpers -------------------------------------------------------
 
@@ -415,6 +415,8 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
       // 动作结果由宿主在 runSuperActions 收尾时按 toolCallId 回填，wire 帧
       // 永远不带它 —— 后续 completed 帧不能用 undefined 把真实结果擦掉。
       superActionResult: patch.superActionResult ?? block.superActionResult,
+      // 同上：带标题的结构化动作也是宿主收尾回填，后续帧不得擦掉。
+      superActions: patch.superActions ?? block.superActions,
       reverted: patch.diff ? false : block.reverted,
       // P0-2: per-hunk decisions anchor to the diff text they were derived
       // from — a new diff invalidates them exactly like the revert marker.
@@ -1268,12 +1270,14 @@ export function attachSuperActionResult(
   state: SessionState,
   toolCallId: string,
   result: NonNullable<ToolBlock["superActionResult"]>,
+  actions?: SuperDirectiveAction[] | null,
 ): number | null {
   for (let i = state.blocks.length - 1; i >= 0; i--) {
     const block = state.blocks[i]!;
     if (block.kind === "tool") {
       if (block.toolCallId !== toolCallId) continue;
       block.superActionResult = result;
+      if (actions) block.superActions = actions;
       return i;
     }
     if (block.kind !== "subagent") continue;
@@ -1282,6 +1286,7 @@ export function attachSuperActionResult(
     );
     if (nested) {
       nested.superActionResult = result;
+      if (actions) nested.superActions = actions;
       return i;
     }
   }

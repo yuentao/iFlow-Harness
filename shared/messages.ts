@@ -22,7 +22,7 @@ import {
   type QqAllowEntry,
   type QqAllowEntryInput,
 } from "./qq-access.js";
-import type { SuperActionReceipt, SuperSessionUi } from "./super-agent.js";
+import type { SuperActionReceipt, SuperDirectiveAction, SuperSessionUi } from "./super-agent.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
@@ -221,6 +221,14 @@ export interface ToolBlock extends BlockBase {
    * 或旧转录），卡片不得因此谎报「已完成」。
    */
   superActionResult?: SuperActionReceipt[] | null;
+  /**
+   * 宿主构造的子会话管理动作（含每项目标子会话的 `title`）。与 `superTasks`
+   * 同理：卡片优先渲染本字段而不是回解有损的 `input`，因为标题只存在于宿主的
+   * super-session 记录里，`input` 里只有裸 id。宿主在 `runSuperActions` 收尾时
+   * 按 toolCallId 回填；null/absent = 还没回填（流式中或旧转录），卡片退回
+   * 解析 `input`（此时无标题，只显示 id —— 诚实降级，不伪造占位符）。
+   */
+  superActions?: SuperDirectiveAction[] | null;
   /**
    * P-1 follow-up: present when `output` exceeded the host STORE cap
    * (`MAX_TOOL_OUTPUT_STORE_CHARS`, 512K, shared/session-state.ts) and was

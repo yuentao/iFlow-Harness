@@ -97,6 +97,7 @@ import {
   type SuperAction,
   type SuperActionReceipt,
   type SuperAttachment,
+  type SuperDirectiveAction,
   type SuperReportEntry,
   type SuperSessionUi,
   type SuperStatus,
@@ -8297,7 +8298,38 @@ export class ChatPanel implements vscode.Disposable {
     }
     // 工具调用触发的动作：把真实结果回填到那张工具帧，动作卡据此显示
     // 「完成 / 未找到 / 失败」而不是把「工具调用完成」当成动作成功。
-    if (toolCallId) this.store.superActionResult(toolCallId, receipts);
+    // 同时把每条动作的目标子会话标题一并回填 —— 标题只存在于宿主的
+    // super-session 记录里（webview 无权查表），带下去卡片才能显示
+    // 「标题（id）」而不是裸 id。取不到标题（记录已清理）就留空，
+    // 卡片优雅退回只显示 id。
+    if (toolCallId) {
+      const enriched: SuperDirectiveAction[] = actions.map((action) => {
+        const title = manager.get?.(action.sessionId)?.title?.trim() || undefined;
+        switch (action.action) {
+          case "answer":
+            return {
+              action: action.action,
+              sessionId: action.sessionId,
+              ...(title ? { title } : {}),
+              answerCount: Object.keys(action.answers ?? {}).length,
+            };
+          case "cleanup":
+            return {
+              action: action.action,
+              sessionId: action.sessionId,
+              ...(title ? { title } : {}),
+              ...(action.keepBranch ? { keepBranch: true } : {}),
+            };
+          default:
+            return {
+              action: action.action,
+              sessionId: action.sessionId,
+              ...(title ? { title } : {}),
+            };
+        }
+      });
+      this.store.superActionResult(toolCallId, receipts, enriched);
+    }
     this.queueSuperActionReceipt(receipts);
   }
 
