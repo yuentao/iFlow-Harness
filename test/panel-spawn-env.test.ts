@@ -152,8 +152,11 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
 
   /**
    * MCP 作用域按**进程**生效：主会话的 CLI 进程一个 MCP 服务器都不该有
-   * （MCP 工具绕过 `settings.allowed_tools` 白名单，只能这样整体移除），
-   * 子会话必须保留（实现工作要用 MCP 的浏览器/数据库工具）。
+   * （MCP 工具绕过 `settings.allowed_tools` 白名单，只能这样整体移除）；
+   * **子会话同样默认移除**（J）：`session/new` 的 `mcpServers: []` 挡不住
+   * settings.json 里配置的服务器 —— CLI 会为每个 server 拉起一整条 stdio
+   * 进程链（每 server 约 3 个 node），每个子会话都复制一遍。子会话的产出
+   * 来自工作目录里的代码与 shell，默认不需要 MCP。
    *
    * 断言的是宿主真的交给子进程的 argv（mock agent 自己 dump 的），不是某个
    * 内部对象。哨兵名与真实服务器名永不相交，所以「新装一个 MCP 服务器」不
@@ -178,7 +181,7 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     expect(argv).toContain("--stream");
   }, 30000);
 
-  it("子会话的 spawn argv 不带 MCP 作用域参数（子会话保留全部 MCP 工具）", async () => {
+  it("子会话的 spawn argv 也带 MCP 作用域参数（默认不连 MCP，避免每个 server 起一条进程链）", async () => {
     const dump = path.join(storageDir, "child-argv.json");
     process.env.ACP_MOCK_ARGV_DUMP = dump;
 
@@ -191,9 +194,12 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     });
     try {
       const argv = readDumpedArgv(dump);
-      expect(argv).not.toContain(MCP_SERVER_ALLOWLIST_FLAG);
-      expect(JSON.stringify(argv)).not.toContain(MCP_SERVER_ALLOWLIST_SENTINEL);
+      const i = argv.indexOf(MCP_SERVER_ALLOWLIST_FLAG);
+      expect(i).toBeGreaterThan(-1);
+      expect(argv[i + 1]).toBe(MCP_SERVER_ALLOWLIST_SENTINEL);
+      // 内置工具能力不受影响：只移除 MCP，参数仍是同一套 ACP 启动方式。
       expect(argv).toContain("--experimental-acp");
+      expect(argv).toContain("--stream");
     } finally {
       await child.dispose();
     }

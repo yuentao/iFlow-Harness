@@ -1247,6 +1247,11 @@ export function applyBlockPatch(
  */
 /** Char budget for the fully-kept tail (≈8MB of UTF-16 string heap). */
 export const EVICT_BUDGET_CHARS = 4_000_000;
+/** Tail blocks kept regardless of the budget (newest turns always render).
+ * Must exceed the webview's mount window (MessageList MAX_WINDOW) so every
+ * mounted card keeps its payload; the host applies the same window to child
+ * transcripts. */
+export const EVICT_KEEP_BLOCKS = 200;
 /** Tail blocks kept regardless of the budget (newest turns always render). */
 export const EVICT_MIN_KEEP = 20;
 

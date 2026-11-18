@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   applyBlockPatch,
+  EVICT_KEEP_BLOCKS,
   evictBlockPayloads,
   type Block,
   type HostSettingsUi,
@@ -2458,8 +2459,10 @@ const RESYNC_THROTTLE_MS = 1_000;
  * compression summaries) is released and rendered with a "released" marker;
  * the host state stays complete regardless (revert / export / persistence
  * read the host, not this projection).
+ *
+ * `EVICT_KEEP_BLOCKS` lives in `shared/messages` so the host-side child
+ * transcript (SuperAgentManager) trims with exactly the same window.
  */
-const EVICT_KEEP_BLOCKS = 200;
 
 /**
  * Eviction memo: input blocks array → evicted blocks array.

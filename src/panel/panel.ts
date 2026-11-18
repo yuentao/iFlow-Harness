@@ -108,6 +108,7 @@ import {
   parseSuperToolCall,
 } from "../../shared/super-tool-call.js";
 import {
+  awaitSuperSessionArchiveWrite,
   deleteSuperSessionArchive,
   listSuperSessionArchiveFiles,
   readSuperSessionArchive,
@@ -6649,9 +6650,49 @@ export class ChatPanel implements vscode.Disposable {
     try {
       await this.forgetSession(sessionId);
       await this.clearTranscript(sessionId);
+      // 子会话属于这段对话：删除会话等于这段对话不存在 —— 它派发的子会话
+      // 进程不能继续跑（跑完也没人接汇报），看板记录与归档归属必须一起消失。
+      // 旧实现只删归档文件、不管活着的子会话：进程继续跑、心跳常驻，而且
+      // 下一次落盘会把这个会话的归档重新写回磁盘。
+      const forgotten = await this.superAgent?.forgetMainSession(sessionId);
+      for (const entry of forgotten?.worktrees ?? []) {
+        this.log.info(
+          `super agent: session ${sessionId} deleted; child ${entry.id} stopped, worktree kept at ${entry.path}${
+            entry.branch ? ` (branch ${entry.branch})` : ""
+          }`,
+        );
+      }
+      // 属于这个会话的待投递内容（汇报 / 动作回执 / 被改道消息 / 参数纠错 /
+      // 排队的合并请求）都是「欠一段已不存在会话的回合」：留着既投不出去，
+      // 又会让 hasSuperWork() 永远为真（心跳停不下来）。
+      const goneIds = new Set(forgotten?.ids ?? []);
+      this.pendingSuperReports.delete(sessionId);
+      this.pendingSuperReportPrompts = this.pendingSuperReportPrompts.filter(
+        (item) => item.mainSessionId !== sessionId,
+      );
+      this.pendingSuperActionReceipts = this.pendingSuperActionReceipts.filter(
+        (item) => item.mainSessionId !== sessionId,
+      );
+      this.pendingDelegatedUserTurns = this.pendingDelegatedUserTurns.filter(
+        (item) => item.mainSessionId !== sessionId,
+      );
+      this.pendingSuperToolCallCorrections = this.pendingSuperToolCallCorrections.filter(
+        (item) => item.mainSessionId !== sessionId,
+      );
+      this.pendingSuperMerges = this.pendingSuperMerges.filter((item) => !goneIds.has(item.id));
+      for (const id of goneIds) {
+        this.superReportedChildIds.delete(id);
+        this.superLastStatus.delete(id);
+      }
       // The child-session archive is this session's too: keeping it would
       // resurrect the deleted session's children (and their branches) the
       // next time anyone restores anything.
+      //
+      // 顺序有讲究：先 force 落盘（清掉节流定时器，并且不再包含这个归属），
+      // 再等在飞的写落定，最后才 rm —— 否则一个排队的写会在 rm 之后 rename，
+      // 把刚删掉的归档复活。
+      await this.persistSuperSessions({ force: true });
+      await awaitSuperSessionArchiveWrite(this.superStoreDir(), sessionId);
       await deleteSuperSessionArchive(this.superStoreDir(), sessionId);
       // M3 P0-1: drop the session's shadow repo + checkpoint index too.
       await this.removeCheckpointsForSession(sessionId);
@@ -6660,6 +6701,11 @@ export class ChatPanel implements vscode.Disposable {
       await rm(attachmentSessionDir(sessionId), { recursive: true, force: true }).catch((error) => {
         this.log.warn(`removing attachment dir failed: ${errorMessage(error)}`);
       });
+      // 看板与忙碌态跟着删除后的现状重算：子会话全没了就不该再显示「等待
+      // 汇报」，没有待办时心跳必须停表（旧实现让它常驻）。
+      this.publishSuperSessions();
+      this.syncSuperWaitingState();
+      if (!this.hasSuperWork()) this.stopSuperHeartbeat();
     } finally {
       this.historySyncBusy = false;
       if (!this.disposed && this.store.getState() === lockState && this.client === lockClient) {
@@ -7501,7 +7547,12 @@ export class ChatPanel implements vscode.Disposable {
     // a merge child gets the main repo root so the CLI's own workspace check
     // and our fs boundary agree on what it may read.
     const includeDirectories = params.includeDirectories;
-    const { args } = buildAcpCommand(entry, includeDirectories);
+    // 子会话默认不连 MCP：`session/new` 的 `mcpServers: []` 只覆盖**请求里**
+    // 的服务器，settings.json 里配置的那些仍会被 CLI 拉起 —— 每个 server
+    // 一整条 stdio 进程链（Windows 上约 3 个 node），每个子会话复制一份。
+    // 子会话的产出靠工作目录里的文件与 shell，用不到 MCP；需要时再去掉这个
+    // 选项（目前没有「子会话启用 MCP」的设置项，所以只改默认，不加设置）。
+    const { args } = buildAcpCommand(entry, includeDirectories, { disableMcpServers: true });
     const systemPromptFile = await this.materializeSystemPrompt();
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",

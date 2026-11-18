@@ -68,7 +68,13 @@ import {
 } from "../../shared/super-agent-guard.js";
 import { renderPrompt } from "../../prompts/index.js";
 import { estimateCost } from "../../shared/context-window.js";
-import { initialSessionState, type Block, type SessionState } from "../../shared/messages.js";
+import {
+  EVICT_KEEP_BLOCKS,
+  evictBlockPayloads,
+  initialSessionState,
+  type Block,
+  type SessionState,
+} from "../../shared/messages.js";
 import {
   applySuperEvent,
   buildSuperReportPrompt,
@@ -80,6 +86,7 @@ import {
   reportForSession,
   retrySuperSession,
   toPersistedSuperSession,
+  toSuperBoardSession,
   withIntegration,
   withUsage,
   type PersistedSuperSession,
@@ -692,7 +699,13 @@ export class SuperAgentManager {
   list(mainSessionId?: string | null): SuperSessionUi[] {
     const live = [...this.sessions.values()];
     const history = mainSessionId ? this.archived.get(mainSessionId) ?? [] : [];
-    return [...live, ...history].sort((a, b) => a.createdAt - b.createdAt);
+    // 这是**看板投影**，不是记录本身：`superSessions` 属于非 blocks 元数据，
+    // 随每次 snapshot / blockPatch 整份重发，而 webview 从不渲染 `task`。
+    // 投影里只带预览（见 `toSuperBoardSession`）；完整任务书仍在本管理器的
+    // 记录里（重试 / PR 正文 / 归档都读那边）。
+    return [...live, ...history]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map(toSuperBoardSession);
   }
 
   get(id: string): SuperSessionUi | undefined {
@@ -937,6 +950,68 @@ export class SuperAgentManager {
       .map((s) => s.id);
     for (const id of ids) await this.cancel(id);
     return ids.length;
+  }
+
+  /**
+   * 主会话被删除：终止并清掉它名下的全部子会话与归档记录。
+   *
+   * 删除会话意味着「这段对话不存在了」：它派发的子会话进程不能继续跑（跑完
+   * 也没人接汇报），排队中的派发要撤掉，看板记录与归档归属必须一起消失 ——
+   * 否则下一次落盘会把这个主会话重新写回归档文件（文件复活），而活着的子
+   * 进程会让宿主的心跳永远停不下来。
+   *
+   * **worktree 与分支保留**：里面可能有还没合并的工作，与 `dispose()` 同
+   * 纪律 —— 删目录不可逆，绝不借「删会话」偷偷丢改动。保留的目录仍由
+   * `sweepStaleWorktrees` 按既有规则（只清已并入 HEAD 且干净的）回收；返回
+   * 清单供宿主如实记日志。
+   *
+   * 返回被清掉的子会话 id（宿主据此清掉属于它们的待办队列）。
+   */
+  async forgetMainSession(
+    mainSessionId: string,
+  ): Promise<{ ids: string[]; worktrees: { id: string; path: string; branch?: string }[] }> {
+    const ids: string[] = [];
+    const worktrees: { id: string; path: string; branch?: string }[] = [];
+    for (const session of [...this.sessions.values()]) {
+      if (session.mainSessionId !== mainSessionId) continue;
+      const id = session.id;
+      ids.push(id);
+      // 排队中的先撤掉，否则槽位一空 pump 还会把它拉起来。
+      this.dequeue(id);
+      this.started.delete(id);
+      if (!isTerminalSuperStatus(session.status)) {
+        // 先落「已中断」再杀进程：dispose 会触发 onExit，管理层把它记成
+        // failed；终态粘性会让随后的 cancelled 被丢弃。
+        this.interrupted.set(id, session.attempts ?? 1);
+        this.apply(id, { type: "cancelled", at: Date.now() });
+      }
+      await this.disposeClient(id);
+      // 附件副本是这个子会话的临时拷贝：记录都没了，它只剩占盘。
+      await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
+      if (
+        session.isolation.path &&
+        !session.isolation.released &&
+        session.isolation.kind !== "repo"
+      ) {
+        worktrees.push({ id, path: session.isolation.path, branch: session.isolation.branch });
+      }
+      const resolver = this.resolvers.get(id);
+      if (resolver) {
+        if (resolver.timer) clearTimeout(resolver.timer);
+        this.resolvers.delete(id);
+      }
+      this.forgetChild(id);
+      this.transcripts.delete(id);
+      this.policies.delete(id);
+      this.mergeTargets.delete(id);
+      this.removeSession(id);
+    }
+    // 归档归属也要清：留着它，下一次 persistSuperSessions 会把空数组重新写回
+    // 磁盘（会话已删，归档文件却复活）。
+    this.archived.delete(mainSessionId);
+    this.archiveOwners.delete(mainSessionId);
+    this.emit();
+    return { ids, worktrees };
   }
 
   /**
@@ -2100,7 +2175,28 @@ export class SuperAgentManager {
       if (from === null) continue;
       entry.dirtyFrom = null;
       send(id, from, entry.state.blocks.slice(from));
+      this.evictTranscriptPayloads(entry);
     }
+  }
+
+  /**
+   * 宿主侧子会话转录的载荷裁剪（**与 webview 同一口径**）。
+   *
+   * 子会话的转录只活在宿主内存里（不落盘），但工具输出（64K 上限）、结构化
+   * diff（256K）、图片 data URL（≤8MB）会随子会话跑得越久堆得越多 —— 一个
+   * 长任务就能把扩展宿主顶到几百 MB。这里复用 webview 的
+   * `evictBlockPayloads`：同样的块数上限（`EVICT_KEEP_BLOCKS`，必然大于
+   * 挂载窗口）与字符预算（`EVICT_BUDGET_CHARS`），只释放保留窗口之外的旧
+   * 载荷并打 `evicted` 标记，最新轮次永远可读。
+   *
+   * 裁剪只动载荷、不删块：详情面板的增量通道按索引合并（`from`），删块会
+   * 让索引错位。已在窗口内的块不会被改写，`evictBlockPayloads` 无变化时返回
+   * 原数组（幂等），因此每次推送后顺手跑一遍没有额外拷贝。
+   */
+  private evictTranscriptPayloads(entry: SuperTranscript): void {
+    const blocks = entry.state.blocks;
+    const evicted = evictBlockPayloads(blocks, EVICT_KEEP_BLOCKS);
+    if (evicted !== blocks) entry.state.blocks = evicted;
   }
 
   /**
