@@ -1205,6 +1205,9 @@ const en: Record<string, string> = {
   "在 QQ 里发送 /qq task <任务描述> 就能派发一个任务。":
     "Send /qq task <description> in QQ to dispatch a task.",
   "只显示前 {0} 条，共 {1} 条。": "Showing the first {0} of {1}.",
+  // QQ 远程任务元信息 tag：融入子会话看板，挂在对应子会话 title 后
+  "渠道：{0}": "Channel: {0}",
+  "发起人：{0}": "From: {0}",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

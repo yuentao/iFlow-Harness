@@ -12,8 +12,47 @@
  *    绝不补造摘要、改动或产物（与 shared/turn-followup.ts 的「绝不伪造」同一纪律）。
  */
 
-import type { Block, TurnChangeUi } from "./messages.js";
+import type { Block, QqTaskUi, TurnChangeUi } from "./messages.js";
 import type { SuperIntegration } from "./super-agent.js";
+
+// ---------------------------------------------------------------------------
+// Webview 投影关联：QQ 任务 ↔ 子会话
+// ---------------------------------------------------------------------------
+
+/**
+ * 子会话投影里用于匹配 QQ 任务的最小形状（避免让本模块依赖完整 SuperSessionUi）。
+ */
+export interface QqTaskSuperSessionRef {
+  title: string;
+  isolation: { branch?: string };
+}
+
+/**
+ * 从 QQ 任务投影里找出派发了这条子会话的那一条（没有就 undefined）。
+ *
+ * 宿主侧权威关联是 `QqTask.correlation.superSessionId`，但它不进 webview 的
+ * `QqTaskUi` 投影；这里用两侧都已经在投影里的字段做关联：
+ *  1. 标题：`panel-host.ts` 派发时把子会话标题写成 `QQ <shortId>`，从派发那一刻
+ *     就存在（分支要到 worktree prepare 落地才有），是主关联；
+ *  2. 分支：`task.correlation.branch` 与 `session.isolation.branch` 都来自同一次
+ *     spawn 的 `spawned.branch`，作为标题被改过时的兜底。
+ * 只认 `channel === "child"`：主会话渠道的任务不直接派生子会话，不能拿主会话
+ * 自己派出的子会话来冒充远程任务。
+ */
+export function findQqTaskForSuperSession(
+  tasks: readonly QqTaskUi[],
+  session: QqTaskSuperSessionRef,
+): QqTaskUi | undefined {
+  for (const task of tasks) {
+    if (task.channel !== "child") continue;
+    if (session.title === `QQ ${task.shortId}`) return task;
+  }
+  const branch = session.isolation.branch;
+  if (!branch) return undefined;
+  return tasks.find(
+    (task) => task.channel === "child" && Boolean(task.branch) && task.branch === branch,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // 任务模型
