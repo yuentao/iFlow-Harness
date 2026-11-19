@@ -1784,7 +1784,7 @@ describe("Super Agent 看板入口运行态炫光", () => {
   });
 });
 
-describe("Super Agent 看板 · 已中断状态危险色与中断来源", () => {
+describe("Super Agent 看板 · 已中断状态静音色与中断来源", () => {
   function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
     const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
       (b.textContent ?? "").includes(title),
@@ -1793,12 +1793,32 @@ describe("Super Agent 看板 · 已中断状态危险色与中断来源", () => 
     return el!;
   }
 
-  it("已中断状态用危险色（与失败同级），折叠行 chip 带 text-destructive", () => {
+  /** 折叠行状态 chip 的文案节点（内层 text-ui-micro），其父才是着色状态 span。 */
+  function statusLabel(trigger: HTMLButtonElement, text: string): HTMLElement {
+    const el = [...trigger.querySelectorAll<HTMLElement>("span.text-ui-micro")].find(
+      (s) => s.textContent === text,
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  it("已中断用静音色，不再是失败同款的 danger 红；文案与 Square 图标保留", () => {
     render([session({ status: "cancelled", interruptedBy: "user" })]);
     expand();
-    const statusChip = rowTrigger().querySelector<HTMLElement>(".text-destructive");
-    expect(statusChip).toBeTruthy();
-    expect(statusChip!.textContent).toContain("已中断");
+    const label = statusLabel(rowTrigger(), "已中断");
+    // 状态色不再是 danger（失败才是故障，中断只是被停下）。
+    expect(label.parentElement!.className).toContain("text-muted-foreground");
+    expect(label.parentElement!.className).not.toContain("text-destructive");
+    // 中断的方块图标仍在（形状是主编码，颜色只是冗余）。
+    expect(label.parentElement!.querySelector("svg.lucide-square")).toBeTruthy();
+  });
+
+  it("失败仍是 danger + X，与已中断明确区分", () => {
+    render([session({ status: "failed", error: "进程崩溃" })]);
+    expand();
+    const label = statusLabel(rowTrigger(), "失败");
+    expect(label.parentElement!.className).toContain("text-destructive");
+    expect(label.parentElement!.querySelector("svg.lucide-x")).toBeTruthy();
   });
 
   it.each([
@@ -1825,5 +1845,224 @@ describe("Super Agent 看板 · 已中断状态危险色与中断来源", () => 
     expect(text).not.toContain("由用户中断");
     expect(text).not.toContain("由智能体中断");
     expect(text).not.toContain("由系统中断");
+  });
+});
+
+describe("Super Agent 看板 · portal 浮层窄屏隐藏走视口媒体查询", () => {
+  /** 一条由 QQ 远程任务派发的子会话（QqTaskTags 才有内容可渲染）。 */
+  function qqSession(): SuperSessionUi {
+    return session({ id: "super-qq", title: "QQ abc123", status: "running" });
+  }
+
+  function renderWithQqTask(s: SuperSessionUi): void {
+    store.current = {
+      state: {
+        superSessions: [s],
+        // findQqTaskForSuperSession 用标题 `QQ <shortId>` 或分支关联。
+        qqTasks: [
+          {
+            taskId: "T-1-abc123",
+            shortId: "abc123",
+            chatType: "group",
+            chatId: "group-1",
+            senderId: "openid-sender-1",
+            status: "running",
+            channel: "child",
+            promptPreview: "远程任务",
+            createdAt: 1000,
+            updatedAt: 1000,
+          },
+        ],
+      },
+      superTranscripts: {},
+      send,
+    };
+    act(() => root.render(<SuperAgentBoard />));
+  }
+
+  const qqTagChips = (): HTMLElement[] =>
+    [...document.body.querySelectorAll<HTMLElement>("span.chip-fade")].filter((el) =>
+      /渠道：|发起人：/.test(el.textContent ?? ""),
+    );
+
+  it("QqTaskTags：≤380px 用视口 max-[380px]，不再是 portal 里恒不匹配的容器查询", () => {
+    renderWithQqTask(qqSession());
+    expand(); // 展开面板（portal 到 body）里的行
+
+    const chips = qqTagChips();
+    expect(chips).toHaveLength(2);
+    for (const chip of chips) {
+      // 视口媒体查询：视口 ≤380px 时 hidden 真正生效。
+      expect(chip.className).toContain("max-[380px]:hidden");
+      // 绝不能退回容器查询：portal 挂 body 后没有 @container 祖先，恒不匹配。
+      expect(chip.className).not.toContain("@max-[380px]:hidden");
+    }
+    // 确实在 portal 浮层里（不在 React 挂载容器内）。
+    expect(container.contains(chips[0]!)).toBe(false);
+    expect(chips[0]!.closest('[role="region"]')).toBeTruthy();
+  });
+
+  it("「全部中断」文案：≤380px 视口隐藏，图标与可访问名保留", () => {
+    renderWithQqTask(qqSession());
+    expand();
+    const btn = document.body.querySelector<HTMLButtonElement>('button[aria-label="全部中断"]');
+    expect(btn).toBeTruthy();
+    const label = [...btn!.querySelectorAll<HTMLElement>("span")].find(
+      (s) => s.textContent === "全部中断",
+    );
+    expect(label).toBeTruthy();
+    expect(label!.className).toContain("max-[380px]:hidden");
+    expect(label!.className).not.toContain("@max-[380px]:hidden");
+    // 图标不随文案隐藏；按钮名始终可读。
+    expect(btn!.querySelector("svg")).toBeTruthy();
+    expect(btn!.closest('[role="region"]')).toBeTruthy();
+  });
+});
+
+describe("Super Agent 看板 · 折叠行补注 chip", () => {
+  function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  const rowChips = (trigger: HTMLElement): HTMLElement[] => [
+    ...trigger.querySelectorAll<HTMLElement>("span.chip-fade"),
+  ];
+
+  it("终态 + skipped：折叠行补「未自动合并」chip", () => {
+    render([
+      session({
+        status: "completed",
+        integration: { mode: "merge", state: "skipped", detail: "工作区脏", at: 5000 },
+      }),
+    ]);
+    expand();
+    expect(rowChips(rowTrigger()).some((c) => c.textContent === "未自动合并")).toBe(true);
+  });
+
+  it("终态 + needsAction：折叠行补「需人工合并」chip（优先级高于状态词）", () => {
+    render([
+      session({
+        status: "completed",
+        integration: { mode: "merge", state: "skipped", needsAction: true, at: 5000 },
+      }),
+    ]);
+    expand();
+    const chips = rowChips(rowTrigger());
+    expect(chips.some((c) => c.textContent === "需人工合并")).toBe(true);
+    expect(chips.some((c) => c.textContent === "未自动合并")).toBe(false);
+  });
+
+  it("终态 + conflict：折叠行补「冲突」chip", () => {
+    render([
+      session({
+        status: "completed",
+        integration: { mode: "merge", state: "conflict", detail: "冲突", at: 5000 },
+      }),
+    ]);
+    expand();
+    expect(rowChips(rowTrigger()).some((c) => c.textContent === "冲突")).toBe(true);
+  });
+
+  it("运行中不提前打集成问题标签", () => {
+    render([
+      session({
+        status: "running",
+        integration: { mode: "merge", state: "skipped", at: 5000 },
+      }),
+    ]);
+    expand();
+    expect(rowChips(rowTrigger()).some((c) => c.textContent === "未自动合并")).toBe(false);
+  });
+
+  it("恢复的历史记录：折叠行状态后补「上次运行」chip，展开详情不再重复", () => {
+    render([session({ status: "completed", restored: true })]);
+    expand();
+    const trigger = rowTrigger();
+    const chips = rowChips(trigger);
+    expect(chips.some((c) => c.textContent === "上次运行")).toBe(true);
+    act(() => trigger.click());
+    // 「上次运行」只出现一次（折叠行在展开态也常驻）。
+    expect(
+      [...document.body.querySelectorAll("span")].filter((s) => s.textContent === "上次运行"),
+    ).toHaveLength(1);
+  });
+});
+
+describe("Super Agent 看板 · not_needed / pr_created 的合并入口", () => {
+  function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  function mergeButton(): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "让智能体合并",
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  function expandFolded(): void {
+    const toggle = document.body.querySelector<HTMLButtonElement>(
+      'button[aria-label="展开已完成的超流体"]',
+    );
+    expect(toggle).toBeTruthy();
+    act(() => toggle!.click());
+  }
+
+  it("not_needed：合并按钮禁用并说明「没有产生改动」，点击不发送请求", () => {
+    render([
+      session({
+        id: "super-nn",
+        status: "completed",
+        integration: { mode: "merge", state: "not_needed", at: 5000 },
+      }),
+    ]);
+    // 全 settled → 看板自动收起；手动展开面板与历史行再打开详情。
+    expand();
+    expandFolded();
+    act(() => rowTrigger().click());
+
+    const btn = mergeButton();
+    expect(btn.getAttribute("aria-disabled")).toBe("true");
+    expect(btn.getAttribute("aria-label")).toBe("这个超流体没有产生改动，不需要合并");
+    expect(btn.className).toContain("cursor-not-allowed");
+    act(() => btn.click());
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("pr_created：合并按钮禁用，改为「打开 PR」直达链接", () => {
+    const url = "https://github.com/yuentao/iFlow-Harness/pull/42";
+    render([
+      session({
+        id: "super-pr",
+        status: "completed",
+        integration: { mode: "pr", state: "pr_created", url, at: 5000 },
+      }),
+    ]);
+    expand();
+    act(() => rowTrigger().click());
+
+    const btn = mergeButton();
+    expect(btn.getAttribute("aria-disabled")).toBe("true");
+    expect(btn.getAttribute("aria-label")).toBe("改动已经提到 PR，请打开 PR 处理合并");
+    act(() => btn.click());
+    expect(send).not.toHaveBeenCalled();
+
+    const pr = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "打开 PR",
+    );
+    expect(pr).toBeTruthy();
+    expect(pr!.getAttribute("title")).toBe(url);
+    act(() => pr!.click());
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({ type: "openExternal", uri: url });
   });
 });
