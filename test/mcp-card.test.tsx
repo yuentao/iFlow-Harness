@@ -400,3 +400,44 @@ it("explains in the detail page why no tools show up when only the main report e
   clickTitle("详情");
   expect(container.textContent).toContain("主会话不加载 MCP，新建超流体并连接后才会上报工具列表");
 });
+
+it("uses the shared settings-group primitive and stays structurally within a 320px editor", () => {
+  reply({ a: { command: "node", args: ["-y"], env: { TOKEN: "abc" } } });
+  clickTitle("编辑");
+  container.style.width = "320px";
+
+  // jsdom has no layout engine (scrollWidth/clientWidth are 0), so the width
+  // invariant holds trivially here; the structural assertions below are the
+  // real guard for the narrow-screen fix.
+  expect(container.scrollWidth).toBeLessThanOrEqual(container.clientWidth);
+
+  // The editor root can shrink inside the narrow settings panel.
+  expect(container.querySelector(".min-w-0.space-y-3")).toBeTruthy();
+
+  // Both sections come from SettingsGroup: caption typography + tracked
+  // heading, no drifted hand-written `tracking-wider` / `px-3 py-1.5` header.
+  const headings = [...container.querySelectorAll("h3")];
+  expect(headings).toHaveLength(2);
+  expect(headings.every((h) => h.className.includes("tracking-[0.08em]") && h.className.includes("text-ui-caption"))).toBe(true);
+  expect(container.querySelector(".tracking-wider")).toBeNull();
+
+  // Transport row wraps so the shrink-0 Segmented drops to its own line.
+  const transportRow = [...container.querySelectorAll("div")].find(
+    (d) => d.firstElementChild?.textContent === "传输类型" && d.className.includes("flex-wrap"),
+  );
+  expect(transportRow).toBeTruthy();
+
+  // Inline inputs in arg/env rows can shrink below their intrinsic width.
+  const shrunk = [...container.querySelectorAll("input")].filter((el) => el.className.includes("flex-1"));
+  expect(shrunk.length).toBeGreaterThan(0);
+  expect(shrunk.every((el) => el.className.includes("min-w-0"))).toBe(true);
+});
+
+it("opens the editor directly from the detail header", () => {
+  reply({ a: { command: "node" } });
+  clickTitle("详情");
+  expect(header.mock.calls.some(([h]) => h !== null && h.title === "MCP 服务器详情")).toBe(true);
+  clickTitle("编辑");
+  expect(header.mock.calls.some(([h]) => h !== null && h.title === "编辑 MCP 服务器")).toBe(true);
+  expect(container.textContent).toContain("服务器信息");
+});
