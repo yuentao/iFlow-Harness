@@ -1112,6 +1112,14 @@ export class ChatPanel implements vscode.Disposable {
   private readonly qqInjectAborts = new Map<string, AbortController>();
   private qqInjectedTaskId: string | null = null;
   /**
+   * 远程接续开关（纯内存态，不持久化）：开启时冻结本地干预并在被接管的
+   * sessionId 上暂停 QQ 主会话注入；关闭 / 会话切换 / webview 重连 / dispose
+   * 一律清空，绝不遗留锁死会话。token 只是 toast 的 host id，不是凭据。
+   */
+  private qqTakeoverActive = false;
+  private qqTakeoverSessionId: string | null = null;
+  private qqTakeoverToastId: number | null = null;
+  /**
    * QQ 主渠道「等最终答复」记账：注入轮已把任务派给子会话的任务 id → 归属
    * 主会话 id。
    *
@@ -2015,6 +2023,8 @@ export class ChatPanel implements vscode.Disposable {
     for (const controller of this.qqInjectAborts.values()) controller.abort();
     this.qqInjectAborts.clear();
     this.qqInjectedTaskId = null;
+    // 远程接续是纯内存态：宿主销毁时必须清门并撤掉常驻 toast。
+    this.clearQqTakeover();
     this.stopQqFinalRescueTimer();
     this.qqMainFinalAwaiters.clear();
     this.qqMainFinalAwaiterSince.clear();
@@ -2505,6 +2515,8 @@ export class ChatPanel implements vscode.Disposable {
         // The webview (re)booted and lost its transcript anchor: resync()
         // forces the next push to be a full snapshot (P-1 blockPatch would
         // apply on top of a transcript the webview no longer holds).
+        // 远程接续是纯内存态：重连即失效，连带撤掉常驻 toast。
+        this.clearQqTakeover();
         this.store.resync();
         this.store.pushSnapshot();
         // Child transcripts are NOT part of the snapshot (their own channel),
@@ -2956,6 +2968,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "qqManagedSetup":
         await this.handleQqManagedSetup(msg.action);
+        break;
+      case "qqTakeover":
+        this.handleQqTakeover(msg.action);
         break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different
@@ -7238,6 +7253,8 @@ export class ChatPanel implements vscode.Disposable {
     if (this.historySyncBusy) return false;
     // A3: the panel was disposed — the store is gone.
     if (this.disposed) return false;
+    // 远程接续绑定在旧会话上：切走即失效。
+    this.clearQqTakeover();
     // Fast path: the CLI only persists jsonl transcripts for sessions that
     // actually had a conversation. A "dead" session (auto-created on panel
     // open, never used) would burn 60s+ on new+load for nothing.
@@ -10649,6 +10666,14 @@ export class ChatPanel implements vscode.Disposable {
    * 排队等空闲期间被 `/qq stop` 打断就返回 canceled，由服务侧收尾。
    */
   private async injectQqMainTurn(input: QqMainInjectInput): Promise<QqMainInjectResult> {
+    // 远程接续暂停门（决策①）：被接管的会话不再让 QQ 消息在本地执行。门是
+    // 会话级的，机器人仍可把其它会话的任务注入它们自己的主会话。
+    if (this.isQqTakeoverActiveFor(this.store.getState().sessionId)) {
+      return {
+        injected: false,
+        reason: "当前会话已开启远程接续，QQ 消息暂停注入本地。",
+      };
+    }
     const taskId = input.task.taskId;
     // F1：main 渠道跑在用户自己的主会话里，不能像 child 那样剔除写工具。
     // 与 child 走同源策略判定：readonly（deny）一律拒绝，绝不注入。
@@ -10685,6 +10710,13 @@ export class ChatPanel implements vscode.Disposable {
       while (true) {
         if (this.disposed || controller.signal.aborted) {
           return { injected: false, canceled: true };
+        }
+        // 等空闲期间用户开启了远程接续：不再把这条 QQ 消息投进本地。
+        if (this.isQqTakeoverActiveFor(this.store.getState().sessionId)) {
+          return {
+            injected: false,
+            reason: "当前会话已开启远程接续，QQ 消息暂停注入本地。",
+          };
         }
         if (Date.now() > deadline) {
           return {
@@ -11032,6 +11064,47 @@ export class ChatPanel implements vscode.Disposable {
       signal.addEventListener("abort", onAbort, { once: true });
       timer.unref?.();
     });
+  }
+
+  /** 当前会话是否处于远程接续接管（暂停 QQ 注入）状态。 */
+  private isQqTakeoverActiveFor(sessionId: string | null): boolean {
+    return this.qqTakeoverActive && this.qqTakeoverSessionId === sessionId;
+  }
+
+  /**
+   * 底部输入区「远程接续」开关：start 在当前会话上设内存暂停门 + 常驻只读
+   * toast；stop 清门 + 取消在跑的 QQ 主会话注入 + dismiss toast。
+   * 三项决策：①只暂停当前会话的 QQ 注入（机器人继续服务其它会话）；②本地
+   * 干预全冻结但保留转录只读；③纯内存态，重连 / 重启即失效。
+   */
+  private handleQqTakeover(action: "start" | "stop"): void {
+    if (this.disposed) return;
+    if (action === "stop") {
+      // 断开远程 = 取消在跑的 QQ 主会话注入回合 + 暂停消息进入本主会话。
+      this.cancelAllQqMainInjections();
+      this.clearQqTakeover();
+      return;
+    }
+    this.qqTakeoverActive = true;
+    this.qqTakeoverSessionId = this.store.getState().sessionId;
+    if (this.qqTakeoverToastId === null) {
+      this.qqTakeoverToastId = this.store.sendToast("info", vscode.l10n.t("远程接管中…"), {
+        persistent: true,
+        displayOnly: true,
+      });
+    }
+    this.postToWebview({ type: "qqTakeoverState", active: true });
+  }
+
+  /** 清掉接管门与常驻 toast；stop / 会话切换 / webview 重连 / dispose 共用。 */
+  private clearQqTakeover(): void {
+    this.qqTakeoverActive = false;
+    this.qqTakeoverSessionId = null;
+    if (this.qqTakeoverToastId !== null) {
+      this.store.dismissToast(this.qqTakeoverToastId);
+      this.qqTakeoverToastId = null;
+    }
+    this.postToWebview({ type: "qqTakeoverState", active: false });
   }
 
   /**
@@ -12988,6 +13061,8 @@ export class ChatPanel implements vscode.Disposable {
    * persistActiveTranscript) run exactly once.
    */
   private async startNewSession(options?: { bypassSuperWait?: boolean }): Promise<void> {
+    // 远程接续绑定在旧会话上：切走即失效，不能把冻结态带进新会话。
+    if (!this.disposed) this.clearQqTakeover();
     const running = this.newSessionRun;
     if (running) {
       // 进行中重复点击：直接忽略，不重复发 `session/new`（join 同一个 run

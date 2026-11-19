@@ -63,6 +63,9 @@ const KIND_ACTION: Record<string, string> = {
  */
 export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   const send = useChat((s) => s.send);
+  // 远程接续冻结：与 streaming 无关的全局态（陷阱 #12），接管期间任何审批
+  // 决策都不得落地；卡片本身仍渲染，用户可只读查看远程在做什么。
+  const remoteTakeover = useChat((s) => s.remoteTakeover);
   // Optimistic lock: the first click answers the request; every button is
   // disabled until the host's next snapshot removes the card. Prevents
   // double-fire on rapid clicks.
@@ -84,7 +87,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   }, []);
 
   const answer = (optionId: string | null) => {
-    if (answered) return;
+    if (answered || remoteTakeover) return;
     setAnswered(true);
     send({ type: "respondApproval", id: approval.id, optionId });
   };
@@ -106,7 +109,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (answered || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      if (answered || remoteTakeover || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
       // A modal above this card (settings / confirm) owns the keyboard; the
       // card is still mounted underneath and must not answer a hidden prompt.
       if (document.querySelector(".auth-backdrop")) return;
@@ -135,7 +138,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [answered, allowOption?.optionId, denyOptionId, approval.id, send]);
+  }, [answered, remoteTakeover, allowOption?.optionId, denyOptionId, approval.id, send]);
 
   const actionVerb = KIND_ACTION[approval.toolKind.toLowerCase()] ?? "执行";
   const actionTarget = primary?.path || approval.toolName;
@@ -241,7 +244,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
               key={opt.optionId}
               variant={variant}
               size="sm"
-              disabled={answered}
+              disabled={answered || remoteTakeover}
               data-autofocus={isSafeSide ? true : undefined}
               title={OPTION_LABEL[opt.kind] ? opt.name : undefined}
               aria-label={approval.toolName ? t("{0}（{1}）", label, approval.toolName) : label}
@@ -257,7 +260,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           <Button
             variant="canvas"
             size="sm"
-            disabled={answered}
+            disabled={answered || remoteTakeover}
             data-autofocus
             aria-label={t("取消审批")}
             onClick={() => answer(null)}

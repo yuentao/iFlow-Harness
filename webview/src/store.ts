@@ -256,6 +256,7 @@ function createMockHost(): HostApi {
 
   // Mock memory files (F3): enough to exercise the tab in a browser — one
   // global primary with structured facts, one project file, one legacy file.
+  const mockTakeoverToastId = 990_001;
   const mockMemoryHome = "C:\\Users\\mock\\.iflow";
   const mockMemoryRoot = "C:\\mock\\workspace";
   const mockMemoryContent = new Map<string, string>([
@@ -1189,6 +1190,7 @@ function createMockHost(): HostApi {
         // otherwise the settings hub's QQ tab renders empty tables.
         broadcast({ type: "qqSettings", values: mockQqSettings });
         broadcast({ type: "qqStatus", connected: false });
+        broadcast({ type: "qqTakeoverState", active: false });
         broadcast({
           type: "snapshot",
           state: {
@@ -1201,6 +1203,22 @@ function createMockHost(): HostApi {
             auth: authState,
           },
         });
+        return;
+      }
+      if (m.type === "qqTakeover") {
+        broadcast({ type: "qqTakeoverState", active: m.action === "start" });
+        if (m.action === "start") {
+          broadcast({
+            type: "toast",
+            level: "info",
+            message: "远程接管中…",
+            toastId: mockTakeoverToastId,
+            persistent: true,
+            displayOnly: true,
+          });
+        } else {
+          broadcast({ type: "dismissToast", toastId: mockTakeoverToastId });
+        }
         return;
       }
       if (m.type === "qqSettingsPatch") {
@@ -2547,6 +2565,12 @@ interface ChatStore {
   /** 最近一次连接检查 / 适配器状态回执；null = 尚未收到。 */
   qqStatus: { connected: boolean; detail?: string } | null;
   /**
+   * 远程接续开关的 webview 内存态（host 经 `qqTakeoverState` 回推）。true = 当前
+   * 会话被远程接管：Composer 所有干预入口与审批/提问卡决策按钮冻结，转录保持
+   * 只读可滚动。不进 snapshot / blockPatch，webview 重连即回到 false。
+   */
+  remoteTakeover: boolean;
+  /**
    * QQ 授权模型：白名单外的人发来消息时留下的待审核记录（宿主每次全量重发，
    * 这里直接替换）。顺序由宿主按 `lastSeenAt` 倒序保证。
    */
@@ -2635,6 +2659,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
   qqStatus: null,
+  remoteTakeover: false,
   qqPendingUsers: [],
   qqLoginQr: null,
   qqManagedStatus: null,
@@ -2763,6 +2788,11 @@ export const useChat = create<ChatStore>((set, get) => ({
     }
     if (msg.type === "qqStatus") {
       set({ qqStatus: { connected: msg.connected, detail: msg.detail } });
+      return;
+    }
+    if (msg.type === "qqTakeoverState") {
+      // 远程接续是 host 权威的纯内存态：按回推值同步按钮与冻结门，不写快照。
+      set({ remoteTakeover: msg.active });
       return;
     }
     if (msg.type === "qqPendingUsers") {

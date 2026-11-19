@@ -1200,6 +1200,11 @@ const en: Record<string, string> = {
   // QQ 远程任务元信息 tag：融入子会话看板，挂在对应子会话 title 后
   "渠道：{0}": "Channel: {0}",
   "发起人：{0}": "From: {0}",
+  // 底部输入区「远程接续」开关（仅机器人已启用时显示）
+  "远程接续": "Remote takeover",
+  "关闭接续": "Disconnect",
+  "开启后本地输入与审批将被冻结": "Local input and approvals will be frozen",
+  "关闭远程接续，恢复本地操作": "Disconnect remote and resume local control",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {
