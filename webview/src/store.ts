@@ -2909,6 +2909,7 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "memoryCandidates" ||
       msg.type === "knowledgeJob" ||
       msg.type === "profileDeleteResult" ||
+      msg.type === "saveAuthResult" ||
       msg.type === "enhancedPrompt" ||
       msg.type === "queueEdited" ||
       msg.type === "contextResolved" ||

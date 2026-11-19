@@ -1990,6 +1990,11 @@ export type HostToWebview =
   /** Reply to `deleteProfile`: the row clears its pending chip on receipt.
    * `ok:false` means the profile is still present (the host also toasts). */
   | { type: "profileDeleteResult"; name: string; ok: boolean }
+  /** Reply to `saveAuth`: the credential editor stays open until this arrives
+   * (no optimistic close) so a failed save keeps the user's typed values.
+   * `ok:false` carries the concrete reason to show inline in the form. The
+   * optional `requestId` is echoed from `saveAuth` for correlation. */
+  | { type: "saveAuthResult"; requestId?: number; ok: boolean; error?: string }
   /** Editor color theme changed ("dark" | "light"); the webview follows it
    * unless the user picked a theme manually in the panel. `auroraIntensity`
    * (0–100) mirrors the `iflow.auroraIntensity` setting — the webview scales
@@ -2258,6 +2263,9 @@ export type WebviewToHost =
       modelName: string;
       profileName?: string | null;
       replaceName?: string | null;
+      /** Echoed on `saveAuthResult` so an open editor only reacts to its own
+       * save (other saves — e.g. the onboarding wizard — may be in flight). */
+      requestId?: number;
     }
   /** M3: forget stored credentials (CLI keeps its own). */
   | { type: "clearAuth" }

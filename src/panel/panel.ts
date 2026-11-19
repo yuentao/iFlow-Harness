@@ -2820,15 +2820,29 @@ export class ChatPanel implements vscode.Disposable {
       case "openImage":
         void this.openImageAttachment(msg.dataUrl);
         break;
-      case "saveAuth":
-        await this.saveAuthAndReconnect(
-          msg.baseUrl,
-          msg.apiKey,
-          msg.modelName,
-          msg.profileName ?? null,
-          msg.replaceName ?? null,
-        );
+      case "saveAuth": {
+        // Explicit receipt, including on an unexpected throw: without it the
+        // credential editor would wait forever (or, in the old optimistic
+        // design, close and throw the typed values away on failure).
+        let result: { ok: boolean; error?: string };
+        try {
+          result = await this.saveAuthAndReconnect(
+            msg.baseUrl,
+            msg.apiKey,
+            msg.modelName,
+            msg.profileName ?? null,
+            msg.replaceName ?? null,
+          );
+        } catch (e) {
+          result = { ok: false, error: errorMessage(e) };
+        }
+        this.postToWebview({
+          type: "saveAuthResult",
+          ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
+          ...result,
+        });
         break;
+      }
       case "clearAuth":
         await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, undefined);
         await this.context.workspaceState.update(WORKSPACE_MODEL_KEY, undefined);
@@ -6331,7 +6345,7 @@ export class ChatPanel implements vscode.Disposable {
     modelName: string,
     profileName: string | null,
     replaceName: string | null = null,
-  ): Promise<void> {
+  ): Promise<{ ok: boolean; error?: string }> {
     // `replaceName` is the name this profile had BEFORE the edit (absent for a
     // brand-new profile). Editing is NOT a profile switch: only the edited row
     // may change — the active pointer, the live CLI and this workspace's model
@@ -6349,8 +6363,9 @@ export class ChatPanel implements vscode.Disposable {
     // has to type one; never borrow another profile's secret.
     const effectiveKey = apiKey ?? (replaced ? previous?.apiKey ?? null : stored?.apiKey ?? null);
     if (replaced && !effectiveKey) {
-      this.store.markError(vscode.l10n.t("编辑 API 配置时请填写 API Key"));
-      return;
+      const error = vscode.l10n.t("编辑 API 配置时请填写 API Key");
+      this.store.markError(error);
+      return { ok: false, error };
     }
     const validation = validateCredentials({
       baseUrl,
@@ -6359,7 +6374,7 @@ export class ChatPanel implements vscode.Disposable {
     });
     if (!validation.ok) {
       this.store.markError(validation.error);
-      return;
+      return { ok: false, error: validation.error };
     }
     const creds = validation.value;
 
@@ -6375,12 +6390,11 @@ export class ChatPanel implements vscode.Disposable {
       Object.keys(readCliSettings()?.apiProfiles ?? {}).map((key) => key.trim()),
     );
     if (replaced && replaced !== name && (profiles[name] || kernelNames.has(name))) {
-      void vscode.window.showWarningMessage(
-        vscode.l10n.t("已存在同名 API 配置: {0}，请换一个名称", name),
-      );
+      const error = vscode.l10n.t("已存在同名 API 配置: {0}，请换一个名称", name);
+      void vscode.window.showWarningMessage(error);
       const auth = this.store.getState().auth;
       this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
-      return;
+      return { ok: false, error };
     }
     if (replaced && replaced !== name) {
       delete profiles[replaced];
@@ -6391,11 +6405,12 @@ export class ChatPanel implements vscode.Disposable {
     // write above remains the runtime cache used for hot re-authentication.
     const kernelWritten = writeKernelApiProfile(name, creds);
     if (kernelWritten && replaced && replaced !== name) deleteKernelApiProfile(replaced);
-    if (!kernelWritten) {
-      // Never report a silent success: the profile only lives in this
-      // window's SecretStorage until the kernel file becomes writable.
-      void vscode.window.showWarningMessage(vscode.l10n.t("无法写入内核配置 {0}", name));
-    }
+    // A kernel write failure is a partial success: the profile is live in
+    // SecretStorage for this window but will not survive a restart. Keep the
+    // editor open with the concrete reason (inline, not just the toast) —
+    // same contract deleteProfile uses via `ok: !kernelWriteFailed`.
+    const kernelError = kernelWritten ? undefined : vscode.l10n.t("无法写入内核配置 {0}", name);
+    if (kernelError) void vscode.window.showWarningMessage(kernelError);
 
     // "Is this the row the panel is running on?" — by credential IDENTITY,
     // never by the final name: a new profile defaulting to the current model,
@@ -6414,7 +6429,7 @@ export class ChatPanel implements vscode.Disposable {
       setKernelActiveProfile(name);
       await this.rememberWorkspaceModelFor(name, creds.modelName);
       await this.reconnectWithCredentials(creds, false);
-      return;
+      return { ok: !kernelError, ...(kernelError ? { error: kernelError } : {}) };
     }
 
     if (!isActiveProfile) {
@@ -6422,7 +6437,7 @@ export class ChatPanel implements vscode.Disposable {
       // no reconnect, no pointer move — the panel keeps running as it was.
       const auth = this.store.getState().auth;
       this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
-      return;
+      return { ok: !kernelError, ...(kernelError ? { error: kernelError } : {}) };
     }
 
     // The edited row is the live one: follow a rename in the pointer, then
@@ -6442,9 +6457,10 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.window.showInformationMessage(
         vscode.l10n.t("API 配置已保存；本次连接仍在用旧凭据，重新连接后生效"),
       );
-      return;
+      return { ok: !kernelError, ...(kernelError ? { error: kernelError } : {}) };
     }
     await this.reconnectWithCredentials(creds, true);
+    return { ok: !kernelError, ...(kernelError ? { error: kernelError } : {}) };
   }
 
   /** True when two credential sets describe the same endpoint ("current
