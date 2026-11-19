@@ -1189,9 +1189,6 @@ function ApiConfigSection({
           <Button variant="primary" disabled={saveBlocked} onClick={submit}>
             {t("保存")}
           </Button>
-          <Button onClick={back}>
-            {t("取消")}
-          </Button>
           {formError && <span className="text-ui-label text-destructive">{formError}</span>}
         </ActionRow>
         {saveBlocked && editingActiveProfile && (
