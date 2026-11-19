@@ -118,10 +118,14 @@
      from the violet primary and the blue info used by read/image cards. */
   --mcp: oklch(0.52 0.12 190);
 
-  /* UI-component boundaries need 3:1 (WCAG 1.4.11). The old 0.9 lightness was
-     1.35:1 against the white card, so field/chip outlines were effectively
-     invisible. 0.64 lands at 3.37:1 without turning the panel into a grid. */
-  --border: oklch(0.64 0.018 265);
+  /* Faint hairline by design. A brief experiment darkened this to 0.64 to hit
+     3:1 (WCAG 1.4.11) for field/chip outlines, but that made every chip, card
+     and overlay read as a heavy frame (user feedback 2026-11-20: 「加边框后
+     看起来奇怪、难看，还是去掉边框吧」). Resting boundaries now come from the
+     surface fills (bg-editor / bg-surface) and keyboard focus from
+     --shadow-focus; text contrast lives in the dedicated foreground tokens.
+     Keep this light — the focus ring and text contrast do not depend on it. */
+  --border: oklch(0.9 0.008 265);
 
   --diff-add: oklch(0.91 0.06 153 / 70%);
   --diff-add-fg: oklch(0.43 0.13 153);

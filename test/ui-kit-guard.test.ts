@@ -375,6 +375,21 @@ describe("ui kit guard", () => {
     expect(kitCss.includes(".focus-within\\:shadow-focus-soft:focus-within")).toBe(true);
   });
 
+  it("keeps the light-theme border a faint hairline (no heavy frames)", () => {
+    // User feedback 2026-11-20: darkening --border to 0.64 (WCAG 1.4.11)
+    // made every chip/card/overlay read as a heavy frame — the model chip
+    // (model + usage bar + chevron) got an obvious outline. The light theme
+    // must stay a faint hairline again; resting boundaries come from surface
+    // fills, keyboard focus from --shadow-focus, text contrast from the
+    // foreground tokens — none of which depend on this value. Lock it light
+    // so a future "darken the border" change cannot silently regress.
+    // The first --border in the sheet is the light :root one (dark theme is
+    // defined later behind prefers-color-scheme).
+    const lightBorder = kitCss.match(/--border:\s*oklch\(\s*([\d.]+)/);
+    expect(lightBorder).not.toBeNull();
+    expect(Number(lightBorder![1])).toBeGreaterThanOrEqual(0.85);
+  });
+
   it("uses one close label for every dismiss affordance", () => {
     // ModalShell's X is a dismissal, not a collapse. The toast X already uses
     // t("关闭") (Dismiss); a second Collapse-labelled X read as "Collapse" in
