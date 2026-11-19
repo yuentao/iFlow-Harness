@@ -1,10 +1,14 @@
 /**
- * 底部输入区「远程接续」开关（宿主侧）：
+ * 底部输入区「远程接续」开关（宿主侧，语义已按用户澄清反转）：
  *
- * - start 在当前会话设内存暂停门 + 常驻只读 toast + 回推 qqTakeoverState；
- * - stop 清门 + 取消在跑的 QQ 主会话注入 + dismiss toast + 回推 false；
- * - 被接管的会话不再接受 QQ 消息注入（机器人仍服务其它会话）；
- * - webview 重连 / dispose 一律清门，状态不持久化。
+ * - start：远程继续干活 —— QQ 消息照常注入主会话、agent 继续执行，只冻结本地
+ *   干预入口；把会话从「已断开」集合移除（重新接上）、发常驻只读 toast、回推
+ *   qqTakeoverState active=true；不设任何注入门，也不取消在跑的注入。
+ * - stop：本地恢复 + 断开远程 —— 在本次接管的 sessionId 上设「不再接收 QQ 注入」
+ *   的门、取消在跑的注入回合、撤掉 toast、回推 active=false。
+ * - 只有「已断开远程接管」的会话才拦截 QQ 注入（机器人仍服务其它会话）。
+ * - 断开门不持久化：只在会话切换 / 重建（newSession / restore / dispose）时清；
+ *   webview 重连不清，避免同一 panel 进程里已断开的会话意外恢复注入。
  */
 import path from "node:path";
 import os from "node:os";
@@ -63,8 +67,11 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
 type Internals = {
   handleWebviewMessage: (msg: unknown) => Promise<void>;
   injectQqMainTurn: (input: unknown) => Promise<{ injected: boolean; reason?: string }>;
-  isQqTakeoverActiveFor: (sessionId: string | null) => boolean;
+  isQqRemoteDetachedFor: (sessionId: string | null) => boolean;
   cancelAllQqMainInjections: () => void;
+  clearQqRemoteDetachedSessions: () => void;
+  waitForQqMainFree: (signal: AbortSignal, deadline: number) => Promise<"free" | "canceled" | "timeout">;
+  runStartNewSession: (options?: unknown) => Promise<void>;
   pushQqState: () => void;
   store: {
     getState: () => { sessionId: string | null; [key: string]: unknown };
@@ -75,6 +82,7 @@ type Internals = {
   qqTakeoverActive: boolean;
   qqTakeoverSessionId: string | null;
   qqTakeoverToastId: number | null;
+  qqRemoteDetachedSessions: Set<string>;
 };
 
 describe("ChatPanel 远程接续开关", () => {
@@ -103,19 +111,21 @@ describe("ChatPanel 远程接续开关", () => {
     vi.restoreAllMocks();
   });
 
-  it("start 设当前会话暂停门 + 发常驻只读 toast + 回推 active=true", async () => {
+  it("start 接上远程 + 冻结本地 + 发常驻只读 toast + 回推 active=true（不设注入门）", async () => {
     const toast = vi.spyOn(p.store, "sendToast");
+    const cancel = vi.spyOn(p, "cancelAllQqMainInjections");
     await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
 
     expect(p.qqTakeoverActive).toBe(true);
     expect(p.qqTakeoverSessionId).toBe("s1");
-    expect(p.isQqTakeoverActiveFor("s1")).toBe(true);
-    expect(p.isQqTakeoverActiveFor("other-session")).toBe(false);
+    // start 不设断开门：QQ 注入照常放行。
+    expect(p.isQqRemoteDetachedFor("s1")).toBe(false);
+    expect(cancel).not.toHaveBeenCalled();
     expect(toast).toHaveBeenCalledWith("info", "远程接管中…", { persistent: true, displayOnly: true });
     expect(p.postToWebview).toHaveBeenCalledWith({ type: "qqTakeoverState", active: true });
   });
 
-  it("stop 清门 + 取消在跑的 QQ 注入 + dismiss toast + 回推 active=false", async () => {
+  it("stop 才断开远程：设断开门 + 取消在跑注入 + dismiss toast + 回推 active=false", async () => {
     await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
     const toastId = p.qqTakeoverToastId!;
     const cancel = vi.spyOn(p, "cancelAllQqMainInjections");
@@ -124,25 +134,57 @@ describe("ChatPanel 远程接续开关", () => {
     await p.handleWebviewMessage({ type: "qqTakeover", action: "stop" });
 
     expect(cancel).toHaveBeenCalledTimes(1);
+    // 断开门只落在本次接管的会话上（其它会话不受影响）。
+    expect(p.isQqRemoteDetachedFor("s1")).toBe(true);
+    expect(p.isQqRemoteDetachedFor("other-session")).toBe(false);
     expect(p.qqTakeoverActive).toBe(false);
     expect(p.qqTakeoverSessionId).toBeNull();
     expect(dismiss).toHaveBeenCalledWith(toastId);
     expect(p.postToWebview).toHaveBeenCalledWith({ type: "qqTakeoverState", active: false });
   });
 
-  it("被接管的会话不再注入 QQ 消息（机器人仍可服务其它会话）", async () => {
+  it("start 后 QQ 注入照常执行（不再暂停）", async () => {
     await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+    // 让注入走到「等空闲」阶段就超时返回，以证明它没有被远程接续门短路。
+    const waitFree = vi.spyOn(p, "waitForQqMainFree").mockResolvedValue("timeout");
 
-    // 最小输入即可：暂停门在方法最前面短路，不会读取 task 字段。
-    const result = await p.injectQqMainTurn({ task: { taskId: "t1" } });
+    const result = await p.injectQqMainTurn({
+      task: { taskId: "t1", policy: { remotePolicy: "trusted" } },
+      signal: new AbortController().signal,
+      timeoutMs: 1000,
+    });
+
+    expect(waitFree).toHaveBeenCalled();
     expect(result.injected).toBe(false);
-    expect(result.reason).toContain("远程接续");
-
-    // 门是会话级的：切到别的会话时同一方法不会因这条门被挡住（这里只验证判定）。
-    expect(p.isQqTakeoverActiveFor("another-session")).toBe(false);
+    expect(result.reason).toContain("主会话长时间未空闲");
+    expect(result.reason).not.toContain("远程接续");
+    expect(result.reason).not.toContain("断开");
   });
 
-  it("webview 重连（ready）即失效：清门并撤掉常驻 toast", async () => {
+  it("stop 后该会话断开：QQ 注入被拦截（机器人仍服务其它会话）", async () => {
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "stop" });
+
+    // 最小输入即可：断开门在方法最前面短路，不会读取 task 的其它字段。
+    const result = await p.injectQqMainTurn({ task: { taskId: "t1" } });
+    expect(result.injected).toBe(false);
+    expect(result.reason).toContain("断开");
+
+    // 门是会话级的：切到别的会话时同一方法不会因这条门被挡住（这里只验证判定）。
+    expect(p.isQqRemoteDetachedFor("another-session")).toBe(false);
+  });
+
+  it("再次 start 重新接上远程：移除该会话的断开门，注入恢复放行", async () => {
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "stop" });
+    expect(p.isQqRemoteDetachedFor("s1")).toBe(true);
+
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+    expect(p.isQqRemoteDetachedFor("s1")).toBe(false);
+    expect(p.qqTakeoverActive).toBe(true);
+  });
+
+  it("webview 重连（ready）清除本地冻结态 + 撤掉常驻 toast", async () => {
     await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
     const toastId = p.qqTakeoverToastId!;
     const dismiss = vi.spyOn(p.store, "dismissToast");
@@ -152,19 +194,48 @@ describe("ChatPanel 远程接续开关", () => {
     await p.handleWebviewMessage({ type: "ready" });
 
     expect(p.qqTakeoverActive).toBe(false);
+    expect(p.qqTakeoverSessionId).toBeNull();
     expect(dismiss).toHaveBeenCalledWith(toastId);
     expect(p.postToWebview).toHaveBeenCalledWith({ type: "qqTakeoverState", active: false });
   });
 
-  it("dispose 清门，重启后不遗留接管态", async () => {
+  it("webview 重连（ready）保留断开门，避免已断开会话恢复注入", async () => {
     await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
-    const toastId = p.qqTakeoverToastId!;
-    const dismiss = vi.spyOn(p.store, "dismissToast");
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "stop" });
+    expect(p.isQqRemoteDetachedFor("s1")).toBe(true);
+    vi.spyOn(p.store, "resync").mockImplementation(() => {});
+    vi.spyOn(p.store, "pushSnapshot").mockImplementation(() => {});
+
+    await p.handleWebviewMessage({ type: "ready" });
+
+    // 冻结态随重连清除，但断开门保留（同一 panel 进程里远程关系仍在）。
+    expect(p.qqTakeoverActive).toBe(false);
+    expect(p.isQqRemoteDetachedFor("s1")).toBe(true);
+  });
+
+  it("会话切换（newSession）清断开门，不遗留永久收不到 QQ 的会话", async () => {
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "stop" });
+    expect(p.isQqRemoteDetachedFor("s1")).toBe(true);
+    // 新建会话的 CLI 部分是重活，这里只要验证进入流程时断开门被清掉。
+    vi.spyOn(p, "runStartNewSession").mockResolvedValue();
+
+    await p.handleWebviewMessage({ type: "newSession" });
+
+    expect(p.isQqRemoteDetachedFor("s1")).toBe(false);
+    expect(p.qqRemoteDetachedSessions.size).toBe(0);
+  });
+
+  it("dispose 清断开门，重启后不遗留", async () => {
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "stop" });
+    expect(p.isQqRemoteDetachedFor("s1")).toBe(true);
 
     await panel.dispose();
 
     expect(p.qqTakeoverActive).toBe(false);
     expect(p.qqTakeoverSessionId).toBeNull();
-    expect(dismiss).toHaveBeenCalledWith(toastId);
+    expect(p.isQqRemoteDetachedFor("s1")).toBe(false);
+    expect(p.qqRemoteDetachedSessions.size).toBe(0);
   });
 });
