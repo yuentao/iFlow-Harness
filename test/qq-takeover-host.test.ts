@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as vscode from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
+import { setConfigOverrides } from "./vscode-stub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -75,6 +76,8 @@ type Internals = {
   pushQqState: () => void;
   store: {
     getState: () => { sessionId: string | null; [key: string]: unknown };
+    sessionStarted: (meta: { sessionId: string }) => void;
+    replaceState: (state: unknown) => void;
     sendToast: (level: string, message: string, opts?: unknown) => number;
     dismissToast: (id: number) => void;
   };
@@ -83,6 +86,34 @@ type Internals = {
   qqTakeoverSessionId: string | null;
   qqTakeoverToastId: number | null;
   qqRemoteDetachedSessions: Set<string>;
+  // 完成提示 / QQ 转发两条路径（本文件新增用例要同时接通）。
+  superAgent: unknown;
+  ensureClient: () => Promise<unknown>;
+  promptWithRetry: (
+    client: unknown,
+    sessionId: string,
+    prompt: unknown,
+  ) => Promise<{ stopReason: string }>;
+  persistActiveTranscript: () => Promise<void>;
+  touchActiveSession: () => Promise<void>;
+  notifyOsDecision: (event: string, text: string) => unknown;
+  postSound: (kind: "done" | "error" | "child") => void;
+  deliverQqMainFinalAnswer: (
+    sessionId: string | null,
+    text: string,
+    stopReason: string,
+    onlyTaskIds?: ReadonlySet<string>,
+  ) => Promise<void>;
+  qqMainFinalAwaiters: Map<string, string>;
+  qq?: {
+    service?: {
+      completeMainFinalAnswer?: (input: {
+        taskId: string;
+        text: string;
+        stopReason?: string;
+      }) => Promise<void>;
+    };
+  };
 };
 
 describe("ChatPanel 远程接续开关", () => {
@@ -237,5 +268,56 @@ describe("ChatPanel 远程接续开关", () => {
     expect(p.qqTakeoverSessionId).toBeNull();
     expect(p.isQqRemoteDetachedFor("s1")).toBe(false);
     expect(p.qqRemoteDetachedSessions.size).toBe(0);
+  });
+
+  it("接管态：本机完成提示静音，但 QQ 最终答复仍投递（不误伤转发）", async () => {
+    // 真实的 sendPrompt 汇总轮收尾同时经过两条路径：
+    //   ① QQ 转发 deliverQqMainFinalAnswer —— 接管态下必须照常投递；
+    //   ② 本机完成提示 announceCue → notifyOsDecision + postSound —— 必须静音。
+    // 两条都接通，专门挡住「在 sendPrompt 收尾外层 return」这种误伤转发的实现。
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      autoMemoryCapture: false,
+      nextStepSuggestions: false,
+    });
+    const complete = vi.fn(async () => {});
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    p.qqMainFinalAwaiters.set("task-qq", "s1");
+    p.superAgent = { list: () => [] };
+    p.ensureClient = async () => ({});
+    const pending: Array<(v: { stopReason: string }) => void> = [];
+    p.promptWithRetry = vi.fn(
+      (_c: unknown, _s: string, _prompt: unknown) =>
+        new Promise<{ stopReason: string }>((resolve) => pending.push(resolve)),
+    ) as unknown as Internals["promptWithRetry"];
+    p.persistActiveTranscript = async () => {};
+    p.touchActiveSession = async () => {};
+    p.store.sessionStarted({ sessionId: "s1" });
+    p.store.replaceState({ ...p.store.getState(), status: "idle" });
+
+    const notify = vi.spyOn(p, "notifyOsDecision");
+    const sound = vi.spyOn(p, "postSound");
+    const deliver = vi.spyOn(p, "deliverQqMainFinalAnswer");
+
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+
+    const started = p.sendPrompt("【汇报】任务完成", undefined, undefined, undefined, {
+      hidden: true,
+      reportTurn: true,
+      finalReport: true,
+    });
+    for (let i = 0; i < 100 && pending.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    pending[0]?.({ stopReason: "end_turn" });
+    await started;
+
+    // 转发未被误伤：真实投递到 QQ 服务。
+    expect(deliver).toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-qq" }));
+    // 本机完成提示静音（真实经过 announceCue 出口）。
+    expect(notify).not.toHaveBeenCalled();
+    expect(sound).not.toHaveBeenCalled();
   });
 });

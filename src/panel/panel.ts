@@ -3225,8 +3225,16 @@ export class ChatPanel implements vscode.Disposable {
    *   - announceChildDone   → `childDone`,   child 音, 「子会话「{0}」已…」
    * Host bookkeeping turns that are NOT reports (action receipts, delegated
    * user-turn backfill) never call any of these — they stay silent.
+   *
+   * QQ 远程接管态本机静音(2026-11-19):接管时用户已离开本机、反馈只走 QQ 转发
+   * (`deliverQqMainFinalAnswer` / 子会话 QQ 回执)。这里是最小的统一出口 —— 在入口
+   * 一步挡住 OS 原生通知 + done/child 提示音,同时覆盖 turnDone / superReport /
+   * childDone 三类完成提示。切勿上移到 sendPrompt 收尾的 finalReport 块:那里还放着
+   * QQ 转发调用,误伤会让远程用户永远收不到最终答复。错误音 `postSound("error")`
+   * 不经此出口,保持原样。
    */
   private announceCue(event: OsNotifyEvent, text: string, kind: "done" | "child"): void {
+    if (this.qqTakeoverActive) return;
     const decision = this.notifyOsDecision(event, text);
     if (!decision.fire && isDuplicateNotificationBlock(decision.reason)) return;
     this.postSound(kind);
