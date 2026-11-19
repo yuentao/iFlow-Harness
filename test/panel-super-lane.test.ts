@@ -105,12 +105,20 @@ type PanelInternals = {
   refreshSuperWaitHeartbeat: () => void;
   queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
   superAutoTurnCursor: number;
-  pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean }>;
+  pendingSuperReportPrompts: Array<{
+    mainSessionId: string | null;
+    text: string;
+    final?: boolean;
+    fallbackText?: string;
+  }>;
+  superReportRunning: boolean;
   pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }>;
   autoTurnsStoppedFor: string | null;
   qqMainFinalAwaiters: Map<string, string>;
   qqMainFinalAwaiterSince: Map<string, number>;
   qqFinalRescueText: Map<string, string>;
+  qqReportFallbackText: Map<string, string>;
+  qqFinalRescueDefers: Map<string, number>;
   qqFinalRescueMs: number;
   qqFinalHardRescueMs: number;
   rescueStaleQqFinalAwaiters: () => void;
@@ -389,5 +397,123 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
 
     expect(complete).not.toHaveBeenCalled();
     expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(true);
+  });
+
+  it("硬上限到点但汇报轮在途 / 排队时先让路，不抢在真实最终汇报前面", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    manager.list = () => [];
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.qqMainFinalAwaiterSince.set("T-qq", Date.now() - 1_000_000);
+    p.qqFinalHardRescueMs = 1;
+    p.qqFinalRescueText.set("lane-session", "缓存正文");
+
+    // 汇报轮正在投递：补发必须让路。
+    p.superReportRunning = true;
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    expect(complete).not.toHaveBeenCalled();
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(true);
+    expect(p.qqFinalRescueDefers.get("T-qq")).toBe(1);
+
+    // 汇报轮结束但同一 owner 还有排队汇报：继续让路。
+    p.superReportRunning = false;
+    p.pendingSuperReportPrompts = [{ mainSessionId: "lane-session", text: "QUEUED" }];
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    expect(complete).not.toHaveBeenCalled();
+    expect(p.qqFinalRescueDefers.get("T-qq")).toBe(2);
+
+    // 队列清空后补发照常发生 —— 让路只推迟、不永久取消。
+    p.pendingSuperReportPrompts = [];
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    await flush();
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledWith({
+      taskId: "T-qq",
+      text: "缓存正文",
+      stopReason: "end_turn",
+    });
+    expect(p.qqFinalRescueDefers.has("T-qq")).toBe(false);
+  });
+
+  it("在途汇报轮持续卡死时让路有上限，超过后仍强制补发（真正卡死的兜底）", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    manager.list = () => [];
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.qqMainFinalAwaiterSince.set("T-qq", Date.now() - 1_000_000);
+    p.qqFinalHardRescueMs = 1;
+    p.qqFinalRescueText.set("lane-session", "缓存正文");
+    p.superReportRunning = true;
+
+    // 让路 6 拍都不补发；第 7 拍强制补发。
+    for (let i = 0; i < 6; i += 1) {
+      p.rescueStaleQqFinalAwaiters();
+      await flush();
+      expect(complete).not.toHaveBeenCalled();
+    }
+    expect(p.qqFinalRescueDefers.get("T-qq")).toBe(6);
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    await flush();
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
+  });
+
+  it("补发缓存正文为空时用汇报正文兜底，不再只发一句占位文案", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    manager.list = () => [];
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.qqMainFinalAwaiterSince.set("T-qq", Date.now() - 1_000_000);
+    p.qqFinalHardRescueMs = 1;
+    // qqFinalRescueText 故意不设：缓存为空。
+    p.qqReportFallbackText.set("lane-session", "子会话真实汇报：登录跳转已修好并验证通过");
+
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    await flush();
+
+    expect(complete).toHaveBeenCalledWith({
+      taskId: "T-qq",
+      text: "子会话真实汇报：登录跳转已修好并验证通过",
+      stopReason: "end_turn",
+    });
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
+  });
+
+  it("finalReport 锚点失效时经 finalFallbackText 投递，不再静默放弃滑向空缓存补发", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.store.getState().blocks.push({ kind: "text", id: "anchor", text: "上一轮旧正文" });
+    p.pendingSuperReportPrompts = [
+      {
+        mainSessionId: "lane-session",
+        text: "FINAL-REPORT",
+        final: true,
+        fallbackText: "子会话汇报正文兜底",
+      },
+    ];
+
+    void p.drainSuperReports();
+    await flush();
+    const call = calls[calls.length - 1]!;
+    // 模拟转录被清空 / 重排：锚块消失，按 id 切片不安全。
+    const blocks = p.store.getState().blocks;
+    blocks.splice(0, blocks.length);
+    call.resolve({ stopReason: "end_turn" });
+    await flush();
+    await flush();
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledWith({
+      taskId: "T-qq",
+      text: "子会话汇报正文兜底",
+      stopReason: "end_turn",
+    });
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
   });
 });

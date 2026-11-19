@@ -3562,7 +3562,7 @@ export class SuperAgentManager {
    */
   reportPromptWithPending(
     entries: { session: SuperSessionUi; report: SuperReport }[],
-    options?: { pendingOwner?: string | null },
+    options?: { pendingOwner?: string | null; finalOverride?: boolean },
   ): { text: string; pendingCount: number } {
     // pendingCount 只统计**同一归属主会话**下还在跑的子会话：这份汇报是投给
     // 某个主会话的，别人家的子会话跟它无关。混进来算的话，提示词里的
@@ -3581,7 +3581,13 @@ export class SuperAgentManager {
       (session) =>
         !isTerminalSuperStatus(session.status) && (session.mainSessionId ?? owner) === owner,
     ).length;
-    return { text: buildSuperReportPrompt(entries, { pendingCount }), pendingCount };
+    return {
+      text: buildSuperReportPrompt(entries, {
+        pendingCount,
+        finalOverride: options?.finalOverride === true,
+      }),
+      pendingCount,
+    };
   }
 
   /**
