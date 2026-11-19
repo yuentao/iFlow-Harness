@@ -493,7 +493,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
 
   return (
     <>
-      {loadError && <div className="text-ui-body text-destructive">{loadError}</div>}
+      {loadError && <div role="alert" className="text-ui-body text-destructive">{loadError}</div>}
 
       {editing === null && detail === null && catalogForm === null && (
         <>
@@ -542,7 +542,9 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 <Button variant="primary" disabled={busy || entries === null || !!loadError || saving} onClick={save}>
                   {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
                 </Button>
-                {editError && <span className="text-ui-body text-destructive">{editError}</span>}
+                {/* Button label changes are not announced; keep a dedicated live region. */}
+                <span className="sr-only" role="status" aria-live="polite">{savedFlash ? t("已保存") : ""}</span>
+                {editError && <span role="alert" className="text-ui-body text-destructive">{editError}</span>}
               </ToolbarRow>
 
               {/* Secondary actions: catalog browsing and refresh are conveniences,
@@ -1161,7 +1163,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               >
                 {t("完成")}
               </Button>
-              {editError && <span className="text-ui-body text-destructive">{editError}</span>}
+              {editError && <span role="alert" className="text-ui-body text-destructive">{editError}</span>}
             </ActionRow>
             <Hint>
               {t("编辑只改本地草稿，点「保存」才会写入文件。")}
@@ -1208,7 +1210,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               <Button variant="primary" onClick={installCatalog}>
                 {t("安装")}
               </Button>
-              {editError && <span className="text-ui-body text-destructive">{editError}</span>}
+              {editError && <span role="alert" className="text-ui-body text-destructive">{editError}</span>}
             </ActionRow>
             <Hint>
               {t("安装只会把模板填进草稿，点「保存」才会写入文件。")}

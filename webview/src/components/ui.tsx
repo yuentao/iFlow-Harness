@@ -1,5 +1,8 @@
 import {
+  Children,
+  cloneElement,
   useEffect,
+  isValidElement,
   useId,
   useLayoutEffect,
   useRef,
@@ -688,10 +691,19 @@ export function Field({
   className?: string;
   children: ReactNode;
 }) {
+  // The asterisk is visual only; mirror `required` onto the inner control so
+  // screen readers announce the constraint (controls live in this kit file).
+  const controls = required
+    ? Children.map(children, (child) =>
+        isValidElement<{ "aria-required"?: string }>(child)
+          ? cloneElement(child, { "aria-required": "true" })
+          : child,
+      )
+    : children;
   return (
     <label className={`flex flex-col gap-1${className ? ` ${className}` : ""}`}>
       <FieldLabel required={required}>{label}</FieldLabel>
-      {children}
+      {controls}
     </label>
   );
 }
