@@ -95,7 +95,8 @@ type PanelInternals = {
   client: FakeClient | null;
   restoring: boolean;
   restoreSession: (sessionId: string) => Promise<boolean>;
-  startNewSession: () => Promise<void>;
+  startNewSession: (options?: { bypassSuperWait?: boolean }) => Promise<void>;
+  confirmAndPurgeSuperResidue: () => Promise<void>;
   handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
   ensureClient: () => Promise<unknown>;
   hasPersistedTranscript: (id: string) => boolean;
@@ -109,6 +110,7 @@ type PanelInternals = {
   persistActiveTranscript: (force?: boolean) => Promise<void>;
   restoreSuperSessions: (id: string) => Promise<void>;
   getSuperAgent: () => unknown;
+  superSweepDelayMs: number;
   queryLiveModels: () => Promise<SessionState["models"]>;
   validateModelForPush: (
     models: Promise<SessionState["models"]>,
@@ -141,6 +143,9 @@ describe("恢复进行中点「新会话」", () => {
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-restore-abort-"));
     panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as PanelInternals;
+    // 生产默认延时 3000ms 用于避开恢复窗口的 I/O；测试里置 0 让 sweep
+    // 立即触发，才能验证「挂住的 sweep 不阻塞恢复」。
+    p.superSweepDelayMs = 0;
     notices = [];
     infos = [];
 
@@ -305,9 +310,13 @@ describe("恢复进行中点「新会话」", () => {
       p.restoreSuperSessions = proto.restoreSuperSessions.bind(panel);
     }
 
-    /** 注入一个假管理器；sweep 由用例决定（挂住 / 抛错 / 立即返回）。 */
-    function stubSweep(sweep: () => Promise<unknown>): { calls: number } {
-      const counter = { calls: 0 };
+    /** 注入一个假管理器；三类 sweep 全走传入的 sweep（挂住 / 抛错 / 立即返回），各自计数。 */
+    function stubSweep(sweep: () => Promise<unknown>): {
+      calls: number;
+      attachmentCalls: number;
+      dirCalls: number;
+    } {
+      const counter = { calls: 0, attachmentCalls: 0, dirCalls: 0 };
       p.getSuperAgent = () =>
         ({
           restoreSessions: () => undefined,
@@ -315,11 +324,15 @@ describe("恢复进行中点「新会话」", () => {
             counter.calls += 1;
             return sweep();
           },
-          // 恢复归档时还会并排清扫附件副本与降级目录；stub 必须实现全，
-          // 否则数组求值时同步 TypeError 会让上面 reject 的 promise 逃逸成
-          // unhandled rejection（Vitest Errors 1、退出码 1）。
-          sweepStaleSuperAttachmentDirs: async () => 0,
-          sweepStaleSuperDirs: async () => 0,
+          // 三类 sweep 全部挂住：恢复必须不 await 它们中的任何一个。
+          sweepStaleSuperAttachmentDirs: () => {
+            counter.attachmentCalls += 1;
+            return sweep();
+          },
+          sweepStaleSuperDirs: () => {
+            counter.dirCalls += 1;
+            return sweep();
+          },
         }) as never;
       return counter;
     }
@@ -335,7 +348,12 @@ describe("恢复进行中点「新会话」", () => {
         new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 1_000)),
       ]);
       expect(restored).toBe(true);
+      // 定时器到点后三类 sweep 全部触发、全部挂住；恢复没有 await 它们中
+      // 的任何一个（旧实现只挂 worktrees 时这一点覆盖不到另两类）。
+      await flush();
       expect(counter.calls).toBe(1);
+      expect(counter.attachmentCalls).toBe(1);
+      expect(counter.dirCalls).toBe(1);
       expect(p.store.getState().sessionId).toBe("restored-session");
 
       // 清扫还在飞，新建会话照常完成（不再等恢复/清扫 settle）。
@@ -347,6 +365,29 @@ describe("恢复进行中点「新会话」", () => {
       expect(p.store.getState().sessionId).toMatch(/^probe-/);
       // 后台清扫只跑了一份，没有被恢复/新建会话重复触发。
       expect(counter.calls).toBe(1);
+    });
+
+    it("冷启动自动新建跳过残留检测：countResidue 挂住也不阻塞启动", async () => {
+      // 模拟 countResidue 扫全工作区卡死：残留检测一旦被调用就永不返回。
+      let confirmCalls = 0;
+      p.confirmAndPurgeSuperResidue = async () => {
+        confirmCalls += 1;
+        await new Promise<void>(() => {});
+      };
+
+      // 冷启动路径传 bypassSuperWait：残留检测根本不该被碰到。
+      const outcome = await Promise.race([
+        p.startNewSession({ bypassSuperWait: true }).then(() => "done" as const),
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 1_000)),
+      ]);
+      expect(outcome).toBe("done");
+      expect(confirmCalls).toBe(0);
+      expect(p.store.getState().sessionId).toMatch(/^probe-/);
+
+      // 对照：用户显式点「新建会话」仍要走残留检测（这里放行以便断言调用）。
+      const confirm = vi.spyOn(p, "confirmAndPurgeSuperResidue").mockResolvedValue();
+      await p.startNewSession();
+      expect(confirm).toHaveBeenCalledTimes(1);
     });
 
     it("清扫失败不影响恢复与新建（可观测但不冒泡）", async () => {
