@@ -91,7 +91,29 @@ type PanelInternals = {
     text: string,
     stopReason: string,
     onlyTaskIds?: ReadonlySet<string>,
+    fallbackText?: string,
   ) => Promise<void>;
+  captureQqReportTurnText: (
+    anchorId: string | undefined,
+    beforeCount: number,
+    anchorLen?: number,
+  ) => string;
+  drainSuperReports: () => Promise<void>;
+  ensureClient: () => Promise<unknown>;
+  promptWithRetry: (
+    client: unknown,
+    sessionId: string,
+    prompt: unknown,
+  ) => Promise<{ stopReason: string }>;
+  persistActiveTranscript: () => Promise<void>;
+  touchActiveSession: () => Promise<void>;
+  maybeAutoCompressOnIdle: (sessionId: string) => Promise<boolean>;
+  pendingSuperReportPrompts: Array<{
+    mainSessionId: string | null;
+    text: string;
+    final?: boolean;
+    fallbackText?: string;
+  }>;
   deliverQqMainIntermediateText: (
     owner: string | null,
     text: string,
@@ -143,6 +165,7 @@ type PanelInternals = {
       errorMessage: string | null;
     };
     userPrompt: (text: string, images?: string[], files?: unknown[], origin?: "qq") => number;
+    onSessionUpdate: (notification: unknown) => void;
   };
 };
 
@@ -955,5 +978,159 @@ describe("QQ 主会话中间正文轮同步", () => {
 
     expect(deliver).toHaveBeenCalledTimes(1);
     expect(deliver).toHaveBeenCalledWith(TASK.taskId, "进度正文");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 回归：汇总轮正文被流式并入锚块导致 QQ 转发出空摘要（2026-11-19）
+// ---------------------------------------------------------------------------
+
+describe("汇总轮正文锚点回归（QQ 空摘要 bug）", () => {
+  let panel: ChatPanel;
+  let p: PanelInternals;
+  let storageDir: string;
+  let iflowHome: string;
+  let complete: ReturnType<typeof vi.fn>;
+
+  const streamChunk = (text: string): void => {
+    p.store.onSessionUpdate({
+      sessionId: "main-session",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+    });
+  };
+
+  /** 预置一个 injected 卡（挡住异步注入卡）+ 末尾 text 锚块，返回该锚块。 */
+  const seedAnchor = (oldText: string): Record<string, unknown> => {
+    p.store.getState().blocks.push({
+      kind: "injected",
+      notice: "上下文",
+      items: [],
+      tokens: 0,
+      id: "b-test-injected",
+    });
+    p.store.getState().blocks.push({ kind: "text", text: oldText, id: "b-test-anchor" });
+    const blocks = p.store.getState().blocks;
+    return blocks[blocks.length - 1]!;
+  };
+
+  beforeEach(async () => {
+    iflowHome = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-anchor-home-"));
+    process.env.IFLOW_HOME = iflowHome;
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-anchor-storage-"));
+    // 关掉回合末联网任务，避免 fire-and-forget 的真实网关调用。
+    setConfigOverrides({ checkpoints: false, autoTitle: false, autoMemoryCapture: false });
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as PanelInternals;
+    const state = p.store.getState();
+    state.sessionId = "main-session";
+    state.status = "idle";
+    state.initializing = false;
+    state.replaying = false;
+
+    complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete as never } };
+    p.qqMainFinalAwaiters.set(TASK.taskId, "main-session");
+
+    // 让真实 sendPrompt 跑完整条收尾链（锚点提取 + 回执），但不 spawn CLI。
+    const fakeClient = {};
+    p.ensureClient = async () => fakeClient;
+    p.persistActiveTranscript = async () => {};
+    p.touchActiveSession = async () => {};
+    p.maybeAutoCompressOnIdle = async () => false;
+    p.promptWithRetry = vi.fn(async () => ({ stopReason: "end_turn" }));
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    delete process.env.IFLOW_HOME;
+    fs.rmSync(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
+
+  it("① 汇报正文被流式并入末尾 text 锚块时，汇总轮仍回真实正文而非兜底", async () => {
+    const anchor = seedAnchor("上一轮旧正文");
+    const anchorId = String(anchor["id"]);
+
+    // 两个 chunk 都通过真实 session/update 流进来 —— appendTextToLast 会把它们
+    // 就地并入锚块、复用同一个 id（这正是 bug 触发条件：hidden 回合无 user 块边界）。
+    p.promptWithRetry = vi.fn(async () => {
+      streamChunk("子会话A已完成：修复了空摘要 bug；");
+      streamChunk("验证：定向测试 3 个文件全绿。");
+      return { stopReason: "end_turn" };
+    });
+
+    const started = await p.sendPrompt("汇报提示", undefined, undefined, undefined, {
+      hidden: true,
+      reportTurn: true,
+      finalReport: true,
+    });
+    expect(started).toBe(true);
+    await tick();
+
+    const blocks = p.store.getState().blocks;
+    const merged = blocks.find((block) => block["id"] === anchorId) as { text: string } | undefined;
+    // 前提确认：新正文确实并入了锚块（否则这个测试没复现到 bug）。
+    expect(merged?.text).toContain("子会话A已完成：修复了空摘要 bug；");
+    expect(merged?.text).toContain("验证：定向测试 3 个文件全绿。");
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    const sent = (complete.mock.calls[0]?.[0] as { text?: string } | undefined)?.text ?? "";
+    expect(sent).toContain("子会话A已完成：修复了空摘要 bug；");
+    expect(sent).toContain("验证：定向测试 3 个文件全绿。");
+    // 旧正文不能混进来，兜底文案更不该出现。
+    expect(sent).not.toContain("上一轮旧正文");
+    expect(sent).not.toContain("超流体任务已完成，但未产生可转发的正文摘要。");
+  });
+
+  it("② captureQqReportTurnText 按锚块旧长度切片取回并入的正文", async () => {
+    const anchor = seedAnchor("旧正文");
+    const anchorId = String(anchor["id"]);
+    const anchorLen = String(anchor["text"]).length;
+
+    streamChunk("本轮新增汇报正文");
+
+    const captured = p.captureQqReportTurnText(anchorId, p.store.getState().blocks.length, anchorLen);
+    expect(captured).toBe("本轮新增汇报正文");
+    // 不传旧长度会把整块（含上一轮旧正文）都算进来 —— 正说明必须记录锚块长度。
+    const noLen = p.captureQqReportTurnText(anchorId, p.store.getState().blocks.length);
+    expect(noLen).toBe("旧正文本轮新增汇报正文");
+  });
+
+  it("③ 二次转述为空时用清洗后的 report.summary 兜底，不双重出现占位文案", async () => {
+    const anchor = seedAnchor("上一轮旧正文");
+    // 汇报正文含协议围栏 / 凭据 / 本机绝对路径 / 长 id，必须被清洗掉。
+    const rawSummary =
+      "子会话A：修复了 QQ 空摘要 bug，改了 shared/qq-access.ts。" +
+      "```super-agent {\"tasks\":[]}``` " +
+      "token=sk-abcdefgh12345678 日志 J:\\git\\proj\\out.log id=0123456789abcdef0123";
+    p.pendingSuperReportPrompts.push({
+      mainSessionId: "main-session",
+      text: "汇报提示文本",
+      final: true,
+      fallbackText: rawSummary,
+    });
+
+    // 汇总轮二次转述为空：promptWithRetry 不 streams 任何文本。
+    p.promptWithRetry = vi.fn(async () => ({ stopReason: "end_turn" }));
+
+    await p.drainSuperReports();
+    await tick();
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    const sent = (complete.mock.calls[0]?.[0] as { text?: string } | undefined)?.text ?? "";
+    // 真实汇报内容要到达 QQ。
+    expect(sent).toContain("子会话A：修复了 QQ 空摘要 bug");
+    expect(sent).toContain("shared/qq-access.ts");
+    // 协议标记 / 凭据 / 本机路径 / 长 id 全部抹掉。
+    expect(sent).not.toContain("super-agent");
+    expect(sent).not.toContain("sk-abcdefgh12345678");
+    expect(sent).not.toContain("J:\\git");
+    expect(sent).not.toContain("0123456789abcdef0123");
+    // 旧正文与占位文案都不该出现（服务侧也不会再补一条占位）。
+    expect(sent).not.toContain("上一轮旧正文");
+    expect(sent).not.toContain("超流体任务已完成，但未产生可转发的正文摘要。");
+    expect(String(anchor["text"])).toBe("上一轮旧正文");
   });
 });
