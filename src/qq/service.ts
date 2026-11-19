@@ -533,6 +533,16 @@ export const QQ_PANEL_FULL_CONTENT_NOTICE = "（完整内容见 iFlow 面板）"
  */
 export const QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS = 60_000;
 /**
+ * 每个进度槽位保留的「已送达指纹」条数上限。
+ *
+ * 为什么不止一条：被节流压掉的中间正文会在下一个窗口**补发**，一条补发可能
+ * 同时送达两条正文（被压掉的那条 + 本次的新正文）。此时「这条正文送达过吗」
+ * 不能只看最后一个指纹 —— 否则补发过的那条会被当成新的再发一次（刷屏 +
+ * 重复）。这里给每槽位保留最近若干条已送达指纹，超出上限按插入序淘汰最旧
+ * 的（与其它进度记账表同一套 LRU 纪律，见 {@link QQ_MAX_TRACKED_PROGRESS_SLOTS}）。
+ */
+export const QQ_MAX_DELIVERED_FINGERPRINTS_PER_SLOT = 32;
+/**
  * 重启后补发「终态但未送达」结果的最小重试间隔（毫秒）。
  *
  * 已送达的任务由 `resultDeliveredAt` 挡住（永不重发）；投递失败的任务需要
@@ -1142,6 +1152,27 @@ export class QqService {
    * 免得按钮把同一句 toast 刷满屏。
    */
   private readonly progressNoticeAt = new Map<string, number>();
+  /**
+   * 每槽位「被最小间隔压掉、尚未送达」的正文（`taskId:分支` → 正文）。
+   *
+   * 为什么要有它：最小间隔内的**新**正文（指纹与已送达的不同）此前是直接
+   * 丢掉的 —— 只给本地一条回执，QQ 侧再没有补发机会。于是「同一批子会话
+   * 快速完成」时，中间的推进过程全部被压成第一条，用户只看到最早那段进展，
+   * 后续正文永久丢失（2026-11-19 实测：20:52 有一次这样的日志）。
+   *
+   * 现在把被压掉的正文**记下来**（每槽位只留最后一条），下一个窗口产生新
+   * 指纹时把它与新正文合并补发（见 {@link deliverProgressLike}）。节流与
+   * 去重策略本身不变：压住期间不投递（不刷屏）、已送达的指纹永不重发。
+   */
+  private readonly progressPendingTexts = new Map<string, string>();
+  /**
+   * 每槽位「已成功送达」的正文指纹集合（`taskId:分支` → 指纹集合）。
+   *
+   * 与 {@link progressFingerprints}（只记最后一条）并存：补发一次可能同时
+   * 送达两条正文，两条都要记住，否则先送达的那条会被当成新的再发一遍。
+   * 集合按插入序淘汰最旧的（上限 {@link QQ_MAX_DELIVERED_FINGERPRINTS_PER_SLOT}）。
+   */
+  private readonly progressDeliveredFingerprints = new Map<string, Set<string>>();
   /** 逻辑投递去重键的递增序号（配合 taskId 生成全局唯一的 dedupeKey）。 */
   private deliverySeqCounter = 0;
 
@@ -1973,17 +2004,100 @@ export class QqService {
     stopReason?: string;
   }): Promise<void> {
     const current = this.tasks.get(input.taskId);
-    if (!current || current.channel !== "main" || current.status !== "injected") return;
+    if (!current || current.channel !== "main") return;
+    const trimmed = (input.text ?? "").trim();
+    if (current.status !== "injected") {
+      // **占位升级通道**：任务已是终态，但归档里的 summary 还是「没有正文」
+      // 的占位文案（QQ_MAIN_FINAL_EMPTY_NOTICE）—— 说明先到的那一轮交回的是
+      // 空正文，真实正文随后才到。此前这里直接早退，于是真实长正文**没有
+      // 第二次投递机会**（deliverResult 又被 resultDeliveredAt 幂等锚点挡住），
+      // 任务归档里的 summary 永远停在占位，QQ 用户只收到一句「未产生摘要」。
+      if (this.canUpgradeMainResult(current, trimmed)) {
+        await this.upgradeMainResult(current, trimmed, (input.stopReason ?? "").trim());
+      }
+      return;
+    }
     // 防御性兜底：宿主侧 deliverQqMainFinalAnswer 已保证传非空文案，但服务是
     // 独立入口（其它宿主 / 测试直接调用也可能传空）。空摘要在这里补一条如实
     // 说明，绝不让 QQ 只收到一行「状态 成功」。summary 变为非空后，
     // deliverResultLocked 的空摘要分支不会重复追加通知（无双重发送）。
-    const summary = (input.text ?? "").trim() || QQ_MAIN_FINAL_EMPTY_NOTICE;
+    const summary = trimmed || QQ_MAIN_FINAL_EMPTY_NOTICE;
     const stopReason = (input.stopReason ?? "").trim() || "end_turn";
     await this.finalizeMainTask(current, summary, stopReason, {
       channel: "main",
       plan: "active-first",
     });
+  }
+
+  /**
+   * 判定「占位结果可否升级为真实正文」。
+   *
+   * 只认一种情形：任务已跑完（succeeded / failed），归档里的 summary
+   * **逐字等于**占位文案 {@link QQ_MAIN_FINAL_EMPTY_NOTICE}，且这次交回的是
+   * 真正的正文（非空、且不是占位文案本身）。
+   *
+   * 为什么不放宽：终态任务的归档是**用户已经收到的内容**。只有「先前那份
+   * 是没有正文的占位」这一种情况才允许改写 —— 否则迟到的第二份结论会覆盖
+   * 用户已经收到的第一份，形成前后矛盾。
+   */
+  private canUpgradeMainResult(task: QqTask, text: string): boolean {
+    // 只认「确实跑完了」的任务：succeeded / failed。canceled（用户停过）、
+    // timeout、needs_review、discarded（用户丢过）都不该再往 QQ 推正文 ——
+    // 用户已经明确表达过「这条不用了」。
+    if (task.status !== "succeeded" && task.status !== "failed") return false;
+    if (task.result?.summary !== QQ_MAIN_FINAL_EMPTY_NOTICE) return false;
+    if (text.length === 0) return false;
+    if (text === QQ_MAIN_FINAL_EMPTY_NOTICE) return false;
+    return true;
+  }
+
+  /**
+   * 占位升级：把归档里的占位摘要改写成真实正文，并**重投**一次。
+   *
+   * 幂等锚点的处置：清掉 `resultDeliveredAt`（占位那份已经投过，但那是
+   * 「没有正文」的占位，真实正文必须再投一次），**保留**
+   * `resultDeliveredChunks`（部分送达的分片续发锚点）—— 交付时按既有分片
+   * 语义处理：内容指纹一致才续发未送达的片，内容变了就整份重发（宁可重复
+   * 也不让摘要缺一块）。
+   *
+   * 状态机：任务已是终态，终态粘性是刻意的不变量，因此这里**不改状态**，
+   * 只改写结果正文并重投。真实答复的停止原因写进 `result.stopReason`
+   * （摘要里的「结束」一行会跟着变），任务状态保持收尾那一轮的状态。
+   */
+  private async upgradeMainResult(
+    task: QqTask,
+    text: string,
+    stopReason: string,
+  ): Promise<void> {
+    const current = this.tasks.get(task.taskId) ?? task;
+    const previous = current.result;
+    const at = this.now();
+    const result: QqTaskResult = {
+      stopReason: stopReason || previous?.stopReason || "end_turn",
+      summary: text,
+      changes: previous?.changes ?? [],
+      artifacts: previous?.artifacts ?? [],
+      ...(previous?.usage ? { usage: previous.usage } : {}),
+      ...(previous?.branch ? { branch: previous.branch } : {}),
+    };
+    const patched: QqTask = {
+      ...current,
+      result,
+      // 清掉幂等锚点：这一份是「真实正文」，与先前那份占位不是同一份内容。
+      resultDeliveredAt: undefined,
+      updatedAt: Math.max(current.updatedAt, at),
+    };
+    await this.persist(patched);
+    // 留痕：占位 → 真实正文的改写必须可查（谁在什么时候把占位换掉了）。
+    await this.appendEvent("task_result_upgraded", patched.taskId, {
+      from: QQ_MAIN_FINAL_EMPTY_NOTICE,
+      summaryChars: text.length,
+      preview: text.slice(0, 120),
+    });
+    this.log(
+      `QQ 任务 ${shortTaskId(patched.taskId)}：占位结果升级为真实正文（${text.length} 字），重新投递`,
+    );
+    await this.deliverResult(patched, { plan: "active-first" });
   }
 
   /**
@@ -3082,7 +3196,7 @@ export class QqService {
   }
 
   /**
-   * 进度 / 刷新类回包的统一投递通道：节流 + 指纹去重 + 失败可观测。
+   * 进度 / 刷新类回包的统一投递通道：节流 + 指纹去重 + 失败可观测 + 补发。
    *
    * 四类调用方（运行中进度、main 渠道摘要、未派发提示、读不到结果提示）
    * 共用同一套纪律 —— 刷新按钮连点不能把被动回复配额烧光：
@@ -3092,11 +3206,15 @@ export class QqService {
    *     新消息，所以同文本必须由这里挡住；
    *  ③ 指纹只在**投递成功后**记账：失败不记账（下次刷新立即重试，绝不
    *     永久静默），并且失败有日志 + 归档事件，不吞掉。
+   *  ④ **补发**：窗口内被压掉的那条**新**正文记进「每槽位最后一条」的短期
+   *     缓存（{@link progressPendingTexts}），下一个窗口产生新指纹时与它
+   *     合并后一起发出 —— 此前中间正文被静默压掉，QQ 侧再没有补发机会
+   *     （同一批子会话快速完成时，进度全被压成第一条）。
    *
    * `branch` 是节流 / 去重的槽位名（progress / main-summary / undispatched /
-   * unreadable），同一任务的不同分支互不挤占。dedupeKey 由分支名 + 文本指纹
-   * 构成，同一次逻辑消息的全部重试共用（adapter 复用同一个 msg_seq，
-   * 重试不刷重复消息）。
+   * unreadable / main-turn-text），同一任务的不同分支互不挤占。dedupeKey 由
+   * 分支名 + 文本指纹构成，同一次逻辑消息的全部重试共用（adapter 复用同一个
+   * msg_seq，重试不刷重复消息）。
    */
   private async deliverProgressLike(
     task: QqTask,
@@ -3110,32 +3228,51 @@ export class QqService {
     // 而连发，或反之永久压住。
     const at = this.monotonic();
     const previous = this.progressRefreshes.get(slot);
-    const lastSent = this.progressFingerprints.get(slot);
     const withinInterval =
       previous !== undefined && at - previous < QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS;
+    // 「这条正文送达过吗」：不只看最后一条指纹 —— 补发一次可能同时送达两条
+    // 正文，两条都得记住，否则先送达的那条会被当成新的再发一遍。
+    const alreadyDelivered = this.hasDeliveredFingerprint(slot, fingerprint);
 
     // 不投递的两条路径都给本地一次性回执（用户点刷新不能毫无反馈）：
     //  ① 指纹未变：永不重发（dedupeKey TTL 过期后平台会重投同一条）；
     //  ② 指纹变了但在最小间隔内：本次压住，等下个窗口（被动回复配额保护）。
-    if (lastSent === fingerprint || withinInterval) {
-      this.notifyProgressThrottled(slot, task.taskId, at, lastSent === fingerprint);
+    if (alreadyDelivered || withinInterval) {
+      if (!alreadyDelivered) {
+        // 被最小间隔压住的**新**正文：记进待补发缓存（每槽位只留最后一条）。
+        // 不立即投递 —— 节流纪律不变（不刷屏）；下一个窗口有新材料时一起发。
+        this.trackProgressSlot(this.progressPendingTexts, slot, text);
+      }
+      this.notifyProgressThrottled(slot, task.taskId, at, alreadyDelivered);
       this.log(
         `QQ 任务 ${task.taskId}：${branch} 消息未投递（${
-          lastSent === fingerprint ? "指纹未变" : "最小间隔内"
-        }，指纹 ${fingerprint}）`,
+          alreadyDelivered ? "指纹未变" : "最小间隔内"
+        }，指纹 ${fingerprint}${alreadyDelivered ? "" : "，已记为待补发"}）`,
       );
       return;
     }
 
     // 先记尝试时刻：投递窗口（重试退避可达数十秒）内的并发刷新不再重复发送。
     this.trackProgressSlot(this.progressRefreshes, slot, at);
+
+    // 补发：上一个窗口被压掉的那条正文与本次正文合并成一条消息发出。
+    // - 两条独立正文 → 合并成一条（一次窗口一条消息，不额外消耗配额）；
+    // - 本次正文已包含被压掉的那条（累积式正文）→ 只发本次（不重复内容）；
+    // - 两条是同一段 → 只发一次。
+    const pending = this.progressPendingTexts.get(slot);
+    const pendingFingerprint = pending === undefined ? undefined : fingerprintText(pending);
+    let payload = text;
+    if (pending !== undefined && pendingFingerprint !== fingerprint && !text.includes(pending)) {
+      payload = `${pending}\n\n${text}`;
+    }
+
     let ok: boolean;
     if (options?.chunked === true) {
       // 中间正文轮：指纹/节流按「整轮正文」判定（上面的 slot 与指纹未变），
       // 投递则复用结果回包同款 chunkQqText 分片档位；首片走被动回复，续片
       // 一律主动消息（与 deliverResultLocked 的纪律一致，避免 seq 撞车被吞）。
       const profile = qqDetailProfile(this.config.resultDetail);
-      const chunks = chunkQqText(text, profile.chunkChars);
+      const chunks = chunkQqText(payload, profile.chunkChars);
       ok = chunks.length > 0;
       for (let i = 0; i < chunks.length; i += 1) {
         // 首片被动优先（回复窗口还开着）；续发片主动优先，但同样保留被动回退
@@ -3148,21 +3285,60 @@ export class QqService {
         }
       }
     } else {
+      // dedupeKey 取**实际发出的正文**的指纹：合并补发后正文变了，key 必须
+      // 跟着变 —— 否则同一次逻辑投递换了内容却复用同一个 msg_seq，会被平台
+      // 当成重复消息静默去重（新内容丢失）。
       ok = await this.deliverTaskNotice(
         task,
-        text,
-        `${branch}:${task.taskId}:${fingerprint}`,
+        payload,
+        `${branch}:${task.taskId}:${fingerprintText(payload)}`,
       );
     }
     if (ok) {
       // 只有投递成功才记指纹：失败不记账，下次刷新立即重试（绝不永久静默）。
-      this.trackProgressSlot(this.progressFingerprints, slot, fingerprint);
+      this.markProgressDelivered(slot, fingerprint);
+      if (pendingFingerprint !== undefined && pendingFingerprint !== fingerprint) {
+        // 被补发的那条也算送达（内容已随合并消息一起送到用户手上），
+        // 记下来避免它稍后单独再来时被当成新的正文重发一遍。
+        this.markProgressDelivered(slot, pendingFingerprint);
+      }
+      this.progressPendingTexts.delete(slot);
     } else {
       // 失败可观测：清掉尝试时刻让下次刷新立即重试；toast 已由
       // deliverTaskNotice 给出（「仍未送达 QQ」），这里补日志与归档事件。
       this.progressRefreshes.delete(slot);
+      // 待补发的那条留在缓存里：下次窗口继续尝试补发（不丢内容）。
       this.log(`QQ 任务 ${task.taskId}：${branch} 消息投递失败，未记指纹，下次刷新重试`);
       await this.appendEvent("task_progress_undelivered", task.taskId, { branch });
+    }
+  }
+
+  /** 这条正文在本格是否已成功送达过（最后一条指纹 + 补发时的历史指纹）。 */
+  private hasDeliveredFingerprint(slot: string, fingerprint: string): boolean {
+    if (this.progressFingerprints.get(slot) === fingerprint) return true;
+    const delivered = this.progressDeliveredFingerprints.get(slot);
+    return delivered ? delivered.has(fingerprint) : false;
+  }
+
+  /**
+   * 记下「这条正文已成功送达」：最后一条指纹 + 已送达指纹集合。
+   *
+   * 集合按插入序淘汰最旧的（上限
+   * {@link QQ_MAX_DELIVERED_FINGERPRINTS_PER_SLOT}），避免长时间多分支任务
+   * 的记账无限增长。
+   */
+  private markProgressDelivered(slot: string, fingerprint: string): void {
+    this.trackProgressSlot(this.progressFingerprints, slot, fingerprint);
+    let delivered = this.progressDeliveredFingerprints.get(slot);
+    if (!delivered) {
+      delivered = new Set<string>();
+      this.trackProgressSlot(this.progressDeliveredFingerprints, slot, delivered);
+    }
+    delivered.add(fingerprint);
+    while (delivered.size > QQ_MAX_DELIVERED_FINGERPRINTS_PER_SLOT) {
+      const oldest = delivered.values().next();
+      if (oldest.done) break;
+      delivered.delete(oldest.value);
     }
   }
 
@@ -3215,6 +3391,8 @@ export class QqService {
       this.progressRefreshes,
       this.progressFingerprints,
       this.progressNoticeAt,
+      this.progressPendingTexts,
+      this.progressDeliveredFingerprints,
     ]) {
       for (const key of map.keys()) {
         if (key.startsWith(prefix)) map.delete(key);
