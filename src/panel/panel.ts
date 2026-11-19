@@ -1248,6 +1248,16 @@ export class ChatPanel implements vscode.Disposable {
    * `onNeedInput` 据此把提问提醒回灌到正确的 QQ 任务。
    */
   private readonly qqTaskBySuperSession = new Map<string, string>();
+  /**
+   * QQ 主任务「自己那一轮」的汇报正文（taskId → 清洗后的子会话汇报）。
+   *
+   * 同一主会话里连发多条 QQ 消息时，各任务派生各自的超流体子会话；一轮汇总
+   * 结论若广播给该会话所有 awaiter，就会出现「摘要相同、taskId 不同」的重复
+   * 卡。这里在汇报入队时按 {@link qqTaskBySuperSession} 把每个子会话的汇报归
+   * 到它的主任务，最终回执时逐 task 取回自己那份，绝不共享别人的结论。
+   * 与 awaiter 同生命周期：投递 / 撤销 / 停通道时清理。
+   */
+  private readonly qqTaskFinalText = new Map<string, string>();
   /** 主动停止中：防止与在飞的启停重叠。 */
   private qqStopping = false;
   /** 最近一次推给 webview 的连接状态（用于「面板重新打开时」的立即回显）。 */
@@ -2116,6 +2126,7 @@ export class ChatPanel implements vscode.Disposable {
     this.qqReportFallbackText.clear();
     this.qqFinalRescueDefers.clear();
     this.qqTaskBySuperSession.clear();
+    this.qqTaskFinalText.clear();
     // Final flush: a turn interrupted by window close / extension reload has
     // no later persist point (completion never runs) — write the tail now so
     // the session survives a restart intact. No-op when blocks are empty.
@@ -9308,6 +9319,23 @@ export class ChatPanel implements vscode.Disposable {
       .filter((value) => value.length > 0)
       .join("\n")
       .trim();
+    // QQ task 级归属：把本批每个子会话的汇报正文归到派生它的主任务（见
+    // qqTaskBySuperSession）。deliverQqMainFinalAnswer 据此逐 task 投递各自的
+    // 结论，同会话多条消息不再共用一份汇总文本（重复卡根因）。只记仍在等的
+    // 任务，避免给已收尾的任务留陈旧缓存。
+    for (const entry of batch) {
+      const taskId = this.qqTaskBySuperSession.get(entry.session.id);
+      if (!taskId || !this.qqMainFinalAwaiters.has(taskId)) continue;
+      const own = sanitizeQqReportFallback(
+        entry.report?.summary ||
+          entry.session.summary ||
+          entry.session.error ||
+          (entry.report?.state === "dropped" ? "已中断" : ""),
+      );
+      if (!own) continue;
+      const prev = this.qqTaskFinalText.get(taskId);
+      this.qqTaskFinalText.set(taskId, prev ? `${prev}\n${own}` : own);
+    }
     this.pendingSuperReportPrompts.push({
       mainSessionId: reportOwner,
       text,
@@ -10900,6 +10928,7 @@ export class ChatPanel implements vscode.Disposable {
               this.qqFinalRescueText.delete(sessionIdBefore);
               this.qqReportFallbackText.delete(sessionIdBefore);
               this.qqFinalRescueDefers.delete(taskId);
+              this.qqTaskFinalText.delete(taskId);
               this.ensureQqFinalRescueTimer();
             }
             superIdsBefore = new Set(
@@ -10990,6 +11019,7 @@ export class ChatPanel implements vscode.Disposable {
         this.qqMainFinalAwaiters.delete(taskId);
         this.qqMainFinalAwaiterSince.delete(taskId);
         this.qqFinalRescueDefers.delete(taskId);
+        this.qqTaskFinalText.delete(taskId);
       }
       if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
       this.qqInjectAborts.delete(taskId);
@@ -10999,15 +11029,16 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 子会话汇报**汇总轮**（pendingCount=0）结束时，把该轮 assistant 文本作为
-   * 真正最终答复回传给对应的 QQ 任务。
+   * 子会话汇报**汇总轮**（pendingCount=0）结束时，把结论回传给对应的 QQ 任务。
    *
-   * 按归属会话取所有登记过的任务（一轮汇总结论覆盖该主会话里正在等答案的
-   * QQ 任务）。空文本不再静默留账：先试宿主持有的子会话汇报正文
-   * （`fallbackText` = report.summary，清洗后），仍为空才回一条如实兜底文案并
-   * 摘除记账，避免 QQ 永久停在「已受理」（R1）。单次投递 / 幂等由服务的
-   * resultDeliveredAt 保证。onlyTaskIds 供 R2 迟到补发精确命中单个任务，
-   * 避免误伤同会话其它 awaiter。
+   * 按 task 归属投递：同一主会话可叠加多条 QQ 消息、各自派生子会话，绝不能把
+   * 一轮汇总结论广播给该会话所有 awaiter（那正是「摘要相同、taskId 不同」的
+   * 重复卡根因）。每个任务取自己派生子会话的汇报正文（qqTaskFinalText），取
+   * 不到且会话里还有别的 awaiter 时走如实兜底、绝不共享别人的结论；单任务
+   * 或 R2 精确补发（onlyTaskIds）时沿用本轮文本 / `fallbackText` / 空文本兜底。
+   * 无论哪条路径都摘除记账，不让 QQ 停在「已受理」（R1）。单次投递 / 幂等由
+   * 服务的 resultDeliveredAt 保证；补发与汇总轮命中同一 task 时靠「删 awaiter
+   * + resultDeliveredAt」双保险避免各投一次。
    */
   private async deliverQqMainFinalAnswer(
     sessionId: string | null,
@@ -11017,6 +11048,9 @@ export class ChatPanel implements vscode.Disposable {
     fallbackText?: string,
   ): Promise<void> {
     if (this.disposed || !sessionId) return;
+    const honestFallback = vscode.l10n.t(
+      "超流体任务已完成，但未产生可转发的正文摘要。",
+    );
     // R1：汇总轮可能只调了合并/复核动作而没有 assistant 正文。旧实现在这里
     // 静默 return 且不摘记账 —— QQ 永远停在「已受理」。改为如实兜底：摘除记账
     // 并回传一条明确文案（走 completeMainFinalAnswer 的 forceActive 主动消息，
@@ -11025,21 +11059,30 @@ export class ChatPanel implements vscode.Disposable {
     // 2026-11-19：二次转述确为空时优先用宿主已持有的子会话汇报正文
     // （report.summary），让用户看到子会话实际做了什么；只有连汇报正文也为空
     // 才退回占位文案。清洗后文本必为非空，服务侧不会再追加一条占位通知。
-    const text =
-      rawText.trim().length > 0
-        ? rawText.trim()
-        : sanitizeQqReportFallback(fallbackText) ||
-          vscode.l10n.t("超流体任务已完成，但未产生可转发的正文摘要。");
-    const taskIds = [...this.qqMainFinalAwaiters.entries()]
+    const cleanFallback = sanitizeQqReportFallback(fallbackText);
+    const sessionTaskIds = [...this.qqMainFinalAwaiters.entries()]
       .filter(([, owner]) => owner === sessionId)
-      .map(([taskId]) => taskId)
-      .filter((taskId) => (onlyTaskIds ? onlyTaskIds.has(taskId) : true));
+      .map(([taskId]) => taskId);
+    const taskIds = sessionTaskIds.filter((taskId) =>
+      onlyTaskIds ? onlyTaskIds.has(taskId) : true,
+    );
+    // 多任务叠加时禁止广播：只有「单任务（无歧义）」或「R2 精确补发」才可沿用
+    // 本轮共享结论；其余每个 awaiter 只取自己那份归属正文，取不到就如实兜底，
+    // 绝不把别人的汇总结论投给它（重复卡根因）。
+    const shareable = onlyTaskIds !== undefined || sessionTaskIds.length <= 1;
     for (const taskId of taskIds) {
+      const own = this.qqTaskFinalText.get(taskId)?.trim() ?? "";
+      // 单任务：主 Agent 汇总正文 > 归属正文 > 汇报正文兜底 > 如实占位。
+      // 多任务：只用自己那份归属正文，缺则如实占位（不共享汇总/兜底正文）。
+      const answer = shareable
+        ? rawText.trim() || own || cleanFallback || honestFallback
+        : own || honestFallback;
       this.qqMainFinalAwaiters.delete(taskId);
       this.qqMainFinalAwaiterSince.delete(taskId);
       this.qqFinalRescueDefers.delete(taskId);
+      this.qqTaskFinalText.delete(taskId);
       try {
-        await this.qq?.service.completeMainFinalAnswer({ taskId, text, stopReason });
+        await this.qq?.service.completeMainFinalAnswer({ taskId, text: answer, stopReason });
       } catch (error) {
         this.log.warn(`QQ 主会话最终答复回传失败：${errorMessage(error)}`);
       }
@@ -11335,6 +11378,7 @@ export class ChatPanel implements vscode.Disposable {
     this.qqReportFallbackText.clear();
     this.qqFinalRescueDefers.clear();
     this.qqTaskBySuperSession.clear();
+    this.qqTaskFinalText.clear();
     this.stopQqFinalRescueTimer();
     if (activeTaskId !== null) {
       this.qqInjectedTaskId = null;
