@@ -1034,6 +1034,15 @@ export interface SuperDirectiveScan {
   pendingOpen?: SuperPendingFence;
 }
 
+/**
+ * 任务标题缺失 / 异常时看板标题位的明确占位（中文源语言，webview 侧过 t() 翻译）。
+ *
+ * 派发层对缺 title 的任务是**严格拒绝**的（见 parseDirectiveValue），不会用正文顶替；
+ * 这个常量只服务于「转录卡 / 容错拆分的展示」——让标题位显示一个明确的占位，
+ * 而不是把整段任务描述挤到标题位（用户实测过的 bug）。
+ */
+export const SUPER_UNTITLED_TASK = "未命名任务";
+
 /** 标题清洗：压空白、截断到 40 字（看板一行放得下）。 */
 export function normalizeSuperTitle(raw: string, fallback = "超流体"): string {
   const cleaned = raw.replace(/\s+/g, " ").trim();
@@ -1348,8 +1357,8 @@ function consumedEndOfClosedRegion(
  * 从主 Agent 的回复文本里扫出委派指令块。
  *
  * 逐块解析：开栏 → 收集正文直到收栏 → JSON.parse。JSON 必须是
- * `{ "tasks": [{ "title", "task" }] }` 或直接的数组；`task` 必填非空，
- * `title` 可省（用任务首行兜底）。
+ * `{ "tasks": [{ "title", "task" }] }` 或直接的数组；`task` 与 `title` 都**必填非空**。
+ * 缺 title / title 为空白的条目会被拒绝并给出字段级原因（绝不拿 task 正文顶到标题位）。
  *
  * 解析失败的块不会中断扫描 —— 它们被收集进 `invalidBlocks`，宿主据此给用户
  * 一条明确提示，而不是假装什么都没发生。
@@ -2104,10 +2113,15 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
     // would burn a process for nothing.
     if (!task || isPlaceholderTask(task)) continue;
     const rawTitle = typeof record.title === "string" ? record.title.trim() : "";
-    const title = rawTitle && !isPlaceholderTask(rawTitle) ? rawTitle : "";
+    // title 必填：缺 / 空白 / 占位符一律拒绝该条，绝不拿 task 正文顶到标题位。
+    // 这是「委派卡标题位显示整段任务描述」的根因修复 —— 调用方必须显式给 title。
+    if (!rawTitle || isPlaceholderTask(rawTitle)) {
+      issues.push(`${where}.title 必填（每个任务都必须有非空标题，不能用任务正文当标题）`);
+      continue;
+    }
     const attachments = parseDirectiveAttachments(record.attachments);
     tasks.push({
-      title: normalizeSuperTitle(title, task.split("\n")[0] ?? "超流体"),
+      title: normalizeSuperTitle(rawTitle),
       task,
       ...(attachments.length > 0 ? { attachments } : {}),
     });
@@ -2736,9 +2750,10 @@ function pairTaskBooks(
       }
     }
     if (titleIndex >= 0) usedTitle.add(titleIndex);
-    const fallback = task.split("\n")[0] ?? "超流体";
-    const titleText = title && !isPlaceholderTask(title) ? title : fallback;
-    books.push({ title: normalizeSuperTitle(titleText, fallback), task });
+    // 展示兜底：缺 title 用明确占位，绝不把任务正文（首行）顶到标题位。
+    // 注意这是**只读展示**路径（坏载荷的降级预览），不影响派发层的 title 必填。
+    const titleText = title && !isPlaceholderTask(title) ? title : SUPER_UNTITLED_TASK;
+    books.push({ title: normalizeSuperTitle(titleText, SUPER_UNTITLED_TASK), task });
     ends.push(titleIndex >= 0 ? Math.max(field.end, fields[titleIndex]!.end) : field.end);
   }
   return { books, ends };
@@ -2783,7 +2798,7 @@ function scanTaskBooks(text: string, from: number, limit: number): TaskBookScan 
  *
  * 提取刻意保守：
  *  - 只认**成对出现**的 `"title"` / `"task"` 字段（值的冒号必须在）；
- *  - 缺 title 时用任务书首行兜底，字段顺序颠倒也认；
+ *  - 缺 title / 占位 title 时用「未命名任务」占位，字段顺序颠倒也认（这里只做只读展示）；
  *  - 夹杂其它无关字段不影响；
  *  - 占位符任务（模型把协议示例原样抄回来）不算；
  *  - 绝不凭空编造内容：拆不出就返回空数组，调用方按原有的 raw 原因码降级。
@@ -3117,7 +3132,7 @@ export function describeSuperSessionLine(session: SuperSessionUi): string {
  * 模型照抄示例就会零派发。改用带引号的占位符 —— 示例本身可解析，而原样
  * 抄回仍会被占位符规则拒掉，不会派发一条垃圾任务。
  */
-const SUPER_DIGEST_HINT = "Dispatch by calling the `super-agent` tool with body {\"tasks\":[{\"title\":\"<title>\",\"task\":\"<self-contained brief>\"}]}; if that tool is not in your list, write the same JSON as a ```super-agent fenced block instead. To manage children, call the `super-agent` tool with {\"actions\":[...]} when its schema exposes `actions`; otherwise emit a ```super-agent-actions fenced block — never call a separate `super-agent-actions` tool.";
+const SUPER_DIGEST_HINT = "Dispatch by calling the `super-agent` tool with body {\"tasks\":[{\"title\":\"<title>\",\"task\":\"<self-contained brief>\"}]}; if that tool is not in your list, write the same JSON as a ```super-agent fenced block instead. To manage children, call the `super-agent` tool with {\"actions\":[...]} when its schema exposes `actions`; otherwise emit a ```super-agent-actions fenced block — never call a separate `super-agent-actions` tool. Every task MUST have a non-empty title — a task without one is REJECTED and never dispatched.";
 
 const SUPER_DIGEST_FOOTER = [
   "",
@@ -4066,8 +4081,11 @@ function describeSuperDirective(language: string, body: string): SuperDirectiveD
       // 只有标题没有正文的条目不是可派发的任务（宿主也会跳过），但既然模型写
       // 了出来，转录里还是显示这一行标题。
       if (!task && !rawTitle) continue;
+      // 缺 / 占位 title 用明确占位，绝不拿 task 首行顶到标题位（用户实测 bug）。
+      const displayTitle =
+        rawTitle && !isPlaceholderTask(rawTitle) ? normalizeSuperTitle(rawTitle) : SUPER_UNTITLED_TASK;
       tasks.push({
-        title: normalizeSuperTitle(rawTitle || task.split("\n")[0] || ""),
+        title: displayTitle,
         task: task || rawTitle,
         attachments: parseDirectiveAttachments(entry.attachments).map((attachment) => attachment.name),
       });

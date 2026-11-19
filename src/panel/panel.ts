@@ -8453,8 +8453,12 @@ export class ChatPanel implements vscode.Disposable {
     const scan = this.superScan.push(text);
     if (scan.invalidBlocks.length > 0) {
       // 只报「无法解析」等于让用户和模型都没法自查；带上失败原因与正文长度，
-      // 才能一眼看出是 JSON 写坏了还是任务书太长被截断。
+      // 才能一眼看出是 JSON 写坏了还是任务书太长被截断。原因里含字段级诊断
+      // （如 tasks[0].title 必填），这里同步记日志定位是哪个任务缺标题。
       const first = scan.invalidBlocks[0]!;
+      this.log.warn(
+        `super agent: invalid delegation directive (${first.reason}, ${first.body.length} chars) — nothing dispatched`,
+      );
       this.store.sendToast(
         "warning",
         vscode.l10n.t("超流体派发指令无法解析（{0}，内容共 {1} 字符），已忽略", first.reason, first.body.length),
@@ -8482,6 +8486,11 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
     if (issues.length > 0) {
+      // 宿主侧可诊断日志：字段级原因里带 tasks[i]，这里整条记下来（尤其 title 必填
+      // 的拒绝），便于从日志直接定位是哪个任务缺标题，而不是只有一句笼统 toast。
+      this.log.warn(
+        `super agent: rejected ${issues.length} malformed task entry(ies): ${issues.join("; ")}`,
+      );
       // 混合载荷：合法任务照常派发，但被丢掉的畸形条目必须可见 —— 静默丢一半
       // 正是「用户只看到一堵 JSON 墙」的来源。只报首条原因，避免 toast 过长。
       this.store.sendToast(
