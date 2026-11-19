@@ -619,7 +619,15 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   useEffect(() => {
     if (!canStop) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.isComposing) return;
+      if (e.key !== "Escape" || e.isComposing || e.defaultPrevented) return;
+      // 待决卡（审批 / 提问）在等待用户决策时 status 仍是 streaming，但此刻
+      // ESC 归卡片所有（拒绝 / 不回答并继续），不是「停掉整轮」。卡片的
+      // window 监听会 preventDefault；这里再按 store 的待决态兜一层，覆盖
+      // 监听注册先后差异，保证一次按键只有一种语义。上层 modal 有自己的
+      // document ESC 处理（会 stopPropagation），这里同样让位。
+      const s = useChat.getState().state;
+      if (s?.pendingApproval || s?.pendingQuestions) return;
+      if (document.querySelector(".auth-backdrop")) return;
       e.preventDefault();
       stopRef.current();
     };

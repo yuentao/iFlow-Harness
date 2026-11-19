@@ -268,3 +268,59 @@ describe("停止请求的进行态", () => {
     expect(container.textContent).toContain("发送");
   });
 });
+
+describe("ESC 停止生成的让位", () => {
+  function esc(): void {
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+  }
+
+  it("无待决卡时 ESC 停止生成", () => {
+    render({ status: "streaming" });
+    esc();
+    expect(mocked.send).toHaveBeenCalledWith({ type: "cancel" });
+  });
+
+  it("有审批卡待决时 ESC 让位给卡片，不停止生成", () => {
+    const state = makeState({ status: "streaming" });
+    state.pendingApproval = {
+      id: "a-1",
+      toolName: "write_file",
+      title: "write",
+      toolKind: "edit",
+      locations: [],
+      options: [{ optionId: "o", name: "允许", kind: "allow_once" }],
+      deadline: Date.now() + 60_000,
+      timeoutMs: 60_000,
+    };
+    mocked.state = state;
+    act(() => root.render(<Composer />));
+    esc();
+    expect(mocked.send).not.toHaveBeenCalledWith({ type: "cancel" });
+  });
+
+  it("有提问卡待决时 ESC 让位给卡片，不停止生成", () => {
+    const state = makeState({ status: "streaming" });
+    state.pendingQuestions = {
+      id: "q-1",
+      questions: [{ header: "h", question: "Q?", options: [], multiSelect: false }],
+      deadline: Date.now() + 60_000,
+      timeoutMs: 60_000,
+    };
+    mocked.state = state;
+    act(() => root.render(<Composer />));
+    esc();
+    expect(mocked.send).not.toHaveBeenCalledWith({ type: "cancel" });
+  });
+
+  it("事件已被 defaultPrevented 时不重复停止生成", () => {
+    render({ status: "streaming" });
+    act(() => {
+      const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      event.preventDefault();
+      window.dispatchEvent(event);
+    });
+    expect(mocked.send).not.toHaveBeenCalledWith({ type: "cancel" });
+  });
+});

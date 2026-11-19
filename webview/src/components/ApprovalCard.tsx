@@ -123,7 +123,7 @@ export function ApprovalCard({
   const denyOptionId = rejectOption?.optionId ?? null;
 
   useEffect(() => {
-    // A covered card must not own the keyboard: its Y/N would answer a
+    // A covered card must not own the keyboard: its shortcuts would answer a
     // decision the user cannot see (the top card is what they are reading).
     if (!active) return;
     const handler = (e: KeyboardEvent) => {
@@ -139,6 +139,24 @@ export function ApprovalCard({
           || target.tagName === "SELECT"
           || target.isContentEditable)
       ) {
+        return;
+      }
+      // ESC is the card's dismissal (deny) — the SAME decision as N, on the
+      // safe side. It used to live in a React onKeyDown on the card root,
+      // which only fired when focus sat inside the card and only called
+      // stopPropagation: focus elsewhere (Composer / body) let the key fall
+      // through to Composer's window-level "ESC stops generation" listener,
+      // so one key meant "deny" or "kill the whole turn" depending on where
+      // focus happened to be. Owning ESC here — behind the same `active` /
+      // modal / editable / defaultPrevented gates as Y/N — gives it one
+      // meaning. preventDefault makes the global stop listener bail even if
+      // listener registration order changes; stopPropagation keeps document-
+      // level closers out of the way.
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setAnswered(true);
+        send({ type: "respondApproval", id: approval.id, optionId: denyOptionId });
         return;
       }
       const key = e.key.toLowerCase();
@@ -171,16 +189,6 @@ export function ApprovalCard({
       role="alertdialog"
       aria-labelledby={titleId}
       aria-describedby={descId}
-      onKeyDown={(e) => {
-        // W4: Escape means "deny" — consistent with the card's dismissal
-        // semantics (the host treats a missing answer as cancelled too).
-        // 拦下冒泡：等待审批时 status 仍是 streaming，事件漏到 window 会
-        // 连带触发「ESC 停止生成」，一次按键双语义。
-        if (e.key === "Escape") {
-          e.stopPropagation();
-          answer(denyOptionId);
-        }
-      }}
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2">
         <ShieldCheck className="size-3.5 shrink-0 text-primary" />
