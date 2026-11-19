@@ -1861,6 +1861,23 @@ export type HostToWebview =
    * (first open / resync / request).
    */
   | { type: "superTranscript"; sessionId: string; from: number; blocks: Block[] }
+  /**
+   * 新建会话时检测到跨历史会话的 Super Agent 残留 → 宿主请求 webview 弹出
+   * 一个阻断式二次确认框（「清空并新建」/「取消」）。
+   *
+   * 所有给用户看的字符串都由宿主用 `vscode.l10n.t` 组装好随消息下发，webview
+   * 只负责渲染，不需要新增 i18n key —— 与另一条正在改 i18n.ts 的线解耦。
+   * `message` 已经醒目警示「包含未合并 worktree 在内的全部残留会被永久清空、
+   * 未提交/未合并工作不可恢复」，webview 不得改写或弱化它。
+   */
+  | {
+      type: "superResidueConfirm";
+      requestId: string;
+      title: string;
+      message: string;
+      confirmLabel: string;
+      cancelLabel: string;
+    }
   | {
       type: "toast";
       level: "info" | "warning" | "error";
@@ -2172,6 +2189,8 @@ export type WebviewToHost =
  * entire switch (dialog dismissed / 取消 — no credential or reconnect side
  * effects, the active profile pointer stays where it was). */
 | { type: "respondProfileSwitch"; id: string; keepSession: boolean | null }
+/** 回答 `superResidueConfirm`：`confirmed=true` = 先全量清空再新建；false = 只新建不清空。 */
+| { type: "respondSuperResidueConfirm"; requestId: string; confirmed: boolean }
   /** Revert a completed tool call that carried a structured diff. */
   | { type: "revertTool"; toolCallId: string }
   /**

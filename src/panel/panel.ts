@@ -76,7 +76,7 @@ import {
   upsertCheckpoint,
 } from "../../shared/checkpoints.js";
 import { CheckpointManager } from "./checkpoints.js";
-import { SuperAgentManager } from "./super-agent.js";
+import { SuperAgentManager, type SuperResidueCount } from "./super-agent.js";
 import {
   buildSuperActionReceiptPrompt,
   buildSuperDigest,
@@ -1548,6 +1548,18 @@ export class ChatPanel implements vscode.Disposable {
    */
   private readonly pendingProfileSwitches = new Map<string, { resolve: (keepSession: boolean | null) => void }>();
   private profileSwitchSeq = 0;
+  /**
+   * 新建会话时的「清空并新建」二次确认框：按 requestId 存 promise resolver。
+   *
+   * 与 profile-switch 对话同源（webview 弹框 → 回传 host），但多一道超时兜底：
+   * 若 webview 没有渲染这个确认框（旧版前端 / 另一条线尚未合并），新建会话
+   * 不能永久卡在等一个永远不会来的回答 —— 超时按「取消」处理（只新建、不清空）。
+   */
+  private readonly pendingSuperResidueConfirms = new Map<string, {
+    resolve: (confirmed: boolean) => void;
+    timer: NodeJS.Timeout;
+  }>();
+  private superResidueConfirmSeq = 0;
   /** Serializes per-session transcript file writes (P2): overlapping persists
    * must not interleave inside one file's temp+rename sequence. */
   private persistChain: Promise<void> = Promise.resolve();
@@ -2081,6 +2093,7 @@ export class ChatPanel implements vscode.Disposable {
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
     this.store.setSuperWaiting(false);
     this.cancelAllProfileSwitches();
+    this.cancelAllSuperResidueConfirms();
     this.clearPostRejectionWatchdog();
     if (this.diagDebounce) {
       clearTimeout(this.diagDebounce);
@@ -2140,6 +2153,16 @@ export class ChatPanel implements vscode.Disposable {
   sweepStaleAttachments(): void {
     void sweepStaleAttachmentDirs({ log: (m) => this.log.info(m) }).catch((error) => {
       this.log.warn(`attachment sweep failed: ${errorMessage(error)}`);
+    });
+    // 项目内 `.iflow/super/` 的附件副本与降级目录此前无人清扫（OS 临时目录
+    // 的 sweep 只扫 temp root）。并列 fire-and-forget，失败只记日志。
+    const manager = this.superAgent;
+    if (!manager) return;
+    void Promise.all([
+      manager.sweepStaleSuperAttachmentDirs(),
+      manager.sweepStaleSuperDirs(),
+    ]).catch((error) => {
+      this.log.warn(`super agent: 附件/目录残留清扫失败：${errorMessage(error)}`);
     });
   }
 
@@ -2586,6 +2609,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "respondProfileSwitch":
         this.handleProfileSwitchResponse(msg.id, msg.keepSession);
+        break;
+      case "respondSuperResidueConfirm":
+        this.handleSuperResidueConfirmResponse(msg.requestId, msg.confirmed);
         break;
       case "revertTool":
         await this.revertToolDiff(msg.toolCallId);
@@ -4958,6 +4984,98 @@ export class ChatPanel implements vscode.Disposable {
       pending.resolve(null);
     }
     this.pendingProfileSwitches.clear();
+  }
+
+  /**
+   * 请求 webview 弹出「清空并新建」二次确认框。
+   *
+   * 警示文案在宿主侧组装（含明确写出「未合并 worktree 的未提交/未合并工作
+   * 永久丢失且不可恢复」），webview 只渲染、不改写。所有 teardown 路径都要
+   * 收口未答的 promise：无 webview 应答时 60s 超时按「取消」处理，绝不擅自
+   * 清空用户磁盘。
+   */
+  private requestSuperResidueConfirm(count: SuperResidueCount): Promise<boolean> {
+    this.cancelAllSuperResidueConfirms();
+    const requestId = `super-residue-${++this.superResidueConfirmSeq}`;
+    const title = vscode.l10n.t("清空并新建会话？");
+    const message = vscode.l10n.t(
+      "检测到 {0} 个历史子会话残留目录（worktree {1} 个 / 降级目录 {2} 个 / 附件 {3} 个）。继续将清空全部残留，包括未合并的 worktree——其中未提交/未合并的代码改动将永久丢失且不可恢复。请确认这些工作不再需要。",
+      count.total,
+      count.worktrees,
+      count.dirs,
+      count.attachments,
+    );
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        // 超时 = 用户没答：按取消处理，只新建不清空。
+        this.pendingSuperResidueConfirms.delete(requestId);
+        resolve(false);
+      }, 60_000);
+      this.pendingSuperResidueConfirms.set(requestId, { resolve, timer });
+      this.postToWebview({
+        type: "superResidueConfirm",
+        requestId,
+        title,
+        message,
+        confirmLabel: vscode.l10n.t("清空并新建"),
+        cancelLabel: vscode.l10n.t("取消"),
+      });
+    });
+  }
+
+  private handleSuperResidueConfirmResponse(requestId: string, confirmed: boolean): void {
+    const pending = this.pendingSuperResidueConfirms.get(requestId);
+    if (!pending) return;
+    this.pendingSuperResidueConfirms.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(confirmed);
+  }
+
+  private cancelAllSuperResidueConfirms(): void {
+    for (const pending of this.pendingSuperResidueConfirms.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve(false);
+    }
+    this.pendingSuperResidueConfirms.clear();
+  }
+
+  /**
+   * 新建会话前的残留检测 + 用户授权下的全量清空（跨全部历史会话）。
+   *
+   * 检测只读目录计数，不跑 git 探测；没有 webview（命令面板入口）时跳过 ——
+   * 没有弹框就无从确认，不能拿一个永远没人答的 promise 挡住新建会话。
+   * 用户取消 / 检测失败 / 清空失败都只记日志，继续正常新建会话。
+   */
+  private async confirmAndPurgeSuperResidue(): Promise<void> {
+    if (this.disposed || !this.editorPanel) return;
+    const manager = this.getSuperAgent();
+    if (!manager) return;
+    const count = await manager.countResidue().catch((error: unknown) => {
+      this.log.warn(`super agent: 残留检测失败（不影响新建会话）：${errorMessage(error)}`);
+      return null;
+    });
+    if (!count || count.total === 0) return;
+    const confirmed = await this.requestSuperResidueConfirm(count);
+    if (this.disposed) return;
+    if (!confirmed) {
+      this.log.info(`super agent: 用户取消清空（残留 ${count.total} 个），只新建会话`);
+      return;
+    }
+    const purged = await manager.purgeAllResidue().catch((error: unknown) => {
+      this.log.warn(`super agent: 全量清空失败（继续新建会话）：${errorMessage(error)}`);
+      return null;
+    });
+    if (purged) {
+      this.log.info(
+        `super agent: 已清空残留（worktree ${purged.worktrees} / 目录 ${purged.dirs} / 附件 ${purged.attachments}，失败 ${purged.failed}）`,
+      );
+      if (purged.failed > 0) {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("已清空历史子会话残留，但有 {0} 个目录未能删除（请手动检查）", purged.failed),
+        );
+      }
+    }
   }
 
   // --- Diff revert ----------------------------------------------------------------
@@ -7658,7 +7776,16 @@ export class ChatPanel implements vscode.Disposable {
     void Promise.resolve()
       // 用一个已 resolve 的 promise 起链：manager 的同步抛错也落进 catch，
       // 不会在调用点炸出去打断恢复。
-      .then(() => manager.sweepStaleWorktrees({ maxKeep }))
+      .then(async () => {
+        // 三类残留同在 `.iflow/super/` 下：worktrees（既有清扫）、attachments、
+        // dirs（降级目录）。并排跑，任何一类失败都落进下面的 catch，不影响会话。
+        const [swept] = await Promise.all([
+          manager.sweepStaleWorktrees({ maxKeep }),
+          manager.sweepStaleSuperAttachmentDirs(),
+          manager.sweepStaleSuperDirs(),
+        ]);
+        return swept;
+      })
       .then((swept) => {
         if (this.disposed) return;
         if (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0) {
@@ -12908,6 +13035,13 @@ export class ChatPanel implements vscode.Disposable {
         this.store.appendNotice(vscode.l10n.t("恢复未完成，正在新建会话"));
       }
       // The panel may have been closed while we waited for the restore.
+      if (this.disposed) return;
+    }
+    // 跨全部历史会话的 Super Agent 残留检测：轻量读目录计数，命中才弹二次
+    // 确认框（「清空并新建」/「取消」）。profile 切换复用这条新建流程，但它
+    // 已有自己的对话框，不叠加这一层。
+    if (!options?.bypassSuperWait) {
+      await this.confirmAndPurgeSuperResidue();
       if (this.disposed) return;
     }
     // Anchor the CLI-transcript lookup before the empty-session cleanup (its

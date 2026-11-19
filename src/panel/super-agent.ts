@@ -113,15 +113,18 @@ import {
   createPullRequest,
   createWorktree,
   currentBranch,
+  deleteSuperBranch,
   discardFailedWorktree,
   ensureSuperIsolationIgnored,
   ghAvailable,
   inspectWorkingTree,
   isBranchMerged,
+  listSuperBranches,
   listWorktrees,
   mergeBranch,
   previewMerge,
   probeGitRepo,
+  pruneWorktrees,
   pushBranch,
   remoteOriginUrl,
   removeWorktree,
@@ -139,6 +142,23 @@ import {
  * 放行；`supervised` 策略的审批回调另有 {@link SUPER_PERMISSION_TIMEOUT_MS}。
  */
 export const SUPER_PENDING_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * `.iflow/super/attachments/` 下附件副本的空闲清扫阈值（7 天）。
+ *
+ * 附件是主会话附件的临时拷贝，只服务一次子会话派发；正常终态会立即删除，
+ * 这里只兜底清扫「进程被强杀 / 升级中断」等来不及收尾的孤儿。与 OS 临时
+ * 附件 (`ATTACHMENT_TMP_MAX_AGE_MS`) 同一档，避免两套清理策略漂移。
+ */
+export const SUPER_ATTACHMENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * `.iflow/super/dirs/` 下降级目录的空闲清扫阈值（14 天）。
+ *
+ * 目录隔离比附件副本更容易留下「还有用的东西」（非 git 仓库的降级工作目录），
+ * 因此阈值取附件的两倍，只回收长期无人问津的残留。
+ */
+export const SUPER_DIR_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // 可配置审批策略（Wave3-A）
@@ -431,6 +451,23 @@ export interface SuperSweepResult {
   kept: number;
   /** 疑似残留的目录（不在 git worktree 注册表里）—— 只记日志，不自动删。 */
   orphans: string[];
+}
+
+/** 跨历史会话的 Super Agent 残留计数（新建会话时的轻量检测）。 */
+export interface SuperResidueCount {
+  worktrees: number;
+  dirs: number;
+  attachments: number;
+  total: number;
+}
+
+/** 「清空并新建」授权下的全量清空结果。 */
+export interface SuperResiduePurgeResult {
+  worktrees: number;
+  dirs: number;
+  attachments: number;
+  /** 删除失败的目录数（best-effort：记日志继续，不阻断新建会话）。 */
+  failed: number;
 }
 
 /**
@@ -1061,6 +1098,28 @@ export class SuperAgentManager {
     }
     // 归档归属也要清：留着它，下一次 persistSuperSessions 会把空数组重新写回
     // 磁盘（会话已删，归档文件却复活）。
+    //
+    // 归档里的子会话**不在 this.sessions 里**，上面的循环碰不到它们：它们的
+    // 进程早死了，但附件副本与 worktree 还在磁盘上。会话都被删了，这些东西
+    // 再没有回收人 —— 一并删附件、把 worktree 交给宿主 force 清理（与活会话
+    // 同纪律：清目录不可逆，但删主会话意味着「这段对话不存在了」）。
+    for (const archived of this.archived.get(mainSessionId) ?? []) {
+      await rm(this.attachmentDirFor(archived.id), { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+      if (
+        archived.isolation.path &&
+        !archived.isolation.released &&
+        archived.isolation.kind !== "repo"
+      ) {
+        worktrees.push({
+          id: archived.id,
+          path: archived.isolation.path,
+          branch: archived.isolation.branch,
+        });
+      }
+      this.discardQuestionResolver(archived.id);
+    }
     this.archived.delete(mainSessionId);
     this.archiveOwners.delete(mainSessionId);
     this.emit();
@@ -1432,6 +1491,191 @@ export class SuperAgentManager {
       result.kept += Math.max(0, recyclable.length - Math.max(excess, 0));
     }
     if (result.removed > 0) this.emit();
+    return result;
+  }
+
+  /**
+   * 清扫 `.iflow/super/attachments/` 下按 mtime 过期的附件副本。
+   *
+   * `sweepStaleAttachmentDirs`（attachments.ts）只扫 OS 临时目录，不碰项目内
+   * 的 super 隔离子树 —— 子会话附件的孤儿目录此前无人清扫。这里只删「年轻」
+   * 的反面：mtime 老于阈值的目录，活着的子会话正在用的附件目录即使老也保留。
+   * best-effort：单个目录删除失败只记日志，继续其它。
+   */
+  async sweepStaleSuperAttachmentDirs(options: {
+    now?: number;
+    maxAgeMs?: number;
+  } = {}): Promise<number> {
+    return this.sweepStaleIsolationDir("attachments", {
+      maxAgeMs: options.maxAgeMs ?? SUPER_ATTACHMENT_MAX_AGE_MS,
+      now: options.now,
+    });
+  }
+
+  /** 清扫 `.iflow/super/dirs/` 下按 mtime 过期的降级目录（非 git 仓库 / worktree 建失败时创建）。 */
+  async sweepStaleSuperDirs(options: { now?: number; maxAgeMs?: number } = {}): Promise<number> {
+    return this.sweepStaleIsolationDir("dirs", {
+      maxAgeMs: options.maxAgeMs ?? SUPER_DIR_MAX_AGE_MS,
+      now: options.now,
+    });
+  }
+
+  /**
+   * `sweepStaleSuperAttachmentDirs` / `sweepStaleSuperDirs` 共用的实现。
+   *
+   * `attachments/` 的目录名是子会话 id，`dirs/` 的目录名是 `<slug>-<unique>`；
+   * 保护集按两处分别构造：活着的子会话 id（附件）与它的 isolation.path 末段
+   * （降级目录）。终态的历史记录不保护 —— 它们正是清扫对象。
+   */
+  private async sweepStaleIsolationDir(
+    kind: "attachments" | "dirs",
+    options: { maxAgeMs: number; now?: number },
+  ): Promise<number> {
+    if (this.disposed) return 0;
+    const root = superIsolationDir(this.deps.repoRoot, kind);
+    let entries: Dirent[];
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      return 0; // 子树还没建过 —— 没有残留。
+    }
+    const liveAttachments = new Set<string>();
+    const liveDirs = new Set<string>();
+    for (const session of this.sessions.values()) {
+      if (isTerminalSuperStatus(session.status)) continue;
+      liveAttachments.add(session.id);
+      if (session.isolation.kind === "directory" && session.isolation.path) {
+        liveDirs.add(path.basename(session.isolation.path));
+      }
+    }
+    const now = options.now ?? Date.now();
+    let removed = 0;
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (kind === "attachments" ? liveAttachments.has(entry.name) : liveDirs.has(entry.name)) {
+        continue;
+      }
+      const target = path.join(root, entry.name);
+      try {
+        const info = await stat(target);
+        if (now - info.mtimeMs < options.maxAgeMs) continue;
+        await rm(target, { recursive: true, force: true });
+        removed += 1;
+      } catch (error) {
+        // 单个目录失败（被占用 / 权限）不影响其它：记日志继续。
+        this.deps.log.warn(
+          `super agent: 清扫 ${kind} 残留 ${target} 失败：${errorMessage(error)}`,
+        );
+      }
+    }
+    if (removed > 0) {
+      this.deps.log.info(`super agent: 已清扫 ${removed} 个过期 ${kind} 残留目录`);
+    }
+    return removed;
+  }
+
+  /**
+   * 轻量统计跨历史会话的残留目录（新建会话时的检测）。
+   *
+   * 只读目录 + 计数，不跑任何 git 探测（那些要几秒到几十秒），因此不阻塞新建
+   * 会话主流程。三类目录同在 `.iflow/super/` 下：worktrees / dirs / attachments。
+   */
+  async countResidue(): Promise<SuperResidueCount> {
+    const countDirs = async (kind: "worktrees" | "dirs" | "attachments"): Promise<number> => {
+      try {
+        const entries = await readdir(superIsolationDir(this.deps.repoRoot, kind), {
+          withFileTypes: true,
+        });
+        return entries.filter((entry) => entry.isDirectory()).length;
+      } catch {
+        return 0; // 子树不存在 = 零残留。
+      }
+    };
+    const [worktrees, dirs, attachments] = await Promise.all([
+      countDirs("worktrees"),
+      countDirs("dirs"),
+      countDirs("attachments"),
+    ]);
+    return { worktrees, dirs, attachments, total: worktrees + dirs + attachments };
+  }
+
+  /**
+   * 用户明确授权后的**全量清空**（「清空并新建」）。
+   *
+   * 与 `sweepStaleWorktrees` / `cleanup` 的安全闸门刻意不同：这里**不再保护**
+   * 未合并 worktree、未提交改动与未合并分支 —— 二次确认框已经醒目警示过
+   * 「未提交/未合并工作会永久丢失」，用户点确认就是授权。清空范围：
+   *  1. 所有 `iflow/super/` 命名空间下已注册的 worktree（含未合并、含脏目录）；
+   *     目录用 Node 递归删（不跟随链接，见 worktree.ts#defaultRemoveDir），
+   *     分支用 `branchDeletionVerified` 走 force 删除，不做合并核验；
+   *  2. `worktrees/` 下不在注册表里的孤儿目录（半删残留）；
+   *  3. 所有 `iflow/super/` 本地分支（含上面目录已删但分支还在的孤儿）；
+   *  4. `dirs/` 与 `attachments/` 下的全部目录。
+   *
+   * best-effort：单个目录删除失败只记日志、计入 failed，继续其它，绝不阻断
+   * 随后的新建会话。清空后把受影响的记录标成 released，看板不再显示待清理。
+   */
+  async purgeAllResidue(): Promise<SuperResiduePurgeResult> {
+    const result: SuperResiduePurgeResult = { worktrees: 0, dirs: 0, attachments: 0, failed: 0 };
+    if (this.disposed) return result;
+
+    // 1. 已注册的 super worktree：强制删目录 + 强制删分支（含未合并）。
+    const registered = await listWorktrees(this.deps.repoRoot).catch(() => []);
+    for (const item of registered) {
+      if (!item.branch?.startsWith(SUPER_BRANCH_PREFIX)) continue;
+      const removal = await removeWorktree({
+        repoRoot: this.deps.repoRoot,
+        targetPath: item.path,
+        branch: item.branch,
+        keepBranch: false,
+        // 用户已授权连未合并分支一起清空：跳过 baseRef 合并核验，走 -D。
+        branchDeletionVerified: true,
+      });
+      this.markWorktreeReleased(item.path);
+      if (removal.removed) {
+        result.worktrees += 1;
+      } else {
+        result.failed += 1;
+        this.deps.log.warn(`super agent: 清空 worktree ${item.path} 失败：${removal.reason ?? ""}`);
+      }
+    }
+
+    // 2 + 4. 三类子树里剩下的目录（孤儿 worktree、dirs、attachments）全删。
+    // worktrees/ 里第 1 步已删掉的目录这里会 readdir 不到，天然幂等。
+    for (const kind of ["worktrees", "dirs", "attachments"] as const) {
+      const root = superIsolationDir(this.deps.repoRoot, kind);
+      let entries: Dirent[];
+      try {
+        entries = await readdir(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const target = path.join(root, entry.name);
+        try {
+          await rm(target, { recursive: true, force: true, maxRetries: 3 });
+          if (kind === "worktrees") result.worktrees += 1;
+          else if (kind === "dirs") result.dirs += 1;
+          else result.attachments += 1;
+          this.markWorktreeReleased(target);
+        } catch (error) {
+          result.failed += 1;
+          this.deps.log.warn(`super agent: 清空 ${kind} 目录 ${target} 失败：${errorMessage(error)}`);
+        }
+      }
+    }
+
+    // 3. 孤儿分支（目录已不在、worktree 元数据已 prune，但分支仍留着）。
+    for (const branch of await listSuperBranches(this.deps.repoRoot)) {
+      const deleted = await deleteSuperBranch(this.deps.repoRoot, branch);
+      if (!deleted) {
+        this.deps.log.warn(`super agent: 清空分支 ${branch} 失败（可能仍被签出）`);
+      }
+    }
+    // 让 git 的 worktree 记账与磁盘现状一致（避免留下坏元数据）。
+    await pruneWorktrees(this.deps.repoRoot);
+    this.emit();
     return result;
   }
 
@@ -1957,6 +2201,19 @@ export class SuperAgentManager {
       // 合并子会话收尾：用只读 git 检测目标分支是否真的并入了当前分支，
       // 再把结果写回来源子会话的 integration（失败/中断同样要如实记）。
       await this.finalizeMergeChild(id);
+      // 附件副本只服务这一轮子会话：终态（completed / failed / cancelled）
+      // 一律删掉，避免跨会话堆积。旧的附件泄漏点只有 cleanup / dispose /
+      // forgetMainSession，正常完成/失败/中断都不会删。
+      //
+      // 两道边界：只对当前 attempt 删 —— 已被一次重试取代时，新的 prepareInner
+      // 已经把新一份附件 stage 到同一个 id 目录，旧的一轮绝不能把它删掉；
+      // 重试会重新 stage（`stageSuperAttachments` 在 prepare 阶段调用），因此
+      // 这里删除不会影响重试再次取用附件。
+      if (isCurrentAttempt) {
+        await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(
+          () => undefined,
+        );
+      }
       this.pump();
     }
   }
