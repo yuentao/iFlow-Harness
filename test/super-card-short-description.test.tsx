@@ -166,3 +166,81 @@ describe("子会话卡片主视图", () => {
     expect(btn).toBeTruthy();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 组件：完整任务描述可就地展开 / 收起
+// ---------------------------------------------------------------------------
+describe("子会话卡片任务描述展开全文", () => {
+  // 首行 150 字（会被截到 95 + 省略号），第二 / 三段只存在于完整 task 里。
+  const LONG_TASK = "甲".repeat(150) + "\n第二段任务说明：这是短描述之外的内容\n第三段收尾";
+
+  function renderExpandable(): void {
+    render([session({ task: LONG_TASK, title: "长任务展开测试" })]);
+    act(() => boardControl().click());
+    act(() => rowButton("长任务展开测试").click());
+  }
+
+  function findToggleByText(text: string): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === text,
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  it("点击「展开全文」后 DOM 出现短描述截断之后的正文", () => {
+    renderExpandable();
+    // 折叠态只有 95 字截断串，不含被截断掉的内容
+    expect(document.body.textContent ?? "").toContain("甲".repeat(95) + "…");
+    expect(document.body.textContent ?? "").not.toContain("第二段任务说明");
+
+    act(() => findToggleByText("展开全文").click());
+
+    const body = document.body.textContent ?? "";
+    // 第 96 字之后的正文（超过 95 字的甲 + 第二 / 三段）出现
+    expect(body).toContain("甲".repeat(100));
+    expect(body).toContain("第二段任务说明：这是短描述之外的内容");
+    expect(body).toContain("第三段收尾");
+  });
+
+  it("展开 / 收起切换 aria-expanded 与可访问名、文案", () => {
+    renderExpandable();
+    const toggle = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => b.getAttribute("aria-label") === "展开任务说明",
+    );
+    expect(toggle).toBeTruthy();
+    expect(toggle!.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => toggle!.click());
+    expect(toggle!.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle!.getAttribute("aria-label")).toBe("收起任务说明");
+    expect((toggle!.textContent ?? "").trim()).toBe("收起全文");
+
+    act(() => toggle!.click());
+    expect(toggle!.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle!.getAttribute("aria-label")).toBe("展开任务说明");
+    expect((toggle!.textContent ?? "").trim()).toBe("展开全文");
+  });
+
+  it("收起后回到短描述（截断串），不再显示完整正文", () => {
+    renderExpandable();
+    act(() => findToggleByText("展开全文").click());
+    expect(document.body.textContent ?? "").toContain("第二段任务说明");
+
+    act(() => findToggleByText("收起全文").click());
+    const body = document.body.textContent ?? "";
+    expect(body).not.toContain("第二段任务说明");
+    expect(body).not.toContain("第三段收尾");
+    expect(body).toContain("甲".repeat(95) + "…");
+  });
+
+  it("短任务不显示展开入口", () => {
+    render([session()]); // task 是单行短句，完整正文 === 短描述
+    act(() => boardControl().click());
+    act(() => rowButton("QQ传输层鲁棒性修复").click());
+    const toggles = [...document.body.querySelectorAll<HTMLButtonElement>("button")].filter(
+      (b) => b.getAttribute("aria-label") === "展开任务说明",
+    );
+    expect(toggles.length).toBe(0);
+  });
+});

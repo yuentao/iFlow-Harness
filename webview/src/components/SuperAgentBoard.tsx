@@ -1731,11 +1731,7 @@ function SuperSessionRow({
           {/* 阶段轨只在展开后出现一次：折叠行只报状态，展开区不再重复状态 chip。 */}
           <SuperTimeline session={session} labeled />
 
-          {description && (
-            <div className="min-w-0 truncate text-ui-caption text-muted-foreground" title={description}>
-              {description}
-            </div>
-          )}
+          <SuperTaskDescription task={session.task} short={description} />
 
           {session.error && (
             <div className="break-words rounded-sm border border-destructive/30 bg-destructive/10 px-2 py-1 text-ui-caption text-destructive">
@@ -2145,6 +2141,44 @@ function SuperPendingArea({ session }: { session: SuperSessionUi }) {
           {t("不回答并继续")}
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * 子会话卡片上的完整任务描述（就地展开 / 收起）。
+ *
+ * 看板行的短描述由 `shortSuperSessionDescription` 单行截断（95 字），但完整
+ * 任务书在 `session.task` 里一字未丢。这里让用户在卡片普通流内就地展开全文——
+ * 不弹 modal、不开 portal，展开只把卡片撑高；折叠态仍是一行短描述，保持看板紧凑。
+ * 只有「完整正文比短描述更长」时才给出展开入口，短任务不显示多余的按钮。
+ */
+function SuperTaskDescription({ task, short }: { task: string; short: string }) {
+  const [open, setOpen] = useState(false);
+  const full = (task ?? "").trim();
+  // 既无短描述也无正文时不占位（对应旧的 `description && ...` 守卫）。
+  if (!short && !full) return null;
+  const expandable = full.length > short.length;
+  return (
+    <div className="min-w-0 text-ui-caption text-muted-foreground">
+      <span
+        className={`block break-words ${open ? "max-h-64 overflow-y-auto whitespace-pre-wrap" : "truncate"}`}
+        title={open ? undefined : short}
+      >
+        {open ? full : short}
+      </span>
+      {expandable && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="mt-0.5 px-0"
+          aria-expanded={open}
+          aria-label={open ? t("收起任务说明") : t("展开任务说明")}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? t("收起全文") : t("展开全文")}
+        </Button>
+      )}
     </div>
   );
 }
