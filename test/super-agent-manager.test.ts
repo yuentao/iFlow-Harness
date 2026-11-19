@@ -1783,11 +1783,19 @@ describe("super agent · 归属与归档", () => {
     const harness = makeManager(repo, "complete", "merge", "main-1");
     harness.manager.spawn({ title: "改登录", task: "修好它" });
     await until(() => harness.sessions[0]?.status === "completed");
+    // status=completed 在 report:ready 时就置位了，远早于 finally 的异步收尾：
+    // 空分支的 worktree 删除 + released 置位。必须等真正收尾完成再动 worktree，
+    // 否则 cleanup 的保守闸门会在目录正被删的窗口里把「查看状态失败」误判成
+    // 「有未提交改动」而静默拒绝清理，归档也就不会写成空数组（CI 上撞过这个竞态）。
+    await until(() => harness.sessions[0]?.integration?.state === "not_needed");
+    await until(() => harness.sessions[0]?.isolation.released === true);
 
     expect(harness.manager.archivableSessions("main-1")).toHaveLength(1);
 
-    // 清理掉它（工作目录删掉，分支按策略处理）。
-    await harness.manager.cleanup(harness.sessions[0]!.id);
+    // 清理掉它（工作目录删掉，分支按策略处理）。released 已置位 → cleanup 走
+    // 早退路径只删记录，不会再碰一个正在被删的目录。
+    const cleaned = await harness.manager.cleanup(harness.sessions[0]!.id);
+    expect(cleaned.ok).toBe(true);
 
     // 归档要变空 —— 否则下次恢复又冒出已经清理掉的子会话。
     expect(harness.manager.archivableSessions("main-1")).toEqual([]);
