@@ -1418,10 +1418,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   return (
     <div
       ref={rootRef}
-      className={`acrylic @container relative z-20 flex flex-col shrink-0 border-t p-3 transition-colors ${
-        dragOver ? "border-primary/60 bg-primary/5" : "border-border"
-      }`}
-      style={{ height: height ?? undefined, boxShadow: "var(--shadow-stage)" }}
+      className={`acrylic @container relative z-20 flex flex-col shrink-0 border-t p-3 transition-all duration-200 ${
+        remoteTakeover ? "overflow-hidden" : ""
+      } ${dragOver ? "border-primary/60 bg-primary/5" : "border-border"}`}
+      style={{ height: remoteTakeover ? undefined : (height ?? undefined), boxShadow: "var(--shadow-stage)" }}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
@@ -1768,7 +1768,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           readOnly={remoteTakeover}
           placeholder={delegateMode ? t("派发为超流体（Enter）") : t("向 iFlow 提问…")}
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
-          className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-3 text-ui-body leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
+          className={`min-h-0 w-full flex-1 resize-none bg-transparent px-3 text-ui-body leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80 transition-all duration-200 ${
+            remoteTakeover ? "max-h-0 overflow-hidden py-0 opacity-0 pointer-events-none" : "max-h-[420px] py-3 opacity-100"
+          }`}
           onChange={(e) => {
             if (histIndex >= 0 && e.target.value !== histEntryRef.current) {
               setHistIndex(-1);
@@ -1869,8 +1871,16 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             status (shrinks via truncate / icon-only degradation), right =
             actions at a constant anchor. No flex-wrap: wrapping used to drop
             buttons to a second line and drift the send key's position. */}
-        <div className="flex shrink-0 items-center gap-1.5 px-2 pb-2 pt-2">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <div
+          className={`flex shrink-0 items-center gap-1.5 transition-all duration-200 ${
+            remoteTakeover ? "justify-center px-2 py-1.5" : "px-2 pb-2 pt-2"
+          }`}
+        >
+          <div
+            className={`flex min-w-0 items-center gap-1.5 overflow-hidden transition-all duration-200 ${
+              remoteTakeover ? "max-w-0 flex-none opacity-0" : "max-w-full flex-1 opacity-100"
+            }`}
+          >
           {/* model dropdown — refreshed at open time: the host re-queries
               GET {baseUrl}/models, so newly added gateway models show up
               without restarting the session.
@@ -2087,6 +2097,13 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 <span className="@max-[340px]:hidden">{remoteTakeover ? t("关闭接续") : t("远程接续")}</span>
               </Button>
             )}
+            {/* 接管态下其余操作按钮水平收缩隐藏，只留下方的「关闭接续」作为
+                解冻的唯一出口；用 CSS 过渡而非卸载 DOM，保持布局稳定。 */}
+            <div
+              className={`flex items-center gap-1.5 overflow-hidden transition-all duration-200 ${
+                remoteTakeover ? "max-w-0 opacity-0" : "max-w-full opacity-100"
+              }`}
+            >
             {/* UI-audit 4.6: the wand only appears once there is something to
                 enhance (or a rewrite to undo) — an always-present disabled
                 button just widened the row. */}
@@ -2143,6 +2160,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 <span className="@max-[340px]:hidden">{delegateMode ? t("派发") : t("发送")}</span>
               </Button>
             )}
+            </div>
           </div>
         </div>
       </div>
