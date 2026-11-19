@@ -258,6 +258,89 @@ it("answers Esc with the agent's own reject option (one deny affordance, no 取�
   });
 });
 
+/**
+ * ESC 语义收敛：卡片通过 window 监听持有 ESC，不再依赖焦点是否落在卡片
+ * 子树内。焦点在卡片外（例如 Composer / body）时同样 deny，且事件被
+ * preventDefault，避免漏到 Composer 的「ESC 停止生成」造成一次按键两种语义。
+ */
+it("denies Esc from the window even when focus is outside the card, and consumes the event", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  act(() => {
+    window.dispatchEvent(event);
+  });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-1",
+    optionId: "reject-1",
+  });
+  expect(event.defaultPrevented).toBe(true);
+});
+
+it("does not deny Esc from a covered approval card: only the top card owns it", () => {
+  act(() =>
+    root.render(
+      <>
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-under" }} active={false} />
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-top" }} />
+      </>,
+    ),
+  );
+  key("Escape");
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-top",
+    optionId: "reject-1",
+  });
+});
+
+it("does not deny Esc while a modal sits above the card", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  const backdrop = document.createElement("div");
+  backdrop.className = "auth-backdrop";
+  document.body.append(backdrop);
+  key("Escape");
+  expect(send).not.toHaveBeenCalled();
+  backdrop.remove();
+});
+
+it("does not deny Esc from an editable target", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  const input = document.createElement("input");
+  document.body.append(input);
+  act(() => {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
+  expect(send).not.toHaveBeenCalled();
+  input.remove();
+});
+
+it("dismisses a question card on Esc with an empty answer, and consumes the event", () => {
+  act(() => root.render(<QuestionCard pending={QUESTIONS} />));
+  const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  act(() => {
+    window.dispatchEvent(event);
+  });
+  expect(send).toHaveBeenCalledWith({ type: "answerQuestions", id: "q-1", answers: {} });
+  expect(event.defaultPrevented).toBe(true);
+});
+
+it("does not let a covered question card answer Esc", () => {
+  act(() =>
+    root.render(
+      <>
+        <QuestionCard pending={{ ...QUESTIONS, id: "q-under" }} active={false} />
+        <QuestionCard pending={{ ...QUESTIONS, id: "q-top" }} />
+      </>,
+    ),
+  );
+  key("Escape");
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "answerQuestions", id: "q-top" }));
+});
+
 it("drops the 取消 twin when the agent already offered a reject option", () => {
   act(() => root.render(<ApprovalCard approval={APPROVAL} />));
   const group = container.querySelector('[role="group"]')!;

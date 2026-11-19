@@ -320,7 +320,7 @@ export function PendingCards({
               <ApprovalCard approval={pendingApproval} active={!covered} />
             )}
             {entry.kind === "questions" && pendingQuestions && (
-              <QuestionCard pending={pendingQuestions} />
+              <QuestionCard pending={pendingQuestions} active={!covered} />
             )}
           </div>
         );
