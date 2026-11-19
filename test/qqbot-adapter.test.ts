@@ -4,6 +4,7 @@ import {
   QqBotAdapter,
   QQBOT_INTENTS,
   QQBOT_OP,
+  DEFAULT_RECONNECT_MAX_DELAY_MS,
   TOKEN_REFRESH_SKEW_MS,
   type QqBotSocket,
   type QqBotTransport,
@@ -842,7 +843,7 @@ describe("QqBotAdapter — 断线 Resume", () => {
     await adapter.close();
   });
 
-  it("resume 地址连续不可达：重试上限后退回默认网关 Identify，不无限卡住", async () => {
+  it("resume 地址不可达：一次失败即退回默认网关 Identify，不无限卡住", async () => {
     const transport = new FakeTransport();
     const adapter = new QqBotAdapter({
       appId: "app-1",
@@ -874,7 +875,9 @@ describe("QqBotAdapter — 断线 Resume", () => {
     first.drop();
 
     await sleep(200);
-    expect(resumeAttempts).toBeGreaterThanOrEqual(3);
+    // 收敛策略：resume 地址连不上时只尝试 1 次就回退默认网关 Identify，
+    // 不再对失效地址做 3 次指数退避重试（旧行为让恢复拖到分钟级）。
+    expect(resumeAttempts).toBe(1);
     // 最终在默认网关新建了一条连接（初始 socket + fallback socket）。
     expect(transport.sockets).toHaveLength(2);
 
@@ -1010,7 +1013,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void
 }
 
 describe("QqBotAdapter — 心跳判死阈值可注入", () => {
-  it("缺省阈值仍是 2（日志写明 × 2，行为不变）", async () => {
+  it("缺省阈值 1：一个周期收不到 ACK 即判死（更早发现半开连接）", async () => {
     const transport = new FakeTransport();
     const logs: string[] = [];
     const adapter = new QqBotAdapter({
@@ -1025,9 +1028,9 @@ describe("QqBotAdapter — 心跳判死阈值可注入", () => {
     await adapter.connect();
     const socket = transport.socket;
     socket.emit(helloFrame(5));
-    // 一直不发 ACK：默认两个周期后判死。
+    // 一直不发 ACK：缺省一个周期后判死（更早发现，弱网可注入更大值）。
     await waitFor(() => socket.closed.value, 1000);
-    expect(logs.join("\n")).toContain("× 2");
+    expect(logs.join("\n")).toContain("× 1");
     await adapter.close();
   });
 
@@ -1471,6 +1474,137 @@ describe("QqBotAdapter — 退避抖动与失败计数", () => {
     // 两次排队的延迟都应是 base=5；若 catch 二次累加，第二次会变成 10。
     expect(delaysFrom(logs).slice(0, 2)).toEqual([5, 5]);
     expect((await adapter.health()).detail).toContain("连续失败 1 次");
+
+    await adapter.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 断线恢复收敛（2026-11-20）：把 1006 断线后 ~3.5 分钟压到秒级
+// ---------------------------------------------------------------------------
+
+describe("QqBotAdapter — 断线恢复收敛", () => {
+  it("退避上限已收敛到 8s（旧值 30s 是 3.5 分钟恢复的主因之一）", () => {
+    expect(DEFAULT_RECONNECT_MAX_DELAY_MS).toBeLessThanOrEqual(8_000);
+  });
+
+  it("READY 超时：resume 无响应时一次即回退 Identify，恢复在阈值内完成", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+      // 注入极小值压缩 8s resume 超时 / 1s 退避的等待，行为与生产一致。
+      handshakeTimeoutMs: 20,
+      resumeHandshakeTimeoutMs: 20,
+      reconnectBaseDelayMs: 5,
+      reconnectMaxDelayMs: 5,
+      random: () => 0,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(60_000));
+    first.emit(
+      dispatchFrame(
+        "READY",
+        { session_id: "sess-stale", resume_gateway_url: "wss://resume.example/ws" },
+        1,
+      ),
+    );
+    // 平台强制断线（每小时一次）后，resume 会被静默忽略、永不回 READY。
+    first.drop(new Error("1006"));
+
+    const start = Date.now();
+    // 第 2 条连 resume 地址；resume 超时后第 3 条已回默认网关走 Identify。
+    await waitFor(() => transport.connects.length >= 3, 1000);
+    const elapsed = Date.now() - start;
+
+    expect(transport.connects[1]!.url).toBe("wss://resume.example/ws");
+    expect(transport.connects[2]!.url).toBe(DEFAULT_QQBOT_GATEWAY_URL);
+    // 恢复在「resume 超时(20ms) + 一次短退避(5ms)」内完成，远小于旧的 ~52s。
+    expect(elapsed).toBeLessThan(400);
+    expect(logs.join("\n")).toContain("resume failed, falling back to identify");
+
+    const third = transport.socket;
+    third.emit(helloFrame(60_000));
+    expect((third.sent[0] as { op: number }).op).toBe(QQBOT_OP.IDENTIFY);
+    third.emit(dispatchFrame("READY", { session_id: "sess-new" }, 2));
+    // Identify 恢复意味着断线区间无法补发：缺口提示必须保留，不谎称已恢复。
+    expect((await adapter.health()).detail).toContain("丢消息");
+
+    await adapter.close();
+  });
+
+  it("1006 断线：resume 只尝试一次，恢复路径明确且无 14 次无效重连", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+      handshakeTimeoutMs: 20,
+      resumeHandshakeTimeoutMs: 20,
+      reconnectBaseDelayMs: 5,
+      reconnectMaxDelayMs: 5,
+      random: () => 0,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(60_000));
+    first.emit(
+      dispatchFrame(
+        "READY",
+        { session_id: "sess-x", resume_gateway_url: "wss://resume.example/ws" },
+        1,
+      ),
+    );
+    first.emit(dispatchFrame("C2C_MESSAGE_CREATE", { ...c2cPayload, id: "m-1" }, 9));
+
+    // 模拟平台无响应关闭（底层 ws close 事件首参即 1006）。
+    first.drop(1006);
+
+    await waitFor(() => transport.connects.length >= 3, 1000);
+    // resume 地址只连一次；重连次数有上限（旧实现这里会累积 14 次无效重连）。
+    expect(transport.connects.filter((c) => c.url.includes("resume.example"))).toHaveLength(1);
+    expect(logs.filter((line) => line.includes("reconnect in")).length).toBeLessThan(4);
+
+    const third = transport.socket;
+    third.emit(helloFrame(60_000));
+    expect((third.sent[0] as { op: number }).op).toBe(QQBOT_OP.IDENTIFY);
+    third.emit(dispatchFrame("READY", { session_id: "sess-new" }, 10));
+    expect(await adapter.health()).toMatchObject({ connected: true });
+
+    await adapter.close();
+  });
+
+  it("心跳 ACK 缺失：主动判死并重连，不等待服务端 close", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+      heartbeatMaxMissedAcks: 1,
+      handshakeTimeoutMs: 0, // 关掉握手超时，确保判死只由心跳 ACK 断供触发。
+      reconnectBaseDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(10));
+    // 关键：不 drop、不发任何 ACK —— 半开连接必须被心跳看门狗自己发现。
+    await waitFor(() => first.closed.value, 1000);
+    expect(logs.join("\n")).toContain("心跳 ACK 超时");
+    // 主动重连已建连（底层 socket 从未收到服务端 close）。
+    await waitFor(() => transport.connects.length >= 2);
+    expect(transport.connects).toHaveLength(2);
 
     await adapter.close();
   });
