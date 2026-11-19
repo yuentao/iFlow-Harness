@@ -472,6 +472,26 @@ export const QQ_MAIN_TURN_TEXT_BRANCH = "main-turn-text";
  * QQ 被动回复配额（同一 msg_id 的被动回复条数有限，见 deliverTaskText）。
  */
 export const QQ_MAIN_TURN_TEXT_MIN_CHARS = 2;
+/**
+ * 出站正文「短窗相似去重」窗口（毫秒，默认 15s）。
+ *
+ * 一次子会话取消会被宿主拆成两条 host-state 通知（interrupted 状态上报 +
+ * cancel 动作回执），主会话对每条都产生一次 assistant 回合；精确指纹去重
+ * 挡不住措辞不同的近似转述，于是 QQ 上连续收到多条内容相近的回复。这里在
+ * 指纹去重之外再加一层「规范化正文短窗相似」判定：窗口刻意取短，避免误杀
+ * 用户连续两条真实指令各自得到的合法回复。仅作用于中间正文投递通道，
+ * 不碰终局答复的 resultDeliveredAt 幂等锚点。
+ */
+export const QQ_OUTBOUND_SIMILAR_WINDOW_MS = 15_000;
+/** 少于该字符数（规范化后）的正文不参与相似去重，避免「嗯」「好」互相误杀。 */
+export const QQ_OUTBOUND_SIMILAR_MIN_CHARS = 8;
+/**
+ * 相似阈值：规范化正文的二元组交集 / 较小集合大小。
+ * 0.4 表示「短的那条有约四成二元组也出现在长的那条里」，可覆盖同一件事被
+ * 稍微不同措辞转述（如「取消打包任务」的两种说法），又显著低于两条独立
+ * 指令答复的相似度；配合 15s 短窗，不会误杀用户连续真实指令的合法回复。
+ */
+export const QQ_OUTBOUND_SIMILAR_THRESHOLD = 0.4;
 /** 结果彻底没能送达 QQ 时记录在任务上的文案。 */
 export const QQ_RESULT_UNDELIVERED = "结果未能送达 QQ（被动回复与主动消息均失败）";
 /**
@@ -852,6 +872,44 @@ export function fingerprintText(text: string): string {
 }
 
 /**
+ * 出站正文规范化（仅用于短窗相似判定，不改写真正投递给用户的文本）。
+ *
+ * 去 Markdown 标记、常见中英文标点与空白并转小写：这样「同一件事被主会话
+ * 用两种措辞复述」时二元组集合仍高度重叠，而标点 / 换行的差异不会把两条
+ * 实质相同的回复判成不同。导出仅供单测验证语义。
+ */
+export function normalizeQqOutboundText(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/gu, "")
+    .replace(/[#*`>_|~\[\]()（）]/gu, "")
+    .replace(/[\s，。！？、；：""''‘’,.!?;:'"()\[\]{}<>《》—\-]/gu, "")
+    .toLowerCase();
+}
+
+/**
+ * 两条规范化正文的二元组相似度（交集 / 较小集合大小，取值 0..1）。
+ *
+ * 用「较小集合」作分母（而非并集）：两条回复一条长一条短时，短的几乎是长
+ * 的子集仍应判为重复（主会话复述常常一段简短、一段展开）。任一为空返回 0，
+ * 完全相同返回 1。导出仅供单测验证语义。
+ */
+export function qqOutboundSimilarity(a: string, b: string): number {
+  if (a.length === 0 || b.length === 0) return 0;
+  if (a === b) return 1;
+  const bigrams = (s: string): Set<string> => {
+    const set = new Set<string>();
+    for (let i = 0; i + 1 < s.length; i += 1) set.add(s.slice(i, i + 2));
+    return set;
+  };
+  const ga = bigrams(a);
+  const gb = bigrams(b);
+  if (ga.size === 0 || gb.size === 0) return 0;
+  let shared = 0;
+  for (const gram of ga) if (gb.has(gram)) shared += 1;
+  return shared / Math.min(ga.size, gb.size);
+}
+
+/**
  * 两条任务记录是否在看板投影上有可见差异。
  *
  * 覆盖看板会展示的全部字段（状态、时间、等待项、结果、失败、关联、回包锚点
@@ -1175,6 +1233,18 @@ export class QqService {
   private readonly progressDeliveredFingerprints = new Map<string, Set<string>>();
   /** 逻辑投递去重键的递增序号（配合 taskId 生成全局唯一的 dedupeKey）。 */
   private deliverySeqCounter = 0;
+  /**
+   * 每个任务最近一次中间正文出站正文的规范化文本 + 单调时刻。
+   *
+   * 与 {@link progressFingerprints} 的「精确指纹、永久去重」互补：后者挡不住
+   * 同一件事的两种措辞（一次取消被宿主拆成两条通知、主会话各转述一次），
+   * 这里按短窗相似度挡住这种近似重复。只作用于中间正文通道，窗口短、阈值
+   * 保守，避免误杀用户连续两条真实指令各自的合法回复。
+   */
+  private readonly recentOutboundText = new Map<
+    string,
+    Array<{ text: string; at: number }>
+  >();
 
   constructor(options: QqServiceOptions) {
     this.config = options.config;
@@ -2023,10 +2093,15 @@ export class QqService {
     // deliverResultLocked 的空摘要分支不会重复追加通知（无双重发送）。
     const summary = trimmed || QQ_MAIN_FINAL_EMPTY_NOTICE;
     const stopReason = (input.stopReason ?? "").trim() || "end_turn";
+    // 短窗相似去重（最终答复侧）：汇报汇总轮的二次转述若与近期出站正文高度
+    // 相似（系统通知回合的近似重复），只落盘收尾、不投递第二条。
+    const deduped = this.isSimilarRecentOutbound(input.taskId, summary);
     await this.finalizeMainTask(current, summary, stopReason, {
       channel: "main",
       plan: "active-first",
+      ...(deduped ? { suppressDelivery: true } : {}),
     });
+    if (!deduped) this.recordOutboundText(input.taskId, summary);
   }
 
   /**
@@ -2120,7 +2195,50 @@ export class QqService {
     if (trimmed.length < QQ_MAIN_TURN_TEXT_MIN_CHARS) return;
     const task = this.tasks.get(taskId);
     if (!task || task.channel !== "main" || task.status !== "injected") return;
+    // 短窗相似去重（第二道防线）：宿主把一次取消拆成多条 host-state 通知时，
+    // 主会话对每条各产生一次 assistant 回合，措辞相近但不逐字相同 —— 精确
+    // 指纹挡不住。这里按规范化正文相似度拦住，避免 QQ 上连续收到多条内容
+    // 相近的回复。面板侧另有一道来源判别（通知回合不转发），两道互补。
+    if (this.isSimilarRecentOutbound(taskId, trimmed)) {
+      this.log(`QQ 任务 ${taskId}：中间正文短窗相似去重，跳过近似重复转述`);
+      return;
+    }
     await this.deliverProgressLike(task, trimmed, QQ_MAIN_TURN_TEXT_BRANCH, { chunked: true });
+    this.recordOutboundText(taskId, trimmed);
+  }
+
+  /**
+   * 这段正文在短窗内是否已有高度相似的出站（用于拦「同一件事被转述多次」）。
+   *
+   * 用单调时钟，避免系统时间回拨让窗口判定失真；只比同一任务，跨任务不互相
+   * 抑制（两个 QQ 用户各问各的，互不干扰）；规范化后太短的正文不参与，避免
+   * 把「好」「嗯」这类语气词误判为重复。
+   */
+  private isSimilarRecentOutbound(taskId: string, text: string): boolean {
+    const normalized = normalizeQqOutboundText(text);
+    if (normalized.length < QQ_OUTBOUND_SIMILAR_MIN_CHARS) return false;
+    const recent = this.recentOutboundText.get(taskId);
+    if (!recent || recent.length === 0) return false;
+    const at = this.monotonic();
+    for (const entry of recent) {
+      if (at - entry.at >= QQ_OUTBOUND_SIMILAR_WINDOW_MS) continue;
+      if (qqOutboundSimilarity(entry.text, normalized) >= QQ_OUTBOUND_SIMILAR_THRESHOLD) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 记录一次中间正文出站（只留短窗内的若干条，超出窗口的惰性清理）。 */
+  private recordOutboundText(taskId: string, text: string): void {
+    const normalized = normalizeQqOutboundText(text);
+    if (normalized.length < QQ_OUTBOUND_SIMILAR_MIN_CHARS) return;
+    const at = this.monotonic();
+    const list = (this.recentOutboundText.get(taskId) ?? []).filter(
+      (entry) => at - entry.at < QQ_OUTBOUND_SIMILAR_WINDOW_MS,
+    );
+    list.push({ text: normalized, at });
+    this.recentOutboundText.set(taskId, list);
   }
 
   /**
@@ -2137,6 +2255,8 @@ export class QqService {
       reason?: string;
       channel?: "main" | "child";
       plan?: QqDeliveryPlan;
+      /** 只落盘收尾、不投递 QQ（用于短窗相似去重命中时的最终答复）。 */
+      suppressDelivery?: boolean;
     } = {},
   ): Promise<void> {
     const current = this.tasks.get(base.taskId) ?? base;
@@ -2179,6 +2299,22 @@ export class QqService {
       updated.taskId,
       { status, stopReason, channel: options.channel ?? "main" },
     );
+    if (options.suppressDelivery === true) {
+      // 最终答复与近期出站正文高度相似（系统通知回合的重复转述）：任务照常
+      // 收尾落盘，但不再投递第二条。同样写下 resultDeliveredAt 幂等锚点 ——
+      // 否则重启补发会把这条已经「以近似形式送达」的结果再投一遍。
+      const handled: QqTask = {
+        ...updated,
+        resultDeliveredAt: Math.max(updated.updatedAt, this.now()),
+        deliveryError: undefined,
+      };
+      await this.persist(handled);
+      await this.appendEvent("task_answer_deduped", updated.taskId, {
+        reason: "similar-recent-outbound",
+        chars: summary.length,
+      });
+      return;
+    }
     await this.deliverResult(updated, options.plan ? { plan: options.plan } : undefined);
   }
 
