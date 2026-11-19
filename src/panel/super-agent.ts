@@ -15,15 +15,20 @@
  *    子会话改回运行中（Orca `worker_done`「恰好发一次」的宿主侧等价物）。
  *  - 内部进展不打扰主会话：只有 ready / blocked / failed / dropped 会上报，
  *    progress 只更新看板（dsh 的 `internal_only` vs `notify`）。
- *  - **子会话始终免确认且完全自主**：内核被推到 `yolo` 模式 —— 这是刻意的产品
- *    语义，子会话必须完全自主、不因审批往返而停顿，也不该把审批变成人工负担。
- *    代价是 `yolo` 下内核通常**不发** `session/request_permission`，所以宿主在
- *    审批点上的依赖护栏（`shared/super-agent-guard.ts`，拦会破坏主工作区依赖的
- *    安装/联接命令）只是**兜底**而非主防线：万一某类工具仍然发审批，宿主就地
- *    自动放行（shell 用 allow_once，危险命令 deny），既不产生待办也不阻塞子会话。
+ *  - **子会话默认免确认且完全自主**（缺省审批策略 `auto`）：内核被推到
+ *    `yolo` 模式 —— 这是刻意的产品语义，子会话必须完全自主、不因审批往返而
+ *    停顿，也不该把审批变成人工负担。代价是 `yolo` 下内核通常**不发**
+ *    `session/request_permission`，所以宿主在审批点上的依赖护栏
+ *    （`shared/super-agent-guard.ts`，拦会破坏主工作区依赖的安装/联接命令）
+ *    只是**兜底**而非主防线：万一某类工具仍然发审批，宿主就地自动放行
+ *    （shell 用 allow_once，危险命令 deny），既不产生待办也不阻塞子会话。
+ *    需要「审批真的发生」的调用方（例如 QQ 远程任务）可以传
+ *    `spawn(spec, { policy })`：`supervised` 不推 `yolo`、把权限请求交给回调
+ *    裁决（未提供/抛错/超时按拒绝），`deny` 直接拒绝。三者都仍然保护依赖
+ *    护栏这条硬底线。
  *    只有 `_iflow/user/questions` 是真正的信息缺口 —— 那是只有人才能回答的，
  *    落到子会话自己的 pending 槽位由看板就地作答（主会话的 pending 是单数槽位，
- *    多子会话并发会互相覆盖）。
+ *    多子会话并发会互相覆盖）。提问不是权限，任何策略下都走这条路。
  *  - **完成后自动带回改动**：按 `iflow.superAgent.integration` 自动合并到主
  *    工作区的当前分支，或推送分支并创建 PR。合并**串行**执行；是否安全先用
  *    `git merge-tree` 在对象库里预演（不碰索引与工作区），因此主工作区有未提交
@@ -40,9 +45,14 @@ import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
+import type { McpServer } from "../acp/protocol.js";
 import type {
   ContentBlock,
+  ExitPlanModeRequest,
   ExitPlanModeResponse,
+  PermissionOption,
+  PermissionOptionKind,
+  RequestPermissionRequest,
   RequestPermissionResponse,
   TurnUsageReport,
   UserQuestion,
@@ -51,15 +61,23 @@ import type {
 import { errorMessage } from "../acp/jsonrpc.js";
 import { applySessionUpdate, estimateTokens, estimateTokensChunked } from "../../shared/session-state.js";
 import {
+  classifyChildFileWrite,
   classifyChildShellCommand,
   classifyChildToolCall,
   extractShellCommand,
   isShellToolCall,
   pickChildPermissionOption,
+  type ChildShellGuardContext,
 } from "../../shared/super-agent-guard.js";
 import { renderPrompt } from "../../prompts/index.js";
 import { estimateCost } from "../../shared/context-window.js";
-import { initialSessionState, type Block, type SessionState } from "../../shared/messages.js";
+import {
+  EVICT_KEEP_BLOCKS,
+  evictBlockPayloads,
+  initialSessionState,
+  type Block,
+  type SessionState,
+} from "../../shared/messages.js";
 import {
   applySuperEvent,
   buildSuperReportPrompt,
@@ -71,6 +89,7 @@ import {
   reportForSession,
   retrySuperSession,
   toPersistedSuperSession,
+  toSuperBoardSession,
   withIntegration,
   withUsage,
   type PersistedSuperSession,
@@ -78,6 +97,7 @@ import {
   type SuperEvent,
   type SuperIntegration,
   type SuperIntegrationMode,
+  type SuperInterruptSource,
   type SuperPending,
   type SuperReport,
   type SuperSessionUi,
@@ -93,15 +113,18 @@ import {
   createPullRequest,
   createWorktree,
   currentBranch,
+  deleteSuperBranch,
   discardFailedWorktree,
   ensureSuperIsolationIgnored,
   ghAvailable,
   inspectWorkingTree,
   isBranchMerged,
+  listSuperBranches,
   listWorktrees,
   mergeBranch,
   previewMerge,
   probeGitRepo,
+  pruneWorktrees,
   pushBranch,
   remoteOriginUrl,
   removeWorktree,
@@ -115,9 +138,255 @@ import {
 
 /**
  * 提问的自动放行时限（与主会话的审批卡同一纪律：超时就放行/继续，避免 agent
- * 永久阻塞）。审批不走这里 —— 子会话免确认，审批由宿主立即放行。
+ * 永久阻塞）。审批不走这里 —— 缺省策略（auto）下子会话免确认、审批由宿主立即
+ * 放行；`supervised` 策略的审批回调另有 {@link SUPER_PERMISSION_TIMEOUT_MS}。
  */
 export const SUPER_PENDING_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * `.iflow/super/attachments/` 下附件副本的空闲清扫阈值（7 天）。
+ *
+ * 附件是主会话附件的临时拷贝，只服务一次子会话派发；正常终态会立即删除，
+ * 这里只兜底清扫「进程被强杀 / 升级中断」等来不及收尾的孤儿。与 OS 临时
+ * 附件 (`ATTACHMENT_TMP_MAX_AGE_MS`) 同一档，避免两套清理策略漂移。
+ */
+export const SUPER_ATTACHMENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * `.iflow/super/dirs/` 下降级目录的空闲清扫阈值（14 天）。
+ *
+ * 目录隔离比附件副本更容易留下「还有用的东西」（非 git 仓库的降级工作目录），
+ * 因此阈值取附件的两倍，只回收长期无人问津的残留。
+ */
+export const SUPER_DIR_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// 可配置审批策略（Wave3-A）
+// ---------------------------------------------------------------------------
+
+/**
+ * 子会话审批模式。
+ *
+ * - `auto`（缺省）：**完全维持既有行为** —— 内核推 `yolo`，宿主对任何
+ *   `session/request_permission` 直接放行（shell 仍过依赖护栏）。本地现有
+ *   调用零回归。
+ * - `supervised`：**不推 `yolo`**；权限请求先交给策略里的
+ *   `onPermissionRequest` 回调裁决，未提供回调、回调抛错或超时一律按拒绝处理
+ *   （安全默认）。提问不是权限，仍落到看板作答。
+ * - `deny`：**不推 `yolo`**；所有权限请求直接拒绝（取消输出）；提问仍走看板。
+ *
+ * - 计划模式已移除（2026-11-18）：`_iflow/plan/exit` 遗留请求按 spawn 审批策略
+ *   处置 —— `auto` 快速放行、`deny` 拒绝、`supervised` 走策略回调（见
+ *   `autoApproveRemovedPlanExit`），绝不让它成为 supervised 的策略后门。
+ */
+export type SuperApprovalMode = "auto" | "supervised" | "deny";
+
+const SUPER_APPROVAL_MODES: readonly SuperApprovalMode[] = ["auto", "supervised", "deny"];
+
+/**
+ * 交给审批回调的请求摘要。
+ *
+ * `request` 是**原始 wire 请求**（含 `options`），回调可以据此做更细的判断。
+ */
+export interface SuperPermissionRequest {
+  sessionId: string;
+  toolCallId?: string;
+  toolName?: string;
+  /** 工具 kind（`execute` / `edit` / ...，wire 上的 `toolCall.kind`）。 */
+  kind?: string;
+  /** 人类可读摘要：工具标题。 */
+  summary: string;
+  /** 原始权限请求。 */
+  request?: RequestPermissionRequest;
+}
+
+/**
+ * 审批回调的裁决结果。
+ *
+ * 前三个值刻意与 wire 的 `PermissionOptionKind` 同名（`deny` 对应
+ * `reject_once`/`reject_always`），由 {@link resolvePermissionResponse} 映射回
+ * **agent 自己给出的 optionId** —— 宿主绝不伪造 optionId（CLI 用原生枚举解析，
+ * 伪造会抛）。
+ */
+export type SuperPermissionDecision = "allow_once" | "allow_always" | "deny" | "cancel";
+
+const SUPER_PERMISSION_DECISIONS: readonly SuperPermissionDecision[] = [
+  "allow_once",
+  "allow_always",
+  "deny",
+  "cancel",
+];
+
+/** 审批回调的裁决时限（略小于主会话审批卡的 5 分钟，超时按拒绝处理）。 */
+export const SUPER_PERMISSION_TIMEOUT_MS = 4 * 60_000;
+
+/**
+ * spawn 时可选携带的策略。
+ *
+ * 缺省（不传）等价于 `{ approval: "auto" }` —— 现有调用点的行为一个字节都不变。
+ */
+export interface SuperSpawnPolicy {
+  approval: SuperApprovalMode;
+  /**
+   * 传给子会话 `session/new` 的 `settings.disallowed_tools`（与主会话的
+   * `MAIN_SESSION_DISALLOWED_TOOLS` 同名机制）。非空时才会出现在请求里。
+   */
+  disallowedTools?: string[];
+  /**
+   * `supervised` 模式的裁决回调。未提供时按拒绝处理（安全默认），
+   * `auto` / `deny` 模式下不会被调用。
+   */
+  onPermissionRequest?: (request: SuperPermissionRequest) => Promise<SuperPermissionDecision>;
+}
+
+/** 归一化之后的策略（运行时形态：工具名去重、审批模式收敛为合法值）。 */
+export interface ResolvedSuperSpawnPolicy {
+  approval: SuperApprovalMode;
+  disallowedTools: string[];
+  onPermissionRequest?: (request: SuperPermissionRequest) => Promise<SuperPermissionDecision>;
+}
+
+/**
+ * 工具名列表归一化：去掉非字符串、空白项与重复项（保留首次出现的顺序）。
+ *
+ * 这是 wire 边界：策略可能来自面板设置、JSON 或模型生成的指令块，脏值不应
+ * 让 `session/new` 携带一个毫无意义的黑名单。
+ */
+export function normalizeDisallowedTools(raw?: readonly unknown[] | null): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const name = item.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
+/**
+ * 把 spawn 的可选 policy 归一化成运行时策略。
+ *
+ * 纯函数：不读环境、不碰磁盘。缺省 / null / 脏值（例如被手改成 `"Auto"`）一律
+ * 收敛为 `auto` —— 「不认识就按现状跑」比「猜一个更严格的模式」更安全，因为
+ * 策略缺失时用户期待的是现有行为。
+ */
+export function resolveSpawnPolicy(
+  spec?: { policy?: SuperSpawnPolicy | null } | null,
+): ResolvedSuperSpawnPolicy {
+  const raw = spec?.policy ?? null;
+  const approval =
+    raw && (SUPER_APPROVAL_MODES as readonly string[]).includes(raw.approval)
+      ? raw.approval
+      : "auto";
+  const resolved: ResolvedSuperSpawnPolicy = {
+    approval,
+    disallowedTools: normalizeDisallowedTools(raw?.disallowedTools),
+  };
+  if (raw?.onPermissionRequest) resolved.onPermissionRequest = raw.onPermissionRequest;
+  return resolved;
+}
+
+/**
+ * repo 档合并子会话**必须**带上的机械工具黑名单。
+ *
+ * 合并子会话跑在主仓工作区（无版本隔离），任务书里的硬边界只是提示词
+ * 约束。这里从工具层面再收一道：
+ *  - `task`：进程内子代理与合并子会话共享 cwd（主仓工作区）与完整工具集，
+ *    它的写文件工具调用不带命令文本、绕开 shell 命令护栏；派它等于开出
+ *    一块宿主看不见的执行面。合并这件事本身不需要任何子代理。
+ *  - `super-agent`：内置子会话派发工具，同样会把工作扩散到别的执行体。
+ *
+ * **刻意不剔除** `run_shell_command` / `write_file` / `replace` / `read_file`：
+ * `git merge --no-ff`、冲突文件读写、收尾的 `git log` / `git status` 都依赖
+ * 它们，剔除任一项都会让正常合并直接失效（这是本加固的红线）。
+ * 这些工具带来的风险由 wire 帧上的护栏兜住（见 `callbacksFor` 的预检）。
+ */
+export const SUPER_MERGE_CHILD_DISALLOWED_TOOLS: readonly string[] = Object.freeze([
+  "task",
+  "super-agent",
+]);
+
+/** 合并子会话的 spawn 策略：审批维持 `auto`，只叠加机械工具黑名单。 */
+export function superMergeChildPolicy(): SuperSpawnPolicy {
+  return { approval: "auto", disallowedTools: [...SUPER_MERGE_CHILD_DISALLOWED_TOOLS] };
+}
+
+/** 一个值是否是合法的裁决（回调返回脏值时不采纳，按拒绝处理）。 */
+function isSuperPermissionDecision(value: unknown): value is SuperPermissionDecision {
+  return typeof value === "string" && (SUPER_PERMISSION_DECISIONS as readonly string[]).includes(value);
+}
+
+/**
+ * 执行审批回调并收敛结果。
+ *
+ * 三条安全默认：**没有回调**、**回调抛错**、**超过时限**一律返回 `deny`。
+ * 回调返回非枚举值时同样按拒绝处理 —— 绝不把脏值当成放行。
+ *
+ * `timeoutMs` 是显式参数（默认 {@link SUPER_PERMISSION_TIMEOUT_MS}），便于单测
+ * 用极小的超时验证超时路径，而不必伪造定时器。
+ */
+export async function awaitSuperPermissionDecision(
+  handler: ((request: SuperPermissionRequest) => Promise<SuperPermissionDecision>) | undefined,
+  request: SuperPermissionRequest,
+  timeoutMs: number = SUPER_PERMISSION_TIMEOUT_MS,
+): Promise<SuperPermissionDecision> {
+  if (!handler) return "deny";
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const timedOut = new Promise<SuperPermissionDecision>((resolve) => {
+      timer = setTimeout(() => resolve("deny"), Math.max(0, timeoutMs));
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    const decided = await Promise.race([handler(request), timedOut]);
+    return isSuperPermissionDecision(decided) ? decided : "deny";
+  } catch {
+    return "deny";
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * 把裁决映射回 wire 响应。
+ *
+ * **只用 agent 给出的 option id**：allow 类找不到允许选项、deny 类找不到拒绝
+ * 选项时退回「取消」（与审批超时同一条路），绝不伪造批准。
+ */
+export function resolvePermissionResponse(
+  options: readonly PermissionOption[],
+  decision: SuperPermissionDecision,
+): RequestPermissionResponse {
+  if (decision === "cancel") return { outcome: { outcome: "cancelled" } };
+  const preferred: PermissionOptionKind[] =
+    decision === "allow_once"
+      ? ["allow_once", "allow_always"]
+      : decision === "allow_always"
+        ? ["allow_always", "allow_once"]
+        : ["reject_once", "reject_always"];
+  for (const kind of preferred) {
+    const option = options.find((item) => item.kind === kind);
+    if (option) return { outcome: { outcome: "selected", optionId: option.optionId } };
+  }
+  return { outcome: { outcome: "cancelled" } };
+}
+
+/** 原始权限请求 → 交给策略回调的摘要（保留 wire 请求本体供回调细判）。 */
+export function toSuperPermissionRequest(request: RequestPermissionRequest): SuperPermissionRequest {
+  const tool = request.toolCall;
+  const summary = tool.title ?? tool.toolName ?? "tool permission request";
+  const out: SuperPermissionRequest = {
+    sessionId: request.sessionId,
+    summary,
+    request,
+  };
+  if (tool.toolCallId) out.toolCallId = tool.toolCallId;
+  if (tool.toolName) out.toolName = tool.toolName;
+  if (typeof tool.kind === "string") out.kind = tool.kind;
+  return out;
+}
 
 /**
  * 实时进度的尾部上限。子会话的完整转录不进快照，看板只拿一段尾部文本做
@@ -141,8 +410,16 @@ export const SUPER_PROGRESS_THROTTLE_MS = 700;
  */
 export const SUPER_TEXT_MAX_CHARS = 120_000;
 
-/** 作为视觉块直接送给子会话的图片上限（与主会话的图片附件上限同口径）。 */
-const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
+/**
+ * 作为视觉块直接送给子会话的图片上限（与主会话的 `ATTACHMENT_IMAGE_MAX_BYTES`
+ * 同口径 5MB）。
+ *
+ * 刻意**不**用 8MB：base64 膨胀约三分之一，8MB 的图片块序列化后会超过 ACP
+ * NDJSON 帧的 8MB 上限（见 `src/acp/jsonrpc.ts` 的帧护栏），prompt 会被解析端
+ * 丢弃而永久悬挂。超过阈值的图片仍会落盘并作为文件路径交给子会话（它可读到），
+ * 只是不作为内联视觉块发送。
+ */
+export const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
 /** 单份附件超过这个大小就不复制 —— 提示词里如实说明，不静默丢。 */
 const MAX_ATTACHMENT_FILE_BYTES = 50 * 1024 * 1024;
 
@@ -174,6 +451,23 @@ export interface SuperSweepResult {
   kept: number;
   /** 疑似残留的目录（不在 git worktree 注册表里）—— 只记日志，不自动删。 */
   orphans: string[];
+}
+
+/** 跨历史会话的 Super Agent 残留计数（新建会话时的轻量检测）。 */
+export interface SuperResidueCount {
+  worktrees: number;
+  dirs: number;
+  attachments: number;
+  total: number;
+}
+
+/** 「清空并新建」授权下的全量清空结果。 */
+export interface SuperResiduePurgeResult {
+  worktrees: number;
+  dirs: number;
+  attachments: number;
+  /** 删除失败的目录数（best-effort：记日志继续，不阻断新建会话）。 */
+  failed: number;
 }
 
 /**
@@ -235,6 +529,19 @@ export interface SuperAgentDeps {
   /** 主仓根目录（worktree / 隔离目录的来源）；非 git 仓库时降级为目录隔离。 */
   repoRoot: string;
   createClient: SuperClientFactory;
+  /**
+   * MCP servers for a child's `session/new` (host broker endpoints).
+   *
+   * The broker owns ONE process per configured MCP server; each child gets a
+   * loopback HTTP endpoint for it, so N concurrent children still mean a single
+   * server process. The host also scopes the child's CLI process to exactly
+   * these names (`--allowed-mcp-server-names`), which is what stops the child
+   * from spawning the user's configured stdio servers itself.
+   *
+   * Optional so fixtures/tests that do not care about MCP keep working; an
+   * absent dependency means "no MCP in child sessions" (the previous default).
+   */
+  childMcpServers?: () => McpServer[];
   /** 子会话列表变化（宿主写进 store.superSessions）。 */
   onSessionsChanged: (sessions: SuperSessionUi[]) => void;
   /**
@@ -329,6 +636,8 @@ export interface SuperAgentDeps {
 interface PendingResolver {
   resolve: (value: unknown) => void;
   timer: NodeJS.Timeout | null;
+  /** 这个 resolver（及其定时器）属于哪一次 `needs_input`；与 session.pending.requestId 比对。 */
+  requestId: string;
 }
 
 /**
@@ -362,11 +671,20 @@ interface SuperQueueEntry {
   id: string;
   /** 仅重试时存在。 */
   retry?: SuperRetryState;
+  /** 审批策略（spawn 时归一化；重试沿用上一轮的那份）。 */
+  policy: ResolvedSuperSpawnPolicy;
 }
 
 export class SuperAgentManager {
   private readonly sessions = new Map<string, SuperSessionUi>();
   private readonly clients = new Map<string, AcpClient>();
+  /**
+   * 每个子会话的审批策略。
+   *
+   * 队列项里也带一份（`SuperQueueEntry.policy`）供 `prepare` 使用；这张表是
+   * **重试**的依据 —— 重试时只拿得到会话记录，拿不到原始的 spawn 参数。
+   */
+  private readonly policies = new Map<string, ResolvedSuperSpawnPolicy>();
   private readonly resolvers = new Map<string, PendingResolver>();
   /**
    * 从磁盘恢复回来的历史子会话，按**归属主会话**分组。
@@ -471,7 +789,13 @@ export class SuperAgentManager {
   list(mainSessionId?: string | null): SuperSessionUi[] {
     const live = [...this.sessions.values()];
     const history = mainSessionId ? this.archived.get(mainSessionId) ?? [] : [];
-    return [...live, ...history].sort((a, b) => a.createdAt - b.createdAt);
+    // 这是**看板投影**，不是记录本身：`superSessions` 属于非 blocks 元数据，
+    // 随每次 snapshot / blockPatch 整份重发，而 webview 从不渲染 `task`。
+    // 投影里只带预览（见 `toSuperBoardSession`）；完整任务书仍在本管理器的
+    // 记录里（重试 / PR 正文 / 归档都读那边）。
+    return [...live, ...history]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map(toSuperBoardSession);
   }
 
   get(id: string): SuperSessionUi | undefined {
@@ -569,11 +893,18 @@ export class SuperAgentManager {
    * `options.isolation = "repo"` 派的是**主仓工作区档**子会话：它没有
    * worktree、没有自己的分支，直接在主仓根目录里干活（合并子会话专用 ——
    * 合并只能在目标分支所在的工作区发生）。
+   *
+   * `options.policy` 是可选审批策略：**缺省即 `{ approval: "auto" }`**，与既有
+   * 调用点（面板派发 / 合并子会话）的行为逐字节一致。
    */
-  spawn(spec: SuperTaskSpec, options?: { isolation?: "repo" }): SuperSessionUi {
+  spawn(
+    spec: SuperTaskSpec,
+    options?: { isolation?: "repo"; policy?: SuperSpawnPolicy | null },
+  ): SuperSessionUi {
     const now = Date.now();
     const id = `super-${now.toString(36)}-${(this.seq++).toString(36)}`;
     const repoIsolation = options?.isolation === "repo";
+    const policy = resolveSpawnPolicy({ policy: options?.policy ?? null });
     const session: SuperSessionUi = {
       id,
       title: spec.title,
@@ -591,8 +922,9 @@ export class SuperAgentManager {
       reports: [],
     };
     this.sessions.set(id, session);
+    this.policies.set(id, policy);
     if (session.mainSessionId) this.archiveOwners.add(session.mainSessionId);
-    this.queue.push({ spec, id });
+    this.queue.push({ spec, id, policy });
     this.emit();
     this.pump();
     return session;
@@ -632,7 +964,7 @@ export class SuperAgentManager {
     }
     const child = this.spawn(
       { title: options.title, task: options.task },
-      { isolation: "repo" },
+      { isolation: "repo", policy: superMergeChildPolicy() },
     );
     this.mergeTargets.set(child.id, {
       sourceId: options.source.id,
@@ -661,15 +993,25 @@ export class SuperAgentManager {
    * cancel 了一个早已结束的子会话，主会话看不到生效，于是又发一次）。
    * 只有「目标根本不存在」才是真的没生效。
    */
-  async cancel(id: string): Promise<SuperCancelOutcome> {
+  async cancel(id: string, source: SuperInterruptSource = "system"): Promise<SuperCancelOutcome> {
     const session = this.sessions.get(id);
-    if (!session) return { ok: false, reason: "not-found" };
+    if (!session) {
+      // 历史归档子会话的进程早随扩展退出，中断意图天然达成（幂等）—— 按
+      // already-terminal 回报，不报 not-found。主会话从上一轮冻结的看板
+      // 抄 id 时，抄到这类「已结束」记录不该被误判成「抄错 id」。
+      const archived = this.findArchived(id);
+      if (archived) return { ok: true, reason: "already-terminal", status: archived.status };
+      return { ok: false, reason: "not-found" };
+    }
     if (isTerminalSuperStatus(session.status)) {
       // 幂等重复：目标已经不在跑 —— 意图已达成，如实说成「已终态」，不是失败。
       return { ok: true, reason: "already-terminal", status: session.status };
     }
     // 还在排队的话先撤掉 —— 否则槽位空出后 pump 会把它启动起来。
     this.dequeue(id);
+    // 提问定时器随中断一起收口：会话已终态，不该再有到点的定时器去 resolve
+    // 一个早被丢弃的提问（更不该误删此处之后新尝试的 resolver）。
+    this.discardQuestionResolver(id);
     // 先记「这一轮被用户喊停」：收尾路径（代提交 + 自动合并）靠它决定
     // 还能不能动这轮的结果。必须落在 apply 之前 —— apply 之后状态已是终态，
     // 再也分不清「正常完成」与「被中断」。
@@ -677,7 +1019,7 @@ export class SuperAgentManager {
     // 先落「已中断」再杀进程：终止进程会触发 AcpClient 的 onExit，而管理层把
     // 内核退出一律记成 failed —— 终态粘性会让随后的 cancelled 被丢弃，手动
     // 停止就显示成失败。先把终态占住，onExit 的失败事件会被幂等地忽略。
-    this.apply(id, { type: "cancelled", at: Date.now() });
+    this.apply(id, { type: "cancelled", at: Date.now(), source });
     const client = this.clients.get(id);
     if (client && session.cliSessionId) {
       try {
@@ -695,12 +1037,93 @@ export class SuperAgentManager {
   }
 
   /** 中断全部子会话，返回被中断的数量。 */
-  async cancelAll(): Promise<number> {
+  async cancelAll(source: SuperInterruptSource = "system"): Promise<number> {
     const ids = [...this.sessions.values()]
       .filter((s) => !isTerminalSuperStatus(s.status))
       .map((s) => s.id);
-    for (const id of ids) await this.cancel(id);
+    for (const id of ids) await this.cancel(id, source);
     return ids.length;
+  }
+
+  /**
+   * 主会话被删除：终止并清掉它名下的全部子会话与归档记录。
+   *
+   * 删除会话意味着「这段对话不存在了」：它派发的子会话进程不能继续跑（跑完
+   * 也没人接汇报），排队中的派发要撤掉，看板记录与归档归属必须一起消失 ——
+   * 否则下一次落盘会把这个主会话重新写回归档文件（文件复活），而活着的子
+   * 进程会让宿主的心跳永远停不下来。
+   *
+   * **worktree 与分支保留**：里面可能有还没合并的工作，与 `dispose()` 同
+   * 纪律 —— 删目录不可逆，绝不借「删会话」偷偷丢改动。保留的目录仍由
+   * `sweepStaleWorktrees` 按既有规则（只清已并入 HEAD 且干净的）回收；返回
+   * 清单供宿主如实记日志。
+   *
+   * 返回被清掉的子会话 id（宿主据此清掉属于它们的待办队列）。
+   */
+  async forgetMainSession(
+    mainSessionId: string,
+  ): Promise<{ ids: string[]; worktrees: { id: string; path: string; branch?: string }[] }> {
+    const ids: string[] = [];
+    const worktrees: { id: string; path: string; branch?: string }[] = [];
+    for (const session of [...this.sessions.values()]) {
+      if (session.mainSessionId !== mainSessionId) continue;
+      const id = session.id;
+      ids.push(id);
+      // 排队中的先撤掉，否则槽位一空 pump 还会把它拉起来。
+      this.dequeue(id);
+      this.started.delete(id);
+      if (!isTerminalSuperStatus(session.status)) {
+        // 先落「已中断」再杀进程：dispose 会触发 onExit，管理层把它记成
+        // failed；终态粘性会让随后的 cancelled 被丢弃。
+        this.interrupted.set(id, session.attempts ?? 1);
+        this.apply(id, { type: "cancelled", at: Date.now(), source: "system" });
+      }
+      await this.disposeClient(id);
+      // 附件副本是这个子会话的临时拷贝：记录都没了，它只剩占盘。
+      await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
+      if (
+        session.isolation.path &&
+        !session.isolation.released &&
+        session.isolation.kind !== "repo"
+      ) {
+        worktrees.push({ id, path: session.isolation.path, branch: session.isolation.branch });
+      }
+      // 提问定时器随会话删除一起收口（统一走 discardQuestionResolver）。
+      this.discardQuestionResolver(id);
+      this.forgetChild(id);
+      this.transcripts.delete(id);
+      this.policies.delete(id);
+      this.mergeTargets.delete(id);
+      this.removeSession(id);
+    }
+    // 归档归属也要清：留着它，下一次 persistSuperSessions 会把空数组重新写回
+    // 磁盘（会话已删，归档文件却复活）。
+    //
+    // 归档里的子会话**不在 this.sessions 里**，上面的循环碰不到它们：它们的
+    // 进程早死了，但附件副本与 worktree 还在磁盘上。会话都被删了，这些东西
+    // 再没有回收人 —— 一并删附件、把 worktree 交给宿主 force 清理（与活会话
+    // 同纪律：清目录不可逆，但删主会话意味着「这段对话不存在了」）。
+    for (const archived of this.archived.get(mainSessionId) ?? []) {
+      await rm(this.attachmentDirFor(archived.id), { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+      if (
+        archived.isolation.path &&
+        !archived.isolation.released &&
+        archived.isolation.kind !== "repo"
+      ) {
+        worktrees.push({
+          id: archived.id,
+          path: archived.isolation.path,
+          branch: archived.isolation.branch,
+        });
+      }
+      this.discardQuestionResolver(archived.id);
+    }
+    this.archived.delete(mainSessionId);
+    this.archiveOwners.delete(mainSessionId);
+    this.emit();
+    return { ids, worktrees };
   }
 
   /**
@@ -721,6 +1144,9 @@ export class SuperAgentManager {
     // 排在自己前面。
     await this.disposeClient(id);
     this.started.delete(id);
+    // 上一轮若正卡在提问上，它的 resolver/定时器必须随旧尝试一起收口 ——
+    // 否则旧定时器到点会误删新一轮刚挂上的 resolver（跨尝试串包）。
+    this.discardQuestionResolver(id);
     // 重试是一次**新的尝试**（序号 +1）：上一轮的中断标记不该命中新一轮。
     this.interrupted.delete(id);
 
@@ -732,10 +1158,37 @@ export class SuperAgentManager {
     };
     this.sessions.set(id, retrySuperSession(session, Date.now()));
     this.lastText.delete(id);
-    this.queue.push({ spec: { title: session.title, task: session.task }, id, retry });
+    this.queue.push({
+      spec: { title: session.title, task: session.task },
+      id,
+      retry,
+      // 重试是同一份派发的延续：策略必须沿用，否则一次重试会把 supervised
+      // 静默退回 auto（重新变成无审批执行）。
+      policy: this.policies.get(id) ?? resolveSpawnPolicy(null),
+    });
     this.emit();
     this.pump();
     return true;
+  }
+
+  /**
+   * 清掉一个子会话的提问 resolver 与定时器（**跨尝试收口的唯一入口**）。
+   *
+   * resolver 与定时器按会话 id 只存一份，但一个会话可能经历「提问 → 失败 →
+   * 重试 → 再提问」：上一轮的定时器若到点无条件 `delete(id)`，会删掉新一轮
+   * 刚挂上的 resolver。所有清理入口（超时 / 应答 / 重试 / 清理 / 中断 / 面板
+   * 关闭）统一走这里，且调用前必须先用 `requestId` 确认对象是自己的那一份。
+   *
+   * 刻意**不** resolve promise：retry / cancel / cleanup 时旧 CLI 进程即将被
+   * 回收，若用空答案 resolve 它，那条在途的 `onUserQuestions` 会让旧内核继续
+   * 往下跑，并通过同一个 id 的回调污染新一轮的状态。让它随旧客户端一起 GC。
+   */
+  private discardQuestionResolver(id: string): PendingResolver | undefined {
+    const resolver = this.resolvers.get(id);
+    if (!resolver) return undefined;
+    if (resolver.timer) clearTimeout(resolver.timer);
+    this.resolvers.delete(id);
+    return resolver;
   }
 
   /**
@@ -749,16 +1202,25 @@ export class SuperAgentManager {
     const pending = session?.pending;
     const resolver = this.resolvers.get(id);
     if (!session || !pending || !resolver) return false;
+    // 只认当前 pending 的那一份：旧尝试残留的 resolver 绝不能被新 pending
+    // 的应答消费（反之亦然），否则一次应答会收口错轮的 promise。
+    if (resolver.requestId !== pending.requestId) return false;
 
-    if (resolver.timer) clearTimeout(resolver.timer);
-    this.resolvers.delete(id);
+    this.discardQuestionResolver(id);
     resolver.resolve({ answers: answer.answers ?? {} });
     this.apply(id, { type: "input_resolved", at: Date.now() });
     return true;
   }
 
   /**
-   * 清理一个子会话：终止进程 + 移除 worktree。
+   * 清理一个子会话：移除 worktree（以及按策略处理分支）。
+   *
+   * **只在它已经停下来、且工作目录没有未提交改动时才动手**：
+   *  - 非终态（准备中 / 运行中 / 等你处理）→ 拒绝，让调用方先中断 ——
+   *    「清理」不是「中断」，删掉它正在用的目录等于当场毁掉它的工作；
+   *  - worktree 里有未提交改动 → 拒绝，删目录不可逆。
+   *
+   * 两种情况都返回 `ok: false` 并带上原因，**不做任何状态变更**。
    *
    * `keepBranch` 为真时分支一定保留；否则当分支上还有未合并提交时也保留，
    * 并在返回值里说明原因（不静默吞掉用户可能需要的提交）。
@@ -772,10 +1234,34 @@ export class SuperAgentManager {
   ): Promise<{ ok: boolean; branchKept?: boolean; reason?: string }> {
     const session = this.get(id);
     if (!session) return { ok: false };
+    // 两道硬闸门，都在改动任何状态之前判：
+    //  1. 还在跑（准备中 / 运行中 / 等你处理）→ 清理会把它的进程与正在用的
+    //     目录一起端掉，等于用「清理」这个按钮偷偷做了「中断 + 丢工作」。
+    //     用户想停就先按中断（cancel），清理不是中断的替代品。
+    //  2. worktree 里还有未提交改动 → 删目录不可逆，那些改动会永久消失。
+    // 两者都**如实拒绝**并给出原因，绝不静默放行、也绝不先删再报告。
+    if (!isTerminalSuperStatus(session.status)) {
+      return { ok: false, reason: "子会话仍在运行，请先中断再清理工作目录" };
+    }
+    if (
+      session.isolation.kind === "git_worktree" &&
+      session.isolation.path &&
+      !session.isolation.released &&
+      existsSync(session.isolation.path) &&
+      (await worktreeHasUncommittedChanges(session.isolation.path))
+    ) {
+      return {
+        ok: false,
+        reason: "工作目录还有未提交的改动，已拒绝清理（请先提交或丢弃这些改动）",
+      };
+    }
     // 排队中的会话被清理后不能再被 pump 启动。
     this.dequeue(id);
     this.started.delete(id);
     this.lastText.delete(id);
+    this.policies.delete(id);
+    // 提问定时器/recorder 随记录一起收口 —— 清理后不该再有定时器去动已删的会话。
+    this.discardQuestionResolver(id);
     await this.disposeClient(id);
     this.forgetChild(id);
     // 排队中就被清理的合并子会话不会走到 prepare 的收尾（它根本没启动）——
@@ -807,11 +1293,20 @@ export class SuperAgentManager {
     }
     const probe = await probeGitRepo(this.deps.repoRoot);
     if (session.isolation.kind === "git_worktree" && probe.isRepo && session.isolation.branch) {
+      // 合并成功后，分支的提交已并入 HEAD、不再以 baseRef 为祖先，
+      // `baseRef..branch` 会把它们数成「未合并」，导致手动清理误判「有未合并
+      // 提交」而保留分支。与 releaseMergedIsolation 同一口径：先用只读的
+      // isBranchMerged 核验，通过则不传 baseRef、显式给出已核验信号。
+      const merged =
+        session.integration?.state === "merged" &&
+        (await isBranchMerged({ repoRoot: this.deps.repoRoot, branch: session.isolation.branch }));
       const result = await removeWorktree({
         repoRoot: this.deps.repoRoot,
         targetPath: session.isolation.path,
         branch: session.isolation.branch,
-        baseRef: session.isolation.baseRef,
+        ...(merged
+          ? { branchDeletionVerified: true }
+          : { baseRef: session.isolation.baseRef }),
         keepBranch: options.keepBranch,
       });
       this.removeSession(id);
@@ -926,6 +1421,9 @@ export class SuperAgentManager {
         targetPath: target,
         branch,
         keepBranch: false,
+        // 上面已用 isBranchMerged 核过「分支已并入当前 HEAD」：合并后 baseRef
+        // 不再是祖先，delete 的依据是这次核验，而不是 baseRef..branch 的计数。
+        branchDeletionVerified: true,
       });
       if (!removal.removed || removal.branchKept) {
         result.kept += 1;
@@ -997,6 +1495,191 @@ export class SuperAgentManager {
   }
 
   /**
+   * 清扫 `.iflow/super/attachments/` 下按 mtime 过期的附件副本。
+   *
+   * `sweepStaleAttachmentDirs`（attachments.ts）只扫 OS 临时目录，不碰项目内
+   * 的 super 隔离子树 —— 子会话附件的孤儿目录此前无人清扫。这里只删「年轻」
+   * 的反面：mtime 老于阈值的目录，活着的子会话正在用的附件目录即使老也保留。
+   * best-effort：单个目录删除失败只记日志，继续其它。
+   */
+  async sweepStaleSuperAttachmentDirs(options: {
+    now?: number;
+    maxAgeMs?: number;
+  } = {}): Promise<number> {
+    return this.sweepStaleIsolationDir("attachments", {
+      maxAgeMs: options.maxAgeMs ?? SUPER_ATTACHMENT_MAX_AGE_MS,
+      now: options.now,
+    });
+  }
+
+  /** 清扫 `.iflow/super/dirs/` 下按 mtime 过期的降级目录（非 git 仓库 / worktree 建失败时创建）。 */
+  async sweepStaleSuperDirs(options: { now?: number; maxAgeMs?: number } = {}): Promise<number> {
+    return this.sweepStaleIsolationDir("dirs", {
+      maxAgeMs: options.maxAgeMs ?? SUPER_DIR_MAX_AGE_MS,
+      now: options.now,
+    });
+  }
+
+  /**
+   * `sweepStaleSuperAttachmentDirs` / `sweepStaleSuperDirs` 共用的实现。
+   *
+   * `attachments/` 的目录名是子会话 id，`dirs/` 的目录名是 `<slug>-<unique>`；
+   * 保护集按两处分别构造：活着的子会话 id（附件）与它的 isolation.path 末段
+   * （降级目录）。终态的历史记录不保护 —— 它们正是清扫对象。
+   */
+  private async sweepStaleIsolationDir(
+    kind: "attachments" | "dirs",
+    options: { maxAgeMs: number; now?: number },
+  ): Promise<number> {
+    if (this.disposed) return 0;
+    const root = superIsolationDir(this.deps.repoRoot, kind);
+    let entries: Dirent[];
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      return 0; // 子树还没建过 —— 没有残留。
+    }
+    const liveAttachments = new Set<string>();
+    const liveDirs = new Set<string>();
+    for (const session of this.sessions.values()) {
+      if (isTerminalSuperStatus(session.status)) continue;
+      liveAttachments.add(session.id);
+      if (session.isolation.kind === "directory" && session.isolation.path) {
+        liveDirs.add(path.basename(session.isolation.path));
+      }
+    }
+    const now = options.now ?? Date.now();
+    let removed = 0;
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (kind === "attachments" ? liveAttachments.has(entry.name) : liveDirs.has(entry.name)) {
+        continue;
+      }
+      const target = path.join(root, entry.name);
+      try {
+        const info = await stat(target);
+        if (now - info.mtimeMs < options.maxAgeMs) continue;
+        await rm(target, { recursive: true, force: true });
+        removed += 1;
+      } catch (error) {
+        // 单个目录失败（被占用 / 权限）不影响其它：记日志继续。
+        this.deps.log.warn(
+          `super agent: 清扫 ${kind} 残留 ${target} 失败：${errorMessage(error)}`,
+        );
+      }
+    }
+    if (removed > 0) {
+      this.deps.log.info(`super agent: 已清扫 ${removed} 个过期 ${kind} 残留目录`);
+    }
+    return removed;
+  }
+
+  /**
+   * 轻量统计跨历史会话的残留目录（新建会话时的检测）。
+   *
+   * 只读目录 + 计数，不跑任何 git 探测（那些要几秒到几十秒），因此不阻塞新建
+   * 会话主流程。三类目录同在 `.iflow/super/` 下：worktrees / dirs / attachments。
+   */
+  async countResidue(): Promise<SuperResidueCount> {
+    const countDirs = async (kind: "worktrees" | "dirs" | "attachments"): Promise<number> => {
+      try {
+        const entries = await readdir(superIsolationDir(this.deps.repoRoot, kind), {
+          withFileTypes: true,
+        });
+        return entries.filter((entry) => entry.isDirectory()).length;
+      } catch {
+        return 0; // 子树不存在 = 零残留。
+      }
+    };
+    const [worktrees, dirs, attachments] = await Promise.all([
+      countDirs("worktrees"),
+      countDirs("dirs"),
+      countDirs("attachments"),
+    ]);
+    return { worktrees, dirs, attachments, total: worktrees + dirs + attachments };
+  }
+
+  /**
+   * 用户明确授权后的**全量清空**（「清空并新建」）。
+   *
+   * 与 `sweepStaleWorktrees` / `cleanup` 的安全闸门刻意不同：这里**不再保护**
+   * 未合并 worktree、未提交改动与未合并分支 —— 二次确认框已经醒目警示过
+   * 「未提交/未合并工作会永久丢失」，用户点确认就是授权。清空范围：
+   *  1. 所有 `iflow/super/` 命名空间下已注册的 worktree（含未合并、含脏目录）；
+   *     目录用 Node 递归删（不跟随链接，见 worktree.ts#defaultRemoveDir），
+   *     分支用 `branchDeletionVerified` 走 force 删除，不做合并核验；
+   *  2. `worktrees/` 下不在注册表里的孤儿目录（半删残留）；
+   *  3. 所有 `iflow/super/` 本地分支（含上面目录已删但分支还在的孤儿）；
+   *  4. `dirs/` 与 `attachments/` 下的全部目录。
+   *
+   * best-effort：单个目录删除失败只记日志、计入 failed，继续其它，绝不阻断
+   * 随后的新建会话。清空后把受影响的记录标成 released，看板不再显示待清理。
+   */
+  async purgeAllResidue(): Promise<SuperResiduePurgeResult> {
+    const result: SuperResiduePurgeResult = { worktrees: 0, dirs: 0, attachments: 0, failed: 0 };
+    if (this.disposed) return result;
+
+    // 1. 已注册的 super worktree：强制删目录 + 强制删分支（含未合并）。
+    const registered = await listWorktrees(this.deps.repoRoot).catch(() => []);
+    for (const item of registered) {
+      if (!item.branch?.startsWith(SUPER_BRANCH_PREFIX)) continue;
+      const removal = await removeWorktree({
+        repoRoot: this.deps.repoRoot,
+        targetPath: item.path,
+        branch: item.branch,
+        keepBranch: false,
+        // 用户已授权连未合并分支一起清空：跳过 baseRef 合并核验，走 -D。
+        branchDeletionVerified: true,
+      });
+      this.markWorktreeReleased(item.path);
+      if (removal.removed) {
+        result.worktrees += 1;
+      } else {
+        result.failed += 1;
+        this.deps.log.warn(`super agent: 清空 worktree ${item.path} 失败：${removal.reason ?? ""}`);
+      }
+    }
+
+    // 2 + 4. 三类子树里剩下的目录（孤儿 worktree、dirs、attachments）全删。
+    // worktrees/ 里第 1 步已删掉的目录这里会 readdir 不到，天然幂等。
+    for (const kind of ["worktrees", "dirs", "attachments"] as const) {
+      const root = superIsolationDir(this.deps.repoRoot, kind);
+      let entries: Dirent[];
+      try {
+        entries = await readdir(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const target = path.join(root, entry.name);
+        try {
+          await rm(target, { recursive: true, force: true, maxRetries: 3 });
+          if (kind === "worktrees") result.worktrees += 1;
+          else if (kind === "dirs") result.dirs += 1;
+          else result.attachments += 1;
+          this.markWorktreeReleased(target);
+        } catch (error) {
+          result.failed += 1;
+          this.deps.log.warn(`super agent: 清空 ${kind} 目录 ${target} 失败：${errorMessage(error)}`);
+        }
+      }
+    }
+
+    // 3. 孤儿分支（目录已不在、worktree 元数据已 prune，但分支仍留着）。
+    for (const branch of await listSuperBranches(this.deps.repoRoot)) {
+      const deleted = await deleteSuperBranch(this.deps.repoRoot, branch);
+      if (!deleted) {
+        this.deps.log.warn(`super agent: 清空分支 ${branch} 失败（可能仍被签出）`);
+      }
+    }
+    // 让 git 的 worktree 记账与磁盘现状一致（避免留下坏元数据）。
+    await pruneWorktrees(this.deps.repoRoot);
+    this.emit();
+    return result;
+  }
+
+  /**
    * 把指向某个 worktree 目录的记录都标成「隔离已释放」。
    *
    * 清扫掉的可能是历史（archived）子会话的工作目录 —— 它们的记录留在归档里，
@@ -1045,7 +1728,7 @@ export class SuperAgentManager {
       if (!isTerminalSuperStatus(session.status)) {
         // 面板正在关闭 —— 这一轮同样不许落改动、不许自动合并。
         this.interrupted.set(id, session.attempts ?? 1);
-        this.apply(id, { type: "cancelled", at: Date.now() });
+        this.apply(id, { type: "cancelled", at: Date.now(), source: "system" });
       }
       await this.disposeClient(id);
       // worktree 保留（里面可能有未合并的工作），附件副本是纯拷贝 → 删掉。
@@ -1081,6 +1764,7 @@ export class SuperAgentManager {
     this.lastText.clear();
     this.lastThought.clear();
     this.promptTokens.clear();
+    this.policies.clear();
     this.queue.length = 0;
     return kept;
   }
@@ -1108,7 +1792,7 @@ export class SuperAgentManager {
       const next = this.queue.shift();
       if (!next) return;
       this.started.add(next.id);
-      void this.prepare(next.id, next.spec, next.retry);
+      void this.prepare(next.id, next.spec, next.retry, next.policy);
     }
   }
 
@@ -1146,7 +1830,57 @@ export class SuperAgentManager {
     return count;
   }
 
-  private async prepare(id: string, spec: SuperTaskSpec, retry?: SuperRetryState): Promise<void> {
+  /**
+   * 准备并执行一个子会话。
+   *
+   * `prepareInner` 只把「隔离环境建好之后」的部分放进 try/finally：准备阶段
+   * 的抛错（worktree 降级目录的 `mkdir` 遇到 ENOTDIR/EPERM、附件目录
+   * `mkdir` 失败……）会直接冒出来。旧实现因此把并发槽位（`started`）永久
+   * 占着 —— 一个根本没起来的子会话就把并发池吃掉一格，会话也卡在「准备中」。
+   *
+   * 这层 wrapper 兜住三条纪律：
+   *  - **任何路径**（正常结束 / 提前 return / 抛错）都归还槽位；
+   *  - 抛错时如实记成 failed 并上报，绝不谎称它在跑；
+   *  - 合并子会话即使在准备阶段失败也要走一次收尾判定 —— 否则来源子会话的
+   *    integration 永远停在旧状态。
+   */
+  private async prepare(
+    id: string,
+    spec: SuperTaskSpec,
+    retry?: SuperRetryState,
+    policy: ResolvedSuperSpawnPolicy = resolveSpawnPolicy(null),
+  ): Promise<void> {
+    const attempt = this.sessions.get(id)?.attempts ?? 1;
+    try {
+      await this.prepareInner(id, spec, retry, policy);
+    } catch (error) {
+      // 准备阶段抛错：会话不能被留在「准备中」，也不能假装它跑过。
+      const latest = this.sessions.get(id);
+      if (
+        latest &&
+        (latest.attempts ?? 1) === attempt &&
+        !isTerminalSuperStatus(latest.status)
+      ) {
+        this.apply(id, { type: "failed", error: errorMessage(error), at: Date.now() });
+        this.notifyReport(id);
+      }
+      // 合并子会话的收尾不看进程是否跑过：目标分支没并入就如实记「仍保留」。
+      await this.finalizeMergeChild(id);
+    } finally {
+      // 槽位必须回收。已被一次重试接管（attempts 变了）时不能动 —— 那一轮
+      // 才是槽位现在的主人。
+      const latest = this.sessions.get(id);
+      if (!latest || (latest.attempts ?? 1) === attempt) this.started.delete(id);
+      this.pump();
+    }
+  }
+
+  private async prepareInner(
+    id: string,
+    spec: SuperTaskSpec,
+    retry: SuperRetryState | undefined,
+    policy: ResolvedSuperSpawnPolicy,
+  ): Promise<void> {
     const session = this.sessions.get(id);
     if (!session || this.disposed || isTerminalSuperStatus(session.status)) {
       // 排队期间被取消 / 清理 / 面板关闭 —— 不要为它建目录或起进程。
@@ -1219,6 +1953,22 @@ export class SuperAgentManager {
       }
     }
 
+    // 隔离一建好就**先写回记录**，再判 early-return：此前 cancel 只 apply
+    // cancelled，prepareInner 在这里（worktree 已建好、isolation 还没写回）命中
+    // 终态守卫直接 return，磁盘上的 worktree 与分支不在任何记录里，成为无人
+    // 认领的孤儿（清理/清扫都找不到它）。写回按 attempt 号守住 —— 已被一次
+    // 重试取代的旧一轮不得把它的 isolation 盖到新一轮头上。
+    const beforeGuards = this.sessions.get(id);
+    if (beforeGuards && !this.disposed && (beforeGuards.attempts ?? 1) === attempt) {
+      this.sessions.set(id, {
+        ...beforeGuards,
+        isolation,
+        queued: false,
+        updatedAt: Date.now(),
+      });
+      this.emit();
+    }
+
     const current = this.sessions.get(id);
     if (!current || this.disposed || isTerminalSuperStatus(current.status)) {
       this.started.delete(id);
@@ -1226,8 +1976,6 @@ export class SuperAgentManager {
     }
     // 准备期间又发生了一次重试 —— 让新的一次执行接管。
     if ((current.attempts ?? 1) !== attempt) return;
-    this.sessions.set(id, { ...current, isolation, queued: false, updatedAt: Date.now() });
-    this.emit();
 
     let model: string | null = null;
     let usageReport: TurnUsageReport | undefined;
@@ -1287,18 +2035,36 @@ export class SuperAgentManager {
       }
       this.clients.set(id, client);
 
-      const { sessionId } = await client.newSession({ cwd: isolation.path, mcpServers: [] });
+      const { sessionId } = await client.newSession({
+        cwd: isolation.path,
+        // Broker endpoints for the configured MCP servers (one shared process
+        // per server across ALL children). Empty when the host has no broker
+        // (no configured servers, or broker startup failed — the CLI process
+        // is then scoped to the sentinel by the host and spawns nothing).
+        mcpServers: this.deps.childMcpServers?.() ?? [],
+        // 工具黑名单与主会话的 `settings.disallowed_tools` 同一机制；**为空时
+        // 不带 settings** —— 缺省策略下 `session/new` 的请求形状必须与既有
+        // 行为逐字节一致（既有测试断言子会话不传 settings）。
+        ...(policy.disallowedTools.length > 0
+          ? { settings: { disallowed_tools: [...policy.disallowedTools] } }
+          : {}),
+      });
       this.apply(id, { type: "started", cliSessionId: sessionId, at: Date.now() });
 
-      // 子会话推 `yolo` 是**刻意的**：子会话必须完全自主，不因审批往返而停顿，
-      // 也不该把审批变成人工负担。代价是 `yolo` 下内核通常**不发**
-      // `session/request_permission`，所以审批点上的依赖护栏（callbacksFor 里的
-      // classifyChildShellCommand）只是**兜底** —— 万一某类工具仍然发审批，就仍然
-      // 自动放行（shell 用 allow_once）+ 拦危险 shell；它不是主防线，不能依赖它。
-      try {
-        await client.setMode(sessionId, "yolo");
-      } catch (error) {
-        this.deps.log.warn(`子会话切换到免确认模式失败（改由宿主自动放行）：${errorMessage(error)}`);
+      // 子会话推 `yolo` 是 `auto` 策略**刻意**的语义：子会话完全自主，不因审批
+      // 往返而停顿。代价是 `yolo` 下内核通常**不发** `session/request_permission`，
+      // 所以审批点上的依赖护栏（callbacksFor 里的 classifyChildShellCommand）只是
+      // **兜底** —— 万一某类工具仍然发审批，就仍然自动放行（shell 用 allow_once）
+      // + 拦危险 shell；它不是主防线，不能依赖它。
+      //
+      // `supervised` / `deny` **绝不推 yolo**：它们的全部意义就是让审批真的发生
+      // （远程任务不能静默清零风险）。
+      if (policy.approval === "auto") {
+        try {
+          await client.setMode(sessionId, "yolo");
+        } catch (error) {
+          this.deps.log.warn(`子会话切换到免确认模式失败（改由宿主自动放行）：${errorMessage(error)}`);
+        }
       }
 
       model = this.deps.currentModel();
@@ -1338,7 +2104,7 @@ export class SuperAgentManager {
       // 「已中断，改动保留在分支（未合并）」。
       const blocked = this.settleBlockReason(id, attempt);
       if (response.stopReason === "cancelled") {
-        this.apply(id, { type: "cancelled", at });
+        this.apply(id, { type: "cancelled", at, source: "system" });
         // 回合被取消：子会话可能已经在 worktree 里改了东西 —— 那些改动留在
         // 分支上，**没有**被合并。如实记下来，别让看板装作「什么都没发生」。
         this.recordInterrupted(id, blocked ?? "cancelled");
@@ -1403,7 +2169,8 @@ export class SuperAgentManager {
       }
       // 自动合并成功后释放隔离。必须在进程回收之后：Windows 上子进程的 cwd
       // 还停在 worktree 里时，目录删不掉（会留下半删的目录）。
-      if (this.sessions.get(id)?.integration?.state === "merged") {
+      // 已被一次重试取代时同样**绝不能删** —— 新的一轮复用的就是这个目录。
+      if (isCurrentAttempt && this.sessions.get(id)?.integration?.state === "merged") {
         await this.releaseIsolationWithRetry(id, "merged");
       }
       // 「没有产生任何提交」的子会话同样要释放隔离（目录与空分支都是残留）。
@@ -1434,6 +2201,19 @@ export class SuperAgentManager {
       // 合并子会话收尾：用只读 git 检测目标分支是否真的并入了当前分支，
       // 再把结果写回来源子会话的 integration（失败/中断同样要如实记）。
       await this.finalizeMergeChild(id);
+      // 附件副本只服务这一轮子会话：终态（completed / failed / cancelled）
+      // 一律删掉，避免跨会话堆积。旧的附件泄漏点只有 cleanup / dispose /
+      // forgetMainSession，正常完成/失败/中断都不会删。
+      //
+      // 两道边界：只对当前 attempt 删 —— 已被一次重试取代时，新的 prepareInner
+      // 已经把新一份附件 stage 到同一个 id 目录，旧的一轮绝不能把它删掉；
+      // 重试会重新 stage（`stageSuperAttachments` 在 prepare 阶段调用），因此
+      // 这里删除不会影响重试再次取用附件。
+      if (isCurrentAttempt) {
+        await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(
+          () => undefined,
+        );
+      }
       this.pump();
     }
   }
@@ -1514,34 +2294,46 @@ export class SuperAgentManager {
       onSessionUpdate: (notification) => {
         const update = notification.update;
         const session = this.sessions.get(id);
-        if (session && session.isolation.kind !== "repo") {
-          const verdict = classifyChildToolCall(
-            {
-              sessionUpdate: update.sessionUpdate,
-              toolCallId: "toolCallId" in update ? update.toolCallId : undefined,
-              toolName: "toolName" in update ? update.toolName : undefined,
-              kind: "kind" in update ? update.kind : undefined,
-              status: "status" in update ? update.status : undefined,
-              title: "title" in update ? update.title : undefined,
-              args: "args" in update ? update.args : undefined,
+        // **所有隔离档位都要过预检**：此前这里跳过了 repo 档（`kind !== "repo"`），
+        // 而 repo 档（主仓工作区 / 合并子会话）恰恰是唯一一档「命令直接作用于
+        // 用户工作区」的隔离方式 —— `git reset --hard` / `git clean -fd` 会在
+        // 那里不可逆地丢掉用户未提交的改动。护栏按 `repoWorkspace` 区分档位：
+        // 破坏性 git 规则只对 repo 档生效，worktree 档的判定结果不变。
+        if (session) {
+          const guardCtx: ChildShellGuardContext = {
+            cwd: session.isolation.path,
+            repoRoot: this.deps.repoRoot,
+            repoWorkspace: session.isolation.kind === "repo",
+            nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
+            readLocalFile: (filePath) => {
+              try {
+                if (statSync(filePath).size > 1024 * 1024) return null;
+                return readFileSync(filePath, "utf8");
+              } catch {
+                return null;
+              }
             },
-            {
-              cwd: session.isolation.path,
-              repoRoot: this.deps.repoRoot,
-              nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
-              readLocalFile: (filePath) => {
-                try {
-                  if (statSync(filePath).size > 1024 * 1024) return null;
-                  return readFileSync(filePath, "utf8");
-                } catch {
-                  return null;
-                }
-              },
-            },
-          );
+          };
+          const toolFrame = {
+            sessionUpdate: update.sessionUpdate,
+            toolCallId: "toolCallId" in update ? update.toolCallId : undefined,
+            toolName: "toolName" in update ? update.toolName : undefined,
+            kind: "kind" in update ? update.kind : undefined,
+            status: "status" in update ? update.status : undefined,
+            title: "title" in update ? update.title : undefined,
+            args: "args" in update ? update.args : undefined,
+          };
+          const verdict = classifyChildToolCall(toolFrame, guardCtx);
           if (verdict?.decision === "deny" && verdict.severity === "session") {
-            this.deps.log.warn(`[${id}] 预检拒绝子会话命令并终止会话：${verdict.reason ?? ""}`);
-            void this.cancel(id);
+            this.blockChildSession(id, verdict.reason ?? "blocked by the host guard");
+            return;
+          }
+          // 写 / 编辑工具不带命令文本，shell 护栏对它们完全失明。repo 档
+          // 直接跑在主仓工作区，必须在同一帧上拦住改写 .git/ 元数据或宿主
+          // .iflow/super/ 子会话记录的动作 —— 那会绕过全部安全网。
+          const writeVerdict = classifyChildFileWrite(toolFrame, guardCtx);
+          if (writeVerdict?.decision === "deny" && writeVerdict.severity === "session") {
+            this.blockChildSession(id, writeVerdict.reason ?? "blocked by the host guard");
             return;
           }
         }
@@ -1594,66 +2386,16 @@ export class SuperAgentManager {
           if (!nested) this.patchTodos(id, normalizeSuperTodos(update.entries));
         }
       },
-      // 兜底路径：审批自动放行，不产生待办、不打扰主会话。
-      // 子会话推的是 yolo，内核通常根本不发 `session/request_permission`；这里
-      // 只在万一某类工具仍然发审批时生效，所以下面的依赖护栏同样是兜底而非主防线。
-      //
-      // 「自动放行」之前仍过依赖护栏（2026-11-11 事故：子会话把主仓
-      // node_modules 联接进 worktree 后跑 `npm ci`，顺着联接清空了用户依赖）。
-      // 护栏是 `shared/super-agent-guard.ts` 的纯函数表，这里只负责给它喂
-      // 命令文本与隔离上下文，命中即拒绝 —— 模型看到工具被拒后可自行换方案。
-      onRequestPermission: async (request) => {
-        const session = this.sessions.get(id);
-        const shell = isShellToolCall(request.toolCall);
-        if (shell && session) {
-          const command = extractShellCommand(request.toolCall);
-          if (command) {
-            const verdict = classifyChildShellCommand(command, {
-              cwd: session.isolation.path,
-              repoRoot: this.deps.repoRoot,
-              nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
-            });
-            if (verdict.decision === "deny") {
-              this.deps.log.warn(
-                `[${id}] 拒绝子会话命令（保护主工作区依赖）：${verdict.reason ?? ""}`,
-              );
-              const reject =
-                request.options.find((option) => option.kind === "reject_once") ??
-                request.options.find((option) => option.kind.startsWith("reject"));
-              // 拒绝也只能用 agent 自己给出的选项 id（CLI 用原生枚举解析，
-              // 伪造 id 会抛）；没有拒绝选项就按「取消」—— 与审批超时同一条路。
-              if (reject) {
-                return {
-                  outcome: { outcome: "selected", optionId: reject.optionId },
-                } as RequestPermissionResponse;
-              }
-              return { outcome: { outcome: "cancelled" } } as RequestPermissionResponse;
-            }
-          }
-        }
-        // shell 类必须 `allow_once`：`allow_always` 会让 CLI 对该工具的后续
-        // 调用不再请求权限，宿主护栏就只看得到第一条命令（形同虚设）。
-        const allow = pickChildPermissionOption(request.options, shell);
-        if (!allow) {
-          // 没有任何可放行的选项 —— 只能说「取消」，绝不伪造批准。
-          this.deps.log.warn(
-            `[${id}] 审批请求没有${shell ? " allow_once 允许选项" : "允许选项"}，按取消处理：${
-              request.toolCall.toolName ?? "tool"
-            }`,
-          );
-          return { outcome: { outcome: "cancelled" } } as RequestPermissionResponse;
-        }
-        this.deps.log.debug?.(
-          `[${id}] 自动放行 ${request.toolCall.toolName ?? "tool"}（免确认模式，${allow.kind}）`,
-        );
-        return {
-          outcome: { outcome: "selected", optionId: allow.optionId },
-        } as RequestPermissionResponse;
-      },
+      // 审批策略（Wave3-A）：缺省 `auto` = 既有行为（`yolo` + 自动放行兜底）；
+      // `supervised` 先问策略回调（未提供/抛错/超时按拒绝）；`deny` 直接拒绝。
+      // 依赖护栏对 `auto` 与 `supervised` 都是硬底线，见 `decidePermission`。
+      onRequestPermission: async (request) => this.decidePermission(id, request),
       onUserQuestions: async (request) =>
         (await this.awaitQuestion(id, request.questions)) as UserQuestionsResponse,
-      // 免确认模式不该卡在计划审批上 —— 计划退出也自动批准。
-      onExitPlanMode: async () => ({ approved: true }) as ExitPlanModeResponse,
+      // Plan 模式已移除（2026-11-18）：CLI 仍可能发来 stale `_iflow/plan/exit`，
+      // 按 spawn 审批策略处置（auto 放行 / deny 拒绝 / supervised 走回调），
+      // 绝不让它成为 supervised 的策略后门（见 autoApproveRemovedPlanExit）。
+      onExitPlanMode: async (request) => this.autoApproveRemovedPlanExit(id, request),
       onExit: (code) => {
         const session = this.sessions.get(id);
         if (!session || isTerminalSuperStatus(session.status)) return;
@@ -1662,6 +2404,180 @@ export class SuperAgentManager {
       },
       onStderr: (line) => this.deps.log.debug?.(`[${id}] ${line}`),
     };
+  }
+
+  /** 该子会话的审批策略；拿不到时按缺省 `auto`（与既有行为一致）。 */
+  private policyFor(id: string): ResolvedSuperSpawnPolicy {
+    return this.policies.get(id) ?? resolveSpawnPolicy(null);
+  }
+
+  /**
+   * 权限请求裁决。
+   *
+   * - `deny`：直接拒绝（映射到 agent 自己给出的 reject 选项；没有就取消）。
+   * - `supervised` / `auto`：**先过依赖护栏**（保护主工作区依赖的硬底线，
+   *   2026-11-11 事故）；`supervised` 随后交给策略回调，未提供/抛错/超时按拒绝；
+   *   `auto` 走既有的兜底放行（shell 用 `allow_once`，其余 `allow_always`），
+   *   与旧实现逐字等价。
+   */
+  private async decidePermission(
+    id: string,
+    request: RequestPermissionRequest,
+  ): Promise<RequestPermissionResponse> {
+    const policy = this.policyFor(id);
+    if (policy.approval === "deny") {
+      this.deps.log.info(
+        `[${id}] 审批策略 deny：拒绝 ${request.toolCall.toolName ?? "tool"}`,
+      );
+      return resolvePermissionResponse(request.options, "deny");
+    }
+
+    // 依赖护栏：对 auto / supervised 都是硬底线 —— 即使审批人点了「允许」，
+    // 会清空主仓依赖的命令也绝不放行。
+    const guarded = this.dependencyGuard(id, request);
+    if (guarded) {
+      this.deps.log.warn(`[${id}] 拒绝子会话命令（保护主工作区依赖）：${guarded.reason ?? ""}`);
+      return resolvePermissionResponse(request.options, "deny");
+    }
+
+    if (policy.approval === "supervised") {
+      const decision = await awaitSuperPermissionDecision(
+        policy.onPermissionRequest,
+        toSuperPermissionRequest(request),
+      );
+      this.deps.log.info(
+        `[${id}] 审批策略 supervised：${request.toolCall.toolName ?? "tool"} → ${decision}`,
+      );
+      return resolvePermissionResponse(request.options, decision);
+    }
+
+    // auto —— 既有兜底放行逻辑（yolo 下通常根本走不到这里）。
+    const shell = isShellToolCall(request.toolCall);
+    // shell 类必须 `allow_once`：`allow_always` 会让 CLI 对该工具的后续
+    // 调用不再请求权限，宿主护栏就只看得到第一条命令（形同虚设）。
+    const allow = pickChildPermissionOption(request.options, shell);
+    if (!allow) {
+      // 没有任何可放行的选项 —— 只能说「取消」，绝不伪造批准。
+      this.deps.log.warn(
+        `[${id}] 审批请求没有${shell ? " allow_once 允许选项" : "允许选项"}，按取消处理：${
+          request.toolCall.toolName ?? "tool"
+        }`,
+      );
+      return { outcome: { outcome: "cancelled" } } as RequestPermissionResponse;
+    }
+    this.deps.log.debug?.(
+      `[${id}] 自动放行 ${request.toolCall.toolName ?? "tool"}（免确认模式，${allow.kind}）`,
+    );
+    return {
+      outcome: { outcome: "selected", optionId: allow.optionId },
+    } as RequestPermissionResponse;
+  }
+
+  /**
+   * 依赖护栏（纯判定）：shell 命令命中「会破坏主工作区依赖」的规则时返回理由，
+   * 否则返回 null。与审批策略无关 —— 它是所有放行路径的共同底线。
+   */
+  private dependencyGuard(
+    id: string,
+    request: RequestPermissionRequest,
+  ): { reason?: string } | null {
+    const session = this.sessions.get(id);
+    if (!session || !isShellToolCall(request.toolCall)) return null;
+    const command = extractShellCommand(request.toolCall);
+    if (!command) return null;
+    const verdict = classifyChildShellCommand(command, {
+      cwd: session.isolation.path,
+      repoRoot: this.deps.repoRoot,
+      repoWorkspace: session.isolation.kind === "repo",
+      nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
+    });
+    return verdict.decision === "deny" ? { reason: verdict.reason } : null;
+  }
+
+  /**
+   * 预检命中（`session` 档）时终止子会话，并让原因可见。
+   *
+   * 预检路径只能终止整个子会话（wire 上没有「拒掉单次调用」的通道），而
+   * `session` 档的规则都意味着命令会在用户工作区里造成不可逆损失 —— 停掉
+   * 子会话是唯一能保证命令不执行的处置。
+   *
+   * 原因可见性分档：
+   *  - worktree 档沿用既有行为（`cancel` + 日志）：它的命中只关乎子会话自己的
+   *    临时目录，看板显示「已中断」足够；
+   *  - repo 档改用 `failed` 并把原因写进 `error`：`cancel` 只会留下「被打断」，
+   *    主会话与看板看不出为什么 —— 那是刚被补齐的护栏，原因必须可追溯。
+   *    同时打上 `interrupted` 标记，收尾路径不会代提交、不会自动合并。
+   */
+  private blockChildSession(id: string, reason: string): void {
+    const session = this.sessions.get(id);
+    if (!session || isTerminalSuperStatus(session.status)) return;
+    this.deps.log.warn(`[${id}] 预检拒绝子会话命令并终止会话：${reason}`);
+    if (session.isolation.kind !== "repo") {
+      void this.cancel(id);
+      return;
+    }
+    // 先占住终态再杀进程：内核退出会被记成 failed，终态粘性让随后的迟到
+    // 事件无法改写这条结论（与 cancel 的顺序纪律一致）。
+    this.interrupted.set(id, session.attempts ?? 1);
+    this.apply(id, {
+      type: "failed",
+      error: `Host guard blocked a destructive command and stopped the child session: ${reason}`,
+      at: Date.now(),
+    });
+    const client = this.clients.get(id);
+    if (client && session.cliSessionId) {
+      try {
+        client.cancel(session.cliSessionId);
+      } catch {
+        // 进程可能已经死了 —— 下面的 dispose 会兜住。
+      }
+    }
+    void this.disposeClient(id);
+    this.notifyReport(id);
+  }
+
+  /**
+   * 处理遗留的 `_iflow/plan/exit`（计划模式已移除，2026-11-18）。
+   *
+   * 子会话理论上不会再进入 plan 模式（宿主在 `session/new` 后推 yolo），但 CLI
+   * 内部仍保留该模式与 `exit_plan_mode` 工具。旧会话归档、外部
+   * `~/.iflow/settings.json` 的 `approvalMode: "plan"` 仍可能让它发来
+   * `_iflow/plan/exit`。这条 stale 请求**不能成为策略绕过的后门**：
+   *
+   *  - `auto`（缺省）：无审批语义，记警告后快速放行，与既有行为一致；
+   *  - `deny`：一律拒绝；
+   *  - `supervised`：走与权限请求同一个策略回调裁决（未提供/抛错/超时按拒绝），
+   *    决不允许一个已移除模式的遗留请求悄悄拿到批准、使 supervised 子会话
+   *    在该节点上变成无审批执行。
+   */
+  private async autoApproveRemovedPlanExit(
+    id: string,
+    request: ExitPlanModeRequest,
+  ): Promise<ExitPlanModeResponse> {
+    const planChars = (request.plan ?? "").length;
+    const policy = this.policyFor(id);
+    if (policy.approval === "auto") {
+      this.deps.log.warn(
+        `[${id}] plan mode removed: auto-approving stale _iflow/plan/exit (${planChars} chars of plan text)`,
+      );
+      return { approved: true };
+    }
+    if (policy.approval === "deny") {
+      this.deps.log.warn(`[${id}] plan mode removed: 审批策略 deny 拒绝 stale _iflow/plan/exit`);
+      return { approved: false, reason: "审批策略 deny 拒绝了已移除的 Plan 模式退出请求" };
+    }
+    // supervised：按策略回调裁决，安全默认（回调缺失/抛错/超时）为 deny。
+    const decision = await awaitSuperPermissionDecision(policy.onPermissionRequest, {
+      sessionId: request.sessionId || id,
+      summary: `退出已移除的 Plan 模式（计划 ${planChars} 字符）`,
+    });
+    const approved = decision === "allow_once" || decision === "allow_always";
+    this.deps.log.warn(
+      `[${id}] plan mode removed: supervised 策略 ${approved ? "批准" : "拒绝"} stale _iflow/plan/exit（${decision}）`,
+    );
+    return approved
+      ? { approved: true }
+      : { approved: false, reason: `审批策略未批准 stale _iflow/plan/exit（裁决：${decision}）` };
   }
 
   /** Lazily create the transcript buffer for a child session. */
@@ -1706,7 +2622,28 @@ export class SuperAgentManager {
       if (from === null) continue;
       entry.dirtyFrom = null;
       send(id, from, entry.state.blocks.slice(from));
+      this.evictTranscriptPayloads(entry);
     }
+  }
+
+  /**
+   * 宿主侧子会话转录的载荷裁剪（**与 webview 同一口径**）。
+   *
+   * 子会话的转录只活在宿主内存里（不落盘），但工具输出（64K 上限）、结构化
+   * diff（256K）、图片 data URL（≤8MB）会随子会话跑得越久堆得越多 —— 一个
+   * 长任务就能把扩展宿主顶到几百 MB。这里复用 webview 的
+   * `evictBlockPayloads`：同样的块数上限（`EVICT_KEEP_BLOCKS`，必然大于
+   * 挂载窗口）与字符预算（`EVICT_BUDGET_CHARS`），只释放保留窗口之外的旧
+   * 载荷并打 `evicted` 标记，最新轮次永远可读。
+   *
+   * 裁剪只动载荷、不删块：详情面板的增量通道按索引合并（`from`），删块会
+   * 让索引错位。已在窗口内的块不会被改写，`evictBlockPayloads` 无变化时返回
+   * 原数组（幂等），因此每次推送后顺手跑一遍没有额外拷贝。
+   */
+  private evictTranscriptPayloads(entry: SuperTranscript): void {
+    const blocks = entry.state.blocks;
+    const evicted = evictBlockPayloads(blocks, EVICT_KEEP_BLOCKS);
+    if (evicted !== blocks) entry.state.blocks = evicted;
   }
 
   /**
@@ -1719,17 +2656,26 @@ export class SuperAgentManager {
     const requestId = `${id}-question-${Date.now().toString(36)}`;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        this.resolvers.delete(id);
+        // 旧定时器（上一轮提问留下的）到点时，若 resolver 或 pending 已不是
+        // 这一份，绝不能碰当前状态 —— 那会把新一轮正在等回答的子会话误复位，
+        // 或删掉它的 resolver 让真正的应答永远收不了口。
+        const resolver = this.resolvers.get(id);
+        if (!resolver || resolver.requestId !== requestId) return;
         const session = this.sessions.get(id);
-        if (session) {
-          this.sessions.set(id, { ...session, pending: undefined, updatedAt: Date.now() });
-          this.emit();
+        if (session?.pending?.requestId !== requestId) {
+          this.discardQuestionResolver(id);
+          return;
         }
+        this.discardQuestionResolver(id);
+        // 与 respond() 走同一条 reducer 迁移：status 从 awaiting_input 回到
+        // running、pending 清空。原来只清 pending 不动 status，看板会永远显示
+        // 「等待你回答」却无可答问题，心跳的等待计数也一直虚高。
+        this.apply(id, { type: "input_resolved", at: Date.now() });
         resolve({ answers: {} });
       }, SUPER_PENDING_TIMEOUT_MS);
       if (typeof timer.unref === "function") timer.unref();
 
-      this.resolvers.set(id, { resolve, timer });
+      this.resolvers.set(id, { resolve, timer, requestId });
       const pending: SuperPending = {
         kind: "question",
         requestId,
@@ -1749,7 +2695,24 @@ export class SuperAgentManager {
     this.integrationChain = this.integrationChain
       .then(() => this.runIntegration(id, attempt))
       .catch((error) => {
-        this.deps.log.error(`子会话集成失败：${errorMessage(error)}`);
+        const reason = errorMessage(error);
+        this.deps.log.error(`子会话集成失败：${reason}`);
+        // runIntegration 抛错时若还没写下任何结论，看板会停在旧状态、
+        // maybeRequestAgentMerge 读到空直接 return —— 集成结果彻底丢失。补写
+        // 一条 failed + needsAction：看板有明确去向，主会话也会被请去处理分支。
+        // 若抛错前已记下结论（例如 record 之后才失败），不覆盖它。
+        if (this.sessions.get(id)?.integration) return;
+        this.recordIntegration(
+          id,
+          {
+            mode: this.deps.integrationMode(),
+            state: "failed",
+            needsAction: true,
+            detail: `自动集成失败：${reason}；分支已保留，请手动合并或让智能体合并`,
+            at: Date.now(),
+          },
+          `automatic integration failed: ${reason}; the branch is kept and still has to be merged`,
+        );
       });
     await this.integrationChain;
   }
@@ -2232,12 +3195,14 @@ export class SuperAgentManager {
 
     // 刻意不传 baseRef：baseRef 是分支起点，合并后分支的提交虽然已经在 HEAD
     // 里，却不再以 baseRef 为祖先，`git rev-list baseRef..branch` 会把它们
-    // 数成「未合并」，分支反而被保留。合并已由上面的 isBranchMerged 确认。
+    // 数成「未合并」，分支反而被保留。合并已由上面的 isBranchMerged 确认，
+    // 这个核验本身就是删分支的依据（branchDeletionVerified）。
     const result = await removeWorktree({
       repoRoot: this.deps.repoRoot,
       targetPath: isolation.path,
       branch: isolation.branch,
       keepBranch: false,
+      branchDeletionVerified: true,
     });
     if (!result.removed || result.branchKept) {
       const reason = result.reason ?? "目录或分支未能删除";
@@ -2319,11 +3284,15 @@ export class SuperAgentManager {
       );
     }
 
+    // 上面已用 branchHasUnmergedCommits 核过「分支上没有独有提交」：删分支
+    // 的依据是这次核验，因此配合 branchDeletionVerified（baseRef 只用于核验，
+    // 不再重复传给 removeWorktree 做第二次计数）。
     const result = await removeWorktree({
       repoRoot: this.deps.repoRoot,
       targetPath: isolation.path,
       branch: isolation.branch,
       keepBranch: false,
+      branchDeletionVerified: true,
     });
     if (!result.removed || result.branchKept) {
       const reason = result.reason ?? "目录或分支未能删除";
@@ -2583,16 +3552,36 @@ export class SuperAgentManager {
    * 会明确「先处理这批结果、此时不要向用户做最终完整汇报」。
    */
   reportPrompt(entries: { session: SuperSessionUi; report: SuperReport }[]): string {
+    return this.reportPromptWithPending(entries).text;
+  }
+
+  /**
+   * 与 {@link reportPrompt} 同文本，额外返回这次汇报的 pendingCount（仍在跑、
+   * 同归属主会话的子会话数）。面板据此把 pendingCount=0 的汇总轮标记为 QQ
+   * 最终答复轮；两处共用同一份计算口径，避免提示词说「还在跑」却标记成最终。
+   */
+  reportPromptWithPending(
+    entries: { session: SuperSessionUi; report: SuperReport }[],
+    options?: { pendingOwner?: string | null },
+  ): { text: string; pendingCount: number } {
     // pendingCount 只统计**同一归属主会话**下还在跑的子会话：这份汇报是投给
     // 某个主会话的，别人家的子会话跟它无关。混进来算的话，提示词里的
     // 「还有 N 个在跑」与面板上的「等待 N 个子会话汇报」就对不上当前会话
     // （用户在会话 A 开着，却看到 B 的孩子也被算成 A 的）。
-    const owner = entries[0]?.session.mainSessionId ?? this.deps.currentMainSessionId() ?? null;
+    //
+    // QQ 主渠道的最终回执也用这个口径判「汇总轮」（pendingCount===0）。面板
+    // 允许显式传入 pendingOwner，让统计口径与等最终答复的 QQ 任务归属对齐，
+    // 避免从 entries[0] 推断 owner 时因异步归属回填而与 awaiter 漂移。普通
+    // 汇报不传该参数，行为与从前逐字节一致。
+    const owner =
+      options?.pendingOwner !== undefined
+        ? options.pendingOwner
+        : (entries[0]?.session.mainSessionId ?? this.deps.currentMainSessionId() ?? null);
     const pendingCount = this.list().filter(
       (session) =>
         !isTerminalSuperStatus(session.status) && (session.mainSessionId ?? owner) === owner,
     ).length;
-    return buildSuperReportPrompt(entries, { pendingCount });
+    return { text: buildSuperReportPrompt(entries, { pendingCount }), pendingCount };
   }
 
   /**

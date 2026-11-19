@@ -99,6 +99,31 @@ describe("super agent · 委派指令解析", () => {
     expect(scan.invalidBlocks).toHaveLength(1);
   });
 
+  it("task 写成字符串数组 → 非法块的原因指向 task 字段", () => {
+    const scan = extractSuperDirectives([
+      "```super-agent",
+      '{"tasks":[["步骤1","步骤2"]]}',
+      "```",
+    ].join("\n"));
+    expect(scan.blocks).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(1);
+    expect(scan.invalidBlocks[0]?.reason).toContain("task 必须是字符串");
+    expect(scan.invalidBlocks[0]?.issues).toEqual(["tasks[0].task 必须是字符串"]);
+    expect(scan.issues).toEqual(["tasks[0].task 必须是字符串"]);
+  });
+
+  it("混合块（一条合法 + 一条畸形）→ 派发合法项并带上 issues", () => {
+    const scan = extractSuperDirectives([
+      "```super-agent",
+      '{"tasks":[{"title":"真的","task":"真的任务"},{"task":123}]}',
+      "```",
+    ].join("\n"));
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]).toEqual([{ title: "真的", task: "真的任务" }]);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.issues).toEqual(["tasks[1].task 必须是字符串"]);
+  });
+
   it("占位符任务被忽略（模型把示例原样抄回来）", () => {
     const text = ['```super-agent', '{"tasks":[{"title":"<标题>","task":"<自包含的任务说明>"}]}', "```"].join("\n");
     const scan = extractSuperDirectives(text);
@@ -712,9 +737,55 @@ describe("super agent · 状态机", () => {
     expect(applySuperEvent(base, { type: "report", report: { state: "dropped", summary: "s", at: 2 }, at: 2 }).status).toBe("cancelled");
   });
 
+  it("report(blocked) 进入 awaiting_input 时必带 pending，不再产出 reportForSession 为 null 的孤儿态", () => {
+    const base = applySuperEvent(session(), { type: "started", cliSessionId: "s1", at: 1 });
+    const next = applySuperEvent(base, {
+      type: "report",
+      report: { state: "blocked", summary: "等用户确认部署", at: 2, humanAction: "请确认是否部署" },
+      at: 2,
+    });
+    expect(next.status).toBe("awaiting_input");
+    expect(next.pending).toBeDefined();
+    expect(next.pending?.kind).toBe("question");
+    expect(next.pending?.questions[0]?.question).toBe("请确认是否部署");
+    expect(next.pending?.requestId).toBeTruthy();
+    const report = reportForSession(next, 3, "fallback");
+    expect(report?.state).toBe("blocked");
+    expect(report?.humanAction).toBe("请确认是否部署");
+  });
+
+  it("report(blocked) 缺 humanAction 时 pending 问题正文退回 summary", () => {
+    const next = applySuperEvent(session(), {
+      type: "report",
+      report: { state: "blocked", summary: "只有摘要可依据", at: 2 },
+      at: 2,
+    });
+    expect(next.status).toBe("awaiting_input");
+    expect(next.pending?.questions[0]?.question).toBe("只有摘要可依据");
+  });
+
   it("失败与中断记录原因", () => {
     expect(applySuperEvent(session(), { type: "failed", error: "boom", at: 1 }).error).toBe("boom");
     expect(applySuperEvent(session(), { type: "cancelled", at: 1 }).status).toBe("cancelled");
+  });
+
+  it("cancelled 事件把来源写入 interruptedBy，无来源时缺省 system", () => {
+    for (const source of ["user", "agent", "system"] as const) {
+      const next = applySuperEvent(session(), { type: "cancelled", at: 1, source });
+      expect(next.status).toBe("cancelled");
+      expect(next.interruptedBy).toBe(source);
+    }
+    expect(applySuperEvent(session(), { type: "cancelled", at: 1 }).interruptedBy).toBe("system");
+  });
+
+  it("中断来源随归档往返，历史无字段时恢复为 system", () => {
+    const cancelled = applySuperEvent(session(), { type: "cancelled", at: 1, source: "agent" });
+    expect(toPersistedSuperSession(cancelled).interruptedBy).toBe("agent");
+    expect(fromPersistedSuperSession(toPersistedSuperSession(cancelled)).interruptedBy).toBe("agent");
+    // 老归档没有这条字段：恢复时如实归为系统中断，不留空。
+    const legacy = toPersistedSuperSession(cancelled);
+    delete legacy.interruptedBy;
+    expect(fromPersistedSuperSession(legacy).interruptedBy).toBe("system");
   });
 
   it("终态判定", () => {
@@ -1107,6 +1178,28 @@ describe("super agent · 合并汇报", () => {
     expect(buffer.dropMissing([session({ id: "b", status: "running" })])).toEqual([]);
   });
 
+  it("takeMissing 返回被清理子会话的完整汇报（迟到结论可如实呈现）", () => {
+    const buffer = new SuperReportBuffer();
+    buffer.add([
+      {
+        session: session({ id: "gone", title: "已归档的任务", status: "completed" }),
+        report: { state: "ready", summary: "迟到的结论正文", at: 1 },
+      },
+      {
+        session: session({ id: "live", title: "仍在跑", status: "running" }),
+        report: { state: "ready", summary: "保住", at: 2 },
+      },
+    ]);
+    const dropped = buffer.takeMissing([session({ id: "live", status: "running" })]);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]?.session.id).toBe("gone");
+    expect(dropped[0]?.session.title).toBe("已归档的任务");
+    expect(dropped[0]?.report.summary).toBe("迟到的结论正文");
+    // 取走后缓冲只剩仍在跑那个，不会让面板卡忙碌，也不会重复提示。
+    expect(buffer.size).toBe(1);
+    expect(buffer.takeMissing([session({ id: "live", status: "running" })])).toEqual([]);
+  });
+
   it("同一子会话只保留最后一条汇报（blocked 被 ready 覆盖）", () => {
     const buffer = new SuperReportBuffer();
     buffer.add([
@@ -1335,6 +1428,28 @@ describe("super agent · 看板摘要", () => {
     expect(digest).toMatch(/\d+ more child session\(s\) omitted for budget/);
     expect(digest).toContain("super-0");
     expect(digest).not.toContain("super-119");
+  });
+
+  it("活跃会话优先拿预算：尾部活跃者的 id 不被 omitted 折叠（抄错 id 会 cancel not-found）", () => {
+    // 实测故障（58 会话现场）：活跃子会话恰好排在数组尾部，旧实现从尾部
+    // 截断，把它们的 id 折叠进「… (N more omitted)」，主 Agent 于是抄到
+    // 一个已被折叠的历史 id 去 cancel —— 宿主报 not-found，中断没生效。
+    const many = Array.from({ length: 60 }, (_, i) =>
+      i < 55
+        ? session({ id: `old-${i}`, title: `历史 ${i}`, status: "completed", summary: "x".repeat(120) })
+        : session({ id: `active-${i}`, title: `活跃 ${i}`, status: "running", summary: "y".repeat(120) }),
+    );
+    const digest = buildSuperDigest(many);
+    expect(digest.length).toBeLessThanOrEqual(SUPER_DIGEST_MAX_CHARS);
+    const omittedAt = digest.indexOf("more child session(s) omitted for budget");
+    expect(omittedAt).toBeGreaterThan(-1);
+    const beforeOmitted = digest.slice(0, omittedAt);
+    // 全部活跃 id 都落在 omitted 之前的保留部分 —— 主 Agent 能抄到正确 id。
+    for (let i = 55; i < 60; i += 1) {
+      expect(beforeOmitted).toContain(`active-${i}`);
+    }
+    // 活跃者排在历史者之前（首个活跃 id 早于首个历史 id）。
+    expect(beforeOmitted.indexOf("active-55")).toBeLessThan(beforeOmitted.indexOf("old-0"));
   });
 
   it("单行摘要压成一行并截断过长文本", () => {
@@ -1781,6 +1896,21 @@ describe("super agent · 宿主与渲染共用块解析", () => {
       { title: "乙", task: "跑测试", attachments: [] },
       // 缺 title 时用任务书首行兜底，绝不编造标题。
       { title: "读代码", task: "读代码", attachments: [] },
+    ]);
+  });
+
+  it("容错拆分：\\uXXXX 转义正确解码成中文，不再读成 uXXXX 乱码", () => {
+    // 源码里的 \\u 在运行时就是载荷正文里的字面 `\u`，正是模型会写出的形态。
+    const body = '{"tasks":[{"title":"\\u4E2D\\u6587","task":"\\u4FEE\\u590D\\u767B\\u5F55"}]}';
+    expect(salvageSuperTasks(body)).toEqual([
+      { title: "中文", task: "修复登录", attachments: [] },
+    ]);
+  });
+
+  it("容错拆分：非法 \\u 十六进制不抛错，退回可读原文", () => {
+    const body = '{"tasks":[{"title":"坏转义","task":"\\uZZZZ 仍然可读"}]}';
+    expect(salvageSuperTasks(body)).toEqual([
+      { title: "坏转义", task: "uZZZZ 仍然可读", attachments: [] },
     ]);
   });
 

@@ -2049,7 +2049,8 @@ pre {
 
 /* Wide settings modal: fixed header + footer, scrolling body between them.
  * The nav rail and content live inside .auth-modal-body (a flex row on wide
- * viewports, collapsing to a stacked tab bar via @container below). */
+ * viewports; below a 560px container it stacks and the nav becomes a
+ * single-row horizontally scrolling tab strip — see SettingsModal). */
 .auth-modal-wide {
   display: flex;
   flex-direction: column;
@@ -2074,7 +2075,7 @@ pre {
   height: min(640px, 86vh);
 }
 
-@media (max-width: 460px) {
+@media (max-width: 560px) {
   .auth-modal-wide .auth-modal-body {
     flex-direction: column;
   }

@@ -21,14 +21,13 @@ import {
   SquareTerminal,
   Wand2,
   X,
-  Zap,
 } from "lucide-react";
 import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type SkillInfo, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
 import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
-import { modeDisplay, t } from "../i18n";
-import { Button, CANVAS_CHIP, Dropdown, ICON_INLINE, IconButton, MenuItem, SearchInput, fuzzyScore } from "./ui";
+import { t } from "../i18n";
+import { Button, CANVAS_CHIP, Dropdown, ICON_INLINE, IconButton, SearchInput, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -298,7 +297,6 @@ export function Composer() {
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
   const commands = useChat((s) => s.state?.commands ?? EMPTY_COMMANDS);
   const skills = useChat((s) => s.state?.skills ?? EMPTY_SKILLS);
-  const modes = useChat((s) => s.state?.modes ?? null);
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
   const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
   const thinkLevel = useChat((s) => s.state?.thinkLevel ?? "auto");
@@ -768,17 +766,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const sendBlocked = replaying || initializing || pending !== null || needsSetup;
   /** Enter/发送 while a real turn streams → the host spawns a child session. */
   const delegateMode = streaming && !replaying && !initializing;
-  // The permission mode is a session-level setting the agent re-reads per turn
-  // (set_mode is an independent JSON-RPC request; CLI 0.5.19 applies it without
-  // touching the in-flight prompt), so it stays switchable while streaming or
-  // while an approval/question card is up. It is only locked before a session
-  // exists (replay/init) or while another switch is in flight.
-  const modeLocked = replaying || initializing || pending !== null;
-  const currentMode = modes?.availableModes.find((m) => m.id === modes.currentModeId) ?? null;
   /** Optimistic switch in flight (`store.pending`, cleared by the confirming
    * snapshot or its 10s failsafe): the trigger shows a spinner instead of its
    * idle icon — the lock alone looked like a dead control. */
-  const modeSwitching = pending?.kind === "mode";
   const modelSwitching = pending?.kind === "model" || pending?.kind === "think";
   /** UI-audit 4.6: the trigger shows the display name (matching the menu rows);
    * an unknown / delisted id falls back to the raw id so the chip never lies
@@ -1871,63 +1861,6 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             buttons to a second line and drift the send key's position. */}
         <div className="flex shrink-0 items-center gap-1.5 px-2 pb-2 pt-2">
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          {/* permission mode dropdown */}
-          {modes && currentMode && (
-            <Dropdown
-              direction="up"
-              menuClass="w-56 max-w-[calc(100vw_-_24px)]"
-              disabled={modeLocked}
-              trigger={(open) => (
-                <Button
-                  variant="canvas"
-                  icon={
-                    modeSwitching ? (
-                      <Loader2 className={`${ICON_INLINE} shrink-0 animate-spin text-primary`} />
-                    ) : (
-                      <Zap className={`${ICON_INLINE} shrink-0 text-primary`} />
-                    )
-                  }
-                  className={`${open ? "bg-surface-2" : ""}`}
-                  aria-haspopup="menu"
-                  aria-expanded={open}
-                  aria-busy={modeSwitching || undefined}
-                  title={modeSwitching ? t("切换中…") : t("权限模式")}
-                  disabled={modeLocked}
-                >
-                  <span className="@max-[340px]:hidden">{currentMode ? modeDisplay(currentMode).label : ""}</span>
-                  {!modeSwitching && (
-                    <ChevronDown className={`${ICON_INLINE} shrink-0 opacity-60 @max-[340px]:hidden`} />
-                  )}
-                </Button>
-              )}
-            >
-              {(close) => (
-                <>
-                  {modes.availableModes.map((m) => {
-                    const view = modeDisplay(m);
-                    return (
-                      <MenuItem
-                        key={m.id}
-                        role="menuitemradio"
-                        selected={m.id === modes.currentModeId}
-                        description={view.desc}
-                        onClick={() => {
-                          if (m.id !== modes.currentModeId) {
-                            beginPending("mode", m.id);
-                            send({ type: "setMode", modeId: m.id });
-                          }
-                          close();
-                        }}
-                      >
-                        {view.label}
-                      </MenuItem>
-                    );
-                  })}
-                </>
-              )}
-            </Dropdown>
-          )}
-
           {/* model dropdown — refreshed at open time: the host re-queries
               GET {baseUrl}/models, so newly added gateway models show up
               without restarting the session.

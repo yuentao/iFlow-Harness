@@ -1,0 +1,843 @@
+{
+  "steps": [
+    {
+      "step": "app-ready",
+      "ok": true
+    },
+    {
+      "step": "settings-open",
+      "ok": true
+    },
+    {
+      "step": "qq-tab",
+      "ok": true
+    },
+    {
+      "step": "edit-click",
+      "ok": "编辑 我的手机（私聊）"
+    },
+    {
+      "step": "delete-click",
+      "ok": "删除 我的手机（私聊）"
+    }
+  ],
+  "measures": {
+    "w500": {
+      "viewport": {
+        "w": 500,
+        "h": 800
+      },
+      "docScrollWidth": 500,
+      "docClientWidth": 500,
+      "bodyScrollWidth": 500,
+      "horizontalOverflow": false,
+      "table": {
+        "label": "允许的用户",
+        "className": "w-full table-fixed border-collapse text-ui-label",
+        "rect": {
+          "x": 50,
+          "y": 345.3,
+          "w": 400,
+          "h": 201,
+          "right": 450,
+          "bottom": 546.3
+        }
+      },
+      "thWidths": [
+        {
+          "text": "条目",
+          "w": 336
+        },
+        {
+          "text": "操作",
+          "w": 64
+        }
+      ],
+      "firstRow": {
+        "noteText": "我的手机（私聊）",
+        "maskedText": "D754********8D11",
+        "maskedHasTail4": true,
+        "maskedRect": {
+          "x": 50,
+          "y": 408.3,
+          "w": 328,
+          "h": 18,
+          "right": 378,
+          "bottom": 426.3
+        },
+        "maskedScrollWidth": 328,
+        "maskedClientWidth": 328,
+        "maskedScrollHeight": 18,
+        "maskedClientHeight": 18,
+        "maskedLineHeight": "18px",
+        "maskedFontSize": "12px",
+        "maskedWhiteSpace": "normal",
+        "maskedOverflowX": false,
+        "noteLines": 1
+      },
+      "actionButtons": [
+        {
+          "label": "编辑 我的手机（私聊）",
+          "rect": {
+            "x": 400,
+            "y": 392.3,
+            "w": 24,
+            "h": 24,
+            "right": 424,
+            "bottom": 416.3
+          }
+        },
+        {
+          "label": "删除 我的手机（私聊）",
+          "rect": {
+            "x": 426,
+            "y": 392.3,
+            "w": 24,
+            "h": 24,
+            "right": 450,
+            "bottom": 416.3
+          }
+        }
+      ],
+      "actionMaxRight": 450,
+      "actionInsideViewport": true,
+      "groupTitle": {
+        "text": "访问控制",
+        "rect": {
+          "x": 50,
+          "y": 219.6,
+          "w": 400,
+          "h": 18,
+          "right": 450,
+          "bottom": 237.6
+        },
+        "lineHeight": "18px",
+        "fontSize": "12px",
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "lines": 1
+      },
+      "groupHint": {
+        "text": "留空表示不接受该来源的任务",
+        "rect": {
+          "x": 50,
+          "y": 241.6,
+          "w": 400,
+          "h": 18,
+          "right": 450,
+          "bottom": 259.6
+        },
+        "belowTitle": true
+      },
+      "editInput": null,
+      "dialog": null,
+      "settingsModal": {
+        "ariaLabel": "设置",
+        "rect": {
+          "x": 16,
+          "y": 88,
+          "w": 468,
+          "h": 624,
+          "right": 484,
+          "bottom": 712
+        },
+        "insideViewport": true,
+        "contentColumnWidth": 400
+      }
+    },
+    "w360": {
+      "viewport": {
+        "w": 360,
+        "h": 800
+      },
+      "docScrollWidth": 360,
+      "docClientWidth": 360,
+      "bodyScrollWidth": 360,
+      "horizontalOverflow": false,
+      "table": {
+        "label": "允许的用户",
+        "className": "w-full table-fixed border-collapse text-ui-label",
+        "rect": {
+          "x": 50,
+          "y": 351.8,
+          "w": 260,
+          "h": 201,
+          "right": 310,
+          "bottom": 552.8
+        }
+      },
+      "thWidths": [
+        {
+          "text": "条目",
+          "w": 196
+        },
+        {
+          "text": "操作",
+          "w": 64
+        }
+      ],
+      "firstRow": {
+        "noteText": "我的手机（私聊）",
+        "maskedText": "D754********8D11",
+        "maskedHasTail4": true,
+        "maskedRect": {
+          "x": 50,
+          "y": 414.8,
+          "w": 188,
+          "h": 18,
+          "right": 238,
+          "bottom": 432.8
+        },
+        "maskedScrollWidth": 188,
+        "maskedClientWidth": 188,
+        "maskedScrollHeight": 18,
+        "maskedClientHeight": 18,
+        "maskedLineHeight": "18px",
+        "maskedFontSize": "12px",
+        "maskedWhiteSpace": "normal",
+        "maskedOverflowX": false,
+        "noteLines": 1
+      },
+      "actionButtons": [
+        {
+          "label": "编辑 我的手机（私聊）",
+          "rect": {
+            "x": 260,
+            "y": 398.8,
+            "w": 24,
+            "h": 24,
+            "right": 284,
+            "bottom": 422.8
+          }
+        },
+        {
+          "label": "删除 我的手机（私聊）",
+          "rect": {
+            "x": 286,
+            "y": 398.8,
+            "w": 24,
+            "h": 24,
+            "right": 310,
+            "bottom": 422.8
+          }
+        }
+      ],
+      "actionMaxRight": 310,
+      "actionInsideViewport": true,
+      "groupTitle": {
+        "text": "访问控制",
+        "rect": {
+          "x": 50,
+          "y": 205,
+          "w": 260,
+          "h": 18,
+          "right": 310,
+          "bottom": 223
+        },
+        "lineHeight": "18px",
+        "fontSize": "12px",
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "lines": 1
+      },
+      "groupHint": {
+        "text": "留空表示不接受该来源的任务",
+        "rect": {
+          "x": 50,
+          "y": 227,
+          "w": 260,
+          "h": 18,
+          "right": 310,
+          "bottom": 245
+        },
+        "belowTitle": true
+      },
+      "editInput": null,
+      "dialog": null,
+      "settingsModal": {
+        "ariaLabel": "设置",
+        "rect": {
+          "x": 16,
+          "y": 88,
+          "w": 328,
+          "h": 624,
+          "right": 344,
+          "bottom": 712
+        },
+        "insideViewport": true,
+        "contentColumnWidth": 260
+      }
+    },
+    "edit500": {
+      "viewport": {
+        "w": 500,
+        "h": 800
+      },
+      "docScrollWidth": 500,
+      "docClientWidth": 500,
+      "bodyScrollWidth": 500,
+      "horizontalOverflow": false,
+      "table": {
+        "label": "允许的用户",
+        "className": "w-full table-fixed border-collapse text-ui-label",
+        "rect": {
+          "x": 50,
+          "y": 330.3,
+          "w": 400,
+          "h": 201,
+          "right": 450,
+          "bottom": 531.3
+        }
+      },
+      "thWidths": [
+        {
+          "text": "条目",
+          "w": 336
+        },
+        {
+          "text": "操作",
+          "w": 64
+        }
+      ],
+      "firstRow": {
+        "noteText": "D754********8D11",
+        "maskedText": "D754********8D11",
+        "maskedHasTail4": true,
+        "maskedRect": {
+          "x": 50,
+          "y": 393.3,
+          "w": 328,
+          "h": 18,
+          "right": 378,
+          "bottom": 411.3
+        },
+        "maskedScrollWidth": 328,
+        "maskedClientWidth": 328,
+        "maskedScrollHeight": 18,
+        "maskedClientHeight": 18,
+        "maskedLineHeight": "18px",
+        "maskedFontSize": "12px",
+        "maskedWhiteSpace": "normal",
+        "maskedOverflowX": false,
+        "noteLines": 1
+      },
+      "actionButtons": [
+        {
+          "label": "保存",
+          "rect": {
+            "x": 400,
+            "y": 377.3,
+            "w": 24,
+            "h": 24,
+            "right": 424,
+            "bottom": 401.3
+          }
+        },
+        {
+          "label": "取消",
+          "rect": {
+            "x": 426,
+            "y": 377.3,
+            "w": 24,
+            "h": 24,
+            "right": 450,
+            "bottom": 401.3
+          }
+        }
+      ],
+      "actionMaxRight": 450,
+      "actionInsideViewport": true,
+      "groupTitle": {
+        "text": "访问控制",
+        "rect": {
+          "x": 50,
+          "y": 204.6,
+          "w": 400,
+          "h": 18,
+          "right": 450,
+          "bottom": 222.6
+        },
+        "lineHeight": "18px",
+        "fontSize": "12px",
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "lines": 1
+      },
+      "groupHint": {
+        "text": "留空表示不接受该来源的任务",
+        "rect": {
+          "x": 50,
+          "y": 226.6,
+          "w": 400,
+          "h": 18,
+          "right": 450,
+          "bottom": 244.6
+        },
+        "belowTitle": true
+      },
+      "editInput": {
+        "rect": {
+          "x": 50,
+          "y": 367.3,
+          "w": 328,
+          "h": 24,
+          "right": 378,
+          "bottom": 391.3
+        },
+        "ariaLabel": "备注 我的手机（私聊）",
+        "value": "我的手机（私聊）",
+        "fontSize": "13px"
+      },
+      "dialog": null,
+      "settingsModal": {
+        "ariaLabel": "设置",
+        "rect": {
+          "x": 16,
+          "y": 88,
+          "w": 468,
+          "h": 624,
+          "right": 484,
+          "bottom": 712
+        },
+        "insideViewport": true,
+        "contentColumnWidth": 400
+      }
+    },
+    "edit360": {
+      "viewport": {
+        "w": 360,
+        "h": 800
+      },
+      "docScrollWidth": 360,
+      "docClientWidth": 360,
+      "bodyScrollWidth": 360,
+      "horizontalOverflow": false,
+      "table": {
+        "label": "允许的用户",
+        "className": "w-full table-fixed border-collapse text-ui-label",
+        "rect": {
+          "x": 50,
+          "y": 351.8,
+          "w": 260,
+          "h": 201,
+          "right": 310,
+          "bottom": 552.8
+        }
+      },
+      "thWidths": [
+        {
+          "text": "条目",
+          "w": 196
+        },
+        {
+          "text": "操作",
+          "w": 64
+        }
+      ],
+      "firstRow": {
+        "noteText": "D754********8D11",
+        "maskedText": "D754********8D11",
+        "maskedHasTail4": true,
+        "maskedRect": {
+          "x": 50,
+          "y": 414.8,
+          "w": 188,
+          "h": 18,
+          "right": 238,
+          "bottom": 432.8
+        },
+        "maskedScrollWidth": 188,
+        "maskedClientWidth": 188,
+        "maskedScrollHeight": 18,
+        "maskedClientHeight": 18,
+        "maskedLineHeight": "18px",
+        "maskedFontSize": "12px",
+        "maskedWhiteSpace": "normal",
+        "maskedOverflowX": false,
+        "noteLines": 1
+      },
+      "actionButtons": [
+        {
+          "label": "保存",
+          "rect": {
+            "x": 260,
+            "y": 398.8,
+            "w": 24,
+            "h": 24,
+            "right": 284,
+            "bottom": 422.8
+          }
+        },
+        {
+          "label": "取消",
+          "rect": {
+            "x": 286,
+            "y": 398.8,
+            "w": 24,
+            "h": 24,
+            "right": 310,
+            "bottom": 422.8
+          }
+        }
+      ],
+      "actionMaxRight": 310,
+      "actionInsideViewport": true,
+      "groupTitle": {
+        "text": "访问控制",
+        "rect": {
+          "x": 50,
+          "y": 205,
+          "w": 260,
+          "h": 18,
+          "right": 310,
+          "bottom": 223
+        },
+        "lineHeight": "18px",
+        "fontSize": "12px",
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "lines": 1
+      },
+      "groupHint": {
+        "text": "留空表示不接受该来源的任务",
+        "rect": {
+          "x": 50,
+          "y": 227,
+          "w": 260,
+          "h": 18,
+          "right": 310,
+          "bottom": 245
+        },
+        "belowTitle": true
+      },
+      "editInput": {
+        "rect": {
+          "x": 50,
+          "y": 388.8,
+          "w": 188,
+          "h": 24,
+          "right": 238,
+          "bottom": 412.8
+        },
+        "ariaLabel": "备注 我的手机（私聊）",
+        "value": "我的手机（私聊）",
+        "fontSize": "13px"
+      },
+      "dialog": null,
+      "settingsModal": {
+        "ariaLabel": "设置",
+        "rect": {
+          "x": 16,
+          "y": 88,
+          "w": 328,
+          "h": 624,
+          "right": 344,
+          "bottom": 712
+        },
+        "insideViewport": true,
+        "contentColumnWidth": 260
+      }
+    },
+    "deleteDialog": {
+      "viewport": {
+        "w": 500,
+        "h": 800
+      },
+      "docScrollWidth": 500,
+      "docClientWidth": 500,
+      "bodyScrollWidth": 500,
+      "horizontalOverflow": false,
+      "table": {
+        "label": "允许的用户",
+        "className": "w-full table-fixed border-collapse text-ui-label",
+        "rect": {
+          "x": 50,
+          "y": 330.3,
+          "w": 400,
+          "h": 201,
+          "right": 450,
+          "bottom": 531.3
+        }
+      },
+      "thWidths": [
+        {
+          "text": "条目",
+          "w": 336
+        },
+        {
+          "text": "操作",
+          "w": 64
+        }
+      ],
+      "firstRow": {
+        "noteText": "我的手机（私聊）",
+        "maskedText": "D754********8D11",
+        "maskedHasTail4": true,
+        "maskedRect": {
+          "x": 50,
+          "y": 393.3,
+          "w": 328,
+          "h": 18,
+          "right": 378,
+          "bottom": 411.3
+        },
+        "maskedScrollWidth": 328,
+        "maskedClientWidth": 328,
+        "maskedScrollHeight": 18,
+        "maskedClientHeight": 18,
+        "maskedLineHeight": "18px",
+        "maskedFontSize": "12px",
+        "maskedWhiteSpace": "normal",
+        "maskedOverflowX": false,
+        "noteLines": 1
+      },
+      "actionButtons": [
+        {
+          "label": "编辑 我的手机（私聊）",
+          "rect": {
+            "x": 400,
+            "y": 377.3,
+            "w": 24,
+            "h": 24,
+            "right": 424,
+            "bottom": 401.3
+          }
+        },
+        {
+          "label": "删除 我的手机（私聊）",
+          "rect": {
+            "x": 426,
+            "y": 377.3,
+            "w": 24,
+            "h": 24,
+            "right": 450,
+            "bottom": 401.3
+          }
+        }
+      ],
+      "actionMaxRight": 450,
+      "actionInsideViewport": true,
+      "groupTitle": {
+        "text": "访问控制",
+        "rect": {
+          "x": 50,
+          "y": 204.6,
+          "w": 400,
+          "h": 18,
+          "right": 450,
+          "bottom": 222.6
+        },
+        "lineHeight": "18px",
+        "fontSize": "12px",
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "lines": 1
+      },
+      "groupHint": {
+        "text": "留空表示不接受该来源的任务",
+        "rect": {
+          "x": 50,
+          "y": 226.6,
+          "w": 400,
+          "h": 18,
+          "right": 450,
+          "bottom": 244.6
+        },
+        "belowTitle": true
+      },
+      "editInput": null,
+      "dialog": {
+        "role": "alertdialog",
+        "ariaLabel": "删除条目",
+        "backdropRect": {
+          "x": 0,
+          "y": 0,
+          "w": 500,
+          "h": 800,
+          "right": 500,
+          "bottom": 800
+        },
+        "rect": {
+          "x": 50,
+          "y": 324.9,
+          "w": 400,
+          "h": 150.3,
+          "right": 450,
+          "bottom": 475.1
+        },
+        "insideViewport": true,
+        "clipped": false,
+        "clippedBy": [],
+        "text": "删除条目删除「我的手机（私聊）」后将无法恢复：完整标识已脱敏，无法从界面还原，需要时只能重新添加。取消删除"
+      },
+      "settingsModal": {
+        "ariaLabel": "设置",
+        "rect": {
+          "x": 16,
+          "y": 88,
+          "w": 468,
+          "h": 624,
+          "right": 484,
+          "bottom": 712
+        },
+        "insideViewport": true,
+        "contentColumnWidth": 400
+      }
+    }
+  },
+  "consoleErrors": [],
+  "files": {
+    "default500": ".iflow\\screens\\qq-access-default-500.png",
+    "default360": ".iflow\\screens\\qq-access-default-360.png",
+    "section360": ".iflow\\screens\\qq-access-section-360.png",
+    "edit500": ".iflow\\screens\\qq-access-edit-500.png",
+    "edit360": ".iflow\\screens\\qq-access-edit-360.png",
+    "deleteConfirm500": ".iflow\\screens\\qq-access-delete-confirm-500.png"
+  },
+  "probes": {
+    "qq-access-default-500.png": {
+      "windowScrollY": 0,
+      "scroller": {
+        "tag": "DIV",
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 472,
+        "rect": {
+          "y": 184,
+          "h": 482,
+          "bottom": 666
+        }
+      },
+      "titleRect": {
+        "y": 219.6,
+        "h": 18,
+        "bottom": 237.6
+      },
+      "tableRect": {
+        "y": 345.3,
+        "h": 201,
+        "bottom": 546.3
+      },
+      "atTitle": "H3:访问控制"
+    },
+    "qq-access-default-360.png": {
+      "windowScrollY": 0,
+      "scroller": {
+        "tag": "DIV",
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 584,
+        "rect": {
+          "y": 184,
+          "h": 482,
+          "bottom": 666
+        }
+      },
+      "titleRect": {
+        "y": 205,
+        "h": 18,
+        "bottom": 223
+      },
+      "tableRect": {
+        "y": 351.8,
+        "h": 201,
+        "bottom": 552.8
+      },
+      "atTitle": "H3:访问控制"
+    },
+    "qq-access-section-360.png": {
+      "windowScrollY": 0,
+      "scroller": {
+        "tag": "DIV",
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 584,
+        "rect": {
+          "y": 184,
+          "h": 482,
+          "bottom": 666
+        }
+      },
+      "titleRect": {
+        "y": 205,
+        "h": 18,
+        "bottom": 223
+      },
+      "tableRect": {
+        "y": 351.8,
+        "h": 201,
+        "bottom": 552.8
+      },
+      "atTitle": "H3:访问控制"
+    },
+    "qq-access-edit-500.png": {
+      "windowScrollY": 0,
+      "scroller": {
+        "tag": "DIV",
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 487,
+        "rect": {
+          "y": 184,
+          "h": 482,
+          "bottom": 666
+        }
+      },
+      "titleRect": {
+        "y": 204.6,
+        "h": 18,
+        "bottom": 222.6
+      },
+      "tableRect": {
+        "y": 330.3,
+        "h": 201,
+        "bottom": 531.3
+      },
+      "atTitle": "H3:访问控制"
+    },
+    "qq-access-edit-360.png": {
+      "windowScrollY": 0,
+      "scroller": {
+        "tag": "DIV",
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 584,
+        "rect": {
+          "y": 184,
+          "h": 482,
+          "bottom": 666
+        }
+      },
+      "titleRect": {
+        "y": 205,
+        "h": 18,
+        "bottom": 223
+      },
+      "tableRect": {
+        "y": 351.8,
+        "h": 201,
+        "bottom": 552.8
+      },
+      "atTitle": "H3:访问控制"
+    },
+    "qq-access-delete-confirm-500.png": {
+      "windowScrollY": 0,
+      "scroller": {
+        "tag": "DIV",
+        "cls": "min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5",
+        "scrollTop": 487,
+        "rect": {
+          "y": 184,
+          "h": 482,
+          "bottom": 666
+        }
+      },
+      "titleRect": {
+        "y": 204.6,
+        "h": 18,
+        "bottom": 222.6
+      },
+      "tableRect": {
+        "y": 330.3,
+        "h": 201,
+        "bottom": 531.3
+      },
+      "atTitle": "DIV:删除条目删除「我的手机（私聊）」后将无法恢复：完"
+    }
+  }
+}

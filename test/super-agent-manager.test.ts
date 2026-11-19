@@ -1,9 +1,16 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { SuperAgentManager, buildTaskPrompt, capTail, SUPER_TEXT_MAX_CHARS } from "../src/panel/super-agent.js";
+import {
+  SuperAgentManager,
+  buildTaskPrompt,
+  capTail,
+  MAX_INLINE_IMAGE_BYTES,
+  SUPER_PENDING_TIMEOUT_MS,
+  SUPER_TEXT_MAX_CHARS,
+} from "../src/panel/super-agent.js";
 import type { AcpClient, AcpClientCallbacks } from "../src/acp/client.js";
 import type { ContentBlock, UserQuestion } from "../src/acp/protocol.js";
 import {
@@ -369,10 +376,14 @@ describe("super agent · 编排", () => {
 
     const request = harness.clients[0]?.newSessionRequests[0];
     expect(request).toBeDefined();
-    // 主会话经 `settings.disallowed_tools` 机械剔除 task 与全部读取/写入/执行
-    // 工具；子会话刻意不传 settings —— 实现与探查都只允许在子会话里跑。
+    // 主会话经 `settings.allowed_tools`（白名单）与 `settings.disallowed_tools`
+    // 机械剔除全部读取/写入/执行工具；子会话刻意不传 settings —— 实现与探查
+    // 都只允许在子会话里跑，内置工具（含 task）必须齐全。MCP 服务器另算：
+    // 子会话进程默认在启动参数层面整体移除（见 panel-spawn-env 的 argv 断言），
+    // 那是进程级开关，不是 session/new 的 settings。
     expect(request?.settings).toBeUndefined();
     expect(JSON.stringify(request ?? {})).not.toContain("disallowed_tools");
+    expect(JSON.stringify(request ?? {})).not.toContain("allowed_tools");
     expect(request?.cwd).toBe(harness.sessions[0]?.isolation.path);
   }, 30000);
 
@@ -732,6 +743,30 @@ describe("super agent · 编排", () => {
     // 目标根本不存在：这才是真的没生效。
     const missing = await harness.manager.cancel("super-does-not-exist");
     expect(missing).toEqual({ ok: false, reason: "not-found" });
+  }, 30000);
+
+  it("中断已归档的历史子会话：按幂等已终态回报，不误报 not-found", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    harness.manager.restoreSessions("main-1", [
+      {
+        id: "super-archived",
+        title: "上次运行的活",
+        task: "干活",
+        status: "cancelled",
+        restored: true,
+        isolation: { kind: "git_worktree", path: "/tmp/wt-old", branch: "iflow/super/old" },
+        mainSessionId: "main-1",
+        createdAt: 100,
+        updatedAt: 200,
+        reports: [],
+      },
+    ]);
+    // 归档记录进程早已退出：中断意图天然达成，不该报成「找不到」让用户
+    // 以为主会话又抄错了一个 id。
+    const outcome = await harness.manager.cancel("super-archived");
+    expect(outcome.ok).toBe(true);
+    expect(outcome.reason).toBe("already-terminal");
   }, 30000);
 
   it("并发超出的派发进排队，槽位空出后自动开跑", async () => {
@@ -1151,12 +1186,56 @@ describe("super agent · 合并子会话（主仓工作区档）", () => {
     // CLI 侧 isPathWithinWorkspace 与宿主 resolveAgentPath 同源：主仓根必须
     // 显式交给 CLI，否则它读不到主仓文件。
     expect(client.includeDirectories).toEqual([repo]);
+    // 合并子会话必须带上机械工具黑名单（嵌套派发工具被剔除），否则任务书
+    // 里的硬边界就只是提示词约束。
+    expect(client.newSessionRequests[0]?.settings).toEqual({
+      disallowed_tools: ["task", "super-agent"],
+    });
 
     // 隔离档位是 repo：没有自己的分支，也没有 worktree。
     const mergeSession = harness.sessions.find((s) => s.id === merge!.id);
     expect(mergeSession?.isolation.kind).toBe("repo");
     expect(mergeSession?.isolation.path).toBe(repo);
     expect(mergeSession?.isolation.branch).toBeUndefined();
+  }, 30000);
+
+  it("repo 档预检拦截破坏性 git 命令：终止合并子会话并留下可见原因", async () => {
+    const repo = makeRepo();
+    // 合并子会话停在 prompt 里，测试在「命令即将执行」的帧上注入破坏性命令。
+    const harness = makeManager(repo, ["commit", "hang"], "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    const branch = harness.sessions[0]!.isolation.branch!;
+
+    const merge = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(merge).not.toBeNull();
+    await until(() => harness.clients.length === 2);
+    const client = harness.clients[1]!;
+    await until(() => client.prompts.length === 1);
+
+    client.callbacks.onSessionUpdate?.({
+      sessionId: "sub",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "run_shell_command",
+        kind: "execute",
+        status: "in_progress",
+        title: "git reset --hard",
+        args: { command: "git reset --hard" },
+      },
+    } as never);
+
+    await until(() => harness.sessions.find((s) => s.id === merge!.id)?.status === "failed");
+    const mergeSession = harness.sessions.find((s) => s.id === merge!.id);
+    // 不能静默放行：子会话被终止，原因写进 failed（主会话汇报读的正是它）。
+    expect(mergeSession?.error).toContain("Host guard");
+    expect(mergeSession?.error).toContain("git reset --hard");
+    expect(client.disposed).toBe(true);
   }, 30000);
 
   it("清理合并子会话只移除记录，绝不删主仓工作区", async () => {
@@ -1914,5 +1993,453 @@ describe("super agent · 子会话 todolist 投影", () => {
     // 主代理自己的 plan（不带 agentId）照常写入。
     sendPlan(client, entries);
     expect(harness.sessions[0]?.todos).toEqual([{ content: "别人的步骤", status: "in_progress" }]);
+  }, 30000);
+});
+
+describe("super agent · 清理的硬闸门", () => {
+  it("运行中的子会话拒绝清理：不杀进程、不删目录、记录还在", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    const worktree = harness.sessions[0]!.isolation.path;
+    expect(existsSync(worktree)).toBe(true);
+
+    const result = await harness.manager.cleanup(spawned.id);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("仍在运行");
+    // 记录、目录、进程都原样 —— 「清理」绝不能代替「中断」。
+    expect(harness.manager.get(spawned.id)).toBeDefined();
+    expect(existsSync(worktree)).toBe(true);
+    expect(harness.clients[0]?.disposed).toBe(false);
+
+    await harness.manager.cancel(spawned.id);
+    await harness.manager.dispose();
+  }, 30000);
+
+  it("工作目录有未提交改动时拒绝清理；处置掉改动后才放行", async () => {
+    const repo = makeRepo();
+    // manual + keepWorktree：完成后工作目录留在磁盘上，测试自己往里写脏文件。
+    const harness = makeManager(
+      repo,
+      "complete",
+      "manual",
+      "main-1",
+      DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+      { keepWorktree: true },
+    );
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    // 宿主在 completed 之后还会跑一次 worktree 快照/代提交，等它收完再动。
+    await until(() => harness.reports.length > 0);
+    const worktree = harness.sessions[0]!.isolation.path;
+    writeFileSync(path.join(worktree, "leftover.txt"), "keep me\n", "utf8");
+
+    const refused = await harness.manager.cleanup(spawned.id);
+    expect(refused.ok).toBe(false);
+    expect(refused.reason).toContain("未提交");
+    // 目录与那份改动都还在 —— 拒绝之后什么都没被删。
+    expect(existsSync(worktree)).toBe(true);
+    expect(readFileSync(path.join(worktree, "leftover.txt"), "utf8")).toBe("keep me\n");
+    expect(harness.manager.get(spawned.id)).toBeDefined();
+
+    // 把改动处置掉（提交）之后，清理才放行。
+    git(worktree, "add", "-A");
+    git(
+      worktree,
+      "-c",
+      "user.name=test",
+      "-c",
+      "user.email=test@example.com",
+      "commit",
+      "-m",
+      "keep leftover",
+    );
+    const cleaned = await harness.manager.cleanup(spawned.id);
+    expect(cleaned.ok).toBe(true);
+    expect(existsSync(worktree)).toBe(false);
+  }, 30000);
+});
+
+describe("super agent · 准备阶段抛错也要回收并发槽位", () => {
+  type Internals = { started: Set<string>; queue: unknown[] };
+
+  it("隔离目录建不出来：会话记为失败，槽位归还给排队的那个", async () => {
+    const repo = makeRepo();
+    // 把 `.iflow` 占成一个普通文件 → worktree / 降级目录的 mkdir 都会 ENOTDIR。
+    writeFileSync(path.join(repo, ".iflow"), "not a directory\n", "utf8");
+    const harness = makeManager(
+      repo,
+      "complete",
+      "merge",
+      "main-1",
+      1, // 上限 1：第二个必须等第一个让出槽位
+    );
+    const first = harness.manager.spawn({ title: "第一个", task: "干活" });
+    const second = harness.manager.spawn({ title: "第二个", task: "干活" });
+
+    // 上限 1：第二个一开始是排队的。
+    expect(harness.sessions.find((s) => s.id === second.id)?.queued).toBe(true);
+
+    // 第一个在准备阶段抛错 → 如实记失败（不能卡在「准备中」）。
+    await until(() => harness.sessions.find((s) => s.id === first.id)?.status === "failed");
+    expect(harness.sessions.find((s) => s.id === first.id)?.error).toBeTruthy();
+
+    // 槽位归还：排队的第二个被 pump 放出来，也在准备阶段失败。
+    // 旧实现在这里会让槽位永远不回收（started 里留着一条「准备中」），
+    // 第二个永远停在 queued。
+    await until(() => harness.sessions.find((s) => s.id === second.id)?.status === "failed");
+    const internals = harness.manager as unknown as Internals;
+    // 状态翻转发生在 catch 里，槽位回收在 finally 里 —— 等它落定再断言。
+    await until(() => internals.started.size === 0);
+    expect(internals.queue).toHaveLength(0);
+
+    await harness.manager.dispose();
+  }, 60000);
+
+  it("附件目录建不出来（stageSuperAttachments 抛错）：同样记失败并归还槽位", async () => {
+    const repo = makeRepo();
+    // 隔离环境能建出来（worktrees 目录可写），但附件目录的位置被一个文件占住。
+    const superDir = path.join(repo, ".iflow", "super");
+    mkdirSync(superDir, { recursive: true });
+    writeFileSync(path.join(superDir, "attachments"), "not a directory\n", "utf8");
+    const source = mkdtempSync(path.join(tmpdir(), "iflow-attachment-"));
+    roots.push(source);
+    const sourceFile = path.join(source, "note.txt");
+    writeFileSync(sourceFile, "hello\n", "utf8");
+
+    const harness = makeManager(repo, "complete", "merge", "main-1", 1);
+    const first = harness.manager.spawn({
+      title: "第一个",
+      task: "干活",
+      attachments: [{ name: "note.txt", path: sourceFile }],
+    });
+    const second = harness.manager.spawn({ title: "第二个", task: "干活" });
+
+    await until(() => harness.sessions.find((s) => s.id === first.id)?.status === "failed");
+    expect(harness.sessions.find((s) => s.id === first.id)?.error).toBeTruthy();
+    // 槽位归还 → 排队的第二个被 pump 放出来（它没有附件，所以正常跑完）。
+    // 旧实现里槽位不回收，第二个会永远停在排队 / 准备中。
+    await until(() => {
+      const status = harness.sessions.find((s) => s.id === second.id)?.status;
+      return status === "completed" || status === "failed" || status === "cancelled";
+    });
+    const internals = harness.manager as unknown as Internals;
+    // 状态先变，finally 里的槽位回收随后落定 —— 等它清零再断言。
+    await until(() => internals.started.size === 0);
+    expect(internals.queue).toHaveLength(0);
+
+    await harness.manager.dispose();
+  }, 60000);
+});
+
+/** 一条最小可用的历史（归档）子会话记录。 */
+function archivedChild(id: string, mainSessionId: string): SuperSessionUi {
+  return {
+    id,
+    title: `历史 ${id}`,
+    task: "旧任务",
+    status: "cancelled",
+    restored: true,
+    mainSessionId,
+    isolation: { kind: "git_worktree", path: `/tmp/${id}`, branch: `iflow/super/${id}` },
+    createdAt: 100,
+    updatedAt: 200,
+    reports: [],
+  };
+}
+
+describe("super agent · 删除主会话时清理它的子会话（H）", () => {
+  it("forgetMainSession 终止活子会话、清掉记录与归档归属，worktree 保留", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang", "manual", "main-1", 2, { keepWorktree: true });
+    const spawned = harness.manager.spawn({ title: "跑着的", task: "长任务" });
+    await until(() => harness.sessions[0]?.status === "running");
+    harness.manager.restoreSessions("main-1", [archivedChild("super-old", "main-1")]);
+    expect(harness.manager.list("main-1")).toHaveLength(2);
+    const branch = harness.manager.get(spawned.id)?.isolation.branch;
+
+    const result = await harness.manager.forgetMainSession("main-1");
+
+    // 进程被回收，记录从看板与归档归属里消失。
+    expect(result.ids).toEqual([spawned.id]);
+    await until(() => harness.clients[0]?.disposed === true);
+    expect(harness.manager.list("main-1")).toEqual([]);
+    expect(harness.manager.list()).toEqual([]);
+    expect(harness.manager.archivableSessions("main-1")).toEqual([]);
+    // 归属集合也必须清掉：留着它，下一次落盘会把空归档重新写回磁盘。
+    expect(harness.manager.archivableMainSessionIds()).not.toContain("main-1");
+    // worktree 与分支保留（删目录不可逆），返回给宿主记日志：活会话与归档
+    // 会话各一份 —— 归档的 worktree 也得上报，否则残留目录无人回收。
+    expect(result.worktrees).toHaveLength(2);
+    const liveWorktree = result.worktrees.find((w) => w.id === spawned.id);
+    expect(liveWorktree?.branch).toBe(branch);
+    const archivedWorktree = result.worktrees.find((w) => w.id === "super-old");
+    expect(archivedWorktree?.path).toBe("/tmp/super-old");
+    expect(archivedWorktree?.branch).toBe("iflow/super/super-old");
+
+    await harness.manager.dispose();
+  }, 30000);
+
+  it("只清目标会话：别的会话名下的子会话不受影响", async () => {
+    const repo = makeRepo();
+    let owner = "main-1";
+    const harness = makeManager(repo, "hang", "manual", () => owner);
+    harness.manager.spawn({ title: "A 的孩子", task: "干活" });
+    await until(() => harness.sessions.length === 1);
+    owner = "main-2";
+    harness.manager.spawn({ title: "B 的孩子", task: "干活" });
+    await until(() => harness.manager.list().length === 2);
+
+    const result = await harness.manager.forgetMainSession("main-1");
+
+    expect(result.ids).toHaveLength(1);
+    const remaining = harness.manager.list();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.mainSessionId).toBe("main-2");
+
+    await harness.manager.dispose();
+  }, 30000);
+});
+
+describe("super agent · 宿主侧子会话转录的资源上限（I）", () => {
+  it("超过保留窗口的旧工具输出被释放，最新块仍完整", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const session = harness.manager.spawn({ title: "长任务", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    await until(() => (harness.clients[0]?.prompts.length ?? 0) === 1);
+    const cb = harness.clients[0]!.callbacks;
+
+    // 210 个工具块 × 20K 输出 —— 合计超过 webview 的字符预算（4M），旧块
+    // 必须被释放；宿主侧此前完全没有上限。
+    const chunk = "x".repeat(20_000);
+    const count = 210;
+    for (let i = 0; i < count; i += 1) {
+      cb.onSessionUpdate?.({
+        sessionId: "sub",
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: `t${i}`,
+          toolName: "read_file",
+          title: `读取 ${i}`,
+          kind: "read",
+          status: "completed",
+          content: [{ type: "content", content: { type: "text", text: chunk } }],
+        },
+      } as never);
+    }
+
+    await until(() =>
+      harness.manager
+        .transcriptBlocks(session.id)
+        .some((block) => block.kind === "tool" && block.evicted === true),
+    );
+    const blocks = harness.manager.transcriptBlocks(session.id);
+    expect(blocks).toHaveLength(count);
+    // 旧块被打上 released 标记、载荷已释放……
+    const oldest = blocks[0];
+    expect(oldest?.kind).toBe("tool");
+    if (oldest?.kind === "tool") {
+      expect(oldest.evicted).toBe(true);
+      expect(oldest.output).toBe("");
+    }
+    // ……最新块仍然完整可读（保留窗口内不裁剪）。
+    const newest = blocks[count - 1];
+    expect(newest?.kind).toBe("tool");
+    if (newest?.kind === "tool") {
+      expect(newest.evicted).toBeUndefined();
+      expect(newest.output.length).toBe(chunk.length);
+    }
+
+    await harness.manager.dispose();
+  }, 30000);
+});
+
+describe("super agent · 看板投影不重发完整任务书（G）", () => {
+  it("list() 只带预览，记录与归档仍保留完整任务书", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete");
+    const task = "按需求改写模块 ".repeat(100);
+    const session = harness.manager.spawn({ title: "长任务", task });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    // 看板投影（随每次 snapshot / blockPatch 整份重发）只带预览。
+    const projected = harness.manager.list("main-1")[0];
+    expect(projected?.task.length).toBeLessThanOrEqual(200);
+    expect(projected?.task.endsWith("…")).toBe(true);
+    // 追溯：记录本身（重试 / PR 正文读它）与归档都保留全文。
+    expect(harness.manager.get(session.id)?.task).toBe(task);
+    expect(harness.manager.archivableSessions("main-1")[0]?.task).toBe(task);
+  }, 30000);
+});
+
+describe("super agent · 编排修复回归", () => {
+  it("提问超时后 status 回 running、pending 清空（不再卡在 awaiting_input）", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const repo = makeRepo();
+      const harness = makeManager(repo, "hang");
+      const session = harness.manager.spawn({ title: "改登录", task: "干活" });
+      await until(() => harness.sessions[0]?.status === "running");
+
+      const questions: UserQuestion[] = [
+        { header: "方案", question: "用哪个方案？", multiSelect: false, options: [{ label: "A" }] },
+      ];
+      let answered: unknown = null;
+      const pendingCall = harness.clients[0]!.callbacks
+        .onUserQuestions?.({ sessionId: "sub-1", questions } as never)
+        ?.then((response) => {
+          answered = response;
+        });
+      await until(() => harness.sessions[0]?.status === "awaiting_input");
+      expect(harness.sessions[0]?.pending).toBeDefined();
+
+      vi.advanceTimersByTime(SUPER_PENDING_TIMEOUT_MS);
+      await pendingCall;
+
+      expect(answered).toEqual({ answers: {} });
+      expect(harness.sessions[0]?.status).toBe("running");
+      expect(harness.sessions[0]?.pending).toBeUndefined();
+      // resolver 已收口：超时后再应答返回 false。
+      expect(harness.manager.respond(session.id, { answers: {} })).toBe(false);
+      await harness.manager.cancel(session.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30000);
+
+  it("重叠提问：旧定时器不删新 resolver，respond 只认当前 pending 的 requestId", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const session = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    const cb = harness.clients[0]!.callbacks;
+
+    // 先用真实定时器把准备阶段走完，再切到假定时器 —— 之后全部是同步断言，
+    // 不依赖 until 的轮询定时器。
+    vi.useFakeTimers();
+    let answerB: unknown = null;
+    try {
+      const callA = cb.onUserQuestions?.({
+        sessionId: "sub-1",
+        questions: [{ header: "方案A", question: "A？", multiSelect: false, options: [{ label: "A" }] }],
+      } as never);
+      expect(harness.sessions[0]?.pending?.questions[0]?.header).toBe("方案A");
+
+      // 让两次提问的 requestId 不同（它以 Date.now() 的 36 进制为尾缀）。
+      vi.advanceTimersByTime(1000);
+
+      const callB = cb.onUserQuestions?.({
+        sessionId: "sub-1",
+        questions: [{ header: "方案B", question: "B？", multiSelect: false, options: [{ label: "B" }] }],
+      } as never)?.then((response) => {
+        answerB = response;
+      });
+      const requestIdB = harness.sessions[0]!.pending!.requestId!;
+      expect(harness.sessions[0]?.pending?.questions[0]?.header).toBe("方案B");
+
+      // 只让 A 的定时器到点：A 在 t=0 挂、B 在 t=1000 挂，deadline 相差 1000ms。
+      vi.advanceTimersByTime(SUPER_PENDING_TIMEOUT_MS - 1);
+
+      // A 的旧定时器到点后，绝不能删掉 B 的 resolver 或复位 B 的 pending。
+      expect(harness.sessions[0]?.pending?.requestId).toBe(requestIdB);
+      expect(harness.sessions[0]?.status).toBe("awaiting_input");
+      const resolvers = (harness.manager as unknown as {
+        resolvers: Map<string, { requestId: string }>;
+      }).resolvers;
+      expect(resolvers.get(session.id)?.requestId).toBe(requestIdB);
+
+      expect(harness.manager.respond(session.id, { answers: { 方案B: "B" } })).toBe(true);
+      await callB;
+      expect(answerB).toEqual({ answers: { 方案B: "B" } });
+      void callA; // 旧尝试的 promise 不 resolve（随旧客户端 GC），断言不挂起即可。
+    } finally {
+      vi.useRealTimers();
+    }
+    await harness.manager.cancel(session.id);
+  }, 30000);
+
+  it("超过 5MB 的图片不内联为视觉块（避免撑爆 ACP 帧），但仍落盘给子会话", async () => {
+    expect(MAX_INLINE_IMAGE_BYTES).toBe(5 * 1024 * 1024);
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const data = Buffer.alloc(MAX_INLINE_IMAGE_BYTES + 1, 1).toString("base64");
+    harness.manager.spawn({
+      title: "大图",
+      task: "看截图",
+      attachments: [{ name: "big", data, mimeType: "image/png" }],
+    });
+    await until(() => (harness.clients[0]?.blocks.length ?? 0) > 0);
+
+    const blocks = harness.clients[0]!.blocks[0]!;
+    expect(blocks.filter((block) => block.type === "image")).toHaveLength(0);
+    // 落盘副本仍出现在任务书里 —— 子会话可用图片工具读它。
+    expect(harness.clients[0]!.prompts[0]).toContain("big.png");
+    await harness.manager.cancel(harness.sessions[0]!.id);
+  }, 30000);
+
+  it("已合并分支的手动清理能删掉分支（不再被 baseRef..branch 误判未合并）", async () => {
+    const repo = makeRepo();
+    const baseRef = gitOut(repo, "rev-parse", "HEAD").trim();
+    const branch = "iflow/super/merged-clean";
+    const wt = path.join(repo, ".iflow", "super", "worktrees", "merged-clean");
+    git(repo, "worktree", "add", "-b", branch, wt);
+    writeFileSync(path.join(wt, "child.txt"), "child\n", "utf8");
+    git(wt, "add", "-A");
+    git(wt, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "child");
+    git(repo, "merge", "--no-ff", "--no-edit", branch);
+    expect(gitOut(repo, "branch", "--list", branch).trim()).not.toBe("");
+
+    const harness = makeManager(repo);
+    harness.manager.restoreSessions("main-1", [
+      {
+        id: "super-merged-clean",
+        title: "已合并",
+        task: "干活",
+        status: "completed",
+        isolation: { kind: "git_worktree", path: wt, branch, baseRef },
+        integration: { mode: "merge", state: "merged", at: Date.now() },
+        mainSessionId: "main-1",
+        createdAt: 1,
+        updatedAt: 2,
+        reports: [],
+      },
+    ]);
+
+    const result = await harness.manager.cleanup("super-merged-clean");
+    expect(result.ok).toBe(true);
+    expect(result.branchKept).toBe(false);
+    expect(existsSync(wt)).toBe(false);
+    expect(gitOut(repo, "branch", "--list", branch).trim()).toBe("");
+  }, 30000);
+
+  it("集成抛异常时补写 failed+needsAction 结果，确保看板有去向且触发智能体合并", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "commit", "merge");
+    const spy = vi
+      .spyOn(
+        harness.manager as unknown as {
+          runIntegration: (id: string, attempt: number) => Promise<void>;
+        },
+        "runIntegration",
+      )
+      .mockRejectedValueOnce(new Error("integration exploded"));
+    try {
+      harness.manager.spawn({ title: "改登录", task: "干活" });
+      // status 先变 completed，随后才跑 commitChildWork + integrate —— 等集成
+      // 结果真正写回，别在竞态窗口里断言。
+      await until(() => harness.sessions[0]?.integration !== undefined);
+
+      const integration = harness.sessions[0]?.integration;
+      expect(integration?.state).toBe("failed");
+      expect(integration?.needsAction).toBe(true);
+      expect(integration?.detail).toContain("integration exploded");
+      expect(spy).toHaveBeenCalled();
+      expect(harness.needMerges.length).toBeGreaterThan(0);
+      expect(harness.needMerges[0]?.session.id).toBe(harness.sessions[0]?.id);
+    } finally {
+      spy.mockRestore();
+    }
   }, 30000);
 });

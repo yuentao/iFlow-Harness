@@ -1,21 +1,27 @@
 /**
- * 主会话的 `session/new` / `session/load` 必须携带
- * `settings.disallowed_tools`：既剔除进程内 `task` 子代理，也剔除读取/探查、
- * 写入与执行类工具（主会话只做派发）。
+ * 主会话的 `session/new` / `session/load` 必须携带两道门控：
+ * ① `settings.allowed_tools`（白名单，主门控）——不在清单里的内置工具根本不会
+ *    被 `createToolRegistry()` 注册；
+ * ② `settings.disallowed_tools`（第二层）——显式写明永不交给主会话的内置工具。
  *
  * 用户指令：主会话只做派发，实现与探查工作全部交给 Super Agent 子会话。
  * 提示词已经写明这一点，但模型仍然优先调 `task`、仍然自己 read_file / 跑
- * vitest（2026-11-15 / 2026-11-16 用户实测截图），所以改成机械剔除（见
- * `src/panel/panel.ts` 的 `MAIN_SESSION_DISALLOWED_TOOLS` 注释里的 bundle
- * 证据：请求的 `settings.disallowed_tools` → Config 的 `excludeTools` →
- * `createToolRegistry()` 跳过注册同名 `static Name` 的类）。
+ * vitest（2026-11-15 / 2026-11-16 用户实测截图），所以改成机械剔除。
  *
- * 清单里有三个精确性要点，改注释时别丢：① `multi_edit` 在当前 CLI 版本
- * 只是声明、并未注册，属防御性条目，不能当作「已挡住它」的证据；②
- * `lsp_goto_definition` / `lsp_find_references` / `lsp_hover` 的注册点被
- * `this.lspManager &&` 包裹，而 `lspManager` 在 Config 构造函数里无条件创建，
- * 所以实际恒注册；③ `grep` / `ls` 不是 CLI 的注册名（搜索/列目录叫
- * `search_file_content` / `list_directory`），写进清单只会静默不生效。
+ * 2026-11-17 的补充（用户实测）：机械剔除只列举了内置工具，主会话仍能调用
+ * **MCP 工具**（`new_page` / `take_screenshot` / `evaluate_script`）。MCP 工具名
+ * 是每个用户自己装的服务器决定的，既列不全也会误挡，所以改成结构性方案：
+ * 白名单只放派发与交互所需的 5 个内置工具，MCP 服务器则在主会话的 CLI 进程
+ * 层面整体移除（`buildAcpCommand` 的 `disableMcpServers`，见
+ * test/panel-spawn-env.test.ts 的 argv 断言）。**任何 MCP 工具名都不进本文件，
+ * 也不进 src。**
+ *
+ * 清单里的精确性要点，改注释时别丢：① `multi_edit` 在当前 CLI 版本只是声明、
+ * 并未注册，属防御性条目，不能当作「已挡住它」的证据；② `lsp_goto_definition`
+ * / `lsp_find_references` / `lsp_hover` 的注册点被 `this.lspManager &&` 包裹，
+ * 而 `lspManager` 在 Config 构造函数里无条件创建，所以实际恒注册；
+ * ③ `grep` / `ls` 不是 CLI 的注册名（搜索/列目录叫 `search_file_content` /
+ * `list_directory`），写进清单只会静默不生效。
  *
  * 覆盖面板侧**全部**会创建/重载主会话的路径；子会话（SuperAgentManager）
  * 刻意不带 settings —— 那条断言在 test/super-agent-manager.test.ts。
@@ -26,7 +32,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
-import { ChatPanel, MAIN_SESSION_DISALLOWED_TOOLS } from "../src/panel/panel.js";
+import {
+  ChatPanel,
+  MAIN_SESSION_ALLOWED_TOOLS,
+  MAIN_SESSION_DISALLOWED_TOOLS,
+  mainSessionSettings,
+} from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import { acpSessionFilePath } from "../src/acp/models-query.js";
 import { setConfigOverrides } from "./vscode-stub.js";
@@ -35,7 +46,23 @@ import type { SessionState } from "../shared/messages.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 /** Every main-session request must carry exactly this. */
-const EXPECTED_SETTINGS = { disallowed_tools: [...MAIN_SESSION_DISALLOWED_TOOLS] };
+const EXPECTED_SETTINGS = {
+  allowed_tools: [...MAIN_SESSION_ALLOWED_TOOLS],
+  disallowed_tools: [...MAIN_SESSION_DISALLOWED_TOOLS],
+};
+
+/**
+ * 白名单是主门控：不在清单里的内置工具**根本不会被注册**（`coreTools` 参与
+ * `createToolRegistry()` 的注册判定），因此「主会话拿不到 MCP 工具」这一结论
+ * 不依赖任何 MCP 工具名——清单只描述「内置工具的允许集合」，用户新装一个
+ * MCP 服务器无需改这里一行代码。
+ */
+const EXPECTED_ALLOWED = [
+  "super-agent",
+  "todo_write",
+  "todo_read",
+  "ask_user_question",
+] as const;
 
 /** 读/写/执行三类工具必须全部被剔除；规划与派发通道必须保留。 */
 const REQUIRED_DISALLOWED = [
@@ -54,6 +81,7 @@ const REQUIRED_DISALLOWED = [
   "lsp_hover",
   "write_file",
   "replace",
+  "save_memory",
   "multi_edit",
   "xml_escape",
   "run_shell_command",
@@ -107,12 +135,14 @@ type FakeClient = {
   setMode: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
   cancel: ReturnType<typeof vi.fn>;
+  mcpStatus?: ReturnType<typeof vi.fn>;
 };
 
 type PanelInternals = {
   client: FakeClient | null;
   sessionCwd: string | null;
   ensureClient: () => Promise<unknown>;
+  insertInjectedContextCard: (since: number) => Promise<void>;
   startNewSession: (options?: { bypassSuperWait?: boolean }) => Promise<void>;
   restoreSession: (sessionId: string) => Promise<boolean>;
   reloadSessionUnderCreds: (
@@ -329,6 +359,114 @@ describe("主会话 session settings · 剔除 task 与读写执行工具", () =
     // list_directory），写进清单只会静默不生效。
     expect(blocked).not.toContain("grep");
     expect(blocked).not.toContain("ls");
+  });
+
+  it("白名单精确等于「派发 + 待办 + 提问」，多一项都要显式讨论", () => {
+    expect([...MAIN_SESSION_ALLOWED_TOOLS].sort()).toEqual([...EXPECTED_ALLOWED].sort());
+    // 派发通道必须在白名单里，否则主会话一个任务都派不出去。
+    expect(MAIN_SESSION_ALLOWED_TOOLS).toContain("super-agent");
+    for (const name of ["todo_write", "todo_read", "ask_user_question"]) {
+      expect(MAIN_SESSION_ALLOWED_TOOLS).toContain(name);
+    }
+    // 计划模式已移除：exit_plan_mode 不再保留在主会话（也不再出现在白名单里）。
+    expect(MAIN_SESSION_ALLOWED_TOOLS).not.toContain("exit_plan_mode");
+  });
+
+  it("两份清单都不含 MCP 工具名，settings 形状也不随用户 MCP 配置变化", () => {
+    // 典型 playwright-mcp 工具名：换个用户就是另一套名字，所以一个都不能进
+    // 清单——封堵靠「只有允许的才注册」+ 进程级 MCP 移除，不靠列举。
+    for (const name of ["new_page", "take_screenshot", "evaluate_script", "browser_close"]) {
+      expect(MAIN_SESSION_ALLOWED_TOOLS).not.toContain(name);
+      expect(MAIN_SESSION_DISALLOWED_TOOLS).not.toContain(name);
+    }
+    // 主会话 settings 里没有 mcpServers：会话级 `mcpServers` 只会**合并**到
+    // 用户已配置的服务器之上（传空数组删不掉任何东西），所以 MCP 由 spawn
+    // 参数处理，settings 里也不该出现任何服务器名/工具名。
+    const settings = mainSessionSettings();
+    expect(settings.mcpServers).toBeUndefined();
+    expect(JSON.stringify(settings)).not.toContain("new_page");
+  });
+
+  it("自动注入卡不再查询 mcp-status，也不带入任何 MCP 条目", async () => {
+    // 主会话的 CLI 进程在 spawn 时就移除了全部 MCP 服务器（buildAcpCommand 的
+    // disableMcpServers），因此这个「模型实际看到什么」的卡片里根本不该有 MCP
+    // 条目——把用户配置里因进程级禁用而未连接的服务器报成「N 个未连接」是误导
+    // （2026-11-18 用户实测截图）。
+    fs.writeFileSync(
+      path.join(storageDir, "context-report.json"),
+      JSON.stringify({ version: 2, systemPrompt: "You are a helpful assistant." }),
+      "utf8",
+    );
+    const servers = Object.fromEntries(
+      ["apipost-mcp", "firecrawl", "exa", "figma", "playwright-mcp"].map((name) => [
+        name,
+        { status: "disconnected", tools: [], toolCount: 0, promptCount: 0, prompts: [] },
+      ]),
+    );
+    const mcpStatus = vi.fn(async () => ({ available: true, servers }));
+    client.mcpStatus = mcpStatus;
+    p.persistActiveTranscript = async () => {};
+    p.store.sessionStarted({ sessionId: "injected-mcp" });
+
+    await p.insertInjectedContextCard(0);
+
+    expect(mcpStatus).not.toHaveBeenCalled();
+    const injected = p.store.getState().blocks.find((b) => b.kind === "injected") as
+      | Extract<SessionState["blocks"][number], { kind: "injected" }>
+      | undefined;
+    expect(injected).toBeDefined();
+    expect(injected!.items.length).toBeGreaterThan(0);
+    expect(injected!.items.some((i) => i.kind === "mcp")).toBe(false);
+    expect(injected!.notice).not.toContain("MCP 服务器未连接");
+  });
+
+  it("新建会话流程中投影为 starting，结束后回到 null", async () => {
+    let seen: string | null | undefined;
+    p.cleanupEmptySession = async () => {
+      // The pre-session window is exactly where the old UI had zero feedback.
+      seen = p.store.getState().newSessionPhase;
+    };
+
+    await p.startNewSession();
+
+    expect(seen).toBe("starting");
+    expect(p.store.getState().newSessionPhase ?? null).toBeNull();
+    expect(client.newSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("进行中重复点击直接忽略：只发一次 session/new", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    client.newSession.mockImplementation(async () => {
+      await gate;
+      return {
+        sessionId: "main-gated",
+        modes: { currentModeId: "default", availableModes: [{ id: "default" }] },
+        _meta: { models: { currentModelId: "m1" }, availableCommands: [], availableSkills: [] },
+      };
+    });
+
+    const first = p.startNewSession();
+    // The first run is registered synchronously (before its first await).
+    const second = p.startNewSession();
+    release();
+    await Promise.all([first, second]);
+
+    expect(client.newSession).toHaveBeenCalledTimes(1);
+    expect(p.store.getState().newSessionPhase ?? null).toBeNull();
+  });
+
+  it("失败可见：投影回到 null，错误横幅拿到真实报错", async () => {
+    client.newSession.mockImplementation(async () => {
+      throw new Error("session/new rejected");
+    });
+
+    await expect(p.startNewSession()).rejects.toThrow("session/new rejected");
+
+    expect(p.store.getState().newSessionPhase ?? null).toBeNull();
+    expect(p.store.getState().errorMessage).toContain("session/new rejected");
   });
 });
 

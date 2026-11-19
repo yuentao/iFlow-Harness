@@ -17,8 +17,12 @@ import type {
   McpToolView,
   McpPromptView,
 } from "../src/acp/protocol.js";
-import type { ApprovalRule } from "./approval-policy.js";
-import type { SuperSessionUi } from "./super-agent.js";
+import {
+  normalizeQqAllowEntries,
+  type QqAllowEntry,
+  type QqAllowEntryInput,
+} from "./qq-access.js";
+import type { SuperActionReceipt, SuperDirectiveAction, SuperIntegrationMode, SuperSessionUi } from "./super-agent.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
@@ -27,9 +31,7 @@ export type { SlashCommand, UserQuestion, SkillInfo };
 // the per-server view and the detail sub-page consume tools/prompts directly.
 // The report envelope itself is consumed host-side from src/acp/protocol.js.
 export type { McpServerStatusView, McpToolView, McpPromptView };
-// M4 P1-1: the approval-policy card edits these directly (the rule shape is
-// shared pure data, not session state — it never rides a snapshot).
-export type { ApprovalRule, ApprovalAction } from "./approval-policy.js";
+
 
 // ---------------------------------------------------------------------------
 // Transcript blocks (rendered in order)
@@ -104,7 +106,7 @@ export interface TextBlock extends BlockBase {
   text: string;
   /**
    * Host-classified status text, not an assistant reply: CLI compression
-   * chatter ("正在压缩…", "压缩聊天历史失败：…") and approval/plan
+   * chatter ("正在压缩…", "压缩聊天历史失败：…") and approval
    * resolution notes. The webview renders these as muted system lines
    * without copy/regenerate actions.
    */
@@ -121,6 +123,14 @@ export interface UserBlock extends BlockBase {
   text: string;
   /** Attached images as data URLs (M5 image input), absent for text-only prompts. */
   images?: string[];
+  /**
+   * 这条用户消息的来源渠道（宿主写入，webview 只渲染徽标）。
+   *
+   * `qq` = 由 QQ 机器人转来、固定注入主会话的外部消息：它在本机
+   * 用户眼里必须与亲手输入的消息可区分 —— 徽标 + 来源包裹是安全边界的一部分，
+   * 不能靠正文内容自行判断。
+   */
+  origin?: "qq";
 }
 
 /** Webview DOM cap for one tool-output pane (3.5 ②). The host store keeps
@@ -186,6 +196,39 @@ export interface ToolBlock extends BlockBase {
    * transcripts, and finally to the honest "unparseable" notice.
    */
   superTasks?: SuperDelegatedTaskUi[] | null;
+  /**
+   * 宿主解析 `super-agent` 委派载荷时遇到的格式问题（可诊断的失败原因）。
+   *
+   * 与 `superTasks` 同源：都来自宿主对**原始 args** 的解析，绝不是对展示串
+   * `input` 回解的结果。两种情形会写入：
+   *  - 载荷整体不可用（如 `tasks` 是字符串数组）→ `superTasks` 缺省，本字段
+   *    是「哪一条字段写错了」的具体说明；
+   *  - 混合载荷（部分条目畸形）→ `superTasks` 只含合法项，本字段说明被忽略
+   *    的条目及原因 —— 不能让畸形条目静默消失。
+   *
+   * null/absent = 载荷没有格式问题（或这不是派发调用）。合并时后续不带 args
+   * 的 completed 帧不得把它擦掉（见 `upsertToolBlock`）。
+   */
+  superTasksError?: string | null;
+  /**
+   * 宿主执行 `super-agent` **管理动作**后的真实结果（每条动作一份 ok/reason）。
+   *
+   * 为什么需要它：`block.status === "completed"` 只表示工具帧返回了（内核对
+   * super-agent 工具只回一句 ack），不表示动作真的生效 —— cancel 抄错 id 报
+   * not-found 时工具帧同样是 completed。动作卡必须以本字段为准显示：全 ok
+   * 才是「已完成」，not-found / 失败显示警告色并给出原因摘要。宿主在
+   * `runSuperActions` 收尾时按 toolCallId 回填；null/absent = 还没回填（流式中
+   * 或旧转录），卡片不得因此谎报「已完成」。
+   */
+  superActionResult?: SuperActionReceipt[] | null;
+  /**
+   * 宿主构造的子会话管理动作（含每项目标子会话的 `title`）。与 `superTasks`
+   * 同理：卡片优先渲染本字段而不是回解有损的 `input`，因为标题只存在于宿主的
+   * super-session 记录里，`input` 里只有裸 id。宿主在 `runSuperActions` 收尾时
+   * 按 toolCallId 回填；null/absent = 还没回填（流式中或旧转录），卡片退回
+   * 解析 `input`（此时无标题，只显示 id —— 诚实降级，不伪造占位符）。
+   */
+  superActions?: SuperDirectiveAction[] | null;
   /**
    * P-1 follow-up: present when `output` exceeded the host STORE cap
    * (`MAX_TOOL_OUTPUT_STORE_CHARS`, 512K, shared/session-state.ts) and was
@@ -529,22 +572,6 @@ export interface PendingApprovalUi {
 }
 
 /**
- * A Plan-mode exit request awaiting user confirmation (iFlow extension
- * `_iflow/plan/exit`). Rendered with the same approval-card visual form as
- * `pendingApproval` so the panel stays visually consistent; the user approves
- * or rejects, and the host replies `{ approved, reason }`.
- */
-export interface PendingPlanExitUi {
-  id: string;
-  /** The plan the agent wants to execute once Plan mode is exited. May be long. */
-  plan: string;
-  /** Host-side auto-answer deadline (epoch ms); drives the countdown UI. */
-  deadline: number;
-  /** Total answer window in ms (APPROVAL_TIMEOUT_MS). */
-  timeoutMs: number;
-}
-
-/**
  * The `ask_user_question` tool's questions awaiting user answers (iFlow
  * extension). Rendered like an approval card; the user answers per question
  * (single choice / multi-select / free text), the host replies on the
@@ -761,6 +788,97 @@ export type InitializingReason =
   | "rollback"
   | "restore";
 
+/**
+ * 「新建会话」流程的宿主投影（从用户点击到新会话就绪、被拒或失败）。
+ *
+ * `initializing` 只覆盖流程的后半段（真正发 `session/new` 时持有），而点击后
+ * 先要等后台落盘链 / 在飞的恢复收尾 / 已有握手，这段时间过去完全没有反馈，
+ * 按钮也仍可点（用户实测「新建会话无加载反馈、可重复点击」）。因此单独投影
+ * 整个窗口：
+ * - `starting`：正在新建会话（准备 / `session/new` / 收尾）。
+ * - `waiting`：正在等待后台任务结束（落盘链、在飞的恢复或握手）。
+ * null 表示没有新建流程在跑。webview 据此禁用按钮、显示对应文案并置
+ * `aria-busy`；宿主在流程结束（成功 / 被拒 / 失败）时一律清回 null。
+ */
+export type NewSessionPhase = "starting" | "waiting";
+
+/**
+ * QQ 远程任务（Wave2-B）的前端投影：一个来自 QQ 的任务从「收到」走到终态的
+ * 看板条目。它是**非 blocks 元数据**，搭 blockPatch 的 tail 通道，绝不进入
+ * `blocks`——远程任务的转录不污染主会话的渲染真值，也不破坏 blockPatch 的
+ * 尾部锚定。
+ *
+ * 这一波只做投影与设置声明：字段是后续波次（适配层、任务执行、审批）的契约，
+ * 宿主尚未写入运行时数据。自包含类型，刻意不 import 任何 QQ 专属模块。
+ */
+export interface QqTaskUi {
+  /** 宿主内唯一的任务 id（幂等 upsert 的键）。 */
+  taskId: string;
+  /** 展示用短 id（看板/通知里代替长 id）。 */
+  shortId: string;
+  /** 来源会话类型：单聊或群聊。 */
+  chatType: "private" | "group";
+  /** 来源会话 id（QQ 侧 chat id）。 */
+  chatId: string;
+  /** 发起任务的用户 id。 */
+  senderId: string;
+  /** 任务状态机（终态粘性由宿主维护；投影只如实渲染）。 */
+  status:
+    | "received"
+    | "validated"
+    | "queued"
+    | "dispatched"
+    | "injected"
+    | "running"
+    | "waiting_approval"
+    | "waiting_answer"
+    | "succeeded"
+    | "failed"
+    | "canceled"
+    | "timeout"
+    | "needs_review"
+    /**
+     * 用户显式丢弃（工作目录/分支已处置）。终态：看板收起所有动作按钮，
+     * 只保留状态与处置说明 —— 分支可能已经不存在，再提供「合并」只会失败。
+     */
+    | "discarded";
+  /**
+   * 任务创建时的执行策略（宿主回填）。`trusted` = 免确认，`supervised` = 工具
+   * 调用需在 QQ 审批，`readonly` = 只读。缺省表示宿主尚未回填（旧记录）——
+   * 投影只如实渲染，绝不自行推导策略。
+   */
+  policy?: "readonly" | "supervised" | "trusted";
+  /**
+   * 执行渠道：`main` = 注入主会话（看板标注「渠道：主会话」，状态里能看到
+   * 「已注入待回复」）；`child` = Super Agent 子会话（旧行为，也是旧归档的
+   * 解释）。
+   */
+  channel: "main" | "child";
+  /** 任务提示词的截断预览（完整正文不进快照）。 */
+  promptPreview: string;
+  /** 收到任务的时间（epoch ms）。 */
+  createdAt: number;
+  /** 最近一次状态变更的时间（epoch ms）。 */
+  updatedAt: number;
+  /** 任务工作分支（隔离执行时由宿主填写）。 */
+  branch?: string;
+  /** 改动统计：文件数 / 新增行 / 删除行。 */
+  changes?: number;
+  additions?: number;
+  deletions?: number;
+  /** 轮次停止原因（CLI 上报，如 end_turn）。 */
+  stopReason?: string;
+  /** 失败/异常时的可读错误（含「丢弃被拒绝 / 丢弃失败」的原因）。 */
+  errorMessage?: string;
+  /**
+   * 丢弃处置的说明（`status === "discarded"` 时才有）：工作目录是否删掉、
+   * 分支是否因未合并提交被保留。看板据此如实展示，不把「分支还在」说成没了。
+   */
+  discardNote?: string;
+  /** 等待用户处置时的摘要（审批或提问）；不含完整载荷。 */
+  pending?: { kind: "approval" | "answer"; summary: string };
+}
+
 export interface SessionState {
   blocks: Block[];
   status: AgentStatus;
@@ -781,8 +899,6 @@ export interface SessionState {
   thinkLevel: ThinkLevel;
   /** Non-null while the host awaits the user's answer for a tool approval. */
   pendingApproval: PendingApprovalUi | null;
-  /** Non-null while the host awaits the user's confirmation to exit Plan mode. */
-  pendingPlanExit: PendingPlanExitUi | null;
   /** Non-null while the host awaits the user's answers for ask_user_question. */
   pendingQuestions: PendingQuestionsUi | null;
   /** Non-null while the profile-switch choice dialog is open (see PendingProfileSwitchUi). */
@@ -803,6 +919,13 @@ export interface SessionState {
    * falls back to the new-session wording).
    */
   initializingReason?: InitializingReason | null;
+  /**
+   * 「新建会话」整个流程的宿主投影：从点击那一刻起就是非 null，直到新会话
+   * 就绪 / 被拒 / 失败才清回 null。`initializing` 只覆盖流程后半段，这个
+   * 字段补上「点击后立刻有反馈 + 期间禁止重复点击」的窗口，并区分
+   * `waiting`（在等后台任务收尾）与 `starting`。缺失（旧宿主 / mock）= null。
+   */
+  newSessionPhase?: NewSessionPhase | null;
   /**
    * Monotonic count of Core boot attempts that re-entered `connecting` (hot
    * restart / profile-switch reconnect). A restart keeps the splash on
@@ -893,6 +1016,12 @@ export interface SessionState {
   superHeld?: boolean;
   /** `superHeld` 时被压住的自动回合数（汇报 + 被改道消息补投），只算当前主会话。 */
   superPendingCount?: number;
+  /**
+   * QQ 远程任务看板（Wave2-B）：每条来自 QQ 的任务的投影，宿主维护、webview
+   * 只渲染。与 superSessions 同属非 blocks 元数据（搭 blockPatch tail 通道），
+   * 并且在会话切换时保留（任务归属面板/工作区，不随转录替换清空）。
+   */
+  qqTasks: QqTaskUi[];
   /**
    * Next-step candidates predicted by one dedicated model call at the end of
    * a turn (the host runs it directly against the OpenAI-compatible endpoint,
@@ -995,7 +1124,6 @@ export function initialSessionState(): SessionState {
     currentModelId: null,
     thinkLevel: "auto",
     pendingApproval: null,
-    pendingPlanExit: null,
     pendingQuestions: null,
     pendingProfileSwitch: null,
     auth: { authenticated: false, needsSetup: false, saved: null, profiles: [], onboardingDismissed: false },
@@ -1004,6 +1132,7 @@ export function initialSessionState(): SessionState {
     replaying: false,
     initializing: false,
     initializingReason: null,
+    newSessionPhase: null,
     compressing: false,
     usage: emptySessionUsage(),
     queue: [],
@@ -1011,6 +1140,7 @@ export function initialSessionState(): SessionState {
     superWaiting: false,
     superHeld: false,
     superPendingCount: 0,
+    qqTasks: [],
     checkpoints: [],
     nextStepSuggestions: [],
     nextStepLoading: false,
@@ -1031,17 +1161,30 @@ export function emptySessionUsage(): SessionUsageUi {
 }
 
 /**
- * Whether the session currently sits in Plan mode. Matched by the mode's
- * `kind` (the CLI's semantic tag, probed CLI 0.5.19 `session/new` `_meta`);
- * falls back to the literal id "plan" for agents that omit `kind`. Shared by
- * host (status bar) and webview (streaming indicator wording) so both agree
- * on when to say 规划 instead of 生成.
+ * Plan mode 已移除（2026-11-18）。
+ *
+ * CLI 的 `_meta.modes` 仍然会上报 `plan`（vendor bundle 刻意不改），但面板不再
+ * 提供该模式。host 每次把 modes 写进 store 都过这里：从 `availableModes` 里
+ * 剔掉 plan 项，并把落在 plan 上的 `currentModeId` 归一到可用的非 plan 模式
+ * （优先 smart / default，否则列表第一项）。旧会话归档、外部
+ * `~/.iflow/settings.json` 的 `approvalMode: "plan"` 因此都不会让已移除的模式
+ * 重新出现在模式菜单里。
+ *
+ * 没有可用的非 plan 模式时原样返回（不伪造模式，交由调用方处理）。
  */
-export function isPlanMode(modes: SessionModeState | null | undefined): boolean {
-  if (!modes) return false;
-  const current = modes.availableModes.find((m) => m.id === modes.currentModeId);
-  if (!current) return false;
-  return current.kind === "plan" || (current.kind === undefined && current.id === "plan");
+export function withoutPlanModes(modes: SessionModeState | null | undefined): SessionModeState | null {
+  if (!modes) return null;
+  const isPlanMode = (mode: SessionModeState["availableModes"][number]): boolean =>
+    mode.kind === "plan" || (mode.kind === undefined && mode.id === "plan");
+  const availableModes = modes.availableModes.filter((mode) => !isPlanMode(mode));
+  if (availableModes.length === 0) return modes;
+  if (availableModes.some((mode) => mode.id === modes.currentModeId)) {
+    return { ...modes, availableModes };
+  }
+  const preferred =
+    availableModes.find((mode) => mode.id === "smart") ??
+    availableModes.find((mode) => mode.id === "default");
+  return { ...modes, availableModes, currentModeId: (preferred ?? availableModes[0]!).id };
 }
 
 /** One fuzzy-search file hit for the @-mention popup (M5). */
@@ -1112,6 +1255,11 @@ export function applyBlockPatch(
  */
 /** Char budget for the fully-kept tail (≈8MB of UTF-16 string heap). */
 export const EVICT_BUDGET_CHARS = 4_000_000;
+/** Tail blocks kept regardless of the budget (newest turns always render).
+ * Must exceed the webview's mount window (MessageList MAX_WINDOW) so every
+ * mounted card keeps its payload; the host applies the same window to child
+ * transcripts. */
+export const EVICT_KEEP_BLOCKS = 200;
 /** Tail blocks kept regardless of the budget (newest turns always render). */
 export const EVICT_MIN_KEEP = 20;
 
@@ -1226,16 +1374,31 @@ function evictOneBlock(block: Block): Block {
  * into the model context. The CLI itself never estimates (no such source in
  * the bundle), the host must not re-fetch schemas per render, so the host
  * computes it once per reply.
+ *
+ * Super Agent 语义:主面板会话带 `disableMcpServers` 启动,CLI 会把每个 server
+ * 报成 `{status:"disconnected", blocked:true}`——那是设计性屏蔽,不是服务器
+ * 故障。服务器实际由子会话经 host 的共享 MCP broker 使用,所以 `status` 与
+ * `childConnected` 以 broker 的 `statuses()` 为权威覆盖:
+ *   - `childConnected: true`  → 子会话已连通(即使 `blocked` 仍为 true);
+ *   - `childConnected: false` → 子会话连接确实失败(带 `error`);
+ *   - `childConnected: undefined` → broker 未就绪 / 无上报,只能退回 `blocked`
+ *     展示「主会话未加载」,绝不能读成「服务器坏了」。
+ * 详情子页仍消费 CLI 视图的 tools/schema/prompts(被屏蔽时为空),不丢字段。
  */
 export interface McpStatusUi {
   discoveryState?: string;
   /** `scope` is host-computed (the CLI's status report carries merged names
    * only): which settings file(s) declare the server, so the card can say
    * whether a row is the global entry, the project entry, or a name the
-   * project overrides. */
+   * project overrides. `childConnected` is host-computed from the shared MCP
+   * broker that Super Agent child sessions use (see the interface doc). */
   servers: Record<
     string,
-    McpServerStatusView & { contextTokens?: number; scope?: McpScope | "both" }
+    McpServerStatusView & {
+      contextTokens?: number;
+      scope?: McpScope | "both";
+      childConnected?: boolean;
+    }
   >;
 }
 
@@ -1422,9 +1585,6 @@ export type UiFontSize = "compact" | "standard" | "large";
 /** Panel spacing density preset, mirrored from `iflow.uiDensity`. */
 export type UiDensity = "compact" | "standard" | "comfortable";
 
-/** Default session approval mode, mirrored from `iflow.defaultMode`. */
-export type UiDefaultMode = "default" | "smart" | "yolo" | "plan";
-
 /** Panel color theme, mirrored from `iflow.theme`. "auto" follows the editor. */
 export type UiThemeMode = "auto" | "light" | "dark";
 
@@ -1433,9 +1593,6 @@ export type UiOsNotifications = "off" | "approvals" | "all";
 
 /** CLI interface language written to ~/.iflow/settings.json; empty leaves it untouched. */
 export type UiCliLanguage = "" | "zh-CN" | "en-US";
-
-/** CLI default approval mode; empty leaves the CLI's own value untouched. */
-export type UiCliApprovalMode = "" | UiDefaultMode;
 
 /** One thinking-capability rule mirrored from `iflow.thinkingModelRules`. */
 export interface ThinkingModelRuleUi {
@@ -1481,9 +1638,6 @@ export interface HostSettingsUi {
   osNotifications: UiOsNotifications;
   /** CLI UI language written to ~/.iflow/settings.json (restart required). */
   language: UiCliLanguage;
-  defaultMode: UiDefaultMode;
-  /** CLI startup approval mode written to settings.json (restart required). */
-  approvalMode: UiCliApprovalMode;
   theme: UiThemeMode;
   auroraIntensity: number;
   uiFontSize: UiFontSize;
@@ -1501,6 +1655,175 @@ export interface HostSettingsUi {
   /** Simultaneously running child sessions (`iflow.superAgent.maxConcurrent`).
    * Extra dispatches queue in FIFO order instead of being rejected. */
   superAgentMaxConcurrent: number;
+  /** How a finished child session's branch is integrated
+   * (`iflow.superAgent.integration`). */
+  superAgentIntegration: SuperIntegrationMode;
+  /** Max kept worktree directories of finished child sessions
+   * (`iflow.superAgent.maxWorktrees`); 0 = unlimited. */
+  superAgentMaxWorktrees: number;
+  /** Keep the worktree directory after a child session finishes
+   * (`iflow.superAgent.keepWorktree`); default false = clean up. */
+  superAgentKeepWorktree: boolean;
+}
+
+/**
+ * QQ 远程任务设置快照（`iflow.qq.*` 的 9 项 + App Secret「已配置」标志）。
+ *
+ * **绝不携带明文凭据**：`hasAppSecret` 只是「SecretStorage 里有没有扫码写入的
+ * App Secret」的布尔投影；凭据只在扫码成功后由宿主单向写入，永不回传、永不进
+ * 快照。机器人 Token 已不再手填（历史 `iflow.qq.bot-token` 是死键）。
+ *
+ * 枚举取值与 `package.json` 的 `iflow.qq.*` 声明逐字一致，也是
+ * `shared/qq-task.ts` 的 `QqRemotePolicy` / `QqResultDetail`。
+ */
+export interface QqSettingsUi {
+  enabled: boolean;
+  /**
+   * 访问控制条目：完整 openid + 可选备注。存储里兼容旧的裸字符串数组
+   * （`pickQqSettingsUi` 归一），脱敏只在 webview 渲染时做。
+   */
+  allowedUsers: QqAllowEntry[];
+  allowedGroups: QqAllowEntry[];
+  workspace: string;
+  remotePolicy: "readonly" | "supervised" | "trusted";
+  maxConcurrentTasks: number;
+  rateLimitPerMin: number;
+  resultDetail: "summary" | "standard" | "full";
+  autoMerge: boolean;
+  /** App Secret 是否已由扫码写入。只有布尔，没有明文。 */
+  hasAppSecret: boolean;
+}
+
+/**
+ * QQ 设置补丁。
+ *
+ * 白名单字段放宽到 {@link QqAllowEntryInput}：webview 交回带备注的完整条目，
+ * 宿主内部的「只追加一个 openid」写路径（扫码绑定 / 放行待审核）仍然可以传
+ * 裸字符串。两种形态都在 `applyQqSettingsPatch` 里归一后落盘。
+ */
+export type QqSettingsPatch = Partial<Omit<QqSettingsUi, "allowedUsers" | "allowedGroups">> & {
+  allowedUsers?: readonly QqAllowEntryInput[];
+  allowedGroups?: readonly QqAllowEntryInput[];
+};
+
+/**
+ * QQ 授权模型（2026-11-17）：待审核用户的一条记录。
+ *
+ * 语义：白名单（`allowedUsers`）只由「扫码者本人」与「面板里人工放行」写入；
+ * 名单外的人发来消息时**不执行任务、不回执**，只把这条记录推到面板由用户
+ * 决定放行或拒绝。`openid` 是 QQ 官方接口给的 openid（私聊 author.id /
+ * 群聊 member_openid），**不是 QQ 号**——官方 API 不提供 QQ 号。
+ *
+ * 脱敏只在 UI 侧做：存储与消息都保留原值，否则面板无法据此写回白名单。
+ */
+export interface QqPendingUserUi {
+  openid: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  count: number;
+  preview: string;
+  chatType: "private" | "group";
+  groupId?: string;
+}
+
+/**
+ * 默认值与裁剪范围 —— **与 src/qq/config.ts 保持同步**（那边是宿主侧权威
+ * 归一化：`normalizeQqConfig`）。shared 层不能 import src/，所以这里只复刻
+ * 默认值、整数四舍五入 + 闭区间裁剪、字符串 trim、白名单去空白/去重，
+ * 非法枚举回退默认；不产出 warnings（告警由宿主侧负责）。
+ */
+const QQ_SETTINGS_DEFAULTS = {
+  enabled: false,
+  workspace: "",
+  remotePolicy: "supervised",
+  maxConcurrentTasks: 2,
+  rateLimitPerMin: 6,
+  resultDetail: "standard",
+  autoMerge: false,
+} as const;
+
+/** 数字项允许范围（闭区间，先取整再裁剪）——与 src/qq/config.ts 的 RANGES 一致。 */
+const QQ_SETTINGS_RANGES = {
+  maxConcurrentTasks: { min: 1, max: 10 },
+  rateLimitPerMin: { min: 1, max: 60 },
+} as const;
+
+/** 枚举取值（与 package.json 的 iflow.qq.* enum 一致）。 */
+const QQ_REMOTE_POLICIES = ["readonly", "supervised", "trusted"] as const;
+const QQ_RESULT_DETAILS = ["summary", "standard", "full"] as const;
+
+function qqReadString(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value.trim() : fallback;
+}
+
+function qqReadBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function qqReadEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return (allowed as readonly string[]).includes(trimmed) ? (trimmed as T) : fallback;
+}
+
+function qqReadInteger(
+  value: unknown,
+  range: { readonly min: number; readonly max: number },
+  fallback: number,
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(range.max, Math.max(range.min, Math.round(value)));
+}
+
+/**
+ * 把任意设置快照归一成 {@link QqSettingsUi}。
+ *
+ * 纯函数（零依赖、无副作用）：宿主读 settings.json / VSCode 配置后交给它，
+ * webview 的 demo 快照也用它兜底。**默认值与 clamp 范围与 src/qq/config.ts
+ * 保持同步**；枚举非法回退默认值，数字取整后裁剪，字符串 trim，白名单去
+ * 空白/去重。
+ *
+ * 凭据只以 `hasAppSecret` 布尔透传（来自 `secrets`），输入里即便混进
+ * `botToken` / `appSecret` 明文也**不会**进入返回值。
+ */
+export function pickQqSettingsUi(
+  raw: Record<string, unknown>,
+  secrets: { hasAppSecret: boolean },
+): QqSettingsUi {
+  const source: Record<string, unknown> =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  return {
+    enabled: qqReadBoolean(source.enabled, QQ_SETTINGS_DEFAULTS.enabled),
+    allowedUsers: normalizeQqAllowEntries(source.allowedUsers),
+    allowedGroups: normalizeQqAllowEntries(source.allowedGroups),
+    workspace: qqReadString(source.workspace, QQ_SETTINGS_DEFAULTS.workspace),
+    remotePolicy: qqReadEnum(
+      source.remotePolicy,
+      QQ_REMOTE_POLICIES,
+      QQ_SETTINGS_DEFAULTS.remotePolicy,
+    ),
+    maxConcurrentTasks: qqReadInteger(
+      source.maxConcurrentTasks,
+      QQ_SETTINGS_RANGES.maxConcurrentTasks,
+      QQ_SETTINGS_DEFAULTS.maxConcurrentTasks,
+    ),
+    rateLimitPerMin: qqReadInteger(
+      source.rateLimitPerMin,
+      QQ_SETTINGS_RANGES.rateLimitPerMin,
+      QQ_SETTINGS_DEFAULTS.rateLimitPerMin,
+    ),
+    resultDetail: qqReadEnum(
+      source.resultDetail,
+      QQ_RESULT_DETAILS,
+      QQ_SETTINGS_DEFAULTS.resultDetail,
+    ),
+    autoMerge: qqReadBoolean(source.autoMerge, QQ_SETTINGS_DEFAULTS.autoMerge),
+    hasAppSecret: secrets.hasAppSecret === true,
+  };
 }
 
 export type HostToWebview =
@@ -1538,6 +1861,23 @@ export type HostToWebview =
    * (first open / resync / request).
    */
   | { type: "superTranscript"; sessionId: string; from: number; blocks: Block[] }
+  /**
+   * 新建会话时检测到跨历史会话的 Super Agent 残留 → 宿主请求 webview 弹出
+   * 一个阻断式二次确认框（「清空并新建」/「取消」）。
+   *
+   * 所有给用户看的字符串都由宿主用 `vscode.l10n.t` 组装好随消息下发，webview
+   * 只负责渲染，不需要新增 i18n key —— 与另一条正在改 i18n.ts 的线解耦。
+   * `message` 已经醒目警示「包含未合并 worktree 在内的全部残留会被永久清空、
+   * 未提交/未合并工作不可恢复」，webview 不得改写或弱化它。
+   */
+  | {
+      type: "superResidueConfirm";
+      requestId: string;
+      title: string;
+      message: string;
+      confirmLabel: string;
+      cancelLabel: string;
+    }
   | {
       type: "toast";
       level: "info" | "warning" | "error";
@@ -1647,23 +1987,6 @@ export type HostToWebview =
       stage: "scanning" | "summarizing" | "writing" | "done" | "error";
       message?: string;
     }
-  /** M4 P1-1: the approval pre-review rule table. `rules` are the user's
-   * global rules (editable, persisted in globalState); `projectRules` come
-   * from the workspace's `.iflow/approval.json` and are READ-ONLY here (the
-   * file is user-owned — the host matches them first but never writes them).
-   * `draft` non-null means a 「始终允许」 click derived a rule that is now
-   * waiting to be named: the webview opens the policy card in naming mode and
-   * either saves it into `rules` or dismisses it. */
-  | {
-      type: "approvalPolicy";
-      rules: ApprovalRule[];
-      projectRules: ApprovalRule[];
-      draft?: ApprovalRule | null;
-      /** Present only when this push answers a save request: "ok" = persisted,
-       * "failed" = the write was rolled back (the rules here are the ones still
-       * on disk). The card waits for this before flashing 已保存. */
-      saveResult?: "ok" | "failed";
-    }
   /** Reply to `deleteProfile`: the row clears its pending chip on receipt.
    * `ok:false` means the profile is still present (the host also toasts). */
   | { type: "profileDeleteResult"; name: string; ok: boolean }
@@ -1697,7 +2020,43 @@ export type HostToWebview =
    * one throwaway agent turn (web_search only) and reports searching / done /
    * error / idle (cancelled). On `done` the appended rows are already written
    * to the settings, so the following `hostSettings` refresh carries them. */
-  | ({ type: "modelMetadataState" } & ModelMetadataStateUi);
+  | ({ type: "modelMetadataState" } & ModelMetadataStateUi)
+  /**
+   * QQ 授权模型：待审核用户列表（每次变更全量重发，顺序按 lastSeenAt 倒序）。
+   * 白名单外的人发来消息只会落到这里，不会执行任务、不会收到回执。
+   */
+  | { type: "qqPendingUsers"; users: QqPendingUserUi[] }
+  /** QQ 远程任务（Wave3-B）：设置页的配置快照。明文凭据绝不在这条消息里，
+   * 只用 `hasAppSecret` 表达扫码写入的 App Secret 是否已配置。 */
+  | { type: "qqSettings"; values: QqSettingsUi }
+  /** QQ 远程任务（Wave3-B）：bridge / 适配器的连接状态；`detail` 是给人看的
+   * 补充说明（例如端点地址或失败原因）。 */
+  | { type: "qqStatus"; connected: boolean; detail?: string }
+  /**
+   * 扫码登录（Wave5-C0）：宿主从 QQ 官方扫码接口取二维码 →
+   * base64 data URL → webview 用 `<img>` 显示，避免 CSP 禁止的 iframe。
+   * `dataUrl` 必须是 `data:image/png;base64,...`（webview 可用
+   * `isQrDataUrl` 护栏校验）；`expiresAt` 是二维码过期时间（epoch ms）；
+   * `phase` 是扫码生命周期；`detail` 是给人看的补充说明（例如失败原因）。
+   */
+  | {
+      type: "qqLoginQr";
+      dataUrl: string;
+      expiresAt: number;
+      phase: "waiting_scan" | "scanned" | "confirmed" | "expired";
+      detail?: string;
+    }
+  /**
+   * 一键托管（Wave5-C0）：宿主把 QQBot 接入（准备环境 / 配置 / 启动 / 等待授权）
+   * 的各阶段进度推给设置页。`phase` 是阶段机；`message` 是给人看的说明；
+   * `progress`（0–100）仅下载等可度量阶段携带，缺省表示不确定进度。
+   */
+  | {
+      type: "qqManagedStatus";
+      phase: "idle" | "checking" | "downloading" | "configuring" | "starting" | "waiting_login" | "logged_in" | "error";
+      message: string;
+      progress?: number;
+    };
 
 // ---------------------------------------------------------------------------
 // WebView → Host commands
@@ -1813,7 +2172,6 @@ export type WebviewToHost =
       keepBranch?: boolean;
     }
   | { type: "newSession" }
-  | { type: "setMode"; modeId: string }
   | { type: "setModel"; modelId: string }
   | { type: "setThink"; level: ThinkLevel }
   /** Open a file location in the editor; `toolCallId` (when the chip belongs
@@ -1823,8 +2181,6 @@ export type WebviewToHost =
   | { type: "openExternal"; uri: string }
   /** Answer a pending approval; `optionId: null` cancels the request. */
   | { type: "respondApproval"; id: string; optionId: string | null }
-  /** Confirm or reject a pending Plan-mode exit; `approved: false` rejects. */
-  | { type: "respondPlanExit"; id: string; approved: boolean; reason?: string; replan?: boolean }
   /** Answer the pending ask_user_question card; `answers` is keyed by
    * question `header`. An empty answers object = dismissed (the agent
    * proceeds with "no answer"). */
@@ -1833,6 +2189,8 @@ export type WebviewToHost =
  * entire switch (dialog dismissed / 取消 — no credential or reconnect side
  * effects, the active profile pointer stays where it was). */
 | { type: "respondProfileSwitch"; id: string; keepSession: boolean | null }
+/** 回答 `superResidueConfirm`：`confirmed=true` = 先全量清空再新建；false = 只新建不清空。 */
+| { type: "respondSuperResidueConfirm"; requestId: string; confirmed: boolean }
   /** Revert a completed tool call that carried a structured diff. */
   | { type: "revertTool"; toolCallId: string }
   /**
@@ -1920,7 +2278,7 @@ export type WebviewToHost =
    * captured at session start goes stale (new gateway models appear). */
   | { type: "refreshModels" }
   /** Settings-page hot restart: tear the CLI child down and spawn a fresh
-   * one so startup-only changes (language / approvalMode / mcpServers written
+   * one so startup-only changes (language / mcpServers written
    * to settings.json) take effect without reloading VSCode. */
   | { type: "restartCli" }
   /** Open the VSCode Settings UI filtered to the iFlow extension section. */
@@ -2013,18 +2371,6 @@ export type WebviewToHost =
   | { type: "openKnowledgeFile"; path: string }
   /** Open a discovered memory file in the editor. */
   | { type: "openMemoryFile"; path: string }
-  /** M4 P1-1: approval-policy card opened — re-read the global table and the
-   * workspace `.iflow/approval.json` (external tools may have rewritten it).
-   * Reply: `approvalPolicy`. */
-  | { type: "listApprovalPolicy" }
-  /** Save the whole global rule table (replace semantics — the card edits a
-   * fresh copy read via `listApprovalPolicy`). Also clears a pending `draft`
-   * when the card saved it into `rules`. Reply: `approvalPolicy`. */
-  | { type: "saveApprovalPolicy"; rules: ApprovalRule[] }
-  /** Abandon the 「始终允许」-derived draft without adding it. The wire
-   * response already went out (the CLI's own proceed_always still applies for
-   * this session) — only the persistent host-side rule is dropped. */
-  | { type: "dismissApprovalRuleDraft" }
   /** M1 P0-7: export the ACTIVE session's transcript. `format` picks the
    * serializer; the host shows a native save dialog and writes the file
    * (Markdown renders every block type, JSON copies the transcript file). */
@@ -2042,15 +2388,80 @@ export type WebviewToHost =
    * message's `action`). The host dispatches on `actionId` (e.g. "compress"
    * drives the /compress bridge) and dismisses the pill. */
   | { type: "toastAction"; actionId: string; toastId?: number }
-  /** 3.5 ①: the user ticked/unticked one item of a plan checklist card
-   * (`PlanBlock` seeded at plan approval). `blockId` is the stable block id
-   * (P4), `index` the entry position; the host flips pending↔completed via
-   * `setPlanEntryStatus` and drops stale clicks silently. */
+  /** The user ticked/unticked one item of a TaskList card (`PlanBlock`).
+   * `blockId` is the stable block id (P4), `index` the entry position; the
+   * host flips pending↔completed via `setPlanEntryStatus` and drops stale
+   * clicks silently. */
   | { type: "togglePlanItem"; blockId: string; index: number }
   /** 3.5 ②: "查看完整输出" on a truncated tool card — the host writes the
    * block's FULL stored output (up to the 512K store cap) to a temp file
    * and opens it in the editor. `blockId` is the stable block id (P4). */
-  | { type: "exportToolOutput"; blockId: string };
+  | { type: "exportToolOutput"; blockId: string }
+  /**
+   * QQ 远程任务（Wave2-B）：看板/通知对单条任务的操作。`taskId` 是宿主分配的
+   * 任务 id；`text` 只在 `answer` 时携带（用户对提问的自由文本作答）。
+   * 本波只声明协议，webview 处理逻辑与宿主执行属后续波次。
+   */
+  | {
+      type: "qqTaskAction";
+      taskId: string;
+      action: "stop" | "approve" | "deny" | "answer" | "merge" | "discard" | "refresh";
+      text?: string;
+    }
+  /** QQ 远程任务（Wave3-C 补声明 / Wave2-B 方向修正）：设置页 QQ 卡片的动作——
+   * 连测试、解绑，以及扫码登录（Wave5-C0）的开始取码、刷新二维码、取消登录。
+   * 这是 webview 发给宿主的**请求**（早期误声明在 HostToWebview 上，方向写反，
+   * panel 只能用运行时形状守卫兜底接收；现已从 HostToWebview 移除、只在此处
+   * 声明）。回执不是同名消息：状态走 `qqStatus`、二维码走 `qqLoginQr`，解绑
+   * 结果走 toast。配对码机制（`generateBindCode`）已随授权模型改造移除。 */
+  | {
+      type: "qqConfigAction";
+      action: "testConnection" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin";
+    }
+  /**
+   * QQ 授权模型：面板对某个待审核用户的处置。`approve` 会把他写进
+   * `iflow.qq.allowedUsers`（去重追加）并移出待审核；`reject` 只移出并记入
+   * 拒绝集合（同一 openid 不会再冒出来）。openid 是官方接口标识，非 QQ 号。
+   */
+  | { type: "qqUserAction"; openid: string; action: "approve" | "reject" }
+  /** QQ 远程任务（Wave3-B）：设置页把用户改动交回宿主（局部补丁语义）。
+   * `hasAppSecret` 是宿主回传的投影，这里只会被忽略——凭据只在扫码成功后
+   * 由宿主写入 SecretStorage，不走设置补丁。 */
+  | { type: "qqSettingsPatch"; patch: QqSettingsPatch }
+  /**
+   * 一键托管（Wave5-C0）：设置页请求宿主开始接入 / 停止 QQBot 托管。
+   * `start` 触发准备→配置→启动→等待扫码授权流程，`stop` 停止并清理。
+   * 进度经 `qqManagedStatus` 回推，登录二维码经 `qqLoginQr` 回推。
+   */
+  | { type: "qqManagedSetup"; action: "start" | "stop" };
+
+// ---------------------------------------------------------------------------
+// QQ 扫码登录安全护栏 (zero-dependency — 宿主生成 data URL、webview 渲染前共用)
+// ---------------------------------------------------------------------------
+
+/** PNG base64 data URL 的严格前缀。`isQrDataUrl` 只认这一种形态，防止把
+ * `data:image/svg+xml` / `javascript:` 等任意 data URL 塞进 `<img src>`。 */
+export const QR_DATA_URL_PREFIX = "data:image/png;base64,";
+
+/**
+ * 扫码登录 data URL 安全护栏：只接受严格 `data:image/png;base64,` 前缀 +
+ * 非空合法 base64 串。base64 合法性判据：长度是 4 的倍数、字符集限于
+ * `[A-Za-z0-9+/]`、仅末尾允许 0–2 个 `=` 填充、且填充前有非空正文。
+ *
+ * 零依赖（宿主与 webview 共用），纯函数，无副作用。宿主生成二维码 data URL
+ * 后、webview 送进 `<img>` 前都应过这道门，避免把任意 data URL（尤其 svg /
+ * javascript:）当成图片渲染。
+ */
+export function isQrDataUrl(value: string): boolean {
+  if (typeof value !== "string") return false;
+  if (!value.startsWith(QR_DATA_URL_PREFIX)) return false;
+  const payload = value.slice(QR_DATA_URL_PREFIX.length);
+  if (!payload || payload.length % 4 !== 0) return false;
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload)) return false;
+  // 去掉末尾填充后必须仍有正文（排除 "====" 等退化串；"==" 长度非 4 已被挡）。
+  if (payload.replace(/=+$/, "").length === 0) return false;
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // User-prompt text helpers (zero-dependency — shared by the host reducer, the

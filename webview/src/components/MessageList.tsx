@@ -52,7 +52,7 @@ import type {
   ThoughtBlock,
   ToolBlock,
 } from "../../../shared/messages";
-import { isPlanMode, MAX_TOOL_OUTPUT_DISPLAY_CHARS, splitSystemPromptSections } from "../../../shared/messages";
+import { MAX_TOOL_OUTPUT_DISPLAY_CHARS, splitSystemPromptSections } from "../../../shared/messages";
 import { useShallow } from "zustand/react/shallow";
 import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
@@ -969,10 +969,10 @@ function TaskList({ block, chrome = "card" }: { block: Extract<Block, { kind: "p
   const send = useChat((s) => s.send);
   const total = block.entries.length;
   const done = block.entries.filter((e) => e.status === "completed").length;
-  // 3.5 ①: a seeded plan card is checkable by the user even when the agent
-  // never drives the todo tool. in_progress items are the agent's claim —
-  // ticking those would fight the agent's own bookkeeping, so they stay
-  // inert. Stale clicks (block gone) are dropped host-side silently.
+  // A TaskList card is checkable by the user even when the agent never drives
+  // the todo tool. in_progress items are the agent's claim — ticking those
+  // would fight the agent's own bookkeeping, so they stay inert. Stale clicks
+  // (block gone) are dropped host-side silently.
   const tickable = Boolean(block.id);
   return (
     <div
@@ -1139,6 +1139,12 @@ function UserMessage({
           </div>
         ) : (
           <>
+        {block.origin === "qq" && (
+          <div className="mb-1.5 flex items-center gap-1.5" title={t("这条消息来自 QQ 机器人转发的远程用户，不是本机输入")}>
+            <Chip tone="info">{t("QQ")}</Chip>
+            <span className="text-ui-micro text-muted-foreground">{t("来自 QQ 渠道")}</span>
+          </div>
+        )}
         <Markdown text={block.text} />
         {block.images && block.images.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
@@ -1418,9 +1424,13 @@ function InjectedContextCard({ block, chrome = "card" }: { block: Extract<Block,
     ...block.items.filter((i) => i.kind === "knowledge" && i.from).map((i) => i.from!),
   ]).size;
   const knowledgeCount = block.items.filter((i) => i.kind === "knowledge").length;
+  // NOTE (2026-11-18): main-session injected cards no longer carry MCP items
+  // (MCP is disabled at spawn, served by Super Agent child sessions via the
+  // host broker), so these two chips are inert for the main panel today. Kept
+  // for old persisted cards and potential child-session transcript reuse — do
+  // not strip the rendering without handling those sources first.
   const mcpItems = block.items.filter((i) => i.kind === "mcp");
   const mcpCarried = mcpItems.filter((i) => i.connected !== false);
-  const mcpUnloaded = mcpItems.length - mcpCarried.length;
   const mcpProject = mcpItems.filter((i) => i.scope === "project" || i.scope === "both").length;
   const evicted = block.evicted === true;
   const chips: ReactNode[] = [];
@@ -1429,7 +1439,10 @@ function InjectedContextCard({ block, chrome = "card" }: { block: Extract<Block,
   if (fileCount > 0) chips.push(<Chip key="files" tone="muted">{t("项目记忆")} {fileCount}</Chip>);
   if (knowledgeCount > 0) chips.push(<Chip key="knowledge" tone="muted">{t("项目知识库")} {knowledgeCount}</Chip>);
   if (mcpCarried.length > 0) chips.push(<Chip key="mcp" tone="muted">{t("MCP 服务器")} {mcpCarried.length}</Chip>);
-  if (mcpUnloaded > 0) chips.push(<Chip key="mcpUnloaded" tone="warning">{t("MCP 未连接")} {mcpUnloaded}</Chip>);
+  // No "MCP 未连接 N" chip on purpose: the main panel session runs without any
+  // MCP server, so an unconnected server was never injected into the request —
+  // claiming a warning status here is misleading (2026-11-18 user report). The
+  // MCP settings card owns live connection status for servers the user has set.
   if (mcpProject > 0) chips.push(<Chip key="mcpProject" tone="info">{t("MCP 项目级")} {mcpProject}</Chip>);
   return (
     <div
@@ -1595,7 +1608,7 @@ export const BlockView = memo(function BlockView({
       // tool calls) render as an orphaned avatar on an empty row — Markdown
       // outputs nothing for them. Skip the whole row.
       if (!block.text.trim()) return null;
-      // Host-classified status text (compression chatter, approval/plan
+      // Host-classified status text (compression chatter, approval
       // resolution notes): a muted system line — no brand avatar, and no
       // copy/regenerate actions (it is not an assistant reply).
       if (block.system) {
@@ -1785,11 +1798,9 @@ function useMessageListState() {
       initializingReason: s.state?.initializingReason ?? null,
       status: s.state?.status ?? "idle",
       compressing: s.state?.compressing ?? false,
-      modes: s.state?.modes ?? null,
       queue: s.state?.queue,
       pendingApproval: s.state?.pendingApproval ?? null,
       pendingQuestions: s.state?.pendingQuestions ?? null,
-      pendingPlanExit: s.state?.pendingPlanExit ?? null,
       pendingProfileSwitch: s.state?.pendingProfileSwitch ?? null,
     })),
   );
@@ -2015,32 +2026,28 @@ function MessageListInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom reads refs only
   }, [promptSeq]);
 
-  // Approval / question / plan-exit cards render OUTSIDE the scroll area
-  // (App.tsx), so unmounting any of them never touches the content RO — the
-  // scroll container just grows by the card height, leaving the transcript
-  // tail floating above an empty gap. All three answers reseed the agent
-  // (semantically "continue", like sending a prompt), so any card
-  // disappearing re-anchors the viewport. This fixed the reported "answering
-  // the question card doesn't scroll to the latest message" bug; the
-  // approval card shares the exact same layout, and the plan-exit card the
-  // reported "exiting plan mode doesn't follow the scroll" one.
+  // Approval / question cards render OUTSIDE the scroll area (App.tsx), so
+  // unmounting either of them never touches the content RO — the scroll
+  // container just grows by the card height, leaving the transcript tail
+  // floating above an empty gap. Both answers reseed the agent (semantically
+  // "continue", like sending a prompt), so any card disappearing re-anchors
+  // the viewport. This fixed the reported "answering the question card doesn't
+  // scroll to the latest message" bug; the approval card shares the exact same
+  // layout.
   const prevApproval = useRef(state.pendingApproval);
   const prevQuestions = useRef(state.pendingQuestions);
-  const prevPlanExit = useRef(state.pendingPlanExit);
   useEffect(() => {
     const approvalCleared = prevApproval.current !== null && state.pendingApproval === null;
     const questionsCleared = prevQuestions.current !== null && state.pendingQuestions === null;
-    const planExitCleared = prevPlanExit.current !== null && state.pendingPlanExit === null;
     prevApproval.current = state.pendingApproval;
     prevQuestions.current = state.pendingQuestions;
-    prevPlanExit.current = state.pendingPlanExit;
-    if (!approvalCleared && !questionsCleared && !planExitCleared) return;
+    if (!approvalCleared && !questionsCleared) return;
     stickToBottom.current = true;
     setShowJump(false);
     const raf = requestAnimationFrame(() => scrollToBottom());
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom reads refs only
     return () => cancelAnimationFrame(raf);
-  }, [state.pendingApproval, state.pendingQuestions, state.pendingPlanExit]);
+  }, [state.pendingApproval, state.pendingQuestions]);
 
   /** Re-sync the header shadow flag from the current scroll position.
    * Scroll events alone miss resizes: when the panel is resized (or a card
@@ -2173,7 +2180,7 @@ function MessageListInner() {
   return (
     <div className="relative min-h-0 flex-1" ref={overlayRef}>
       <div className="message-scroll h-full overflow-y-auto px-3 pb-4 pt-3" ref={scrollRef} onScroll={onScroll}>
-        {/* --pending-card-h: height of the floating approval/question/plan card
+        {/* --pending-card-h: height of the floating approval/question card
             overlay (set by App's ResizeObserver on the shared wrapper). The
             card floats over this scroller, so the content reserves its height
             as bottom padding — otherwise the newest message would sit
@@ -2260,8 +2267,7 @@ function MessageListInner() {
                     state.status !== "connecting" &&
                     state.status !== "streaming" &&
                     !state.pendingApproval &&
-                    !state.pendingQuestions &&
-                    !state.pendingPlanExit
+                    !state.pendingQuestions
                   }
                   onRegenerate={onRegenerate}
                   onRemember={onRemember}
@@ -2348,9 +2354,7 @@ function MessageListInner() {
                 )
                 : state.compressing
                   ? t("正在压缩")
-                  : isPlanMode(state.modes)
-                    ? t("正在规划")
-                    : t("正在生成")}
+                  : t("正在生成")}
           </FloatPill>
         </div>
       )}

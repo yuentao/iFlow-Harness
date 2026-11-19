@@ -23,7 +23,7 @@ import {
   extractSuperActions,
   extractSuperDirectives,
   parseJsonLoose,
-  parseSuperTaskValue,
+  parseSuperDelegationPayload,
   type SuperAction,
   type SuperTaskSpec,
 } from "./super-agent.js";
@@ -69,6 +69,29 @@ export function classifySuperToolName(name: string): SuperToolCallKind | null {
 }
 
 /**
+ * 从工具调用的**标题**识别协议类别。
+ *
+ * 内置 `super-agent` 工具的 `getDescription()` 返回的是短标签，不是工具名：
+ * `Delegate N task(s)` / `Manage N child session action(s)`。而 CLI 的
+ * **智能审批（SMART）权限请求**只带 `{toolCallId,status,title,content,locations,kind}`
+ * —— 没有 `toolName`，也**没有 `args`**（bundle 实证 0.5.19：
+ * `[...].evaluateToolCall(...)` 的 RISKY 分支构造 toolCall 时只填 title）。
+ * 只按名字判定会让这类请求落进普通审批卡，5 分钟超时后按「拒绝」回给内核
+ * （表现为派发静默消失）。
+ *
+ * 匹配是锚定的整串比较（允许任意空白），不做包含匹配 —— 其它工具的标题
+ * 里碰巧出现 "delegate" 也不会被误判成派发。
+ */
+export function classifySuperToolTitle(title: string): SuperToolCallKind | null {
+  if (typeof title !== "string") return null;
+  const compact = title.trim().replace(/\s+/g, " ");
+  if (!compact) return null;
+  if (/^delegate \d+ tasks?$/i.test(compact)) return "dispatch";
+  if (/^manage \d+ child session actions?$/i.test(compact)) return "actions";
+  return null;
+}
+
+/**
  * 把工具调用的参数归一成 JSON 文本。
  *
  * 接受对象 / 数组，以及装着 JSON 的字符串（先 trim；空串与非法 JSON 返回
@@ -80,12 +103,13 @@ function normalizeArgsValue(args: unknown): unknown {
   if (typeof args === "string") {
     const trimmed = args.trim();
     if (!trimmed) return null;
-    try {
-      const parsed: unknown = JSON.parse(trimmed);
-      return parsed && typeof parsed === "object" ? parsed : null;
-    } catch {
-      return null;
-    }
+    // 与围栏通道 parseSuperDelegationPayload 同源：字符串载荷一律走宽松解析
+    // （修原始换行 / 尾逗号 / 非法转义）。否则同一份脏 JSON 字符串围栏能派发、
+    // 工具通道却严格 parse 失败返回 null → 静默零派发。
+    const loose = parseJsonLoose(trimmed);
+    if (!loose.ok) return null;
+    const parsed = loose.value;
+    return parsed && typeof parsed === "object" ? parsed : null;
   }
   return args && typeof args === "object" ? args : null;
 }
@@ -123,6 +147,52 @@ export function resolveSuperToolCallKind(
   return hasActions && !hasTasks ? "actions" : kind;
 }
 
+/** 管理动作的合法名字（与 `shared/super-agent.ts` 的解析器一致）。 */
+const SUPER_ACTION_KINDS = new Set(["retry", "cancel", "answer", "cleanup"]);
+
+/**
+ * 只凭**载荷结构**识别协议类别（名字完全缺失时的最后一道依据）。
+ *
+ * 权限请求在智能审批形态下既没有 `toolName` 也没有 `args`，但旧版 / 其它
+ * 适配器可能带上 args 而不带名字。这里按结构严格判定：派发要求 `tasks`
+ * 非空且每个元素是带非空字符串 `task` 的对象；管理要求 `actions` 非空且
+ * 每个元素带合法 `action` 与非空 `sessionId`。**不做宽松匹配** —— 这只是
+ * 「名字缺失」时的兜底，误判会跳过对真实工具的审批，宁可漏认让它走审批卡。
+ */
+export function classifySuperToolArgs(args: unknown): SuperToolCallKind | null {
+  const value = normalizeArgsValue(args);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const isRecord = (item: unknown): item is Record<string, unknown> =>
+    Boolean(item) && typeof item === "object" && !Array.isArray(item);
+  const tasks = record.tasks;
+  if (
+    Array.isArray(tasks) &&
+    tasks.length > 0 &&
+    tasks.every(
+      (task) => isRecord(task) && typeof task.task === "string" && task.task.trim().length > 0,
+    )
+  ) {
+    return "dispatch";
+  }
+  const actions = record.actions;
+  if (
+    Array.isArray(actions) &&
+    actions.length > 0 &&
+    actions.every(
+      (action) =>
+        isRecord(action) &&
+        typeof action.action === "string" &&
+        SUPER_ACTION_KINDS.has(action.action) &&
+        typeof action.sessionId === "string" &&
+        action.sessionId.trim().length > 0,
+    )
+  ) {
+    return "actions";
+  }
+  return null;
+}
+
 /**
  * 把工具参数包成对应协议的围栏文本。
  *
@@ -149,12 +219,21 @@ export interface SuperToolCallPayload {
   tasks: SuperTaskSpec[][];
   /** actions：解析出的动作，按输出顺序（dispatch 时为空）。 */
   actions: SuperAction[];
+  /**
+   * 字段级诊断：混合载荷里被丢弃的畸形条目（如 `tasks[1] 必须是对象`）。
+   *
+   * 空数组 = 载荷完全合法；非空时宿主仍派发 `tasks` 里的合法项，并补一条
+   * warning，绝不静默丢掉一半。
+   */
+  issues: string[];
 }
 
 /** 解析失败：`reason` 直接进日志（英文短语），宿主据此留痕。 */
 export interface SuperToolCallFailure {
   ok: false;
   reason: string;
+  /** 字段级诊断（如 `tasks[0].task 必须是字符串`），供宿主 toast 给出具体原因。 */
+  issues: string[];
 }
 
 export type SuperToolCallResult = ({ ok: true } & SuperToolCallPayload) | SuperToolCallFailure;
@@ -181,14 +260,23 @@ export function parseSuperToolCall(
 ): SuperToolCallResult {
   const effectiveKind = resolveSuperToolCallKind(kind, args);
   const text = synthesizeSuperToolCallBlock(effectiveKind, args);
-  if (!text) return { ok: false, reason: "the tool arguments are not a JSON payload" };
+  if (!text) {
+    return { ok: false, reason: "the tool arguments are not a JSON payload", issues: [] };
+  }
   if (effectiveKind === "dispatch") {
     const scan = extractSuperDirectives(text, 0);
     if (scan.blocks.length === 0) {
       const reason = scan.invalidBlocks[0]?.reason ?? "the payload contains no delegation tasks";
-      return { ok: false, reason };
+      return { ok: false, reason, issues: scan.issues };
     }
-    return { ok: true, kind: effectiveKind, text, tasks: scan.blocks, actions: [] };
+    return {
+      ok: true,
+      kind: effectiveKind,
+      text,
+      tasks: scan.blocks,
+      actions: [],
+      issues: scan.issues,
+    };
   }
   const scan = extractSuperActions(text, 0);
   if (scan.actions.length === 0) {
@@ -198,9 +286,10 @@ export function parseSuperToolCall(
         scan.invalidBlocks.length > 0
           ? "the payload is not a valid actions block"
           : "the payload contains no management actions",
+      issues: [],
     };
   }
-  return { ok: true, kind: effectiveKind, text, tasks: [], actions: scan.actions };
+  return { ok: true, kind: effectiveKind, text, tasks: [], actions: scan.actions, issues: [] };
 }
 
 /**
@@ -213,24 +302,18 @@ export function parseSuperToolCall(
  *
  * 两种输入形态都收：
  *  - **对象**（wire 的 `tool_call.args` 就是它）：直接进公共解析入口；
- *  - **JSON 字符串**：先走项目已有的宽松解析 {@link parseJsonLoose}（修原始
- *    换行 / 尾逗号 / 非法转义），修不好就返回 null —— 绝不编造内容。
+ *  - **JSON 字符串**：先走宽松解析（修原始换行 / 尾逗号 / 非法转义），修不好
+ *    就返回 null —— 绝不编造内容。
  *
- * 口径与派发器**完全一致**（复用 {@link parseSuperTaskValue}，不复制校验）：
- * 缺 `title` 回退到 task 首行、附件同时接受 `string[]` 与 `{path,name}` 对象、
- * 占位符任务跳过、空任务判失败。因此「宿主派发出去了」与「卡片说有任务」
- * 不会再出现分叉。
+ * 口径与派发器**完全一致**（复用 {@link parseSuperDelegationPayload}，不复制
+ * 校验）：缺 `title` 回退到 task 首行、附件同时接受 `string[]` 与 `{path,name}`
+ * 对象、占位符任务跳过、空任务判失败；混合载荷里畸形条目被丢弃、合法条目照常
+ * 返回（诊断原因见 `parseSuperDelegationPayload` 的 `issues`）。因此「宿主派发
+ * 出去了」与「卡片说有任务」不会再出现分叉。
  *
  * @returns 解析出的任务列表；载荷不可用时为 null（调用方据此诚实降级）。
  */
 export function parseSuperDelegationTasks(args: unknown): SuperTaskSpec[] | null {
-  let value: unknown = args;
-  if (typeof args === "string") {
-    const loose = parseJsonLoose(args);
-    if (!loose.ok) return null;
-    value = loose.value;
-  }
-  if (!value || typeof value !== "object") return null;
-  const parsed = parseSuperTaskValue(value);
+  const parsed = parseSuperDelegationPayload(args);
   return parsed.ok ? parsed.tasks : null;
 }

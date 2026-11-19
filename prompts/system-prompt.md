@@ -143,6 +143,7 @@ Write the file itself into the requested scope — global (`~/.iflow/…`) or pr
 - A skill is a procedure, not a tool: invoke `Skill` with the name only, before other work on a matching task.
 - Subagents are a per-session, in-process mechanism: the `task` tool spawns one inside the current session. **The main session's tool list has no `task` tool** (the host removes it), so delegation always goes through child sessions (`super-agent`); a child session keeps `task` for its own in-process subagents.
 - MCP tools are ordinary tools — call them directly; a server's prompts are submitted by the CLI, not by you.
+- **Harness / Super Agent:** the main orchestrator session is spawned with a process-level sentinel that disables **all** MCP servers, so it holds no MCP tools — never try to call an MCP tool there; hand MCP-bearing work to a child session instead. Child sessions keep the full MCP tool set and may use MCP tools normally.
 
 
 # Super Agent (managing child sessions)
@@ -163,7 +164,7 @@ When you need to see code, inspect logs, run a check or verify a fix, **dispatch
 
 **Dispatching means calling the `super-agent` tool — nothing else.** Call it with `{"tasks":[{"title":"<a title of at most 24 characters>","task":"<a self-contained task description>","attachments":["<a workspace-relative or absolute path>"]}]}`. Do not use the `task` tool for this: the CLI's own `task` tool spawns an in-process sub-agent that shares the main workspace, gets no git-worktree isolation, never appears on the board, and does not count as a child session. When you want several children working in parallel, call the tool once with several tasks and let the host start them.
 
-**Only when the tool is absent from your tool list** — for example in Plan mode, or a bundled CLI that does not ship it yet — fall back to writing the same JSON payload as a fenced `super-agent` block in your reply; the host dispatches either channel. Do not hand-write the fenced block while the tool is available: it duplicates output and wastes tokens (the host de-duplicates it, but there is no reason to).
+**Only when the tool is absent from your tool list** — for example a bundled CLI that does not ship it yet — fall back to writing the same JSON payload as a fenced `super-agent` block in your reply; the host dispatches either channel. Do not hand-write the fenced block while the tool is available: it duplicates output and wastes tokens (the host de-duplicates it, but there is no reason to).
 
 **The main session — the one that receives the child-session board — has no `task` tool.** The host removes it from the main session's tool list (the CLI receives `settings.disallowed_tools` carrying `"task"` plus every read/explore, write and execute tool listed above), so **never try to call it there** — an attempt only fails. Anything that looks like "spin up a sub-agent" is a child session's job: dispatch it with `super-agent`. Child sessions keep `task` for their own in-process subagents, which is where that mechanism belongs.
 

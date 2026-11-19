@@ -25,6 +25,9 @@ const en: Record<string, string> = {
   "准备中": "Preparing",
   "等你回答": "Waiting for you",
   "已中断": "Interrupted",
+  "由用户中断": "Interrupted by user",
+  "由智能体中断": "Interrupted by agent",
+  "由系统中断": "Interrupted by system",
   "不弹审批": "No approval prompts",
   "子会话里的工具调用（包括运行命令）会直接执行，不会先征求你的同意":
     "Tool calls in a child session — shell commands included — run directly, without asking you first",
@@ -35,6 +38,7 @@ const en: Record<string, string> = {
   "子会话还在运行时不能清理，请先中断它":
     "A running child session cannot be cleaned up — interrupt it first",
   "按未回答继续": "it continues with “no answer”",
+  "已提交，等待子会话继续": "Submitted — waiting for the child session to continue",
   "子会话 {0}：{1}": "Child session {0}: {1}",
   "让智能体合并分支": "Let the agent merge the branch",
   "已自动合并": "Auto-merged",
@@ -43,10 +47,13 @@ const en: Record<string, string> = {
   "自动处理失败": "Could not merge or open a PR",
   "未自动合并": "Not auto-merged",
   "无需合并": "No merge needed",
+  "需人工合并": "Needs manual merge",
+  "已完成、需人工合并的 {0} 个子会话": "Finished child sessions needing a manual merge ({0})",
   "这个子会话的改动已经合并": "This child session's changes are already merged",
   "{0} 个进行中": "{0} running",
-  "{0} 个待处理": "{0} need you",
-  "{0} 个未成功": "{0} unfinished",
+  "{0} 个等你回答": "{0} waiting for you",
+  "{0} 个失败": "{0} failed",
+  "{0} 个需人工合并": "{0} needing a manual merge",
   "全部中断": "Interrupt all",
   "子会话看板": "Child-session board",
   "展开子会话看板": "Expand the child-session board",
@@ -55,6 +62,8 @@ const en: Record<string, string> = {
   "展开已完成的子会话": "Expand the finished child sessions",
   "收起已完成的子会话": "Collapse the finished child sessions",
   "已完成并合并的 {0} 个子会话": "Finished and merged child sessions ({0})",
+  "已完成、无需合并的 {0} 个子会话": "Finished child sessions with nothing to merge ({0})",
+  "已完成的 {0} 个子会话": "Finished child sessions ({0})",
   "派发": "Dispatch",
   "已派出": "Dispatched",
   "已启动": "Started",
@@ -91,8 +100,8 @@ const en: Record<string, string> = {
     "Interrupt child session “{0}”? It stops immediately and this turn's changes are neither committed nor merged; what is already in its working directory is kept, and you can retry later.",
   "中断全部 {0} 个进行中的子会话？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
     "Interrupt all {0} running child sessions? They stop immediately and their changes are neither committed nor merged; what is already in their working directories is kept, and you can retry later.",
-  "重试这个子会话：沿用原来的工作目录，已有的改动会保留":
-    "Retry this child session: reuses its working directory and keeps existing changes",
+  "重试这个子会话：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）":
+    "Retry this child session: reuses its working directory and creates no new commit, but clears the previous integration result and re-runs the whole task (spending tokens again)",
   "第 {0} 次尝试": "Attempt {0}",
   "独立工作目录": "Its own working directory",
   "只隔离了目录": "Directory only — no branch isolation",
@@ -135,15 +144,8 @@ const en: Record<string, string> = {
   // loading / topbar
   "历史会话（选择后恢复该会话上下文）": "Recent sessions (pick one to restore its context)",
   "当前会话": "Current session",
-  "权限模式": "Permission mode",
-  "智能": "Smart",
-  "iFlow 会自行判断风险，必要时才征求你的确认": "iFlow judges the risk itself and only asks when it matters",
   "免确认": "Auto-approve",
-  "所有操作直接执行，不再询问": "Every action runs directly — nothing is asked",
   "标准": "Standard",
-  "每次执行操作前都要你确认": "You confirm before each action runs",
-  "规划": "Plan",
-  "只读：只分析、出计划，不改动文件": "Read-only: analyze and plan without changing files",
   "模型": "Model",
   "搜索模型…": "Search models…",
   "新会话": "New session",
@@ -154,7 +156,6 @@ const en: Record<string, string> = {
   "连接中": "Connecting",
   "正在生成": "Generating",
   "生成中": "Generating",
-  "正在规划": "Planning",
   "正在压缩": "Compressing",
   "出错了": "Something went wrong",
   "会话历史": "Session history",
@@ -264,6 +265,9 @@ const en: Record<string, string> = {
   "更新任务清单": "Updating todos",
   "正在恢复历史会话…": "Restoring session…",
   "正在创建新会话…": "Creating new session…",
+  // 新建会话流程（NewSessionPhase）：starting / waiting 两个阶段。
+  "正在新建会话…": "Creating a new session…",
+  "正在等待后台任务结束": "Waiting for a background task to finish",
   "正在删除会话…": "Deleting session…",
   "正在删除消息…": "Deleting message…",
   "正在回滚对话…": "Rolling back the conversation…",
@@ -322,20 +326,11 @@ const en: Record<string, string> = {
   "当前模型：{0}": "Current model: {0}",
   "提示音": "Sound",
   "回复完成或失败时播放提示音。": "Play a cue when a reply finishes or fails.",
-  "默认权限模式": "Default approval mode",
   "审批说明": "Approval help",
   "「允许一次」只执行这一次；「始终允许」会让本次会话记住这个操作，之后不再询问。":
     "\"Allow once\" runs it just this time; \"Always allow\" remembers this action for the session and stops asking.",
   "Y 允许一次 · N 拒绝 · Esc 取消": "Y allow once · N reject · Esc cancel",
   "Y 允许一次 · N/Esc 拒绝": "Y allow once · N/Esc reject",
-  "计划说明": "Plan help",
-  "Plan 模式只做分析和规划，不改动文件。批准后 iFlow 会开始执行，并可以修改工作区里的文件。":
-    "Plan mode only analyzes and plans — it does not change files. Once you approve, iFlow starts working and can modify files in the workspace.",
-  "批准的计划会存到 .iflow/specs/，方便以后回看。":
-    "Approved plans are saved under .iflow/specs/ so you can review them later.",
-  "编辑的内容只在你点「重新规划」时交给 iFlow；点「批准计划」执行的仍是原计划。":
-    "Your edits are handed to iFlow only when you choose Re-plan; Approve still runs the original plan.",
-  "Y 批准 · N 拒绝 · R 重新规划": "Y approve · N reject · R re-plan",
   "提问说明": "Question help",
   "iFlow 正在等你回答，回答前它会先暂停。":
     "iFlow is waiting for your answer and pauses until you reply.",
@@ -357,16 +352,13 @@ const en: Record<string, string> = {
   "不回答并继续": "Continue without answering",
   "回车只确认当前输入框；要提交整张卡片，请点「提交回答」或按 Ctrl/Cmd + 回车。":
     "Enter confirms just that field; to submit the whole card, use the Submit answer button or Ctrl/Cmd+Enter.",
-  "保存并重新规划": "Save and re-plan",
   "快捷键": "Keyboard shortcuts",
   "审批允许 / 拒绝": "Approve / reject",
-  "计划批准 / 拒绝 / 重新规划": "Plan approve / reject / re-plan",
   "上一个 / 下一个会话": "Previous / next session",
   "聚焦输入框": "Focus the composer",
   "切换 Focus 视图": "Toggle Focus view",
   "配置完成": "You're all set",
   "连接": "Connection",
-  "默认模式": "Default mode",
   "继续配置": "Continue configuring",
   "还没配置 API 密钥，现在还不能开始对话。": "No API key configured yet — you cannot start chatting.",
   "去配置": "Set it up",
@@ -383,17 +375,7 @@ const en: Record<string, string> = {
   "如 glm-5.3-flash-free": "e.g. glm-5.3-flash-free",
   "重启内核": "Restart Core",
   "等待选择…": "Waiting for your choice…",
-  "审批规则": "Approval rule",
-  "自动允许": "Auto-allow",
   "自动拒绝": "Auto-deny",
-  "弹卡确认": "Ask (card)",
-  "启用": "Enabled",
-  "点击启用": "Click to enable",
-  "点击停用": "Click to disable",
-  "规则名称": "Rule name",
-  "动作": "Action",
-  "MCP 服务器名": "MCP server name",
-  "工具名（精确匹配）": "Tool name (exact match)",
   // MCP management card
   "MCP 服务器": "MCP servers",
   "添加 MCP 服务器": "Add MCP server",
@@ -443,15 +425,19 @@ const en: Record<string, string> = {
   "项目级覆盖全局": "Project scope (overrides global)",
   "项目级和全局有同名服务器时，内核会用项目级那份整体替换全局的（不会合并字段）":
     "When a server name exists in both scopes, the Core replaces the global entry with the project one wholesale (fields are not merged)",
-  "这里改的是全局配置（~/.iflow/settings.json）。保存后要点底部的「重启内核」才会生效，当前会话会自动恢复。":
-    "This edits the global configuration (~/.iflow/settings.json). Click Restart Core in the footer to apply; the current session restores automatically.",
-  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后要点底部的「重启内核」才会生效。":
-    "This edits the project configuration (<workspace>/.iflow/settings.json). For a name that also exists globally, the Core replaces the global entry with the project one wholesale (fields are not merged). Click Restart Core in the footer to apply.",
+  "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的子会话会通过共享代理使用这些 server。":
+    "This edits the global configuration (~/.iflow/settings.json). Restart the Core after saving — new child sessions use these servers through the shared proxy.",
+  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后重启内核，新建的子会话会通过共享代理使用这些 server。":
+    "This edits the project configuration (<workspace>/.iflow/settings.json). For a name that also exists globally, the Core replaces the global entry with the project one wholesale (fields are not merged). Restart the Core after saving — new child sessions use these servers through the shared proxy.",
+  "这些 MCP server 仅供 Super Agent 子会话使用，主会话不加载 MCP。":
+    "These MCP servers are used only by Super Agent child sessions; the main session does not load MCP.",
   "保存中…": "Saving…",
-  // MCP status indicators + detail sub-page
+  // MCP status indicators + detail sub-page (child-session view is authoritative)
   "状态未知": "Status unknown",
   "已禁用": "Disabled",
-  "已屏蔽": "Blocked",
+  "已在子会话连接": "Connected in child sessions",
+  "子会话连接失败": "Child session connection failed",
+  "主会话未加载 MCP": "Not loaded in the main session",
   "已连接": "Connected",
   "连接中…": "Connecting…",
   "未连接": "Not connected",
@@ -463,13 +449,18 @@ const en: Record<string, string> = {
   "MCP 服务器详情": "MCP server details",
   "刷新": "Refresh",
   "刷新中…": "Refreshing…",
-  "这个服务器的工具说明会占用约 {0} tokens 上下文（估算）":
-    "This server's tool descriptions take about {0} tokens of context (estimated)",
+  "这些工具说明会在子会话中占用约 {0} tokens 上下文（估算）":
+    "These tool descriptions take about {0} tokens of context in child sessions (estimated)",
+  "子会话连接失败：": "Child session connection failed:",
   "连接失败：": "Connection failed:",
   "这个服务器没有提供工具或提示": "This server provides no tools or prompts",
   "正在读取工具列表…": "Reading the tool list…",
   "拿不到工具列表（未连接，或没有开启状态上报）":
     "Cannot read the tool list (not connected, or status reporting not enabled)",
+  "主会话不加载 MCP，新建子会话并连接后才会上报工具列表":
+    "The main session does not load MCP; the tool list is reported after a child session connects",
+  "主会话不加载 MCP，工具由子会话通过共享代理使用":
+    "The main session does not load MCP; tools are used by child sessions through the shared proxy",
   "工具 ({0})": "Tools ({0})",
   "提示词 ({0})": "Prompts ({0})",
   "参数结构": "Parameter structure",
@@ -508,13 +499,13 @@ const en: Record<string, string> = {
   "继续": "Resume",
   "（附件消息）": "(attachment message)",
   "排队中": "Queued",
+  "排队 {0}": "Queued {0}",
   "附件 {0}": "{0} attachment(s)",
   "删除": "Delete",
   // delete confirmation dialogs (ConfirmDialog)
   "删除会话": "Delete session",
   "删除消息": "Delete message",
   "删除配置": "Delete profile",
-  "删除审批规则": "Delete approval rule",
   "确定删除会话「{0}」吗？此操作不可撤销。": "Delete session \"{0}\"? This cannot be undone.",
   "确定删除该消息及其后所有内容吗？此操作不可撤销。":
     "Delete this message and everything after it? This cannot be undone.",
@@ -542,8 +533,8 @@ const en: Record<string, string> = {
   "给核心模块补充单元测试": "Add unit tests to the core modules",
   "分析这个报错的可能原因并给出修复方案": "Analyze this error's likely causes and propose a fix",
   // P0-3: splash patience line & error toast actions
-  "等待时间偏长：可能是 MCP 服务器连接缓慢或网络不可达":
-    "Taking longer than usual — an MCP server may be slow to connect or the network is unreachable",
+  "等待时间偏长：可能是内核启动缓慢或网络不可达":
+    "Taking longer than usual — the Core may be slow to start or the network is unreachable",
   "重启内核后重试，当前会话会自动恢复": "Restart the Core and retry — this session restores automatically",
   "关闭": "Dismiss",
   "回到最新": "Jump to latest",
@@ -562,8 +553,7 @@ const en: Record<string, string> = {
       "记忆": "Memory",
       "{0} 个项目记忆文件": "{0} project memory file(s)",
       "{0} 个知识库文档": "{0} knowledge doc(s)",
-        "MCP 未连接": "MCP not connected",
-        "MCP 项目级": "MCP project-scope",
+      "MCP 项目级": "MCP project-scope",
         "这次请求没有带上": "Not included in this request",  "{0} 字符": "{0} chars",
   "{0} 字节": "{0} bytes",
   "diff": "diff",
@@ -578,8 +568,8 @@ const en: Record<string, string> = {
   "重新分析整个工作区并覆盖索引": "Re-analyze the whole workspace and overwrite the index",
   "正在启动 …": "Starting …",
   "正在重新启动内核 …": "Restarting the Core …",
-  "首次启动，或配置了多个 MCP 服务器时会多等一会儿":
-    "Takes longer on first launch, or when several MCP servers are configured",
+  "首次启动时需要多等一会儿":
+    "A first launch may take a little longer",
   // P1: edit & resend, session search, aria-live announcements
   "搜索会话…": "Search sessions…",
   "有操作等你批准": "An action is waiting for your approval",
@@ -592,22 +582,11 @@ const en: Record<string, string> = {
   "已选 {0} 项": "{0} selected",
   "正在连接 iFlow…": "Connecting to iFlow…",
   "正在生成回复…": "Generating response…",
-  "正在规划…": "Planning…",
   "正在压缩上下文…": "Compressing context…",
   "已停止生成": "Generation stopped",
   "已就绪": "Ready",
-  // Plan-mode exit confirmation card
-  "iFlow 准备开始执行计划": "iFlow is ready to start the plan",
-  "批准后 iFlow 会离开 Plan 模式，按下面的计划开始动手：": "Once approved, iFlow leaves Plan mode and starts working through this plan:",
-  "批准计划": "Approve plan",
-  "拒绝计划": "Reject plan",
-  "重新规划": "Re-plan",
-  "编辑计划": "Edit plan",
-  "预览计划": "Preview plan",
   "编辑": "Edit",
   "预览": "Preview",
-  "计划审批操作": "Plan approval actions",
-  "计划已就绪，等你批准": "The plan is ready for your approval",
   // render-error fallback (ErrorBoundary)
   "重试": "Retry",
   "界面渲染异常": "Interface rendering error",
@@ -660,7 +639,6 @@ const en: Record<string, string> = {
   // settings taxonomy + grouped settings (2026-10-18)
   "账户与模型": "Account & models",
   "外观与交互": "Appearance & interaction",
-  "权限与审批": "Permissions & approvals",
   "MCP 与工具": "MCP & tools",
   "记忆与知识": "Memory & knowledge",
   "运行与数据": "Runtime & data",
@@ -673,14 +651,27 @@ const en: Record<string, string> = {
   "会话": "Session",
   "并发上限": "Concurrency limit",
   "个": "sessions",
+  "集成模式": "Integration mode",
+  "子会话完成后，把它的改动并回当前分支的方式。": "How a finished child session's changes are merged back into the current branch.",
+  "自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的子会话生效。":
+    "Auto-merge: merge into the current branch (conflicts are previewed first and your uncommitted changes are protected); Open PR: push the branch and open a pull request (needs the gh CLI); Manual: just keep the branch for you to merge from the board. Takes effect on the next child session that finishes.",
+  "自动合并": "Auto-merge",
+  "创建 PR": "Open PR",
+  "手动": "Manual",
+  "工作目录上限": "Worktree limit",
+  "磁盘上最多保留几个已结束子会话的工作目录。": "How many finished child-session worktrees to keep on disk at most.",
+  "默认 10，可设 0–100；填 0 表示不限。超出时按修改时间从旧到新回收，分支一律保留，有未提交改动的目录不会被回收。":
+    "Defaults to 10, range 0–100; 0 means no limit. When exceeded, the oldest are removed first by modification time; branches are always kept and worktrees with uncommitted changes are never removed.",
+  "保留工作目录": "Keep worktree",
+  "子会话完成后，是否保留它的工作目录。": "Whether to keep a finished child session's working directory.",
+  "默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的子会话从不回收。开启后工作目录会留在磁盘上，可随时手动清理。":
+    "Off by default: finished worktrees are reclaimed automatically (branches are always kept); failed or interrupted sessions are never reclaimed. When on, worktrees stay on disk for manual cleanup.",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
   "调整面板整体字号。": "Adjust the panel font size.",
-  "审批/提问/计划阻塞时，或整轮完成时发送。":
-    "Sent when an approval, question or plan blocks, or when a turn completes.",
+  "审批/提问阻塞时，或整轮完成时发送。":
+    "Sent when an approval or question blocks, or when a turn completes.",
   "高级外观": "Advanced appearance",
   "可选": "Optional",
-  "新会话使用的权限模式。": "The permission mode new sessions start with.",
-  "内核兼容": "Core compatibility",
   "面板启动时恢复上次使用的会话。": "Restore the last used session when the panel starts.",
   "VSCode 启动时自动打开聊天面板。": "Open the chat panel automatically when VSCode starts.",
   "下次启动生效。": "Takes effect on the next start.",
@@ -711,8 +702,6 @@ const en: Record<string, string> = {
   "提示与通知": "Sound & notifications",
   "系统通知": "OS notifications",
   "从不": "Never",
-  "面板默认权限模式": "Default panel approval mode",
-  "内核默认审批模式": "Core default approval mode",
   "启动与会话": "Startup & sessions",
   "后台预热内核": "Warm up the Core",
   "恢复上次会话": "Restore last session",
@@ -845,10 +834,10 @@ const en: Record<string, string> = {
   "第 {0}/{1} 个任务": "Task {0}/{1}",
   "这段内容没能完整读取，下面的任务书仅供参考，可能还没有真正派出去":
     "This content could not be read in full; the task briefs below are for reference only and may not have been dispatched yet.",
-  "这段任务信息没能完整读取，暂时看不到任务列表，下面是它的原始内容":
-    "This task information could not be read in full, so the task list is unavailable. Its raw content is shown below.",
-  "这段操作信息没能完整读取，暂时看不到操作列表，下面是它的原始内容":
-    "This action information could not be read in full, so the action list is unavailable. Its raw content is shown below.",
+  "委派指令格式错误：{0}": "Malformed delegation directive: {0}",
+  "未派发": "Not dispatched",
+  "部分未派发": "Partly dispatched",
+  "复制原始参数": "Copy raw arguments",
   "子会话操作": "Child session actions",
   "{0} 个动作": "{0} action(s)",
   "回答": "Answer",
@@ -868,7 +857,7 @@ const en: Record<string, string> = {
   "收起任务说明": "Collapse the task description",
   "展开全文（还有 {0} 字）": "Show full text ({0} more characters)",
   "未指定子会话": "No child session specified",
-  // 多张待处理卡的堆叠计数器（审批 / Plan 退出 / 提问）
+  // 多张待处理卡的堆叠计数器（审批 / 提问）
   "还有 {0} 张卡片待处理": "{0} more card(s) need you",
   "还有 {0} 张卡片待处理：{1}": "{0} more card(s) need you: {1}",
   "收起待处理卡": "Collapse pending cards",
@@ -884,13 +873,13 @@ const en: Record<string, string> = {
   "添加文件超时了，请重试": "Adding the file timed out. Try again.",
   "、": ", ",
 
-  // 2026-11-16 文案优化：设置 / 引导 / 认证 / 审批规则（键变更后的新词条）
+  // 2026-11-16 文案优化：设置 / 引导 / 认证（键变更后的新词条）
   "设置保存在哪里": "Where settings are saved",
-  "外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言、审批模式保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后生效。":
-    "Panel preferences such as appearance and sound live in your VSCode user settings and follow VSCode Settings Sync. API profiles and keys, MCP, language and approval mode live in the local iFlow config (keys are plaintext — mind who can read this machine) and apply after a Core restart.",
+  "外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后由新子会话使用最新配置。":
+    "Panel preferences such as appearance and sound live in your VSCode user settings and follow VSCode Settings Sync. API profiles and keys, MCP and language live in the local iFlow config (keys are plaintext — mind who can read this machine); new child sessions pick up the latest config after a Core restart.",
   "打开 VSCode 设置": "Open VSCode settings",
-  "重启内核，当前会话会自动恢复。语言、审批模式与 MCP 的改动在重启后生效。":
-    "Restart the Core — the current session comes back automatically. Language, approval mode and MCP changes apply after the restart.",
+  "重启内核，当前会话会自动恢复。语言改动在重启后生效；MCP 仅供子会话使用，重启后的新子会话会通过共享代理加载。":
+    "Restart the Core — the current session comes back automatically. Language changes apply after the restart; MCP is used only by child sessions, which load it through the shared proxy after a restart.",
   "内容需要是列表（最外层用 [ ]）": "The content must be a list (wrap it in [ ])",
   "JSON 格式有误，请检查括号与引号": "Invalid JSON — check the brackets and quotes",
   "用 JSON 列表写明哪些模型支持思考：每项包含 pattern（模型匹配）与 supportsThinking（是否支持）。保存后写入本机 iFlow 配置，重启内核生效。":
@@ -939,11 +928,6 @@ const en: Record<string, string> = {
   "停止生成（在审批卡上为拒绝）": "Stop generating (rejects on an approval card)",
   "背景光晕的浓淡：0 为关闭，100 最亮。":
     "How strong the background glow is: 0 turns it off, 100 is brightest.",
-  "只影响新会话；当前会话可在输入框下方的模式菜单里切换。":
-    "New sessions only; switch the current one from the mode menu below the composer.",
-  "内核启动时使用的审批模式。": "The approval mode the Core starts with.",
-  "与上面的面板默认模式互不影响；保存后重启内核生效。":
-    "Independent of the panel default above; applies after a Core restart.",
   "窗口打开时提前启动内核，首次打开面板不用等。":
     "Start the Core ahead of time when a window opens, so the first panel open is instant.",
   "每个窗口约 100MB 内存；下次窗口启动生效。":
@@ -1007,8 +991,6 @@ const en: Record<string, string> = {
   "可以点下面的按钮再试一次。": "Use the button below to try again.",
   "返回填写配置": "Back to the profile form",
   "没有匹配的模型": "No matching models",
-  "新会话默认用这个权限模式；点选后当前会话也会立即切换。之后可以在「设置 → 权限与审批」里细化规则。":
-    "New sessions start in this mode; picking one also switches the current session. Fine-grained rules live in Settings → Permissions & approvals.",
   "可以开始对话了，其余设置在 ⚙ 里随时能改。":
     "You can start chatting now; the rest stays editable in ⚙.",
   "这几项可以稍后再配。": "These can be set up later.",
@@ -1018,26 +1000,8 @@ const en: Record<string, string> = {
     "How should the current conversation be handled after switching to profile \"{0}\"?",
   "这段对话保留，用新配置接着聊": "Keep this conversation and continue with the new profile",
   "从一段空白对话重新开始": "Start over with a blank conversation",
-  "每次询问": "Ask every time",
-  "审批请求会从上往下匹配规则（项目规则优先），第一条命中的规则决定结果：自动允许、自动拒绝或每次询问。破坏性命令（如 rm、git push）永远不会被自动允许，即使命中规则也会先问你。":
-    "Approval requests match rules top to bottom (project rules first); the first match decides: auto-allow, auto-deny, or ask. Destructive commands such as rm or git push are never auto-allowed — you are always asked first.",
-  "还没有审批规则": "No approval rules yet",
-  "项目内的规则（只读）": "Rules from the project (read-only)",
-  "已命中 {0} 次": "Matched {0}×",
-  "添加规则": "Add rule",
-  "如 允许读取 src 目录": "e.g. Allow reading the src folder",
-  "路径范围（相对工作区，支持通配）":
-    "Path scope (relative to the workspace; globs allowed)",
-  "命令开头（逗号分隔，仅对执行类生效）":
-    "Command prefix (comma-separated; execute only)",
-  "加入列表": "Add to list",
-  "更新列表": "Update list",
-  "所有条件都留空会匹配全部请求，请谨慎使用。这里的修改只作用于列表，点「保存」后才真正生效。":
-    "Leaving every condition empty matches ALL requests — use with care. Edits only change the list; click Save to apply.",
-  "删除规则「{0}」？点「保存」后才会真正生效。":
-    "Delete rule \"{0}\"? It takes effect once you save.",
   // 文案收尾补充：资产 / 记忆 / MCP / 看板等新增词条（2026-11-16）
-  "拒绝或取消都不会执行任何操作。想提前定好规则，可到「设置 → 权限与审批」。": "Reject or cancel runs nothing. To set rules in advance, go to Settings → Permissions & approvals.",
+  "拒绝或取消都不会执行任何操作。": "Reject or cancel runs nothing.",
   "审批操作": "Approval actions",
   "{0}（{1}）": "{0} ({1})",
   "取消审批": "Cancel approval",
@@ -1107,6 +1071,135 @@ const en: Record<string, string> = {
   "Ollama 跑在本机，不校验 API Key，填一个非空值（如 ollama）即可；请先确认 Ollama 已经启动。": "Ollama runs locally and does not check the API key — any non-empty value (e.g. ollama) works; make sure Ollama is running first.",
   "接口地址要以 http:// 或 https:// 开头": "The endpoint must start with http:// or https://",
   "请填写模型名称": "Enter a model name",
+  // QQ 远程任务（设置页）
+  "QQ 机器人": "QQ bot",
+  "已通过扫码授权；如需更换请重新扫码。":
+    "Authorized by QR code; scan again if you need to replace it.",
+  "重新扫码授权": "Re-authorize by QR",
+  "需要注意": "Needs attention",
+  "连接状态未知": "Connection status unknown",
+  "剩余": "Expires in",
+  "测试连接": "Test connection",
+  "解除绑定": "Unbind",
+  "待审核用户": "Pending users",
+  "暂无待审核用户": "No pending users",
+  "白名单外的人发来消息时只会出现在这里，不会被执行；放行后即可派发任务，拒绝后不会再出现。":
+    "Messages from people outside the allowlist only show up here and are never executed; approve to let them dispatch tasks, reject to hide them for good.",
+  "来源": "Source",
+  "出现次数": "Seen",
+  "首次": "First seen",
+  "最近": "Last seen",
+  "群 {0}": "Group {0}",
+  "启用 QQ 远程任务": "Enable QQ remote tasks",
+  "从 QQ 私聊或群聊接收任务，在独立分支上执行。关闭面板不会停止 QQ 通道（通道随扩展宿主存活，重开面板可继续查看）。":
+    "Receive tasks from QQ private chats or groups and run them on isolated branches. Closing the panel does NOT stop the QQ channel — it lives with the extension host, so reopen the panel anytime to keep watching it.",
+  "机器人 Token": "Bot token",
+  "App Secret": "App secret",
+  "凭据只从宿主传入，面板不保存。": "Credentials come from the host only; the panel stores nothing.",
+  "访问控制": "Access control",
+  "留空表示不接受该来源的任务": "Leave empty to reject tasks from that source",
+  "允许的用户": "Allowed users",
+  "QQ 号": "QQ number",
+  "添加用户": "Add user",
+  "允许的群": "Allowed groups",
+  "群号": "Group number",
+  "添加群": "Add group",
+  "备注": "Note",
+  "备注 {0}": "Note for {0}",
+  "{0} {1} 的备注": "Note for {0} {1}",
+  "用户": "user",
+  "群": "group",
+  "条目": "Entry",
+  "输入{0}标识": "Enter the {0} identifier",
+  "输入{0}的 openid": "Enter the {0} openid",
+  "完整 openid": "Full openid",
+  "完整群号": "Full group number",
+  "确认添加": "Add entry",
+  "取消添加": "Cancel",
+  "请填写完整的{0}标识。": "Enter the full {0} identifier.",
+  "无效的{0}标识：只能包含字母、数字、下划线或连字符（4–64 位），脱敏后的星号串不能用。":
+    "Invalid {0} identifier: use only letters, digits, underscores or hyphens (4–64 characters); a masked value with asterisks cannot be used.",
+  "该标识已在名单中，无需重复添加。": "That identifier is already in the list.",
+  "{0} 已脱敏显示，无法在此修改；如需更换请删除后重新添加。":
+    "{0} is shown masked and cannot be edited here; delete and re-add an entry to change it.",
+  "openid": "openid",
+  "操作": "Actions",
+  "未命名": "Unnamed",
+  "编辑 {0}": "Edit {0}",
+  "备注（可选）": "Note (optional)",
+  "新{0}的备注": "Note for the new {0}",
+  "删除条目": "Delete entry",
+  "删除「{0}」后将无法恢复：完整标识已脱敏，无法从界面还原，需要时只能重新添加。":
+    "Deleting “{0}” cannot be undone: the full identifier is masked and cannot be recovered from this screen — you would have to add it again.",
+  "执行策略": "Execution policy",
+  "主会话": "Main session",
+  "远程任务策略": "Remote task policy",
+  "只读": "Read-only",
+  "只读：可以查看工作区，写文件与执行命令会被拒绝。":
+    "Read-only: the workspace can be inspected, but writes and shell commands are rejected.",
+  "受监督": "Supervised",
+  "受监督：工具调用需在 QQ 审批，{0} 分钟未响应按拒绝处理。":
+    "Supervised: tool calls need approval in QQ; no response within {0} minutes counts as a rejection.",
+  "受信任": "Trusted",
+  "受信任：工具调用无需 QQ 审核直接执行，仅建议对自己完全掌控的账号与群使用。":
+    "Trusted: tool calls run without QQ review — only for accounts and groups you fully control.",
+  "结果详细度": "Result detail",
+  "一行结论": "One-line verdict",
+  "一行结论：成功或失败，加上改动的文件数。":
+    "One-line verdict: success or failure plus the number of changed files.",
+  "简短摘要": "Short summary",
+  "简短摘要：涉及的文件与最终回复。": "Short summary: touched files and the final reply.",
+  "完整回复": "Full reply",
+  "完整最终回复，受 QQ 单条消息长度限制。":
+    "The complete final reply, limited by QQ's per-message length.",
+  "同时运行的任务数": "Concurrent tasks",
+  "范围 1–10，超出后排队等待。": "1–10; extra tasks wait in a queue.",
+  "每分钟任务上限": "Tasks per minute",
+  "范围 1–60，超过上限的任务会被拒绝。": "1–60; tasks over the limit are rejected.",
+  "完成后自动合并": "Auto-merge when done",
+  "任务成功后把分支自动合并回当前分支。":
+    "Merge the branch back into the current branch after a successful run.",
+  "工作区目录": "Workspace directory",
+  "远程任务运行的工作区；留空表示当前工作区根目录。":
+    "Workspace the remote tasks run in; empty means the current workspace root.",
+  "留空使用当前工作区": "Empty = current workspace",
+  "尚未添加条目": "No entries yet",
+  "{0} {1}": "{0} {1}",
+  "删除 {0} {1}": "Delete {0} {1}",
+  "QQ 官方机器人": "QQ official bot",
+  // 一键接入：QQ 官方机器人（QQBot）
+  "使用 QQ 官方机器人，扫码授权后即可从 QQ 远程控制本工作区（需先在 q.qq.com 创建机器人）。":
+    "Uses the official QQ bot — scan to authorize, then control this workspace from QQ (create a bot at q.qq.com first).",
+  "官方合规通道（推荐）": "Official compliant channel (recommended)",
+  "一键接入 QQ 机器人": "One-click QQ bot setup",
+  "请用手机 QQ 扫描二维码完成授权": "Scan the QR code with mobile QQ to authorize",
+  "已连接 QQ 官方机器人": "Connected to the official QQ bot",
+  "扫码授权 QQ 机器人": "Scan to authorize the QQ bot",
+  "首次使用需在 q.qq.com 创建机器人（个人账号即可）。":
+    "On first use, create a bot at q.qq.com (a personal account is enough).",
+  // 一键接入 + 窗口内扫码授权
+  "一键接入": "One-click setup",
+  "停止托管": "Stop managed setup",
+  "空闲": "Idle",
+  "检查环境": "Checking environment",
+  "生成配置": "Generating configuration",
+  "启动中": "Starting",
+  "出错": "Error",
+  "QQ 登录二维码": "QQ login QR code",
+  "二维码已过期，请刷新": "QR code expired — please refresh",
+  "已确认，正在完成登录": "Confirmed — finishing login",
+  "刷新二维码": "Refresh QR code",
+  "我已扫码": "I've scanned",
+  // QQ 远程任务：保留仍被消息来源标注 / 子会话 tag / 设置页使用的键；独立任务看板已移除
+  "来自 QQ 渠道": "from QQ",
+  "这条消息来自 QQ 机器人转发的远程用户，不是本机输入":
+    "This message came from a remote user via the QQ bot — it is not local input",
+  "私聊": "Private chat",
+  "群聊": "Group chat",
+  "批准": "Approve",
+  // QQ 远程任务元信息 tag：融入子会话看板，挂在对应子会话 title 后
+  "渠道：{0}": "Channel: {0}",
+  "发起人：{0}": "From: {0}",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {
@@ -1117,23 +1210,4 @@ export function t(message: string, ...args: Array<string | number>): string {
   return out;
 }
 
-/**
- * W6: localized display for the CLI's permission modes (ids come from the
- * agent, names may be English) — label + one-line description per the design
- * spec. Lives next to the dictionary so a new mode id is added in ONE place.
- * Unknown ids fall back to the agent-provided name.
- */
-export function modeDisplay(mode: { id: string; name: string }): { label: string; desc: string } {
-  switch (mode.id) {
-    case "smart":
-      return { label: t("智能"), desc: t("iFlow 会自行判断风险，必要时才征求你的确认") };
-    case "yolo":
-      return { label: t("免确认"), desc: t("所有操作直接执行，不再询问") };
-    case "default":
-      return { label: t("标准"), desc: t("每次执行操作前都要你确认") };
-    case "plan":
-      return { label: t("规划"), desc: t("只读：只分析、出计划，不改动文件") };
-    default:
-      return { label: mode.name || mode.id, desc: "" };
-  }
-}
+

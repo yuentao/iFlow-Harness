@@ -111,6 +111,7 @@ export interface McpServerEnvVar {
 }
 
 export interface McpServerStdio {
+  name?: string;
   type?: "stdio";
   command: string;
   args?: string[];
@@ -118,7 +119,21 @@ export interface McpServerStdio {
   cwd?: string;
 }
 
-export type McpServer = McpServerStdio | { type: "http" | "sse"; url: string; headers?: McpServerEnvVar[] };
+/**
+ * Remote MCP server (probed against the vendored CLI bundle's ACP zod schema:
+ * `type: enum(["stdio","sse","http","streamable-http"])`, `url` / `httpUrl`,
+ * and `headers` as `Record<string,string>` — NOT the `{name,value}[]` shape
+ * `env` uses). A `url` without `type` is treated as legacy SSE by the CLI.
+ */
+export interface McpServerRemote {
+  name?: string;
+  type: "http" | "sse" | "streamable-http";
+  url?: string;
+  httpUrl?: string;
+  headers?: Record<string, string>;
+}
+
+export type McpServer = McpServerStdio | McpServerRemote;
 
 export interface NewSessionRequest {
   cwd: string;
@@ -424,6 +439,12 @@ export interface ExitPlanModeResponse {
  * only console.errors the text, so the capture point is the only source).
  * `available:false` (with `reason` disabled/no_config/no_loader/probe_failed)
  * means the Mod is missing or opted out — the client degrades to no indicator.
+ *
+ * NOTE (2026-11-18): the reply comes from the queried session's own CLI
+ * process. The main panel session is spawned with a process-level sentinel
+ * that disables every MCP server, so its report is always empty; status
+ * queries must target a Super Agent child session (or the host-side shared
+ * broker) instead.
  */
 export interface McpStatusReport {
   available: boolean;

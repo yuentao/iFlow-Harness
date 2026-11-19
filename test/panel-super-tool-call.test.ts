@@ -82,9 +82,11 @@ type FakeManager = {
 
 type PanelInternals = {
   superAgent: unknown;
+  client: { setMode: ReturnType<typeof vi.fn> } | null;
   onSessionUpdate: (n: { sessionId: string; update: ToolCallFrame }) => void;
   sendPrompt: (...args: unknown[]) => Promise<boolean>;
   autoApproveSuperAgentTool: (req: RequestPermissionRequest) => RequestPermissionResponse | null;
+  scanSuperDirectives: (content: unknown) => void;
   log: { lines: { level: string; message: string }[] };
   store: {
     getState: () => SessionState;
@@ -245,7 +247,7 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
 
     await waitFor(() => manager.cancel.mock.calls.length > 0);
-    expect(manager.cancel).toHaveBeenCalledWith("super-x");
+    expect(manager.cancel).toHaveBeenCalledWith("super-x", "agent");
   });
 
   it("super-agent 工具收到纯 actions 载荷：走动作链路，不派发、不 warn", async () => {
@@ -262,7 +264,7 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
 
     await waitFor(() => manager.cancel.mock.calls.length > 0);
-    expect(manager.cancel).toHaveBeenCalledWith("super-merged");
+    expect(manager.cancel).toHaveBeenCalledWith("super-merged", "agent");
     expect(manager.spawn).not.toHaveBeenCalled();
     expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(0);
   });
@@ -278,22 +280,30 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
 
     await waitFor(() => manager.cancel.mock.calls.length > 0);
-    expect(manager.cancel).toHaveBeenCalledWith("super-ns");
+    expect(manager.cancel).toHaveBeenCalledWith("super-ns", "agent");
     expect(manager.spawn).not.toHaveBeenCalled();
   });
 
-  it("名字命中但 args 为空：只留痕（一次 toast + 日志），不 spawn", () => {
+  it("名字命中但整轮都没带 args：completed 帧留痕（一次 toast + 日志），不 spawn", () => {
     const toast = vi.spyOn(p.store, "sendToast");
+    // in_progress 帧理论上应带 args；缺失时不立刻报（下一帧可能补），
+    // 等 completed 帧仍没有载荷才下结论。
     p.onSessionUpdate({
       sessionId: "tool-session",
       update: frame({ status: "in_progress" }),
+    });
+    expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(0);
+
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({ sessionUpdate: "tool_call_update", status: "completed" }),
     });
 
     expect(manager.spawn).not.toHaveBeenCalled();
     const warnings = toast.mock.calls.filter((call) => call[0] === "warning");
     expect(warnings).toHaveLength(1);
     expect(String(warnings[0]?.[1])).toContain("super-agent");
-    expect(String(warnings[0]?.[1])).toContain("未派发子会话");
+    expect(String(warnings[0]?.[1])).toContain("未派发任何子会话");
     expect(p.log.lines.some((line) => line.level === "warn")).toBe(true);
 
     // 同一条工具帧的后续更新按 toolCallId 去重，不再重复弹提示。
@@ -303,6 +313,25 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
     expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(1);
     expect(manager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("畸形 tasks（字符串数组）：warning 含具体原因，零 spawn", () => {
+    const toast = vi.spyOn(p.store, "sendToast");
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        status: "in_progress",
+        // 实测形态：模型把 tasks[].task 写成字符串数组。
+        args: { tasks: [["a", "b"]] },
+      }),
+    });
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    const warnings = toast.mock.calls.filter((call) => call[0] === "warning");
+    expect(warnings).toHaveLength(1);
+    expect(String(warnings[0]?.[1])).toContain("载荷不合法");
+    expect(String(warnings[0]?.[1])).toContain("task 必须是字符串");
+    expect(String(warnings[0]?.[1])).toContain("未派发子会话");
   });
 
   it("pending 帧不带 args 时不误报「未派发」，随后 in_progress 照常派发一次", () => {
@@ -325,6 +354,84 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
     expect(manager.spawn).toHaveBeenCalledTimes(1);
     expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(0);
+  });
+
+  it("completed 帧仍无载荷：toast + 纠错提示（不再静默 accepted）", async () => {
+    // 实测故障形态：pending / in_progress / completed 三帧都没带 args。
+    // 工具层仍回 `Delegation request accepted.`，宿主却什么都没派。
+    const toast = vi.spyOn(p.store, "sendToast");
+    p.onSessionUpdate({ sessionId: "tool-session", update: frame({ status: "pending" }) });
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({ sessionUpdate: "tool_call_update", status: "in_progress" }),
+    });
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(0);
+
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({ sessionUpdate: "tool_call_update", status: "completed" }),
+    });
+    const warnings = toast.mock.calls.filter((call) => call[0] === "warning");
+    expect(warnings).toHaveLength(1);
+    expect(String(warnings[0]?.[1])).toContain("未派发任何子会话");
+    expect(manager.spawn).not.toHaveBeenCalled();
+    // 模型也要知道：一条 hidden 纠错提示送回主会话。
+    await waitFor(() => correctionPrompts().length > 0);
+    expect(correctionPrompts()).toHaveLength(1);
+    expect(String(p.log.lines.find((line) => line.level === "warn")?.message)).toContain(
+      "NOTHING was dispatched",
+    );
+
+    // 同一条调用的重复 completed 帧不再弹第二条提示。
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({ sessionUpdate: "tool_call_update", status: "completed" }),
+    });
+    expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(1);
+  });
+
+  it("completed 帧才带载荷：补派发一次，不误报「未派发」", () => {
+    const toast = vi.spyOn(p.store, "sendToast");
+    p.onSessionUpdate({ sessionId: "tool-session", update: frame({ status: "pending" }) });
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        sessionUpdate: "tool_call_update",
+        status: "completed",
+        args: { tasks: [{ title: "迟到载荷", task: "正文" }] },
+      }),
+    });
+    // 工具层只回 ack，载荷晚到也比丢掉好：宿主在 completed 帧补处理。
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(0);
+  });
+
+  it("已派发后 completed 帧不弹「未派发」提示", () => {
+    const toast = vi.spyOn(p.store, "sendToast");
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({ args: { tasks: [{ title: "正常", task: "正文" }] } }),
+    });
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({ sessionUpdate: "tool_call_update", status: "completed" }),
+    });
+    expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(0);
+  });
+
+  it("工具帧只带短标签标题（Delegate 1 task）也能识别并派发", () => {
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        toolName: undefined,
+        title: "Delegate 1 task",
+        status: "in_progress",
+        args: { tasks: [{ title: "标题式派发", task: "正文" }] },
+      }),
+    });
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
   });
 
   it("同一条 actions 工具帧 pending + in_progress 各带 args 时只执行一次", async () => {
@@ -364,16 +471,20 @@ describe("Super Agent · 结构化工具调用兜底", () => {
   // --- 内置工具权限请求：直接放行、不弹审批卡 -------------------------------
 
   function permissionRequest(over: {
-    toolName?: string;
+    /** `null` = 彻底省略 toolName（CLI 智能审批的权限请求就不带它）。 */
+    toolName?: string | null;
     title?: string;
+    args?: unknown;
     options?: RequestPermissionRequest["options"];
   } = {}): RequestPermissionRequest {
+    const toolName = over.toolName === undefined ? "super-agent" : over.toolName;
     return {
       sessionId: "tool-session",
       toolCall: {
         toolCallId: "tc-perm",
-        toolName: over.toolName ?? "super-agent",
+        ...(toolName ? { toolName } : {}),
         title: over.title ?? "",
+        ...(over.args !== undefined ? { args: over.args } : {}),
         kind: "other",
         locations: [],
       },
@@ -426,5 +537,146 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     expect(
       p.autoApproveSuperAgentTool(permissionRequest({ toolName: "super-agent-guard" })),
     ).toBeNull();
+  });
+
+  it("智能审批形态（无 toolName、标题 Delegate N task）直接放行，不落审批卡", () => {
+    // CLI 0.5.19 智能审批 RISKY 分支构造 toolCall 只填
+    // `title: getDescription(params)`，没有 toolName、也没有 args：
+    // 派发是 `Delegate N task(s)`，管理是 `Manage N child session action(s)`。
+    expect(
+      p.autoApproveSuperAgentTool(permissionRequest({ toolName: null, title: "Delegate 1 task" })),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "allow-always" } });
+    expect(
+      p.autoApproveSuperAgentTool(permissionRequest({ toolName: null, title: "Delegate 3 tasks" })),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "allow-always" } });
+    expect(
+      p.autoApproveSuperAgentTool(
+        permissionRequest({ toolName: null, title: "Manage 1 child session action" }),
+      ),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "allow-always" } });
+    expect(
+      p.autoApproveSuperAgentTool(
+        permissionRequest({ toolName: null, title: "Manage 2 child session actions" }),
+      ),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "allow-always" } });
+  });
+
+  it("名字与标题都缺失时按真实载荷结构识别（tasks / actions）", () => {
+    expect(
+      p.autoApproveSuperAgentTool(
+        permissionRequest({ toolName: null, args: { tasks: [{ task: "做点事" }] } }),
+      ),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "allow-always" } });
+    expect(
+      p.autoApproveSuperAgentTool(
+        permissionRequest({
+          toolName: null,
+          args: { actions: [{ action: "cancel", sessionId: "super-1" }] },
+        }),
+      ),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "allow-always" } });
+  });
+
+  it("载荷兜底不误放行：结构不匹配（或标题无关）的请求仍返回 null", () => {
+    // 名字 / 标题都命不中，载荷也不像 super-agent → 必须继续走审批卡。
+    expect(
+      p.autoApproveSuperAgentTool(
+        permissionRequest({ toolName: null, title: "Run shell command", args: { command: "dir" } }),
+      ),
+    ).toBeNull();
+    // 结构相近但 action 名字不在协议枚举里 → 不认（避免把真实工具当派发放行）。
+    expect(
+      p.autoApproveSuperAgentTool(
+        permissionRequest({
+          toolName: null,
+          args: { actions: [{ action: "delete", sessionId: "super-1" }] },
+        }),
+      ),
+    ).toBeNull();
+    // tasks 元素缺少非空 task 字符串 → 不认。
+    expect(
+      p.autoApproveSuperAgentTool(
+        permissionRequest({ toolName: null, args: { tasks: [{ title: "缺 task" }] } }),
+      ),
+    ).toBeNull();
+  });
+
+  // --- 参数纠错闭环：工具层报错 + 宿主 hidden prompt 引导重派 -----------------
+
+  /** 取出发给主会话的 super-agent 参数纠错提示（hidden prompt）。 */
+  function correctionPrompts(): Array<{ text: string; options: Record<string, unknown> | undefined }> {
+    const mock = p.sendPrompt as unknown as { mock: { calls: unknown[][] } };
+    return mock.mock.calls
+      .filter((call) => {
+        const options = call[4] as Record<string, unknown> | undefined;
+        return (
+          options?.hidden === true &&
+          typeof call[0] === "string" &&
+          call[0].includes("[super-agent tool call rejected]")
+        );
+      })
+      .map((call) => ({
+        text: String(call[0]),
+        options: call[4] as Record<string, unknown> | undefined,
+      }));
+  }
+
+  it("畸形调用：入队一条 hidden 纠错提示（含原因与正确格式，不回贴畸形原文）", async () => {
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        status: "in_progress",
+        args: { tasks: [{ title: "坏任务", task: 5 }] },
+      }),
+    });
+
+    await waitFor(() => correctionPrompts().length > 0);
+    const prompts = correctionPrompts();
+    expect(prompts).toHaveLength(1);
+    const text = prompts[0]!.text;
+    // 正确格式示例（模型可直接照抄）。
+    expect(text).toContain('{"tasks":[{"title":"short title","task":"self-contained brief"}]}');
+    // 明确的修正指令 + 具体到字段的原因。
+    expect(text).toContain("请修正后重新调用 super-agent");
+    expect(text).toMatch(/task/);
+    // 畸形原文绝不回贴（否则既费 token 又可能诱导模型照抄）。
+    expect(text).not.toContain('"task":5');
+    expect(text).not.toContain("坏任务");
+    // 纠错回合禁止被派发成子会话（delegateOnBusy: false）。
+    expect(prompts[0]!.options).toMatchObject({ hidden: true, delegateOnBusy: false });
+    expect(manager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("同一轮最多 2 条纠错提示：第 3 次畸形调用只留 toast，不再入队", async () => {
+    for (let i = 0; i < 3; i += 1) {
+      p.onSessionUpdate({
+        sessionId: "tool-session",
+        update: frame({
+          toolCallId: `tc-bad-${i}`,
+          status: "in_progress",
+          args: { tasks: [{ task: 42 }] },
+        }),
+      });
+    }
+
+    await waitFor(() => correctionPrompts().length >= 2);
+    await flush();
+    expect(correctionPrompts()).toHaveLength(2);
+    expect(manager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("正常派发不产生纠错提示", async () => {
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        status: "in_progress",
+        args: { tasks: [{ title: "正常任务", task: "把这件事做完" }] },
+      }),
+    });
+
+    await flush();
+    await flush();
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    expect(correctionPrompts()).toHaveLength(0);
   });
 });

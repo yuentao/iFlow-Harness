@@ -158,5 +158,5 @@ export function canReviewTurn(state: SessionState, userBlockId: string): boolean
   if (start < 0) return false;
   if (state.blocks.slice(start + 1).some((b) => b.kind === "user")) return true;
   return (state.status === "idle" || state.status === "error") &&
-    !state.pendingApproval && !state.pendingQuestions && !state.pendingPlanExit && !state.pendingProfileSwitch;
+    !state.pendingApproval && !state.pendingQuestions && !state.pendingProfileSwitch;
 }

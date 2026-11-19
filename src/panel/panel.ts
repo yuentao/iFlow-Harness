@@ -24,6 +24,7 @@ import {
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
 import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
+import { McpBroker, normalizeBrokerServers, type McpBrokerStatus } from "../acp/mcp-broker.js";
 import { deleteKernelApiProfile, migrateKernelApiProfiles, readKernelApiProfiles, setKernelActiveProfile, writeKernelApiProfile } from "../acp/api-profiles.js";
 import {
   getActiveProfileName,
@@ -44,6 +45,7 @@ import type {
   PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  UserQuestion,
   UserQuestionsRequest,
   UserQuestionsResponse,
   ExitPlanModeRequest,
@@ -53,8 +55,8 @@ import type {
   SessionSettings,
   ToolCallBase,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
-import { extractCorePrompt, isPlanMode, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QqSettingsPatch, QqTaskUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
@@ -74,7 +76,7 @@ import {
   upsertCheckpoint,
 } from "../../shared/checkpoints.js";
 import { CheckpointManager } from "./checkpoints.js";
-import { SuperAgentManager } from "./super-agent.js";
+import { SuperAgentManager, type SuperResidueCount } from "./super-agent.js";
 import {
   buildSuperActionReceiptPrompt,
   buildSuperDigest,
@@ -96,16 +98,21 @@ import {
   type SuperAction,
   type SuperActionReceipt,
   type SuperAttachment,
+  type SuperDirectiveAction,
+  type SuperIntegrationMode,
   type SuperReportEntry,
   type SuperSessionUi,
   type SuperStatus,
   type SuperTaskSpec,
 } from "../../shared/super-agent.js";
 import {
+  classifySuperToolArgs,
   classifySuperToolName,
+  classifySuperToolTitle,
   parseSuperToolCall,
 } from "../../shared/super-tool-call.js";
 import {
+  awaitSuperSessionArchiveWrite,
   deleteSuperSessionArchive,
   listSuperSessionArchiveFiles,
   readSuperSessionArchive,
@@ -147,24 +154,13 @@ import {
   reassignBlockIds,
   renameSessionSummary,
   SESSION_LABEL_MAX,
+  setQqTasks,
   snapshotEditDiff,
   sortSessionSummaries,
   synthesizeEditDiff,
   toAgentPromptText,
 } from "../../shared/session-state.js";
 import { computeHunks, replayHunks } from "../../shared/hunks.js";
-import {
-  APPROVAL_RULES_MAX,
-  decideApproval,
-  deriveAllowRule,
-  hardDenyReason,
-  isSuperAgentToolRequest,
-  normalizeApprovalRule,
-  parseApprovalPolicy,
-  serializeApprovalPolicy,
-  type ApprovalRequestInfo,
-  type ApprovalRule,
-} from "../../shared/approval-policy.js";
 import { SessionStore } from "./store.js";
 import { getTerminalRecorder, openInTerminal } from "./terminal.js";
 import { MemoryService } from "../memory/service.js";
@@ -185,7 +181,6 @@ import {
 } from "../../shared/notifications.js";
 import { sendOsNotification } from "../acp/os-notify.js";
 import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
-import { planSpecContent, planSpecFileName, planChecklistEntries } from "../../shared/plan-spec.js";
 import {
   buildFollowupPrompt,
   parseFollowupResponse,
@@ -202,6 +197,66 @@ import {
 } from "../../shared/model-metadata.js";
 import { fetchPageText, searchWeb, type WebSearchHit } from "../acp/web-search.js";
 import { WireRingBuffer } from "./wire-log.js";
+import {
+  QqService,
+  qqSpawnPolicyFor,
+  type QqMainInjectInput,
+  type QqMainInjectResult,
+  type QqTaskAction,
+} from "../qq/service.js";
+import { QqTaskStore } from "../qq/store.js";
+import {
+  createQqServiceHost,
+  QQ_DEFAULT_SETTLE_TIMEOUT_MS,
+  QqSettleTimeoutError,
+  type QqHostPorts,
+  type QqHostSuperSnapshot,
+} from "../qq/panel-host.js";
+import {
+  applyQqSettingsPatch,
+  createVscodeQqSettingsIo,
+  readQqSettings,
+  type QqSettingsIo,
+} from "../qq/settings-host.js";
+import {
+  checkQqStartupGate,
+  normalizeQqConfig,
+  QQ_SECRET_KEYS,
+  validateQqConfig,
+  type QqConfig,
+} from "../qq/config.js";
+import {
+  isTerminalSuperStatus as isQqTerminalSuperStatus,
+  QQ_SETTLE_POLL_MS,
+  shouldRestartOnPatch,
+} from "../qq/wiring.js";
+import {
+  QqPendingUserStore,
+  QQ_PENDING_DROPPED_TOAST_COOLDOWN_MS,
+  QQ_PENDING_MAX_USERS,
+  type QqPendingUser,
+  type QqPendingUserInput,
+} from "../qq/pending-users.js";
+import { maskQqOpenId } from "../../shared/qq-access.js";
+import type { InboundMessage } from "../qq/adapter/types.js";
+import {
+  buildClearedQrMessage,
+  buildConfirmedQrMessage,
+  createQqBotBindRuntime,
+  createQqChannelDispatch,
+  deliverViaQqBotAdapter,
+  QQBOT_APP_ID_SECRET_KEY,
+  qrFailureMessage,
+  qrProgressMessage,
+  qrReadyMessage,
+  readQqBotCredentials,
+  sanitizeQrLoginMessage,
+  storeQqBotCredentials,
+  toManagedStatusMessage,
+  type QqBotAdapterLike,
+  type QqBotBindRuntimeDeps,
+  type QqChannelDispatchDeps,
+} from "./qqbot-host.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
 /** M2 P0-4: async execFile (never sync — trap #18: external process probes
@@ -219,7 +274,7 @@ const URL_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 /** User answer window for a tool-approval card. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 /** Re-check window for the deferred card toasts (policy 2026-10-16): the OS
- * reminder for an approval / plan / question card is scheduled this long and
+ * reminder for an approval / question card is scheduled this long and
  * fires only if the card still owns its webview pending slot when the check
  * runs — parallel permission requests replace each other's card (CLI runs a
  * turn's function calls through Promise.allSettled), and a card that has been
@@ -263,6 +318,18 @@ const DISCARDED_SESSION_IDS_CAP = 8;
  * ("已取消…" vs "恢复完成后将自动新建会话").
  */
 type RestoreOutcome = "aborted" | "completed" | "failed";
+/**
+ * 结构化 super-agent 工具调用（`super-agent` / `super-agent-actions`）的
+ * 宿主侧处理结果，按 toolCallId 记账：
+ *  - `dispatched`：载荷可用，已交给派发链路；
+ *  - `actions`：载荷可用，已交给管理动作链路；
+ *  - `rejected`：载荷不可用，已 toast + 入队纠错提示；
+ *  - `dropped`：直到 completed 帧都没拿到可用载荷，已 toast + 入队纠错提示。
+ *
+ * 存在的意义：工具层对任何合法参数都回 ack，模型因此以为派发成功。若宿主
+ * 因为「帧里没带 args」而静默跳过，completed 帧必须能把这件事查出来并回话。
+ */
+type SuperToolCallOutcome = "dispatched" | "actions" | "rejected" | "dropped";
 /** Cap for abandonedRestoreSessionIds (one entry per abandoned restore). */
 const ABANDONED_RESTORE_IDS_CAP = 8;
 /** A promise whose resolver is captured for later (settle handles). */
@@ -382,7 +449,29 @@ const INTERNAL_PROMPT_IDLE_MS = 90_000;
  */
 const SUPER_HEARTBEAT_MS = 1_500;
 /**
- * Tools the MAIN panel session must never receive.
+ * 已归档子会话迟到结论提示的正文上限：toast 是浮层胶囊不是转录卡，长 summary
+ * 必须截断，否则一条汇报能把 toast 栈撑爆。
+ */
+const SUPER_ARCHIVED_REPORT_MAX_CHARS = 480;
+/**
+ * Tool gating for the MAIN panel session: a WHITELIST for built-in tools plus a
+ * process-level MCP scope — never a blacklist of names.
+ *
+ * Why not a blacklist (2026-11-17 user report): the main session could still
+ * call MCP tools (`new_page` / `take_screenshot` / `evaluate_script`) because
+ * `disallowed_tools` only ever named BUILT-IN tools. MCP tool names are
+ * per-installation — every user configures different servers — so any
+ * enumeration is both incomplete (a server added later walks straight through)
+ * and wrong (it would withhold a tool the user legitimately has). The
+ * structural answer has two halves, and neither contains an MCP name:
+ *  1. `MAIN_SESSION_ALLOWED_TOOLS` → `settings.allowed_tools` → Config
+ *     `coreTools`: a tool is registered ONLY when it is listed, so every other
+ *     built-in tool (and any tool a future CLI version adds) never exists in
+ *     this session.
+ *  2. `buildAcpCommand(..., { disableMcpServers: true })` starts the main
+ *     session's CLI process with zero MCP servers, so `discoverAllTools()` — the
+ *     path that bypasses `coreTools` — has nothing to register.
+ * Adding or removing an MCP server therefore needs NO code change here.
  *
  * The user directive is that the main session only DELEGATES: it plans, writes
  * task briefs, watches the board and reports — every implementation step AND
@@ -393,23 +482,37 @@ const SUPER_HEARTBEAT_MS = 1_500;
  * mechanical instead of advisory.
  *
  * Wire behavior (verified against the vendored CLI bundle,
- * vendor/iflow-cli/bundle/iflow.js):
+ * vendor/iflow-fork/bundle/iflow.js):
  *  - `session/new` / `session/load` map the request's `settings.disallowed_tools`
- *    onto the Config's `excludeTools`
- *    (`u = {...this.settings.merged, ..., excludeTools: o?.disallowed_tools, ...}`);
+ *    onto the Config's `excludeTools`, and `settings.allowed_tools` onto
+ *    `coreTools` (`u = {...this.settings.merged, ..., excludeTools:
+ *    o?.disallowed_tools, ..., coreTools: o?.allowed_tools, ...}`);
  *    `loadSession` builds its config through the same `newSessionConfig(...,
  *    settings)`, and its not-found fallback calls `newSession` (settings
  *    forwarded too).
- *  - `Config.createToolRegistry()`'s registrar
- *    (`t = (r, ...n) => { let s = r.name, a = r.Name || s, l = this.getExcludeTools(), ...;
- *    (l?.includes(s) || l?.includes(a)) && (u = !1); u && register }`) skips
- *    registration when `excludeTools` matches either the static `Name` or the
- *    class name.
+ *  - `coreTools` is a WHITELIST: `createToolRegistry()`'s registrar computes
+ *    `u = o === void 0 ? true : o.some(g => g === s || g === a ||
+ *    g.startsWith(`${s}(`) || g.startsWith(`${a}(`))` and registers the class
+ *    only when `u` is true (`excludeTools` can still veto). `allowed_tools`
+ *    therefore withholds tools by never creating them — including tools a
+ *    future bundle adds, with no list to maintain here.
+ *  - MCP tools are NOT part of that registrar: they arrive later through
+ *    `ToolRegistry.discoverAllTools()` → `mcpClientManager.discoverAllMcpTools()`,
+ *    which does not consult `coreTools`. That is why the main session also
+ *    removes the MCP servers from its CLI process (see `buildAcpCommand`'s
+ *    `disableMcpServers`); the whitelist alone would leave them callable.
+ *  - The same registrar applies `excludeTools` on top of the whitelist
+ *    (`(l?.includes(s) || l?.includes(a)) && (u = !1)`, where `l` is
+ *    `this.getExcludeTools()`), matching either the static `Name` or the class
+ *    name. That is why the second-layer list below strengthens, and never
+ *    replaces, `allowed_tools`.
  *
- * Provenance of the names below (scanned 2026-11-16 across
- * vendor/iflow-fork/bundle/iflow.js). Each one is a `static Name = "<name>"` in
- * the bundle, but "declared" is not "registered" — this comment must not claim
- * a tool is withheld when the registrar never creates it:
+ * Provenance of the names below (scanned 2026-11-16 / 2026-11-17 across
+ * vendor/iflow-fork/bundle/iflow.js). Each one is a `static Name` in the
+ * bundle — a `"<name>"` literal, or for `save_memory` the
+ * schema object's name (`static Name = jzn.name`) — but "declared"
+ * is not "registered": this comment must not claim a tool is withheld when the
+ * registrar never creates it:
  *  - registered by `createToolRegistry()`'s `t(...)` calls: read_file (L1246),
  *    read_many_files (L1453), glob (L1323), search_file_content (L1259,
  *    L1317), list_directory (L950), image_read (L1247), web_fetch (L2153,
@@ -435,20 +538,41 @@ const SUPER_HEARTBEAT_MS = 1_500;
  * `search_file_content` / `list_directory`), so listing them would be a silent
  * no-op as well.
  *
- * Kept available on purpose: `todo_write` / `todo_read` (the orchestrator's own
- * planning), `ask_user_question` (requirements), and the `super-agent` tool
- * itself — it is the dispatch channel and is registered by the loader
- * (`super-agent-loader.cjs`, `static Name = "super-agent"`), not by the bundle.
+ * What the main session KEEPS is decided by the whitelist below, not by this
+ * list: `super-agent` (the dispatch channel — registered by the loader,
+ * `super-agent-loader.cjs`, `static Name = "super-agent"`, and it goes through
+ * the same registrar), `todo_write` / `todo_read` (the orchestrator's own
+ * planning) and `ask_user_question` (requirements).
+ *
+ * The list below is the SECOND layer. It is redundant with the whitelist in
+ * this bundle version — both are consumed by the same registrar, and a name that
+ * is not in `coreTools` is never created in the first place — but it is kept
+ * because it states the intent explicitly (these are the tools the main session
+ * must never hold) and it survives a phantom future where `allowed_tools` is
+ * renamed or stops being honored. It names BUILT-IN tools only; MCP tool names
+ * must never appear here or anywhere else (see the header: they are per-user).
  *
  * The exclusion is per session: child sessions (SuperAgentManager) deliberately
  * do NOT pass settings and therefore keep every tool — the main session hands
- * both the implementation and the investigation down to them.
+ * both the implementation and the investigation down to them. The MCP scope is
+ * likewise per PROCESS: only the main session's spawn gets
+ * `--allowed-mcp-server-names`, child spawns do not.
  *
  * Side effect (deliberate, not hidden): the `@iflow` chat participant and
  * `iflow.askSelection` reuse this panel session, so they lose file reads and
  * shell commands too; slash commands that need to inspect the workspace (e.g.
  * `/init`) likewise have to be delegated.
  */
+export const MAIN_SESSION_ALLOWED_TOOLS = [
+  // the ONLY dispatch channel (loader-registered; must be listed or the main
+  // session cannot delegate at all)
+  "super-agent",
+  // the orchestrator's own planning surface
+  "todo_write",
+  "todo_read",
+  // requirements clarification — the answers become the task briefs
+  "ask_user_question",
+] as const;
 export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // in-process sub-agents — the main session delegates to Super Agent children
   "task",
@@ -468,6 +592,8 @@ export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // writing
   "write_file",
   "replace",
+  // writes ~/.iflow/memory.md; the panel persists memory host-side instead
+  "save_memory",
   // defensive: declared at L3160 but not registered in this bundle version
   // (class `Aut` is never passed to `t(...)`); kept for future CLI versions
   "multi_edit",
@@ -475,10 +601,35 @@ export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // executing
   "run_shell_command",
 ] as const;
-/** Fresh settings object for one main-session `session/new` / `session/load`.
- * A factory (not a shared object) so no caller can mutate another's copy. */
+/** The main session's mode is fixed (2026-11-18). Every tool it holds
+ * (`super-agent` / `todo_write` / `todo_read` / `ask_user_question`) has
+ * `shouldConfirmExecute() === false` and its CLI process runs without MCP
+ * servers, so no permission request can ever reach the approval card — the
+ * user-selectable mode had no observable effect and was removed. `smart` is
+ * the product default (vendor bundle: `(function(A){A.DEFAULT="default",
+ * A.SMART="smart",A.YOLO="yolo",A.PLAN="plan"})(dn||(dn={}))` and
+ * `getAvailableModes()` lists `{id:"smart"}` first). Child sessions push
+ * `yolo` themselves and QQ tasks use their own supervised policy. */
+export const MAIN_SESSION_MODE = "smart";
+
+/** Fresh settings object for one main-session `session/new` / `session/load`,
+ * A factory (not a shared object) so no caller can mutate another's copy.
+ *
+ * `allowed_tools` is the structural gate (only these names are registered at
+ * all); `disallowed_tools` is the explicit second layer. Sending only the
+ * whitelist would already be sufficient in this bundle version, but the belt
+ * costs nothing and keeps the intent legible.
+ *
+ * MCP is NOT addressed here on purpose: `settings` has no per-session MCP scope
+ * (the request's `mcpServers` array is merged ON TOP of the user's configured
+ * servers, so an empty array removes nothing). The main session's MCP servers
+ * are removed at process level instead — see `buildAcpCommand`'s
+ * `disableMcpServers`. */
 export function mainSessionSettings(): SessionSettings {
-  return { disallowed_tools: [...MAIN_SESSION_DISALLOWED_TOOLS] };
+  return {
+    allowed_tools: [...MAIN_SESSION_ALLOWED_TOOLS],
+    disallowed_tools: [...MAIN_SESSION_DISALLOWED_TOOLS],
+  };
 }
 /** Next-step prediction: another fire-and-forget internal prompt, but with a
  * much tighter budget. The user turn already settled, so a slow gateway only
@@ -644,13 +795,6 @@ const ONBOARDING_DISMISSED_KEY = "iflow.onboardingDismissed";
 /** globalState key: cross-window cache of the resolved node runtime
  * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
-/** M4 P1-1 globalState key: the serialized global approval pre-review rule
- * table (`{version, rules}` — see shared/approval-policy.ts). */
-const APPROVAL_POLICY_KEY = "iflow.approvalPolicy";
-/** M4 P1-1: workspace-relative project override, matched BEFORE the global
- * table so a repo can tighten (or loosen, within the hard-veto floor) the
- * user's rules. Read-only from the panel's side — never written back. */
-const APPROVAL_POLICY_PROJECT_FILE = ".iflow/approval.json";
 /** `iflow.uiFontSize` presets — kept in sync with shared/messages.ts. */
 const UI_FONT_SIZES = ["compact", "standard", "large"] as const;
 /** `iflow.uiDensity` presets — kept in sync with shared/messages.ts. */
@@ -667,16 +811,6 @@ function asUiDensity(value: unknown): (typeof UI_DENSITIES)[number] {
   return UI_DENSITIES.includes(value as (typeof UI_DENSITIES)[number])
     ? (value as (typeof UI_DENSITIES)[number])
     : "standard";
-}
-
-/** `iflow.defaultMode` values — kept in sync with shared/messages.ts. */
-const DEFAULT_MODES = ["default", "smart", "yolo", "plan"] as const;
-
-/** settings.json / VSCode config is user-editable — fall back to `smart`. */
-function asDefaultMode(value: unknown): (typeof DEFAULT_MODES)[number] {
-  return DEFAULT_MODES.includes(value as (typeof DEFAULT_MODES)[number])
-    ? (value as (typeof DEFAULT_MODES)[number])
-    : "smart";
 }
 
 /** `iflow.theme` values — kept in sync with shared/messages.ts. */
@@ -703,12 +837,10 @@ function asCliLanguage(value: unknown): (typeof CLI_LANGUAGES)[number] {
     : "";
 }
 
-/** `iflow.approvalMode` values; empty = do not override the CLI's own value. */
-const CLI_APPROVAL_MODES = ["", ...DEFAULT_MODES] as const;
-function asCliApprovalMode(value: unknown): (typeof CLI_APPROVAL_MODES)[number] {
-  return CLI_APPROVAL_MODES.includes(value as (typeof CLI_APPROVAL_MODES)[number])
-    ? (value as (typeof CLI_APPROVAL_MODES)[number])
-    : "";
+/** `iflow.superAgent.integration` values — stale settings.json values fall
+ * back to `merge`, matching the runtime guard in `integrationMode()`. */
+function asSuperIntegrationMode(value: unknown): SuperIntegrationMode {
+  return value === "pr" || value === "manual" ? value : "merge";
 }
 
 /** Cap on the per-workspace recent-session list. */
@@ -751,6 +883,18 @@ export interface PanelServices {
    * the real path would pop a system toast on the machine running the suite.
    */
   osNotify?: (title: string, message: string) => Promise<boolean>;
+  /** Test hook: QQ 设置 / SecretStorage 的注入式 IO（缺省走 vscode 实现）。 */
+  qqSettingsIo?: QqSettingsIo;
+  /**
+   * Test hook: QQBot 官方路线的可注入依赖（真网络 / 二维码渲染 / adapter）。
+   * 缺省走 node:https + node:crypto + 内联 QR PNG + 真 QqBotAdapter。
+   */
+  qqbotDeps?: {
+    bind?: QqBotBindRuntimeDeps;
+    transport?: QqChannelDispatchDeps["transport"];
+    adapterFactory?: QqChannelDispatchDeps["adapterFactory"];
+    gatewayUrl?: string;
+  };
 }
 
 /**
@@ -758,6 +902,121 @@ export interface PanelServices {
  * The handshake's post-connect steps and the session/prompt entry points check
  * it at their checkpoints so a destroyed store is never touched again.
  */
+/**
+ * QQ 通道单项收尾上限：关面板不能被一个卡住的 adapter/socket 拖死。
+ * （通道重启上限与退避阶梯已随收敛移除。）
+ */
+const QQ_BRIDGE_STOP_TIMEOUT_MS = 2_000;
+/** 设置改动 → 重启 QQ 服务的防抖窗口（settings.json 一次编辑会触发多帧）。 */
+const QQ_SETTINGS_RESTART_DEBOUNCE_MS = 500;
+/**
+ * 设置事件合并窗口：一次补丁会逐键写多条配置，`onDidChangeConfiguration`
+ * 因此连发多轮。50ms 内的事件合并成一轮完整同步，避免一次编辑触发 N 次。
+ */
+const QQ_SETTINGS_SYNC_DEBOUNCE_MS = 50;
+/** 单次「失活 → 自动重启」的硬上限：绝不允许无限重启（重扫是人工兜底）。 */
+const QQ_HEALTH_RESTART_LIMIT = 1;
+/**
+ * 任务看板投影上限。
+ *
+ * 任务记录本身由 `QqTaskStore` 落盘管理，这里限的是**投影到 webview 的行数**
+ * ——长跑通道会把几百条终态任务一起塞进每一帧快照。活跃（非终态）任务全
+ * 保留（用户要能看到正在跑的任务并停止它），剩余名额给最近的终态任务。
+ */
+export const QQ_TASK_PROJECTION_LIMIT = 100;
+/** `QqTaskUi.status` 中的终态集合（与 `src/qq/service.ts` 的状态机一致）。 */
+const QQ_TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
+  "succeeded",
+  "failed",
+  "canceled",
+  "timeout",
+  "needs_review",
+]);
+/**
+ * 健康 detail 里出现这些片段即视为「失活 / 出错」，不能继续显示「正常」。
+ *
+ * 只匹配明确表示链路不可用的措辞：`op=9 invalid session` 由 adapter 记录成
+ * 「会话已失效（op=9 invalid session）」，断线与重连失败同理；**不**匹配
+ * 「断线区间可能丢消息」这类「当前已连上、只是提示历史缺口」的 notice。
+ */
+const QQ_HEALTH_FAILURE_MARKERS = [
+  "invalid session",
+  "会话已失效",
+  "连接断开",
+  "已断开",
+  "重连失败",
+  "心跳发送失败",
+  "发送失败",
+  "disconnected",
+] as const;
+
+/** adapter 健康快照是否代表「可正常收发」。 */
+export function isQqHealthHealthy(health: {
+  connected: boolean;
+  detail?: string | null;
+}): boolean {
+  if (!health.connected) return false;
+  const detail = (health.detail ?? "").toLowerCase();
+  if (detail.length === 0) return true;
+  return !QQ_HEALTH_FAILURE_MARKERS.some((marker) => detail.includes(marker.toLowerCase()));
+}
+
+/**
+ * 裁剪 QQ 任务投影：活跃任务永不丢弃，剩余名额按原顺序（service 已按
+ * updatedAt 降序）补足终态任务；返回保持原行序（看板不回跳）。
+ */
+export function capQqTaskProjection(
+  tasks: readonly QqTaskUi[],
+  limit: number = QQ_TASK_PROJECTION_LIMIT,
+): QqTaskUi[] {
+  if (tasks.length <= limit) return [...tasks];
+  const keep = new Set<string>();
+  for (const task of tasks) {
+    if (keep.size >= limit) break;
+    if (!QQ_TERMINAL_TASK_STATUSES.has(task.status)) keep.add(task.taskId);
+  }
+  for (const task of tasks) {
+    if (keep.size >= limit) break;
+    keep.add(task.taskId);
+  }
+  return tasks.filter((task) => keep.has(task.taskId));
+}
+
+/** `requestSuperMerge` 的真实结果（供 QQ 端口如实回传 detail）。 */
+export type SuperMergeDispatchResult =
+  | { dispatched: true; mergeSessionId: string }
+  | { dispatched: false; queued: boolean; reason: string };
+
+/**
+ * 主会话渠道等待「主会话空闲」的轮询间隔。
+ *
+ * 比子会话收尾轮询（1.5s）短得多：这里等的是本地回合结束，用户按下回车后
+ * 往往几秒内就空闲，注入延迟必须可感知地小。
+ */
+const QQ_MAIN_IDLE_POLL_MS = 300;
+
+/**
+ * QQ 最终答复「迟到补发」阈值（R2）。
+ *
+ * 汇报轮的 final 标记由 pendingCount===0 决定；当同会话里还有别的非终态子会话
+ * （典型是主 Agent 派出的复核子会话）时 pendingCount 长期 >0，汇总轮会被判成
+ * 非 final，QQ 于是永远停在「已受理」。这里给等最终答复的 awaiter 两道兜底：
+ *  - 软阈值：awaiter 已等超过 QQ_FINAL_RESCUE_MS 且本会话已无活跃子会话 → 补发；
+ *  - 硬上限：即使还有子会话卡在非终态，等超过 QQ_FINAL_HARD_RESCUE_MS 也补发
+ *    （宁可给一条如实兜底，也不让 QQ 永久停在已受理）。
+ * 轮询间隔远小于阈值，仅为让补发在阈值到点后尽快发生。
+ */
+const QQ_FINAL_RESCUE_MS = 120_000;
+const QQ_FINAL_HARD_RESCUE_MS = 600_000;
+const QQ_FINAL_RESCUE_POLL_MS = 10_000;
+
+/**
+ * 注入轮结束时判定 delegated 的宽限期（R3）：子会话登记可能与回合收尾差错一拍，
+ * 留一个很短的窗口再核对子会话列表，避免把「已派子会话」误判成直答而提前撤销
+ * 等最终答复的记账。测试可注入更小值。
+ */
+const QQ_DELEGATION_GRACE_MS = 120;
+
 export class DisposedError extends Error {
   constructor(message = "panel disposed") {
     super(message);
@@ -808,6 +1067,144 @@ export class ChatPanel implements vscode.Disposable {
    * lazily (the first delegation pays the setup cost).
    */
   private superAgent: SuperAgentManager | null = null;
+  /**
+   * Host-side MCP broker: ONE process per configured MCP server, shared by all
+   * Super Agent children (they reach it over loopback streamable HTTP). Started
+   * lazily on the first child spawn; disposed with the panel.
+   *
+   * Without it every child CLI process would spawn its own copy of every
+   * configured server (Windows: ~3 node processes per server per child), which
+   * is exactly why child MCP used to be switched off entirely.
+   */
+  private mcpBroker: McpBroker | null = null;
+  /** Single-flight guard for broker startup (several children can spawn at once). */
+  private mcpBrokerStarting: Promise<McpBroker | null> | null = null;
+  /**
+   * QQ 远程任务通道的运行期现场（QQBot 单一路径）。
+   *
+   * 现场 = QqService + 任务落盘 + 启动时的配置快照 + 设置 IO + 官方 adapter。
+   * 它是**唯一**的「通道是否在跑」判据 —— 所有入口都以 `this.qq` 是否存在
+   * 为闸门，没有任何入口能在半初始化状态下继续。
+   *
+   * `config` 与 QqService 内部持有的是**同一个对象**：非连接类字段（白名单 /
+   * 策略 / 并发 / 限流 / 详略 / 自动合并）由面板就地热更新，改完即时生效。
+   * 历史遗留的 IPC / bridge / 托管 manager / 二维码轮询桥字段已随收敛移除。
+   */
+  private qq?: {
+    service: QqService;
+    store: QqTaskStore;
+    config: QqConfig;
+    io: QqSettingsIo;
+    /** QQBot 官方路线：不 spawn bridge，直接持有 adapter + 扫码会话。 */
+    qqbot: {
+      adapter: QqBotAdapterLike;
+      /** 扫码会话在绑定成功后即停并清空，只在绑定进行中短驻留。 */
+      bindSession?: { stop(): void };
+    };
+  };
+  /**
+   * 主会话渠道（QQ 消息固定去向）的注入控制面。
+   *
+   * `qqInjectAborts` 按 taskId 保存「放弃等待空闲」的取消信号（`/qq stop`
+   * 与通道停止都要能立刻放手）；`qqInjectedTaskId` 是当前真正跑在主会话上的
+   * 那一轮属于哪个任务 —— 停止时要打断的是**这一轮**，不能误伤本地回合。
+   */
+  private readonly qqInjectAborts = new Map<string, AbortController>();
+  private qqInjectedTaskId: string | null = null;
+  /**
+   * QQ 主渠道「等最终答复」记账：注入轮已把任务派给子会话的任务 id → 归属
+   * 主会话 id。
+   *
+   * 主会话只委派不执行：注入轮的 assistant 文本只是「已安排」的占位，真正
+   * 答复在子会话汇报汇总轮（hidden/reportTurn、pendingCount=0）产生。该轮
+   * 结束时按归属会话找到这里的任务，把那一轮文本作为最终答复回传 QQ。停止
+   * / 会话切换时摘除，避免迟到的汇报回错任务。
+   */
+  private readonly qqMainFinalAwaiters = new Map<string, string>();
+  /**
+   * 每个 awaiter 的登记时刻（taskId → Date.now()）：迟到补发（R2）按等待时长判定。
+   * 与 qqMainFinalAwaiters 同生命周期，同增同删；缺省视为「刚登记」（不触发补发）。
+   */
+  private readonly qqMainFinalAwaiterSince = new Map<string, number>();
+  /**
+   * 每个归属主会话最近一次汇报回合产出的 assistant 文本（sessionId → text）。
+   * 补发时优先用它（保留真实结论），没有才退回如实兜底文案。仅作补发缓存，
+   * 不参与正常 final 回执；awaiter 清空时一并清理。
+   */
+  private readonly qqFinalRescueText = new Map<string, string>();
+  /** 迟到补发的轮询定时器（仅在有 awaiter 时存活）。 */
+  private qqFinalRescueTimer: ReturnType<typeof setInterval> | null = null;
+  /** 注入轮 delegated 判定的宽限期；测试可注入更小值。 */
+  private qqDelegationGraceMs = QQ_DELEGATION_GRACE_MS;
+  /** 迟到补发的软 / 硬阈值；测试可注入更小值。 */
+  private qqFinalRescueMs = QQ_FINAL_RESCUE_MS;
+  private qqFinalHardRescueMs = QQ_FINAL_HARD_RESCUE_MS;
+  /**
+   * 属于 QQ 主渠道对话的本地提问卡（卡片 id → 归属 QQ 任务 id）。
+   *
+   * 主会话/子会话的 `_iflow/user/questions` 与本地回合共用同一个单数提问卡槽位，
+   * 这里单独记账：QQ 用户的 `/qq answer` 只回灌这里登记的卡，绝不误答本地提问；
+   * 本地用户先作答时也从这里摘除，避免同一问题被 QQ 再答一次（双重应答）。
+   * 记 taskId 而非只用 Set，是为了回灌时不依赖「当前回合」这个易变状态 ——
+   * 回合结束后 qqInjectedTaskId 会清空，但那张卡仍属于诞生它的那个任务。
+   */
+  private readonly qqMainQuestionIds = new Map<string, string>();
+  /**
+   * QQ 主渠道任务派生的子会话 → 发起它的 QQ 主任务 id。
+   *
+   * main 渠道任务没有 `correlation.superSessionId`（那是 child 渠道专属），子会话
+   * 的提问因此无法按旧路径匹配到 QQ 任务。这里在派发子会话的当场打上归属标签，
+   * `onNeedInput` 据此把提问提醒回灌到正确的 QQ 任务。
+   */
+  private readonly qqTaskBySuperSession = new Map<string, string>();
+  /** 主动停止中：防止与在飞的启停重叠。 */
+  private qqStopping = false;
+  /** 最近一次推给 webview 的连接状态（用于「面板重新打开时」的立即回显）。 */
+  private qqConnected = false;
+  private qqLastDetail: string | null = null;
+  /** 设置变更 → 重启服务的防抖定时器。 */
+  private qqRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 进行中的启动（并发调用 startQqIfEnabled 时共享同一份工作）。 */
+  private qqStarting: Promise<void> | null = null;
+  /**
+   * 进行中的「建通道」占位。
+   *
+   * `startQqBotChannel` 既有 `doStartQq`（配置事件路径）也有扫码成功
+   * （绑定路径）两个调用方；两条路径若各建一套 owner，会互相覆盖/反杀。
+   * 这里在**任何 await 之前同步占位**，后来者直接复用同一份启动。
+   */
+  private qqChannelStarting: Promise<void> | null = null;
+  /** 健康检查驱动的自动重启次数（上限 {@link QQ_HEALTH_RESTART_LIMIT}）。 */
+  private qqHealthRestarts = 0;
+  /** 设置事件合并定时器（一次补丁逐键写配置会连发多轮事件）。 */
+  private qqSettingsSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * QQBot 官方扫码会话：绑定进行中短驻留，成功/失败/stop 后立即清空。
+   * 独立于 `this.qq`（扫码时尚无服务现场），避免把半绑定现场塞进主通道。
+   */
+  private qqbotBinding: { stop(): void } | null = null;
+  /**
+   * QQ 待审核用户（授权模型 2026-11-17）：白名单外的人发来消息时落一条记录，
+   * 面板审核后决定放行（写进 `allowedUsers`）或拒绝。
+   *
+   * 独立于 `this.qq`：通道没启动 / 没绑定时也要能展示历史记录，因此存储由
+   * 面板懒建、与通道生命周期无关。
+   */
+  private qqPendingUsers: QqPendingUserStore | null = null;
+  /**
+   * 队列满丢弃提示的冷却记账（openid → 上次 warning toast 时刻）。
+   *
+   * 满队时外部每条消息都会触发一次丢弃事件，同一 openid 连续刷消息会把
+   * 面板刷满屏；按 {@link QQ_PENDING_DROPPED_TOAST_COOLDOWN_MS} 冷却，
+   * 每 10 分钟最多一条。不同 openid 的首次丢弃仍各自提示。
+   */
+  private readonly qqPendingDropToastAt = new Map<string, number>();
+  /**
+   * 启动代次：`stopQq` 每次递增。异步启动在关键节点复核它 —— 启动途中被
+   * 停用 / 重启时，慢半拍的那个启动必须把自己造出来的现场拆掉，而不是把
+   * 一份陈旧通道装回 `this.qq`。
+   */
+  private qqGeneration = 0;
   /**
    * 待「让智能体合并」的子会话队列。
    *
@@ -872,6 +1269,55 @@ export class ChatPanel implements vscode.Disposable {
   /** {@link superToolCallActionsDone} 的容量上限。 */
   private static readonly SUPER_TOOL_CALL_ACTIONS_CAP = 100;
   /**
+   * 结构化 super-agent 工具调用的处理结果，key = toolCallId。
+   *
+   * 工具层对合法参数一律回 ack（`execute()` 只校验形状，不做任何 I/O），
+   * 所以「模型收到 accepted」不等于「宿主真的派了」。载荷只随 in_progress
+   * 帧到达，pending 帧通常没有 args；如果某次调用从头到尾都没带载荷，
+   * completed 帧就会是唯一的补救点 —— 这里按 id 记账，completed 帧据此
+   * 判断要不要留痕（见 {@link auditSuperToolCallCompletion}）。
+   *
+   * 有界：工具帧数量不设界；换会话 / 恢复会话 / 热重认证时清空。
+   */
+  private readonly superToolCallOutcomes = new Map<string, SuperToolCallOutcome>();
+  /** {@link superToolCallOutcomes} 的容量上限（工具帧数量不设界，Map 必须有界）。 */
+  private static readonly SUPER_TOOL_CALL_OUTCOME_CAP = 100;
+  /**
+   * 同一个主会话、同一轮里最多发几次「super-agent 参数纠错提示」。
+   *
+   * 工具层现在会抛错让模型自己修，宿主这条 hidden prompt 是兜底：两者叠加
+   * 若不加限次，模型坚持写同样的错误参数时宿主会无限喂纠错回合。2 次足够
+   * 覆盖「模型没读懂错误 / 换一种写法又错」两种情况，之后只留 toast ——
+   * 把决定权交回用户，而不是让面板自转。
+   */
+  private static readonly SUPER_TOOL_CALL_CORRECTION_CAP = 2;
+  /**
+   * 当前轮次已发出的纠错提示数（key = 主会话 id）。
+   *
+   * 「一轮」以用户下一次主动发消息为界（`sendPrompt` 的 !internal && !hidden
+   * 分支清掉本条记录）；宿主自己投的 hidden 回合不重置 —— 否则纠错提示自己
+   * 触发的新一轮会重新获得配额，限次形同虚设。换会话 / 恢复会话 / 热重认证
+   * 时由 {@link resetSuperDirectiveScans} 清空。
+   */
+  private readonly superToolCallCorrections = new Map<string, number>();
+  /**
+   * 等待主会话空闲的纠错提示（hidden prompt）。
+   *
+   * 工具调用必然发生在主会话生成中，所以入队时几乎总是忙的；投递复用子会话
+   * 汇报那条「排队等空闲」的车道（`drainSuperToolCallCorrections`，与汇报/
+   * 动作回执互斥执行）。每条带归属主会话：排队期间用户切了会话，A 的纠错
+   * 提示不能投进 B 的对话。
+   */
+  private pendingSuperToolCallCorrections: Array<{ mainSessionId: string | null; text: string }> = [];
+  /**
+   * 合并 drain 的一次性唤醒定时器（见 drainSuperMerges）。
+   *
+   * 合并队列的派发与汇报车道互锁：一次派发没成功时不能只等外部回调 ——
+   * 合并子会话可能压根没派出去，于是永远不会有人回调。这个定时器在下一拍
+   * 自己再叫一次 drain，心跳之外多一道保险；有定时器在就不再叠加新的。
+   */
+  private superMergeWakeupTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
    * Rolling buffer of the same MAIN-session text, scanned for management
    * actions (`super-agent-actions` fenced blocks). Kept separate from the
    * delegation buffer: the two protocols have independent fences and
@@ -925,7 +1371,7 @@ export class ChatPanel implements vscode.Disposable {
    * 每条都带**归属主会话**：排队期间用户可能切了会话，A 的汇报不能投进
    * B 的对话（投错会话 = 串台）。
    */
-  private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }> = [];
+  private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean }> = [];
   /**
    * 已经执行完、等着回执给主会话的子会话管理动作（先进先出）。
    *
@@ -942,6 +1388,28 @@ export class ChatPanel implements vscode.Disposable {
   private pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }> = [];
   /** 汇报 turn 正在跑（drain 的重入锁，与合并队列互斥）。 */
   private superReportRunning = false;
+  /**
+   * 5 条宿主自动回合队列的**明确优先级**（数组先后即投递先后）。
+   *
+   * 旧实现把 5 个 drain 逐个 fire-and-forget，调用顺序（汇报在最前）事实上
+   * 成了隐式优先级；配合汇报 drain 的 while 一次投多条，任一队列卡在 error /
+   * Stop 上时其它队列只能等「用户下次发消息」这个唯一解除点。这里把优先级
+   * 显式化，并配合 {@link superAutoTurnCursor} 轮转，保证每条队列每几拍都能
+   * 拿到一次车道，不会饿死。
+   *
+   * 汇报优先是刻意保持既有语义（只有汇报在排队时行为与旧版一致）；其后依次
+   * 是动作回执（防主会话重复发同一动作）、被改道的用户消息（用户原话）、
+   * 参数纠错（让卡住的调用往前走）、合并（要动主工作区，最保守）。
+   */
+  private static readonly SUPER_AUTO_TURN_PRIORITY = [
+    "reports",
+    "actionReceipts",
+    "delegated",
+    "corrections",
+    "merges",
+  ] as const;
+  /** 轮转游标：下一次仲裁从 {@link SUPER_AUTO_TURN_PRIORITY} 的哪一位起步。 */
+  private superAutoTurnCursor = 0;
   /**
    * 主会话车道（同步互斥）：同一时刻只允许**一个**回合在准备阶段。
    *
@@ -985,6 +1453,14 @@ export class ChatPanel implements vscode.Disposable {
    * 指纹没变 = 只有展示性字段变了，节流写即可。
    */
   private superArchiveFingerprint = "";
+  /**
+   * 后台残留 worktree 清扫的在飞标记。
+   *
+   * 清扫**不在**会话恢复 / 新建会话的关键路径上（见
+   * `sweepStaleWorktreesInBackground`）；这个闸门只保证同一时刻最多一份在跑，
+   * 切会话 / 反复恢复不会叠出多条 `git status` 子进程链。
+   */
+  private sweepInFlight = false;
   /**
    * 已经把汇报交给宿主的子会话 id。
    *
@@ -1050,43 +1526,11 @@ export class ChatPanel implements vscode.Disposable {
     {
       options: PermissionOption[];
       toolName: string;
-      /** M4 P1-1: the original request — needed to derive an allow rule when
-       * the user upgrades an approval to 「始终允许」. */
-      req: RequestPermissionRequest;
       resolve: (response: RequestPermissionResponse) => void;
       timer: NodeJS.Timeout;
     }
   >();
   private approvalSeq = 0;
-  /** M4 P1-1: cached global pre-review rule table (null = not loaded yet).
-   * Invalidated on save and on panel dispose only — globalState is ours. */
-  private approvalRules: ApprovalRule[] | null = null;
-  /** M4 P1-1: cached workspace `.iflow/approval.json` rules (read-only).
-   * Invalidated by the workspace file watcher, on session start and on card
-   * open — an external tool (or the user's editor) owns that file. */
-  private approvalProjectRules: ApprovalRule[] | null = null;
-  /** M4 P1-1: a 「始终允许」 click derived this rule; it is NOT persisted until
-   * the user names it in the policy card (or it is dismissed). */
-  private approvalDraft: ApprovalRule | null = null;
-  private approvalRuleSeq = 0;
-  /** Awaiting user confirmation for `_iflow/plan/exit`, keyed by plan-exit id. */
-  private readonly pendingPlanExits = new Map<
-    string,
-    {
-      resolve: (response: ExitPlanModeResponse) => void;
-      timer: NodeJS.Timeout;
-      /** Full plan text — persisted to `.iflow/specs/` on approval. */
-      plan: string;
-    }
-  >();
-  private planExitSeq = 0;
-  /**
-   * Mode to return to after a Plan exit is approved. The CLI does NOT switch
-   * modes itself when `_iflow/plan/exit` is approved (verified 2026-09: agent
-   * stays in plan mode), so the client must issue `session/set_mode` after
-   * approval. Captured in setMode() right before switching INTO a plan mode.
-   */
-  private planReturnModeId: string | null = null;
   /** Awaiting user answers for `_iflow/user/questions`, keyed by card id. */
   private readonly pendingQuestions = new Map<
     string,
@@ -1097,15 +1541,34 @@ export class ChatPanel implements vscode.Disposable {
   >();
   /**
    * Awaiting the user's choice in the profile-switch dialog, keyed by dialog id.
-   * No timer: the dialog blocks no agent (unlike approval/plan/question cards),
+   * No timer: the dialog blocks no agent (unlike approval/question cards),
    * so it waits for the user indefinitely — every cancel path (panel dispose,
    * session teardown) resolves it explicitly instead.
    */
   private readonly pendingProfileSwitches = new Map<string, { resolve: (keepSession: boolean | null) => void }>();
   private profileSwitchSeq = 0;
+  /**
+   * 新建会话时的「清空并新建」二次确认框：按 requestId 存 promise resolver。
+   *
+   * 与 profile-switch 对话同源（webview 弹框 → 回传 host），但多一道超时兜底：
+   * 若 webview 没有渲染这个确认框（旧版前端 / 另一条线尚未合并），新建会话
+   * 不能永久卡在等一个永远不会来的回答 —— 超时按「取消」处理（只新建、不清空）。
+   */
+  private readonly pendingSuperResidueConfirms = new Map<string, {
+    resolve: (confirmed: boolean) => void;
+    timer: NodeJS.Timeout;
+  }>();
+  private superResidueConfirmSeq = 0;
   /** Serializes per-session transcript file writes (P2): overlapping persists
    * must not interleave inside one file's temp+rename sequence. */
   private persistChain: Promise<void> = Promise.resolve();
+  /**
+   * Transcript writes currently queued or in flight on `persistChain`.
+   * `cleanupEmptySession` awaits the chain before the new-session state swap;
+   * while that wait is non-trivial the new-session projection must say
+   * 「正在等待后台任务结束」 instead of looking frozen (see NewSessionPhase).
+   */
+  private persistPending = 0;
   /** P6: workspace file list for the @-mention popup — `findFiles` is a full
    * workspace scan; cache it and invalidate on file-system changes. */
   private fileSearchCache: { rels: string[] } | null = null;
@@ -1157,7 +1620,7 @@ export class ChatPanel implements vscode.Disposable {
    */
   private turnHadAgentOutput = false;
   /**
-   * Armed after a timeout auto-reject (approval / plan-exit / question) while
+   * Armed after a timeout auto-reject (approval / question) while
    * a turn is in flight. If the CLI's follow-up model request wedges (zero
    * `session/update` for POST_REJECTION_IDLE_MS — see the constant), the
    * watchdog cancels the dead turn instead of stranding the panel on
@@ -1345,10 +1808,7 @@ export class ChatPanel implements vscode.Disposable {
             // Every mirrored setting lives in the same settings panel; a
             // direct VSCode-side edit must repaint it too.
             if (e.affectsConfiguration("iflow")) this.postHostSettings();
-        if (
-          e.affectsConfiguration("iflow.language")
-          || e.affectsConfiguration("iflow.approvalMode")
-        ) {
+        if (e.affectsConfiguration("iflow.language")) {
           this.syncCliSettingsToDisk();
         }
         // Setting-owned thinking rules: re-merge into ~/.iflow/thinking-models.json
@@ -1376,13 +1836,22 @@ export class ChatPanel implements vscode.Disposable {
     const fileWatcher = this.services.watchers?.[0] ?? vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(watchRoot, "**/*"));
     const invalidateFileCache = () => {
       this.fileSearchCache = null;
-      // M4 P1-1: the project override lives inside the workspace, so the same
-      // watcher covers it — drop the cache and the next pre-review re-reads.
-      this.approvalProjectRules = null;
     };
     fileWatcher.onDidCreate(invalidateFileCache);
     fileWatcher.onDidDelete(invalidateFileCache);
     this.context.subscriptions.push(fileWatcher);
+    // QQ 远程任务通道（Wave3-B2b）：设置区的任何改动都可能要求重建服务。
+    // 监听整个 `iflow.qq` 段（等价于 `iflow.qq.` 前缀），再按「是否碰到连接类
+    // 字段」决定重启 —— 改白名单 / 策略这类热更新字段不应打断在跑的任务。
+    this.context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (!e.affectsConfiguration("iflow.qq")) return;
+        // 合并同一批写入产生的多轮事件（见 QQ_SETTINGS_SYNC_DEBOUNCE_MS）。
+        this.scheduleQqSettingsChanged();
+      }),
+    );
+    // 异步启动，不阻塞激活：设置未启用时只读一次配置就返回。
+    void this.startQqIfEnabled();
     // Status bar entry is the always-visible launcher (no sidebar view anymore).
     this.statusBar.show();
   }
@@ -1399,9 +1868,7 @@ export class ChatPanel implements vscode.Disposable {
       case "streaming": {
         const label = state.compressing
           ? vscode.l10n.t("正在压缩")
-          : isPlanMode(state.modes)
-            ? vscode.l10n.t("正在规划")
-            : vscode.l10n.t("生成中");
+          : vscode.l10n.t("生成中");
         text = `$(sync~spin) iFlow: ${label}${model}`;
         break;
       }
@@ -1530,6 +1997,16 @@ export class ChatPanel implements vscode.Disposable {
     // re-running teardown against an already-destroyed panel.
     if (this.disposed) return;
     this.disposed = true;
+    // QQ 主会话渠道：等空闲的注入立刻放手。否则它会在宿主销毁后继续排空，
+    // 往已销毁的 store 写一轮 prompt（服务侧看到 canceled 会自行收尾）。
+    for (const controller of this.qqInjectAborts.values()) controller.abort();
+    this.qqInjectAborts.clear();
+    this.qqInjectedTaskId = null;
+    this.stopQqFinalRescueTimer();
+    this.qqMainFinalAwaiters.clear();
+    this.qqMainFinalAwaiterSince.clear();
+    this.qqFinalRescueText.clear();
+    this.qqTaskBySuperSession.clear();
     // Final flush: a turn interrupted by window close / extension reload has
     // no later persist point (completion never runs) — write the tail now so
     // the session survives a restart intact. No-op when blocks are empty.
@@ -1557,7 +2034,6 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
-    this.cancelAllPlanExits(vscode.l10n.t("扩展已停用，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
     // Super Agent: kill the child sessions' CLI processes too — each one is
     // its own process tree, and leaving them behind would leak node
@@ -1584,10 +2060,31 @@ export class ChatPanel implements vscode.Disposable {
       // best-effort teardown
     }
     this.superAgent = null;
+    // MCP broker: kill the shared server processes now that no child can use
+    // them. Best-effort — teardown must not be blocked by a wedged server.
+    try {
+      await this.mcpBroker?.dispose();
+    } catch (error) {
+      this.log.warn(`MCP broker dispose failed: ${errorMessage(error)}`);
+    }
+    this.mcpBroker = null;
+    this.mcpBrokerStarting = null;
     this.pendingSuperReports.clear();
     this.pendingSuperReportPrompts = [];
     this.pendingSuperActionReceipts = [];
     this.pendingDelegatedUserTurns = [];
+    // 面板销毁后这四个 drain 可能正卡在 await sendPrompt 上；把队列与车道全
+    // 清掉，避免它们在 finally 里把「已销毁实例」的锁/标志重新写回（也避免
+    // 残留的合并请求在销毁后还能触发一次唤醒）。
+    this.pendingSuperToolCallCorrections = [];
+    this.pendingSuperMerges = [];
+    this.superReportRunning = false;
+    this.superMergeRunning = false;
+    this.mainLane = null;
+    if (this.superMergeWakeupTimer) {
+      clearTimeout(this.superMergeWakeupTimer);
+      this.superMergeWakeupTimer = null;
+    }
     this.autoTurnsStoppedFor = null;
     this.clearDeferredAutoTurnsToast();
     this.promptRequestSessionId = null;
@@ -1595,12 +2092,25 @@ export class ChatPanel implements vscode.Disposable {
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
     this.store.setSuperWaiting(false);
     this.cancelAllProfileSwitches();
+    this.cancelAllSuperResidueConfirms();
     this.clearPostRejectionWatchdog();
     if (this.diagDebounce) {
       clearTimeout(this.diagDebounce);
       this.diagDebounce = null;
     }
+    if (this.qqSettingsSyncTimer) {
+      clearTimeout(this.qqSettingsSyncTimer);
+      this.qqSettingsSyncTimer = null;
+    }
+    if (this.qqRestartTimer) {
+      clearTimeout(this.qqRestartTimer);
+      this.qqRestartTimer = null;
+    }
     this.diagBaselineErrors = null;
+    // QQ 通道：bridge 进程、宿主 IPC 监听与任务服务必须一起收掉 —— 否则窗口
+    // 关闭后会留下一个孤立的 node 进程和占用的端口。最多等 2s（见
+    // QQ_BRIDGE_STOP_TIMEOUT_MS），关闭流程不能被一个卡住的 socket 拖死。
+    await this.raceQqTeardown(this.stopQq());
     this.client = null;
     this.memory.dispose();
     this.assets.dispose();
@@ -1643,6 +2153,16 @@ export class ChatPanel implements vscode.Disposable {
     void sweepStaleAttachmentDirs({ log: (m) => this.log.info(m) }).catch((error) => {
       this.log.warn(`attachment sweep failed: ${errorMessage(error)}`);
     });
+    // 项目内 `.iflow/super/` 的附件副本与降级目录此前无人清扫（OS 临时目录
+    // 的 sweep 只扫 temp root）。并列 fire-and-forget，失败只记日志。
+    const manager = this.superAgent;
+    if (!manager) return;
+    void Promise.all([
+      manager.sweepStaleSuperAttachmentDirs(),
+      manager.sweepStaleSuperDirs(),
+    ]).catch((error) => {
+      this.log.warn(`super agent: 附件/目录残留清扫失败：${errorMessage(error)}`);
+    });
   }
 
   /** Open (or reveal) the chat as an editor tab with a generous width. */
@@ -1670,6 +2190,9 @@ export class ChatPanel implements vscode.Disposable {
     panel.onDidChangeViewState(
       (e) => {
         this.panelVisible = e.webviewPanel.visible;
+        // 面板重新可见：QQ 通道可能在被隐藏期间变化（任务推进 / bridge 重连），
+        // 补一次全量推送，避免设置卡与看板停在旧画面。
+        if (e.webviewPanel.visible) this.pushQqState();
       },
       null,
       this.context.subscriptions,
@@ -1684,6 +2207,7 @@ export class ChatPanel implements vscode.Disposable {
     );
     this.postSnapshot();
     this.postTheme();
+    this.pushQqState();
     void this.ensureClient().catch((error) => {
       this.log.error("initial connect failed", errorMessage(error));
     });
@@ -1944,6 +2468,25 @@ export class ChatPanel implements vscode.Disposable {
 
   private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {
     this.log.trace(`webview → host: ${msg.type}`);
+    // `qqConfigAction`（连测试 / 解绑 / 扫码三动作）是 webview→host 命令；
+    // 它历史上只声明在 HostToWebview 上（方向写反），Wave3-C2 已在
+    // WebviewToHost 补上声明，「修正消息方向」这次又把 HostToWebview 上的
+    // 误声明移除，下面 switch 里的 `case "qqConfigAction"` 是类型检查过的
+    // 正规通道。这段运行时形状守卫保留，兼容尚未重建、仍按旧声明发送的
+    // 旧 webview（先于 switch 命中，行为与原先一致）。配对码动作已随授权
+    // 模型改造移除，旧 webview 发来会被静默丢弃。
+    const qqAction = (msg as { type?: unknown; action?: unknown });
+    if (
+      qqAction.type === "qqConfigAction" &&
+      (qqAction.action === "testConnection" ||
+        qqAction.action === "unbind" ||
+        qqAction.action === "startQrLogin" ||
+        qqAction.action === "refreshQr" ||
+        qqAction.action === "cancelQrLogin")
+    ) {
+      await this.handleQqConfigAction(qqAction.action);
+      return;
+    }
     switch (msg.type) {
       case "ready":
         // The webview (re)booted and lost its transcript anchor: resync()
@@ -1969,6 +2512,7 @@ export class ChatPanel implements vscode.Disposable {
         // `ready` proves the listener is live.
         this.postTheme();
         this.postHostSettings();
+        this.pushQqState();
         break;
       case "sendPrompt":
         await this.sendPrompt(msg.text, msg.images, msg.files, msg.contexts);
@@ -2008,9 +2552,6 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "newSession":
         await this.startNewSession();
-        break;
-      case "setMode":
-        await this.setMode(msg.modeId);
         break;
       case "setModel":
         await this.setModel(msg.modelId);
@@ -2062,14 +2603,14 @@ export class ChatPanel implements vscode.Disposable {
       case "respondApproval":
         this.handleApprovalResponse(msg.id, msg.optionId);
         break;
-      case "respondPlanExit":
-        await this.handlePlanExitResponse(msg.id, msg.approved, msg.reason, msg.replan === true);
-        break;
       case "answerQuestions":
         this.handleQuestionAnswers(msg.id, msg.answers);
         break;
       case "respondProfileSwitch":
         this.handleProfileSwitchResponse(msg.id, msg.keepSession);
+        break;
+      case "respondSuperResidueConfirm":
+        this.handleSuperResidueConfirmResponse(msg.requestId, msg.confirmed);
         break;
       case "revertTool":
         await this.revertToolDiff(msg.toolCallId);
@@ -2214,12 +2755,6 @@ export class ChatPanel implements vscode.Disposable {
         if (msg.language !== undefined && CLI_LANGUAGES.includes(msg.language)) {
           writes.push(["language", msg.language]);
         }
-        if (msg.defaultMode !== undefined && DEFAULT_MODES.includes(msg.defaultMode)) {
-          writes.push(["defaultMode", msg.defaultMode]);
-        }
-        if (msg.approvalMode !== undefined && CLI_APPROVAL_MODES.includes(msg.approvalMode)) {
-          writes.push(["approvalMode", msg.approvalMode]);
-        }
         if (msg.theme !== undefined && UI_THEMES.includes(msg.theme)) writes.push(["theme", msg.theme]);
         if (msg.auroraIntensity !== undefined && Number.isFinite(msg.auroraIntensity)) {
           writes.push(["auroraIntensity", Math.min(100, Math.max(0, Math.round(msg.auroraIntensity)))]);
@@ -2256,6 +2791,15 @@ export class ChatPanel implements vscode.Disposable {
         // 子会话并发上限：先归一化再落盘，面板不该把 0 / 越界值写进 settings.json。
         if (msg.superAgentMaxConcurrent !== undefined && Number.isFinite(msg.superAgentMaxConcurrent)) {
           writes.push(["superAgent.maxConcurrent", clampMaxConcurrentSuperSessions(msg.superAgentMaxConcurrent)]);
+        }
+        if (msg.superAgentIntegration !== undefined) {
+          writes.push(["superAgent.integration", asSuperIntegrationMode(msg.superAgentIntegration)]);
+        }
+        if (msg.superAgentMaxWorktrees !== undefined && Number.isFinite(msg.superAgentMaxWorktrees)) {
+          writes.push(["superAgent.maxWorktrees", clampMaxSuperWorktrees(msg.superAgentMaxWorktrees)]);
+        }
+        if (typeof msg.superAgentKeepWorktree === "boolean") {
+          writes.push(["superAgent.keepWorktree", msg.superAgentKeepWorktree]);
         }
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
         // 调高上限后排队的子会话立刻有机会起跑；调低不影响已在运行的会话，
@@ -2358,16 +2902,6 @@ export class ChatPanel implements vscode.Disposable {
       case "openKnowledgeFile":
         void this.memory.openKnowledgeFile(msg.path);
         break;
-      case "listApprovalPolicy":
-        void this.sendApprovalPolicy();
-        break;
-      case "saveApprovalPolicy":
-        await this.saveApprovalPolicy(msg.rules);
-        break;
-      case "dismissApprovalRuleDraft":
-        this.approvalDraft = null;
-        void this.sendApprovalPolicy();
-        break;
       case "regenerate":
         await this.regenerate();
         break;
@@ -2394,6 +2928,21 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "exportToolOutput":
         await this.exportToolOutput(msg.blockId);
+        break;
+      case "qqSettingsPatch":
+        await this.handleQqSettingsPatch(msg.patch);
+        break;
+      case "qqTaskAction":
+        await this.handleQqTaskAction(msg.taskId, msg.action, msg.text);
+        break;
+      case "qqConfigAction":
+        await this.handleQqConfigAction(msg.action);
+        break;
+      case "qqUserAction":
+        await this.handleQqUserAction(msg.openid, msg.action);
+        break;
+      case "qqManagedSetup":
+        await this.handleQqManagedSetup(msg.action);
         break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different
@@ -2517,8 +3066,6 @@ export class ChatPanel implements vscode.Disposable {
       soundFeedback: config.get<boolean>("soundFeedback", true),
       osNotifications: asOsNotifications(config.get<string>("osNotifications", "approvals")),
       language: asCliLanguage(config.get<string>("language", "")),
-      defaultMode: asDefaultMode(config.get<string>("defaultMode", "smart")),
-      approvalMode: asCliApprovalMode(config.get<string>("approvalMode", "")),
       theme: asUiTheme(config.get<string>("theme", "auto")),
       auroraIntensity: Math.min(100, Math.max(0, config.get<number>("auroraIntensity", 35))),
       uiFontSize: asUiFontSize(config.get<string>("uiFontSize", "standard")),
@@ -2537,6 +3084,11 @@ export class ChatPanel implements vscode.Disposable {
       superAgentMaxConcurrent: clampMaxConcurrentSuperSessions(
         config.get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
       ),
+      superAgentIntegration: asSuperIntegrationMode(config.get<string>("superAgent.integration", "merge")),
+      superAgentMaxWorktrees: clampMaxSuperWorktrees(
+        config.get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
+      ),
+      superAgentKeepWorktree: config.get<boolean>("superAgent.keepWorktree", false),
     });
   }
 
@@ -2659,7 +3211,7 @@ export class ChatPanel implements vscode.Disposable {
 
   /**
    * Deferred card toast (policy 2026-10-16: OS reminders exist only while the
-   * question/approval/plan card is displayed). `cardStillDisplayed` answers
+   * question/approval card is displayed). `cardStillDisplayed` answers
    * "still pending AND still owning its webview slot" at FIRE time — the
    * synchronous call site cannot see a same-tick slot replacement from a
    * parallel permission request, but the deferred check does. A toast for an
@@ -3697,8 +4249,7 @@ export class ChatPanel implements vscode.Disposable {
       if (this.autoTurnsHeld()) {
         this.autoTurnsStoppedFor = null;
         this.syncSuperWaitingState();
-        void this.drainSuperReports();
-        void this.drainDelegatedUserTurns();
+        void this.drainSuperAutoTurns();
       }
       return;
     }
@@ -3767,7 +4318,7 @@ export class ChatPanel implements vscode.Disposable {
    *   compress a healthy session — the hy3 32K-fallback misreport was the
    *   exact false-positive this guard prevents);
    * - only a truly idle session (streaming/connecting/init/replay windows
-   *   and pending approval/question/plan cards stay untouched);
+   *   and pending approval/question cards stay untouched);
    * - `autoCompressInFlight` keeps one compress turn at a time; a failed
    *   compression is logged + warned, never escalated to the error banner
    *   (the user's next real prompt still has the reactive overflow path).
@@ -3786,7 +4337,7 @@ export class ChatPanel implements vscode.Disposable {
     const state = this.store.getState();
     if (state.sessionId !== sessionId) return false;
     if (state.initializing || state.replaying || state.status !== "idle") return false;
-    if (state.pendingApproval || state.pendingPlanExit || state.pendingQuestions) return false;
+    if (state.pendingApproval || state.pendingQuestions) return false;
     const usage = state.usage;
     const window = usage?.contextWindow ?? null;
     if (!usage || usage.estimated || window === null || window <= 0) return false;
@@ -3838,102 +4389,6 @@ export class ChatPanel implements vscode.Disposable {
   }
 
 
-  // --- M4 P1-1: approval pre-review rule table --------------------------------
-
-  /** Auto-decision transcript notes already emitted this turn, keyed by
-   * `ruleId|toolName`. An "allow all reads" rule would otherwise add a system
-   * line per read_file call; cleared at every prompt attempt (see
-   * promptWithRetry's `turnHadAgentOutput` reset). */
-  private readonly autoApprovalNoted = new Set<string>();
-
-  /** Workspace file the project override is read from (null = no workspace). */
-  private approvalProjectUri(): vscode.Uri | null {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!root) return null;
-    return vscode.Uri.joinPath(root, ...APPROVAL_POLICY_PROJECT_FILE.split("/"));
-  }
-
-  /**
-   * Load (and cache) both rule tables. Async on purpose: the approval path
-   * must never do sync I/O in the extension host (trap #18 discipline), and
-   * the project file is owned by the user / external tools.
-   */
-  private async loadApprovalRules(): Promise<{ global: ApprovalRule[]; project: ApprovalRule[] }> {
-    if (!this.approvalRules) {
-      const raw = this.context.globalState.get<string>(APPROVAL_POLICY_KEY);
-      this.approvalRules = raw ? parseApprovalPolicy(raw) ?? [] : [];
-    }
-    if (!this.approvalProjectRules) this.approvalProjectRules = await this.readProjectApprovalRules();
-    return { global: this.approvalRules, project: this.approvalProjectRules };
-  }
-
-  private async readProjectApprovalRules(): Promise<ApprovalRule[]> {
-    const uri = this.approvalProjectUri();
-    if (!uri) return [];
-    try {
-      const bytes = await vscode.workspace.fs.readFile(uri);
-      const rules = parseApprovalPolicy(Buffer.from(bytes).toString("utf8"));
-      if (!rules) {
-        this.log.warn(`approval policy: ignoring malformed ${APPROVAL_POLICY_PROJECT_FILE}`);
-        return [];
-      }
-      return rules;
-    } catch {
-      return []; // absent is the normal case — global rules only
-    }
-  }
-
-  /** Precedence order for matching: project rules override global ones. */
-  private approvalRuleChain(global: readonly ApprovalRule[], project: readonly ApprovalRule[]): ApprovalRule[] {
-    return [...project, ...global];
-  }
-
-  /**
-   * Persist the global rule table. Returns false when the write rejected —
-   * the in-memory table is rolled back so the panel never acts on rules that
-   * would be gone after a window reload (the caller answers with a toast /
-   * a saveResult:"failed" push instead of claiming 已保存).
-   */
-  private async persistApprovalRules(rules: ApprovalRule[]): Promise<boolean> {
-    const previous = this.approvalRules;
-    this.approvalRules = rules;
-    try {
-      await this.context.globalState.update(APPROVAL_POLICY_KEY, serializeApprovalPolicy(rules));
-      return true;
-    } catch (error) {
-      this.approvalRules = previous;
-      this.log.warn(`approval policy write failed: ${errorMessage(error)}`);
-      return false;
-    }
-  }
-
-  /** Bump a matched GLOBAL rule's hit counter (project rules are read-only —
-   * the panel never writes a file the user owns). */
-  private noteApprovalRuleHit(ruleId: string | undefined, project: readonly ApprovalRule[]): void {
-    if (!ruleId || !this.approvalRules) return;
-    if (project.some((r) => r.id === ruleId)) return;
-    let changed = false;
-    const next = this.approvalRules.map((r) => {
-      if (r.id !== ruleId) return r;
-      changed = true;
-      return { ...r, hits: (r.hits ?? 0) + 1 };
-    });
-    if (changed) void this.persistApprovalRules(next);
-  }
-
-  /** The wire facts a decision is made from (see ApprovalRequestInfo: CLI
-   * 0.5.19 permission requests carry kind/title/locations, not toolName/args). */
-  private approvalRequestInfo(req: RequestPermissionRequest): ApprovalRequestInfo {
-    const toolCall = req.toolCall;
-    return {
-      toolName: toolCall.toolName ?? "",
-      toolKind: toolCall.kind ?? "other",
-      title: toolCall.title ?? "",
-      paths: (toolCall.locations ?? []).map((l) => l.path),
-      cwd: this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
-    };
-  }
-
   /**
    * Super Agent 内置工具（`super-agent` / `super-agent-actions`）的权限请求
    * 直接放行，不弹审批卡。
@@ -3944,14 +4399,32 @@ export class ChatPanel implements vscode.Disposable {
    * 子会话就要用户点一次，把「随时开启」变成「每次确认」，安全边界却没有任何
    * 增量（工具不执行任何东西）。
    *
-   * 只对这一个工具生效：其它工具仍走规则表 / 审批卡，用户的 approvalMode
-   * 语义不变。响应里的 `optionId` **必须是 agent 真正给出的** —— CLI 用
-   * `nativeEnum` 解析，伪造会抛错并卡死回合；没有 allow 选项时按现有取消
-   * 路径回 `cancelled`，绝不伪造批准。
+   * 只对这一个工具生效：其它工具仍走审批卡。响应里的 `optionId` **必须是
+   * agent 真正给出的** —— CLI 用 `nativeEnum` 解析，伪造会抛错并卡死回合；
+   * 没有 allow 选项时按现有取消路径回 `cancelled`，绝不伪造批准。
    */
   private autoApproveSuperAgentTool(req: RequestPermissionRequest): RequestPermissionResponse | null {
-    if (!isSuperAgentToolRequest(this.approvalRequestInfo(req))) return null;
-    const label = req.toolCall.toolName || req.toolCall.title || "super-agent";
+    // 识别顺序按证据强度从强到弱（全部只对「命中即放行」生效，未命中仍走
+    // 规则表 / 审批卡）：
+    //  1. 工具名归一（含命名空间前缀与分隔符变体）；
+    //  2. 标题里直接写着工具名（CLI 0.5.19 的权限请求经常省略 toolName）；
+    //  3. 标题是内置工具的短标签 —— 智能审批（SMART）的 RISKY 分支构造
+    //     toolCall 时只填 `title: getDescription(params)`，派发形态是
+    //     `Delegate 1 task`、管理形态是 `Manage 1 child session action`
+    //     （bundle 实证 0.5.19，见 shared/super-tool-call.ts 的
+    //     classifySuperToolTitle）；
+    //  4. 以上都没有时按**真实载荷结构**兜底（tasks / actions 严格校验）。
+    // 只看 title 会漏掉无标题形态、只看载荷会漏掉智能审批（它不带 args），
+    // 两者叠加才覆盖当前已知的全部形态。
+    const toolName = (req.toolCall.toolName ?? "").trim();
+    const title = (req.toolCall.title ?? "").trim();
+    const kind =
+      (toolName ? classifySuperToolName(toolName) : null) ??
+      (title ? classifySuperToolName(title) : null) ??
+      (title ? classifySuperToolTitle(title) : null) ??
+      classifySuperToolArgs(req.toolCall.args);
+    if (!kind) return null;
+    const label = toolName || title || "super-agent";
     const option =
       req.options.find((o) => o.kind === "allow_always") ??
       req.options.find((o) => o.kind.startsWith("allow"));
@@ -3959,120 +4432,11 @@ export class ChatPanel implements vscode.Disposable {
       this.log.warn(`super agent: "${label}" permission request offers no allow option — cancelling`);
       return { outcome: { outcome: "cancelled" } };
     }
-    this.log.info(`super agent: auto-allowed built-in tool "${label}" (${option.kind})`);
+    this.log.info(`super agent: auto-allowed built-in tool "${label}" (${kind}, ${option.kind})`);
     return { outcome: { outcome: "selected", optionId: option.optionId } };
   }
 
-  /**
-   * Run the rule table over an incoming permission request BEFORE surfacing a
-   * card. Returns the wire response to send, or null when the user must still
-   * decide (no rule matched, or a hard veto downgraded an allow to ask).
-   *
-   * Discipline: the response's `optionId` is ALWAYS one the agent offered —
-   * the CLI parses it with `nativeEnum(...)` (probed, CLI 0.5.19 bundle), so a
-   * fabricated id throws and strands the turn. When the wanted shape is
-   * missing, allow falls back to the card and deny falls back to `cancelled`
-   * (the same response the 5-minute timeout produces).
-   */
-  private async preReviewApproval(req: RequestPermissionRequest): Promise<RequestPermissionResponse | null> {
-    const { global, project } = await this.loadApprovalRules();
-    const chain = this.approvalRuleChain(global, project);
-    if (chain.length === 0) return null;
-    const info = this.approvalRequestInfo(req);
-    const decision = decideApproval(chain, info);
-    if (decision.action === "ask") return null;
-
-    const pick = (kinds: readonly string[]): PermissionOption | undefined => {
-      for (const kind of kinds) {
-        const found = req.options.find((o) => o.kind === kind);
-        if (found) return found;
-      }
-      return undefined;
-    };
-
-    let response: RequestPermissionResponse;
-    if (decision.action === "allow") {
-      const option = pick(["allow_once", "allow_always"]);
-      if (!option) {
-        this.log.warn(
-          `approval policy: rule "${decision.ruleLabel ?? decision.ruleId}" matched but the request offers no allow option — showing the card`,
-        );
-        return null;
-      }
-      response = { outcome: { outcome: "selected", optionId: option.optionId } };
-    } else {
-      const option = pick(["reject_once", "reject_always"]);
-      response = option
-        ? { outcome: { outcome: "selected", optionId: option.optionId } }
-        : { outcome: { outcome: "cancelled" } };
-    }
-
-    this.noteApprovalRuleHit(decision.ruleId, project);
-    // One transcript trace per rule per tool per turn (see autoApprovalNoted).
-    const noteKey = `${decision.ruleId ?? ""}|${info.toolName}`;
-    if (!this.autoApprovalNoted.has(noteKey)) {
-      this.autoApprovalNoted.add(noteKey);
-      const ruleName = decision.ruleLabel ?? decision.ruleId ?? "";
-      this.store.approvalResolutionNote(
-        info.toolName || info.title || "tool",
-        decision.action === "allow"
-          ? vscode.l10n.t("按策略自动允许（{0}）", ruleName)
-          : vscode.l10n.t("按策略自动拒绝（{0}）", ruleName),
-      );
-    }
-    return response;
-  }
-
-  /**
-   * 「始终允许」 upgrade (roadmap P1-1): derive the narrowest rule for THIS
-   * request and hand it to the policy card for naming. Nothing is persisted
-   * until the user saves — a rule that silently auto-approves future turns
-   * must be a deliberate, visible act. Returns false when no rule can be
-   * derived (hard-vetoed command, or the request carries nothing to match on).
-   */
-  private offerAlwaysAllowRule(req: RequestPermissionRequest): boolean {
-    const info = this.approvalRequestInfo(req);
-    if (hardDenyReason(info)) return false;
-    const draft = deriveAllowRule(info, `rule-${Date.now().toString(36)}-${++this.approvalRuleSeq}`);
-    if (!draft) return false;
-    this.approvalDraft = draft;
-    return true;
-  }
-
-  /** Push the current tables (+ any pending draft) to the policy card.
-   * `saveResult` is only set when this push answers a save request: the card
-   * waits for it before flashing 已保存 (a fire-and-forget send used to flash
-   * success before the host had written anything). */
-  private async sendApprovalPolicy(saveResult?: "ok" | "failed"): Promise<void> {
-    const { global, project } = await this.loadApprovalRules();
-    this.postToWebview({
-      type: "approvalPolicy",
-      rules: global,
-      projectRules: project,
-      draft: this.approvalDraft,
-      ...(saveResult ? { saveResult } : {}),
-    });
-  }
-
-  /** Save the global table (replace semantics — see shared/messages.ts). */
-  private async saveApprovalPolicy(rules: readonly ApprovalRule[]): Promise<void> {
-    const clean: ApprovalRule[] = [];
-    for (const raw of rules.slice(0, APPROVAL_RULES_MAX)) {
-      const rule = normalizeApprovalRule(raw, `rule-${clean.length + 1}`);
-      if (rule && !clean.some((r) => r.id === rule.id)) clean.push(rule);
-    }
-    // Saving from the card resolves the draft either way (the user either
-    // kept it in `rules` or threw it away).
-    this.approvalDraft = null;
-    const ok = await this.persistApprovalRules(clean);
-    if (!ok) {
-      this.store.sendToast("warning", vscode.l10n.t("审批规则保存失败，已保留原规则"));
-    }
-    // Push the (possibly rolled-back) table either way: the card uses this
-    // reply to stop its saving state, and on failure it must show what is
-    // actually persisted rather than the user's unsaved draft.
-    await this.sendApprovalPolicy(ok ? "ok" : "failed");
-  }
+  
 
 
   // --- Tool approval flow (session/request_permission) --------------------------
@@ -4129,7 +4493,6 @@ export class ChatPanel implements vscode.Disposable {
       this.pendingApprovals.set(id, {
         options: req.options,
         toolName: approval.toolName,
-        req,
         resolve,
         timer,
       });
@@ -4190,20 +4553,12 @@ export class ChatPanel implements vscode.Disposable {
       isReject ? vscode.l10n.t("已拒绝") : vscode.l10n.t("已允许（{0}）", option?.name ?? optionId),
     );
     pending.resolve({ outcome: { outcome: "selected", optionId } });
-    // M4 P1-1: 「始终允许」 upgrades to a named rule. The approval itself is
-    // already resolved — rule creation is a deliberate second step in the
-    // policy card (pre-filled draft, user names & saves).
-    if (option?.kind === "allow_always") {
-      if (this.offerAlwaysAllowRule(pending.req)) void this.sendApprovalPolicy();
-      else this.log.info("allow-always offered but no rule could be derived — kept as one-time approval");
-    }
   }
 
   /** Shared complete user-stop chain: unblock cards, suppress retries/watchdog. */
   private cancelCurrentTurn(): void {
     const client = this.client;
     this.cancelAllApprovals(vscode.l10n.t("用户取消"));
-    const skippedPlanExits = this.cancelAllPlanExits(vscode.l10n.t("用户取消，计划审批已跳过"));
     this.cancelAllPendingQuestions(vscode.l10n.t("用户取消"));
     this.cancelSeen = true;
     this.clearPostRejectionWatchdog();
@@ -4220,15 +4575,6 @@ export class ChatPanel implements vscode.Disposable {
       this.announceDeferredAutoTurns();
     }
     this.sendTurnCancel(sessionId, client);
-    // Stopping a Plan-exit card must leave the session in the mode the panel
-    // shows. `session/set_mode` has no echo notification, so nothing would
-    // notice the CLI drifting out of Plan mode here — the user-reported
-    // symptom was the composer still saying 计划 while the agent had already
-    // gained write access (session 439fd54b). Re-assert the stored mode; a
-    // push of the mode the CLI already holds is a no-op on its side.
-    if (skippedPlanExits > 0 && client) {
-      void this.assertModeForPrompt(client, sessionId);
-    }
   }
 
   /**
@@ -4335,176 +4681,22 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  // --- Plan-mode exit flow (_iflow/plan/exit) ---------------------------------
+  // --- Plan mode (removed) — minimal defensive fallback ------------------------
 
   /**
-   * Surface a Plan-mode exit request as a confirmation card in the webview and
-   * resolve once the user answers (or the timeout auto-rejects). Reuses the
-   * approval-card visual form so the panel stays consistent.
+   * 计划模式已移除（2026-11-18）。
+   *
+   * CLI 内部仍然保留 `permission_mode: plan` 与 `exit_plan_mode` 工具（vendor
+   * bundle 刻意不改）。旧会话归档、外部 `~/.iflow/settings.json` 的
+   * `approvalMode: "plan"`、或 CLI 自身的启动默认都可能让
+   * `_iflow/plan/exit` 再次到达宿主。**不能挂死**：这里不弹卡、不入待办、不写
+   * specs，记一条警告后直接放行（wire 契约仍是 `{approved, reason?}`），让
+   * agent 继续跑，而不是阻塞到 5 分钟审批超时。
    */
-  private requestPlanExitFromUser(req: ExitPlanModeRequest): Promise<ExitPlanModeResponse> {
-    const id = `plan-${++this.planExitSeq}`;
-    const now = Date.now();
-    const pending: PendingPlanExitUi = {
-      id,
-      plan: req.plan ?? "",
-      deadline: now + APPROVAL_TIMEOUT_MS,
-      timeoutMs: APPROVAL_TIMEOUT_MS,
-    };
-    return new Promise<ExitPlanModeResponse>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingPlanExits.delete(id);
-        // Resolve FIRST — see the approval-timeout comment above.
-        resolve({ approved: false, reason: vscode.l10n.t("超时未确认，已拒绝") });
-        this.store.clearPlanExit(id);
-        this.store.resolveExitPlanModeBlock(false);
-        this.store.planExitResolutionNote(vscode.l10n.t("计划审批超时，已自动拒绝"));
-        this.armPostRejectionWatchdog();
-      }, APPROVAL_TIMEOUT_MS);
-      this.pendingPlanExits.set(id, { resolve, timer, plan: pending.plan });
-      this.store.showPlanExit(pending);
-      // M1 P0-5 + policy 2026-10-16: Plan approval is the user's fourth OS
-      // trigger (card displayed) — same slot-mirror re-check as approvals so a
-      // replaced card never announces itself.
-      this.toastWhileDisplayed(
-        () => this.pendingPlanExits.has(id) &&
-          this.store.getState().pendingPlanExit?.id === pending.id,
-        "plan",
-        () => vscode.l10n.t("iFlow 等待计划审批（{0} 秒后自动拒绝）", Math.round(APPROVAL_TIMEOUT_MS / 1000)),
-      );
-    });
-  }
-
-  /** Resolve a pending Plan-mode exit from the webview's answer. */
-  private async handlePlanExitResponse(
-    id: string,
-    approved: boolean,
-    reason?: string,
-    replan = false,
-  ): Promise<void> {
-    const pending = this.pendingPlanExits.get(id);
-    if (!pending) return;
-    this.pendingPlanExits.delete(id);
-    clearTimeout(pending.timer);
-    this.store.clearPlanExit(id);
-    // The CLI never sends a terminal update for the exit_plan_mode call itself
-    // (bundle: handleExitPlanMode returns a functionResponse only) — settle it
-    // here so the card doesn't linger at 等待执行 until the turn-end sweep
-    // mislabels an approved plan's call as failed. Replan answered
-    // success:false too, so it settles as failed like a rejection.
-    this.store.resolveExitPlanModeBlock(approved);
-    // The agent is blocked on this response: compute it first and resolve in
-    // `finally`, so a note/mode/write failure can never leave the CLI waiting
-    // for the 5-minute timeout.
-    const response: ExitPlanModeResponse = {
-      approved,
-      reason: approved ? undefined : reason ?? vscode.l10n.t("用户拒绝了该计划"),
-    };
-    try {
-      // Replan with edited plan text: the reason IS the revised plan the user
-      // wrote in the card's edit mode — surface a truncated excerpt in the
-      // resolution note so the transcript records what changed (the full text
-      // goes to the agent via the resolve below; the note is display-only).
-      let note: string;
-      if (replan) {
-        note = reason
-          ? vscode.l10n.t("重新规划：{0}", reason.length > 80 ? `${reason.slice(0, 80)}…` : reason)
-          : vscode.l10n.t("重新规划");
-      } else if (approved) {
-        // Approved plans are project artifacts: `.iflow/specs/<timestamp>-<slug>.md`.
-        // The write must not block approval — a failure is logged and the note
-        // simply omits the path.
-        let savedPath: string | null = null;
-        try {
-          savedPath = await this.persistPlanSpec(pending.plan);
-        } catch (error) {
-          this.log.warn(`failed to persist plan spec: ${errorMessage(error)}`);
-        }
-        note = savedPath
-          ? vscode.l10n.t("已批准计划，已保存到 {0}", savedPath)
-          : vscode.l10n.t("已批准计划");
-        // 3.5 ①: give the approved round a task-level progress view from the
-        // start — the TaskList otherwise only appears once the agent itself
-        // calls the todo tool. Parser returns null for plans without a
-        // usable item list (a one-item card is noise); a later todo_write
-        // still replaces the seeded items (the agent's bookkeeping wins).
-        const checklist = planChecklistEntries(pending.plan);
-        if (checklist) this.store.seedPlanChecklist(checklist);
-      } else {
-        note = reason ?? vscode.l10n.t("已拒绝计划");
-      }
-      this.store.planExitResolutionNote(note);
-      // Wire behavior (verified 2026-09): the CLI does not leave plan mode on
-      // its own after `_iflow/plan/exit` resolves — switch back explicitly on
-      // BOTH approval and rejection (rejection must not strand the session in
-      // plan mode either; the agent continues in the returned mode). Replan is
-      // the exception: it rejects the plan but keeps the session in plan mode
-      // so the agent can revise it.
-      if (!replan) {
-        const modes = this.store.getState().modes;
-        const fallback = modes?.availableModes.find((m) => m.kind != null && m.kind !== "plan")?.id;
-        const target = this.planReturnModeId ?? fallback ?? "smart";
-        this.planReturnModeId = null;
-        void this.setMode(target).catch(() => undefined);
-      }
-    } catch (error) {
-      this.log.warn(`failed to finish plan exit: ${errorMessage(error)}`);
-    } finally {
-      pending.resolve(response);
-    }
-  }
-
-  /**
-   * Persist an approved plan under the active workspace's `.iflow/specs/`.
-   * Returns the workspace-relative display path, or null when there is no
-   * workspace folder / the write fails (approval still proceeds).
-   */
-  private async persistPlanSpec(plan: string): Promise<string | null> {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    if (folders.length === 0) return null;
-    const folder = folders.find((candidate) => candidate.uri.fsPath === this.sessionCwd) ?? folders[0]!;
-    const createdAt = new Date();
-    const dir = vscode.Uri.joinPath(folder.uri, ".iflow", "specs");
-    try {
-      const fileName = planSpecFileName(plan, createdAt);
-      await vscode.workspace.fs.createDirectory(dir);
-      let target = vscode.Uri.joinPath(dir, fileName);
-      // Timestamps are second-granular; keep two approvals in the same second
-      // from clobbering each other.
-      for (let n = 2; ; n += 1) {
-        try {
-          await vscode.workspace.fs.stat(target);
-        } catch {
-          break;
-        }
-        target = vscode.Uri.joinPath(dir, fileName.replace(/\.md$/, `-${n}.md`));
-      }
-      await vscode.workspace.fs.writeFile(
-        target,
-        Buffer.from(
-          planSpecContent(plan, { sessionId: this.store.getState().sessionId, createdAt }),
-          "utf8",
-        ),
-      );
-      return path.posix.join(".iflow", "specs", path.basename(target.fsPath));
-    } catch (error) {
-      this.log.warn(`failed to persist plan spec: ${errorMessage(error)}`);
-      return null;
-    }
-  }
-
-  /** Cancel every pending Plan exit (client died / replaced) without hanging the agent. */
-  private cancelAllPlanExits(reason: string): number {
-    const cancelled = this.pendingPlanExits.size;
-    for (const [id, pending] of this.pendingPlanExits) {
-      clearTimeout(pending.timer);
-      this.store.clearPlanExit(id);
-      this.store.resolveExitPlanModeBlock(false);
-      this.store.planExitResolutionNote(reason);
-      pending.resolve({ approved: false, reason });
-    }
-    this.pendingPlanExits.clear();
-    return cancelled;
+  private handleRemovedPlanExit(req: ExitPlanModeRequest): ExitPlanModeResponse {
+    const planChars = (req.plan ?? "").length;
+    this.log.warn(`plan mode removed: auto-approving stale _iflow/plan/exit (${planChars} chars of plan text)`);
+    return { approved: true, reason: vscode.l10n.t("计划模式已移除，自动继续") };
   }
 
   // --- User questions flow (_iflow/user/questions, ask_user_question tool) ----
@@ -4518,11 +4710,16 @@ export class ChatPanel implements vscode.Disposable {
   private userQuestionsFromAgent(req: UserQuestionsRequest): Promise<UserQuestionsResponse> {
     const id = `q-${++this.approvalSeq}`;
     const now = Date.now();
+    // QQ 主渠道注入回合里 agent 的提问：本地卡照常显示，但额外转发给发起者。
+    // 捕获快照而非实时读 qqInjectedTaskId —— 回合结束后它会清空，回灌必须按
+    // 提问诞生时所属的那一个任务寻址。
+    const qqMainTaskId = this.qqInjectedTaskId;
 
     return new Promise<UserQuestionsResponse>((resolve) => {
       const timer = setTimeout(() => {
         // Safety: an unanswered card must not block the agent forever.
         this.pendingQuestions.delete(id);
+        this.qqMainQuestionIds.delete(id);
         // Resolve FIRST — see the approval-timeout comment above.
         resolve({ answers: {} });
         this.store.clearQuestions(id);
@@ -4531,6 +4728,7 @@ export class ChatPanel implements vscode.Disposable {
       }, APPROVAL_TIMEOUT_MS);
 
       this.pendingQuestions.set(id, { resolve, timer });
+      if (qqMainTaskId) this.qqMainQuestionIds.set(id, qqMainTaskId);
       this.store.showQuestions({
         id,
         questions: req.questions,
@@ -4545,6 +4743,8 @@ export class ChatPanel implements vscode.Disposable {
         "question",
         () => vscode.l10n.t("iFlow 有问题需要你回答（{0} 秒后自动继续）", Math.round(APPROVAL_TIMEOUT_MS / 1000)),
       );
+      // 转发是异步的，不阻塞提问挂起；接线异常只记日志，本地卡始终可用。
+      if (qqMainTaskId) this.forwardQqMainTaskQuestion(qqMainTaskId, req.questions);
     });
   }
 
@@ -4552,9 +4752,21 @@ export class ChatPanel implements vscode.Disposable {
   private handleQuestionAnswers(id: string, answers: Record<string, string | string[]>): void {
     const pending = this.pendingQuestions.get(id);
     if (!pending) return;
+    // 用卡片诞生时记录的 taskId，不读实时 qqInjectedTaskId —— 后者在回合收尾
+    // 后会清空，本机作答若发生在那时候就撤不掉 QQ 侧的等待槽位。
+    const wasQqTaskId = this.qqMainQuestionIds.get(id);
+    this.qqMainQuestionIds.delete(id);
     this.pendingQuestions.delete(id);
     clearTimeout(pending.timer);
     this.store.clearQuestions(id);
+    // 本机先作答 → 撤销 QQ 侧那条等待槽位，避免 `/qq answer` 二次回灌同一个问题。
+    if (wasQqTaskId) {
+      try {
+        this.qq?.service.clearQuestionWait(wasQqTaskId);
+      } catch (error) {
+        this.log.warn(`QQ 提问等待槽位清理失败：${errorMessage(error)}`);
+      }
+    }
     const answered = Object.keys(answers).length;
     this.store.appendNotice(
       answered > 0
@@ -4572,6 +4784,157 @@ export class ChatPanel implements vscode.Disposable {
       pending.resolve({ answers: {} });
     }
     this.pendingQuestions.clear();
+    this.qqMainQuestionIds.clear();
+  }
+
+  /**
+   * 远程派发的子会话提问 → 转发给 QQ 发起者。
+   *
+   * 服务侧会按 `QqTask.correlation.superSessionId` 判定任务是否真的来自 QQ，
+   * 本地子会话在这里就会被忽略，因此无需重复判断任务来源。转发是异步的，
+   * 不阻塞子会话的提问挂起；接线层异常只记日志，不打断看板作答通道。
+   */
+  private forwardQqTaskQuestion(superSessionId: string, questions: readonly UserQuestion[]): void {
+    const service = this.qq?.service;
+    if (!service) return;
+    try {
+      void service
+        .forwardTaskQuestion({
+          superSessionId,
+          questions: questions.map((question) => ({
+            header: question.header,
+            question: question.question,
+            ...(question.options
+              ? {
+                  options: question.options.map((option) => ({
+                    label: option.label,
+                    description: option.description,
+                  })),
+                }
+              : {}),
+            multiSelect: question.multiSelect === true,
+          })),
+        })
+        .catch((error: unknown) => {
+          this.log.warn(`QQ 提问提醒转发失败：${errorMessage(error)}`);
+        });
+    } catch (error) {
+      this.log.warn(`QQ 提问提醒转发失败：${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * QQ 主渠道注入回合里 agent 的提问 → 转发给发起者。
+   *
+   * 与 child 渠道复用服务的 `waiting_answer` / `pendingAnswers` / `/qq answer`
+   * 状态机，只按 taskId 定位（main 任务没有子会话 id）。服务找不到对应 main
+   * 任务（本地回合被误标）时会安静忽略，不会给无关的 QQ 用户发消息。
+   */
+  private forwardQqMainTaskQuestion(taskId: string, questions: readonly UserQuestion[]): void {
+    const service = this.qq?.service;
+    if (!service) return;
+    try {
+      void service
+        .forwardMainTaskQuestion({
+          taskId,
+          questions: questions.map((question) => ({
+            header: question.header,
+            question: question.question,
+            ...(question.options
+              ? {
+                  options: question.options.map((option) => ({
+                    label: option.label,
+                    description: option.description,
+                  })),
+                }
+              : {}),
+            multiSelect: question.multiSelect === true,
+          })),
+        })
+        .catch((error: unknown) => {
+          this.log.warn(`QQ 主会话提问提醒转发失败：${errorMessage(error)}`);
+        });
+    } catch (error) {
+      this.log.warn(`QQ 主会话提问提醒转发失败：${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * QQ 主渠道任务派生的子会话提问 → 转发给发起者，答案回灌到该子会话。
+   *
+   * 主会话是纯委派者，真正干活的提问多来自子会话。旧路径 `forwardTaskQuestion`
+   * 只认 `correlation.superSessionId && channel !== "main"` 的任务，而 main 渠道
+   * QQ 任务两者都没有 —— 提问卡因此只在看板显示、QQ 永远收不到。这里按派生时
+   * 记录的 QQ 主任务 id 定位任务（与 forwardMainTaskQuestion 同口径），但把应答
+   * 端口指向 child：答案经 `answerRemoteQuestion(superSessionId)` 回到真正提问的
+   * 子会话（`SuperAgentManager.respond`），不是主会话那张不存在的卡。
+   */
+  private forwardQqMainTaskChildQuestion(
+    taskId: string,
+    superSessionId: string,
+    questions: readonly UserQuestion[],
+  ): void {
+    const service = this.qq?.service;
+    if (!service) return;
+    try {
+      void service
+        .forwardMainTaskChildQuestion({
+          taskId,
+          superSessionId,
+          questions: questions.map((question) => ({
+            header: question.header,
+            question: question.question,
+            ...(question.options
+              ? {
+                  options: question.options.map((option) => ({
+                    label: option.label,
+                    description: option.description,
+                  })),
+                }
+              : {}),
+            multiSelect: question.multiSelect === true,
+          })),
+        })
+        .catch((error: unknown) => {
+          this.log.warn(`QQ 子会话提问提醒转发失败：${errorMessage(error)}`);
+        });
+    } catch (error) {
+      this.log.warn(`QQ 子会话提问提醒转发失败：${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * QQ 用户的 `/qq answer` 回灌：命中本回合的提问卡并 resolve，agent 继续。
+   * 只认 `qqMainQuestionIds` 里的卡 —— 本地回合的提问绝不会被 QQ 回答误答。
+   * 端口被服务超时 / 停止调用时 answers 是 `{}`（按未回答继续），语义一致。
+   * 返回是否真的命中，供服务如实回执（绝不假装提交成功）。
+   */
+  private answerQqMainQuestion(taskId: string, answers: Record<string, string | string[]>): boolean {
+    // 只认「诞生时归属这个任务」的卡 —— 本地回合的提问绝不会被 QQ 回答误答。
+    // 不读实时 qqInjectedTaskId：回合收尾后它会清空，迟到的合法回答应仍可命中。
+    let answered = false;
+    for (const [id, ownerTaskId] of [...this.qqMainQuestionIds]) {
+      if (ownerTaskId !== taskId) continue;
+      const pending = this.pendingQuestions.get(id);
+      if (!pending) {
+        this.qqMainQuestionIds.delete(id);
+        continue;
+      }
+      this.pendingQuestions.delete(id);
+      this.qqMainQuestionIds.delete(id);
+      clearTimeout(pending.timer);
+      this.store.clearQuestions(id);
+      pending.resolve({ answers });
+      answered = true;
+    }
+    if (answered) {
+      this.store.appendNotice(
+        Object.keys(answers).length > 0
+          ? vscode.l10n.t("已通过 QQ 回答 {0} 个问题", Object.keys(answers).length)
+          : vscode.l10n.t("QQ 提问已按未回答继续"),
+      );
+    }
+    return answered;
   }
 
   // --- Profile-switch choice dialog (extension-side, custom webview modal) ----
@@ -4620,6 +4983,98 @@ export class ChatPanel implements vscode.Disposable {
       pending.resolve(null);
     }
     this.pendingProfileSwitches.clear();
+  }
+
+  /**
+   * 请求 webview 弹出「清空并新建」二次确认框。
+   *
+   * 警示文案在宿主侧组装（含明确写出「未合并 worktree 的未提交/未合并工作
+   * 永久丢失且不可恢复」），webview 只渲染、不改写。所有 teardown 路径都要
+   * 收口未答的 promise：无 webview 应答时 60s 超时按「取消」处理，绝不擅自
+   * 清空用户磁盘。
+   */
+  private requestSuperResidueConfirm(count: SuperResidueCount): Promise<boolean> {
+    this.cancelAllSuperResidueConfirms();
+    const requestId = `super-residue-${++this.superResidueConfirmSeq}`;
+    const title = vscode.l10n.t("清空并新建会话？");
+    const message = vscode.l10n.t(
+      "检测到 {0} 个历史子会话残留目录（worktree {1} 个 / 降级目录 {2} 个 / 附件 {3} 个）。继续将清空全部残留，包括未合并的 worktree——其中未提交/未合并的代码改动将永久丢失且不可恢复。请确认这些工作不再需要。",
+      count.total,
+      count.worktrees,
+      count.dirs,
+      count.attachments,
+    );
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        // 超时 = 用户没答：按取消处理，只新建不清空。
+        this.pendingSuperResidueConfirms.delete(requestId);
+        resolve(false);
+      }, 60_000);
+      this.pendingSuperResidueConfirms.set(requestId, { resolve, timer });
+      this.postToWebview({
+        type: "superResidueConfirm",
+        requestId,
+        title,
+        message,
+        confirmLabel: vscode.l10n.t("清空并新建"),
+        cancelLabel: vscode.l10n.t("取消"),
+      });
+    });
+  }
+
+  private handleSuperResidueConfirmResponse(requestId: string, confirmed: boolean): void {
+    const pending = this.pendingSuperResidueConfirms.get(requestId);
+    if (!pending) return;
+    this.pendingSuperResidueConfirms.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(confirmed);
+  }
+
+  private cancelAllSuperResidueConfirms(): void {
+    for (const pending of this.pendingSuperResidueConfirms.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve(false);
+    }
+    this.pendingSuperResidueConfirms.clear();
+  }
+
+  /**
+   * 新建会话前的残留检测 + 用户授权下的全量清空（跨全部历史会话）。
+   *
+   * 检测只读目录计数，不跑 git 探测；没有 webview（命令面板入口）时跳过 ——
+   * 没有弹框就无从确认，不能拿一个永远没人答的 promise 挡住新建会话。
+   * 用户取消 / 检测失败 / 清空失败都只记日志，继续正常新建会话。
+   */
+  private async confirmAndPurgeSuperResidue(): Promise<void> {
+    if (this.disposed || !this.editorPanel) return;
+    const manager = this.getSuperAgent();
+    if (!manager) return;
+    const count = await manager.countResidue().catch((error: unknown) => {
+      this.log.warn(`super agent: 残留检测失败（不影响新建会话）：${errorMessage(error)}`);
+      return null;
+    });
+    if (!count || count.total === 0) return;
+    const confirmed = await this.requestSuperResidueConfirm(count);
+    if (this.disposed) return;
+    if (!confirmed) {
+      this.log.info(`super agent: 用户取消清空（残留 ${count.total} 个），只新建会话`);
+      return;
+    }
+    const purged = await manager.purgeAllResidue().catch((error: unknown) => {
+      this.log.warn(`super agent: 全量清空失败（继续新建会话）：${errorMessage(error)}`);
+      return null;
+    });
+    if (purged) {
+      this.log.info(
+        `super agent: 已清空残留（worktree ${purged.worktrees} / 目录 ${purged.dirs} / 附件 ${purged.attachments}，失败 ${purged.failed}）`,
+      );
+      if (purged.failed > 0) {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("已清空历史子会话残留，但有 {0} 个目录未能删除（请手动检查）", purged.failed),
+        );
+      }
+    }
   }
 
   // --- Diff revert ----------------------------------------------------------------
@@ -5339,8 +5794,8 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Mirror the CLI-bound extension settings (language / approvalMode) into
-   * `~/.iflow/settings.json`. The CLI reads both only at startup (probed,
+   * Mirror the CLI-bound extension setting (language) into
+   * `~/.iflow/settings.json`. The CLI reads it only at startup (probed,
    * CLI 0.5.19 bundle: Config loads settings once, the `/language` command
    * itself prints "restartRequired"), so an empty value means "don't touch
    * the CLI's own entry" and a successful write offers an immediate hot
@@ -5365,8 +5820,6 @@ export class ChatPanel implements vscode.Disposable {
     const patch: Partial<CliSettingsShape> = {};
     const language = cfg.get<string>("language", "");
     if (language) patch.language = language;
-    const approvalMode = cfg.get<string>("approvalMode", "");
-    if (approvalMode) patch.approvalMode = approvalMode;
     if (Object.keys(patch).length === 0) return;
     if (!updateCliSettings(patch)) {
       void vscode.window.showWarningMessage(
@@ -5420,7 +5873,6 @@ export class ChatPanel implements vscode.Disposable {
       this.restartRestoreId = outgoingId;
     }
     this.cancelAllApprovals(vscode.l10n.t("内核已重启"));
-    this.cancelAllPlanExits(vscode.l10n.t("内核已重启，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
     // Tail rescue BEFORE the state swap (same rationale as the profile
     // switch): the in-memory blocks are discarded by replaceState below.
@@ -5499,7 +5951,7 @@ export class ChatPanel implements vscode.Disposable {
   /** MCP card saved: replace the whole dict of ONE scope in that scope's
    * settings.json (see the replace-semantics note on the WebviewToHost
    * message), then offer the same hot-restart affordance as the
-   * language/approvalMode sync path — the CLI only reads mcpServers at
+   * language sync path — the CLI only reads mcpServers at
    * startup. The project file is created when absent (the CLI's own
    * `mcp add --scope project` does the same); the global file is not, so a
    * broken global config surfaces instead of being silently rebuilt. */
@@ -5535,45 +5987,95 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * MCP card asked for live connection state: query the CLI's `_iflow/mcp/status`
-   * (mcp-status-refactor Mod) and append the host-computed `contextTokens` per
-   * server — the BPE of the tool declarations the CLI injects into every request
-   * (the CLI itself has no such estimate, and re-tokenizing on the webview per
-   * render would be wasteful). Every failure mode degrades to `status: null`
-   * (CLI not running, Mod missing → methodNotFound, Mod disabled → available:false,
-   * session not started yet): the card shows NO indicator rather than a wrong one.
+   * MCP card asked for live connection state. Super Agent changes the meaning
+   * of the CLI's `_iflow/mcp/status` on the MAIN session: because it starts
+   * with `disableMcpServers`, every configured server is reported as
+   * `{status:"disconnected", blocked:true}` — that is a deliberate design,
+   * NOT a broken server. The servers are actually connected and used by the
+   * child sessions through the host's shared MCP broker (`this.mcpBroker`).
+   *
+   * So the broker is the authority for the live connection state. We still
+   * query the CLI report because it is the only source of the tools/prompts
+   * declarations shown in the detail sub-page; its status/error are then
+   * overridden per server from `mcpBroker.statuses()`:
+   *   - broker connected    → status "connected", childConnected true, no error
+   *   - broker disconnected → status "disconnected", childConnected false, error
+   *   - broker not ready    → childConnected undefined; a CLI-blocked server
+   *     falls back to a NEUTRAL "main session does not load MCP" (no red dot),
+   *     never "server is broken".
+   *
+   * `contextTokens` is the host-computed BPE of the tool declarations (the
+   * CLI itself has no such estimate, and re-tokenizing per render in the
+   * webview would be wasteful). Any total failure (no CLI report AND no
+   * broker) degrades to `status: null` — the card shows NO indicator rather
+   * than a guessed one.
    */
   private async sendMcpStatus(): Promise<void> {
     const client = this.client;
     const sessionId = this.store.getState().sessionId;
-    if (!client || !sessionId) {
-      this.postToWebview({ type: "mcpStatus", status: null });
-      return;
-    }
     let report: McpStatusReport | null = null;
-    try {
-      report = await client.mcpStatus(sessionId);
-    } catch (error) {
-      this.log.warn(`mcpStatus unavailable: ${errorMessage(error)}`);
+    if (client && sessionId) {
+      try {
+        report = await client.mcpStatus(sessionId);
+      } catch (error) {
+        this.log.warn(`mcpStatus unavailable: ${errorMessage(error)}`);
+      }
     }
-    if (!report || !report.available) {
+
+    // Child-session view: the shared broker owns the real connections.
+    const brokerBy = new Map<string, McpBrokerStatus>();
+    for (const entry of this.mcpBroker?.statuses() ?? []) brokerBy.set(entry.name, entry);
+    if ((!report || !report.available) && brokerBy.size === 0) {
       this.postToWebview({ type: "mcpStatus", status: null });
       return;
     }
+
     const scopes = this.readMcpScopes();
     const servers: Record<
       string,
-      McpServerStatusView & { contextTokens?: number; scope?: McpScope | "both" }
+      McpServerStatusView & { contextTokens?: number; scope?: McpScope | "both"; childConnected?: boolean }
     > = {};
-    for (const [name, view] of Object.entries(report.servers ?? {})) {
-      servers[name] = {
-        ...view,
-        contextTokens: estimateMcpContextTokens(view.tools ?? []),
-        scope: mcpScopeOf(name, scopes.global, scopes.project),
+    const names = new Set<string>([...Object.keys(report?.servers ?? {}), ...brokerBy.keys()]);
+    for (const name of names) {
+      const cliView = report?.servers?.[name];
+      const broker = brokerBy.get(name);
+      // Start from the CLI view to keep tools/schema/prompts for the detail
+      // sub-page; synthesize a minimal view when only the broker knows it.
+      const view: McpServerStatusView & {
+        contextTokens?: number;
+        scope?: McpScope | "both";
+        childConnected?: boolean;
+      } = {
+        status: "disconnected",
+        toolCount: 0,
+        promptCount: 0,
+        tools: [],
+        prompts: [],
+        ...cliView,
       };
+      if (broker) {
+        view.status = broker.connected ? "connected" : "disconnected";
+        view.childConnected = broker.connected;
+        if (broker.connected) {
+          delete view.error;
+          delete view.errorKind;
+        } else if (broker.error) {
+          view.error = broker.error;
+          view.errorKind = "unknown";
+        }
+      } else if (cliView?.blocked) {
+        // Broker not ready: `blocked` only means the main session never loads
+        // MCP by design. Drop any CLI "spawn failed" noise so the card renders
+        // a neutral dot instead of a false red one.
+        delete view.error;
+        delete view.errorKind;
+      }
+      view.contextTokens = estimateMcpContextTokens(view.tools ?? []);
+      view.scope = mcpScopeOf(name, scopes.global, scopes.project);
+      servers[name] = view;
     }
     const status: McpStatusUi = {
-      discoveryState: report.discoveryState,
+      discoveryState: report?.discoveryState,
       servers,
     };
     this.postToWebview({ type: "mcpStatus", status });
@@ -5950,7 +6452,6 @@ export class ChatPanel implements vscode.Disposable {
     // hot re-auth / restart path against a destroyed store.
     if (this.disposed) return;
     this.cancelAllApprovals(vscode.l10n.t("重新认证"));
-    this.cancelAllPlanExits(vscode.l10n.t("重新认证，计划审批已跳过"));
     this.cancelAllPendingQuestions(vscode.l10n.t("重新认证，提问已跳过"));
     // 热重认证的 keepSession 路径原地重载同一个会话（不经过新会话 / 恢复），
     // 扫描缓冲与去重账本属于旧凭据下的那段对话，这里显式清空。
@@ -6366,13 +6867,17 @@ export class ChatPanel implements vscode.Disposable {
     // `super-agent-actions` 工具调用（内核 registry 里没有这两个工具），
     // 旧实现既不执行也不提示，用户以为已经派了。这里从 args 取载荷，按
     // 同一套协议执行。只认主会话自己的工具帧（带 agentId 的 SubAgent 事件
-    // 跳过），且只看「即将执行」的两帧 —— completed / failed 帧重放同一份
-    // 载荷没有意义。
+    // 跳过）。**completed 帧也要过一遍**：工具层对合法参数一律回 ack，
+    // 若载荷整轮都没到达（pending 帧无 args、in_progress 帧缺失），
+    // completed 是最后一次核对「到底派没派」的机会（见 handleSuperToolCall）。
     if (
       !this.restoring &&
       (n.update.sessionUpdate === "tool_call" || n.update.sessionUpdate === "tool_call_update") &&
       !(n.update as { agentId?: string }).agentId &&
-      (n.update.status === "pending" || n.update.status === "in_progress")
+      (n.update.status === "pending" ||
+        n.update.status === "in_progress" ||
+        n.update.status === "completed" ||
+        n.update.status === "failed")
     ) {
       this.handleSuperToolCall(n.update);
     }
@@ -6641,15 +7146,54 @@ export class ChatPanel implements vscode.Disposable {
     const activeId = lockState.activeSessionId ?? lockState.sessionId;
     if (sessionId === activeId) {
       this.cancelAllApprovals(vscode.l10n.t("会话已删除"));
-      this.cancelAllPlanExits(vscode.l10n.t("会话已删除，计划审批已跳过"));
       this.cancelAllPendingQuestions(vscode.l10n.t("会话已删除，提问已跳过"));
     }
     try {
       await this.forgetSession(sessionId);
       await this.clearTranscript(sessionId);
+      // 子会话属于这段对话：删除会话等于这段对话不存在 —— 它派发的子会话
+      // 进程不能继续跑（跑完也没人接汇报），看板记录与归档归属必须一起消失。
+      // 旧实现只删归档文件、不管活着的子会话：进程继续跑、心跳常驻，而且
+      // 下一次落盘会把这个会话的归档重新写回磁盘。
+      const forgotten = await this.superAgent?.forgetMainSession(sessionId);
+      for (const entry of forgotten?.worktrees ?? []) {
+        this.log.info(
+          `super agent: session ${sessionId} deleted; child ${entry.id} stopped, worktree kept at ${entry.path}${
+            entry.branch ? ` (branch ${entry.branch})` : ""
+          }`,
+        );
+      }
+      // 属于这个会话的待投递内容（汇报 / 动作回执 / 被改道消息 / 参数纠错 /
+      // 排队的合并请求）都是「欠一段已不存在会话的回合」：留着既投不出去，
+      // 又会让 hasSuperWork() 永远为真（心跳停不下来）。
+      const goneIds = new Set(forgotten?.ids ?? []);
+      this.pendingSuperReports.delete(sessionId);
+      this.pendingSuperReportPrompts = this.pendingSuperReportPrompts.filter(
+        (item) => item.mainSessionId !== sessionId,
+      );
+      this.pendingSuperActionReceipts = this.pendingSuperActionReceipts.filter(
+        (item) => item.mainSessionId !== sessionId,
+      );
+      this.pendingDelegatedUserTurns = this.pendingDelegatedUserTurns.filter(
+        (item) => item.mainSessionId !== sessionId,
+      );
+      this.pendingSuperToolCallCorrections = this.pendingSuperToolCallCorrections.filter(
+        (item) => item.mainSessionId !== sessionId,
+      );
+      this.pendingSuperMerges = this.pendingSuperMerges.filter((item) => !goneIds.has(item.id));
+      for (const id of goneIds) {
+        this.superReportedChildIds.delete(id);
+        this.superLastStatus.delete(id);
+      }
       // The child-session archive is this session's too: keeping it would
       // resurrect the deleted session's children (and their branches) the
       // next time anyone restores anything.
+      //
+      // 顺序有讲究：先 force 落盘（清掉节流定时器，并且不再包含这个归属），
+      // 再等在飞的写落定，最后才 rm —— 否则一个排队的写会在 rm 之后 rename，
+      // 把刚删掉的归档复活。
+      await this.persistSuperSessions({ force: true });
+      await awaitSuperSessionArchiveWrite(this.superStoreDir(), sessionId);
       await deleteSuperSessionArchive(this.superStoreDir(), sessionId);
       // M3 P0-1: drop the session's shadow repo + checkpoint index too.
       await this.removeCheckpointsForSession(sessionId);
@@ -6658,6 +7202,11 @@ export class ChatPanel implements vscode.Disposable {
       await rm(attachmentSessionDir(sessionId), { recursive: true, force: true }).catch((error) => {
         this.log.warn(`removing attachment dir failed: ${errorMessage(error)}`);
       });
+      // 看板与忙碌态跟着删除后的现状重算：子会话全没了就不该再显示「等待
+      // 汇报」，没有待办时心跳必须停表（旧实现让它常驻）。
+      this.publishSuperSessions();
+      this.syncSuperWaitingState();
+      if (!this.hasSuperWork()) this.stopSuperHeartbeat();
     } finally {
       this.historySyncBusy = false;
       if (!this.disposed && this.store.getState() === lockState && this.client === lockClient) {
@@ -6908,7 +7457,17 @@ export class ChatPanel implements vscode.Disposable {
       void this.persistActiveTranscript(true); // seed the extension-owned copy
       // 该主会话当年派发的子会话（重启后进程已亡，但分支与工作目录还在）：
       // 把它们取回看板，用户才知道有哪些分支等着合并或清理。
-      await this.restoreSuperSessions(loadedId);
+      //
+      // 单独兜错：看板是**附加信息**，它坏了不能把「会话已恢复」判成失败 ——
+      // 那会连带丢掉刚重建好的转录并让用户以为恢复失败。失败可见（toast +
+      // 日志）但不阻断（新建会话、继续对话都照常）。
+      await this.restoreSuperSessions(loadedId).catch((error: unknown) => {
+        this.log.warn(`super agent: 恢复子会话记录失败（不影响会话恢复）：${errorMessage(error)}`);
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("子会话记录恢复失败（不影响会话）：{0}", errorMessage(error)),
+        );
+      });
       void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
       return true;
     } catch (error) {
@@ -7139,7 +7698,7 @@ export class ChatPanel implements vscode.Disposable {
     const archive = await readSuperSessionArchive(this.superStoreDir(), mainSessionId);
     // 归档**读不出来**是故障，不是「这个会话没有子会话」。必须如实告诉用户
     // —— 旧实现把两者都当成空数组，用户重启后只看到空板子，完全看不出发生过
-    // 什么。损坏的原件已由读侧留底（.corrupt-<时间戳>），路径一并报出。
+    // 什么。损坏的原件已由读侧留底（归档名.corrupt），路径一并报出。
     if (archive.damaged) {
       this.log.warn(
         `super agent: 子会话归档读不出来（${archive.damage ?? "unknown"}），备份：${archive.backupPath ?? "-"}`,
@@ -7154,7 +7713,27 @@ export class ChatPanel implements vscode.Disposable {
     }
     const records = archive.sessions;
     if (records.length > 0) {
-      const restored = records.map((record) => fromPersistedSuperSession(record));
+      // 归档里的隔离目录可能已被外部手工删除，或上次失败的清理留下半删残迹。
+      // 恢复前核对磁盘事实，让 fromPersistedSuperSession 如实校正 released /
+      // recycled —— 否则看板会对一个早就不存在的目录显示「待清理」。
+      // **必须用原始 isolation.path 判存在性**：comparisonPathKey 为路径比较做了
+      // toLowerCase，Linux 大小写敏感，用它 existsSync 会把 mkdtemp 随机后缀含大写
+      // 字母的现存目录误判为不存在（ubuntu CI 实测），进而错误保留 released:true。
+      // 核对失败时不猜（留 undefined = 保留归档原样）；这里只读盘，**绝不自动删**
+      // 任何孤儿目录或分支。
+      const restored = await Promise.all(
+        records.map(async (record) => {
+          const kind = record.isolation.kind;
+          if (kind === "repo") return fromPersistedSuperSession(record);
+          try {
+            return fromPersistedSuperSession(record, {
+              worktreePresent: existsSync(record.isolation.path),
+            });
+          } catch {
+            return fromPersistedSuperSession(record);
+          }
+        }),
+      );
       this.log.info(`super agent: restored ${restored.length} historical child session(s) for ${mainSessionId}`);
       this.getSuperAgent()?.restoreSessions(mainSessionId, restored);
     }
@@ -7163,17 +7742,78 @@ export class ChatPanel implements vscode.Disposable {
     // 在这里被收掉 —— 否则它们会一直堆在 `.iflow/super/worktrees/` 下。
     // 超过 `iflow.superAgent.maxWorktrees` 的干净残留（含未合并的）按目录
     // mtime 从旧到新回收目录、保留分支。
+    //
+    // **绝不 await**：这一步要逐个残留目录跑 `git status` + merge-base 探测，
+    // 而本方法处于 connect() 的启动序列里（restoreSession 被 await），新建
+    // 会话又要先等在飞的恢复 settle —— 串起来就是用户实测的「点新建会话
+    // 毫无反应，只在控制台反复打 new session: joining the in-flight run」。
+    this.sweepStaleWorktreesInBackground();
+  }
+
+  /**
+   * 后台清扫磁盘上的残留 worktree（**绝不阻塞会话恢复 / 新建会话**）。
+   *
+   * 因果链（2026-11-18 用户实测）：`connect()` → `restoreSession()` →
+   * `restoreSuperSessions()` → `await sweepStaleWorktrees()`。每个残留目录都要
+   * 跑 `git status --porcelain` 与 `merge-base --is-ancestor`，工程一大（或磁盘
+   * 被索引器/杀软占着）就是几十秒；期间用户点「新建会话」→ `startNewSession`
+   * 发现恢复在飞 → 停在恢复的 settle 上 → 后续点击全部 join 同一次 run。
+   *
+   * 纪律：
+   *  - fire-and-forget，但**必须有 catch**：清扫失败只记警告 + 一条提示，
+   *    绝不变 unhandled rejection，也绝不影响新建会话；
+   *  - 同一时刻只跑一次（`sweepInFlight`）：恢复被反复触发时不叠多份 git 子进程；
+   *  - 清扫本身幂等（见 `SuperAgentManager.sweepStaleWorktrees`），晚一点跑与
+   *    早一点跑结果相同，代价只是磁盘残留多留一会儿。
+   */
+  private sweepStaleWorktreesInBackground(): void {
+    if (this.disposed || this.sweepInFlight) return;
+    const manager = this.getSuperAgent();
+    if (!manager) return;
     const maxKeep = clampMaxSuperWorktrees(
       vscode.workspace
         .getConfiguration("iflow")
         .get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
     );
-    const swept = await this.getSuperAgent()?.sweepStaleWorktrees?.({ maxKeep });
-    if (swept && (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0)) {
-      this.log.info(
-        `super agent: 残留清扫 — 删除 ${swept.removed} 个，保留 ${swept.kept} 个，疑似残留 ${swept.orphans.length} 个（需人工确认）`,
-      );
-    }
+    this.sweepInFlight = true;
+    void Promise.resolve()
+      // 用一个已 resolve 的 promise 起链：manager 的同步抛错也落进 catch，
+      // 不会在调用点炸出去打断恢复。
+      .then(async () => {
+        // 三类残留同在 `.iflow/super/` 下：worktrees（既有清扫）、attachments、
+        // dirs（降级目录）。并排跑，任何一类失败都落进下面的 catch，不影响会话。
+        // 每一项都经 Promise.resolve().then() 包一层：即便某个 manager 方法同步
+        // 抛错（stub 未实现 / 未来改动），也只是该项变成 rejected，不会在数组
+        // 求值时打断其余项的 handler 绑定 —— 否则先返回的 rejected promise 会
+        // 变成 unhandled rejection（Vitest Errors 1）。
+        const [swept] = await Promise.all([
+          Promise.resolve().then(() => manager.sweepStaleWorktrees({ maxKeep })),
+          Promise.resolve().then(() => manager.sweepStaleSuperAttachmentDirs()),
+          Promise.resolve().then(() => manager.sweepStaleSuperDirs()),
+        ]);
+        return swept;
+      })
+      .then((swept) => {
+        if (this.disposed) return;
+        if (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0) {
+          this.log.info(
+            `super agent: 残留清扫（后台）— 删除 ${swept.removed} 个，保留 ${swept.kept} 个，疑似残留 ${swept.orphans.length} 个（需人工确认）`,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        // 背景清扫失败不是会话故障：可观测（日志 + 提示），但绝不冒泡。
+        this.log.warn(`super agent: 后台残留清扫失败（不影响会话）：${errorMessage(error)}`);
+        if (!this.disposed) {
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("后台清理残留工作目录失败（不影响会话）：{0}", errorMessage(error)),
+          );
+        }
+      })
+      .finally(() => {
+        this.sweepInFlight = false;
+      });
   }
 
   /**
@@ -7330,6 +7970,10 @@ export class ChatPanel implements vscode.Disposable {
     this.superAgent = new SuperAgentManager({
       repoRoot,
       createClient: (params) => this.createSuperClient(params),
+      // createSuperClient awaits ensureMcpBroker() first, so by the time the
+      // manager asks for entries the broker (when any server is configured) is
+      // already listening. Read lazily: a child spawned later still sees it.
+      childMcpServers: () => this.mcpBroker?.sessionServers() ?? [],
       onSessionsChanged: (sessions) => {
         this.store.setSuperSessions(sessions);
         // 子会话状态一变就把记录落盘：扩展随时可能被重启（窗口关闭、宿主
@@ -7352,8 +7996,21 @@ export class ChatPanel implements vscode.Disposable {
       // 子会话在等你回答：与主会话的提问卡同一档通知（`question` 属
       // approvals 默认档），只弹系统通知、不发提示音 —— 子会话的汇报回合
       // 已经统一静音，提问是唯一需要当场惊动用户的子会话事件。
-      onNeedInput: (session) =>
-        this.notifyOs("question", vscode.l10n.t("子会话「{0}」在等你回答", session.title)),
+      // 远程派发的任务还要把这条提问提醒转发给 QQ 发起者（本地任务不受影响：
+      // 服务侧找不到对应的 QQ 任务就会直接忽略）。
+      onNeedInput: (session) => {
+        this.notifyOs("question", vscode.l10n.t("子会话「{0}」在等你回答", session.title));
+        if (session.pending?.kind === "question") {
+          // main 渠道 QQ 任务派生的子会话：按 QQ 主任务寻址，答案回灌子会话。
+          // 旧 child 渠道仍走 superSessionId 匹配，两者互不干扰。
+          const qqMainTaskId = this.qqTaskBySuperSession.get(session.id);
+          if (qqMainTaskId) {
+            this.forwardQqMainTaskChildQuestion(qqMainTaskId, session.id, session.pending.questions);
+          } else {
+            this.forwardQqTaskQuestion(session.id, session.pending.questions);
+          }
+        }
+      },
       // 自动集成没能把子会话的改动带回主分支 → 自动请智能体合并，
       // 不再把这件事留给用户点看板上的按钮。
       onNeedAgentMerge: (session, reason) => this.scheduleSuperMerge(session.id, reason),
@@ -7422,6 +8079,60 @@ export class ChatPanel implements vscode.Disposable {
     return this.superAgent;
   }
 
+  /**
+   * Start (once) the host MCP broker for the configured servers.
+   *
+   * Merging mirrors the CLI: `{...user, ...workspace}` — the project entry of a
+   * name wins. Disabled / unusable entries are skipped and logged; because the
+   * child's `--allowed-mcp-server-names` list comes from the broker's names, a
+   * skipped server is also absent from the child instead of being silently
+   * spawned per child.
+   *
+   * Returns null when there is nothing to broker, or when startup itself
+   * failed — callers then scope the child to the sentinel (no MCP). A broker
+   * whose UPSTREAM fails is not a startup failure: the failure surfaces on the
+   * child's first request and in the panel log, and never blocks spawning.
+   */
+  private async ensureMcpBroker(): Promise<McpBroker | null> {
+    if (this.mcpBroker) return this.mcpBroker;
+    if (this.mcpBrokerStarting) return this.mcpBrokerStarting;
+    this.mcpBrokerStarting = (async (): Promise<McpBroker | null> => {
+      const scopes = this.readMcpScopes();
+      const servers: Record<string, unknown> = { ...scopes.global, ...(scopes.project ?? {}) };
+      const { servers: usable, skipped } = normalizeBrokerServers(servers);
+      for (const entry of skipped) {
+        this.log.warn(`MCP broker: 跳过 "${entry.name}"（${entry.reason}）`);
+      }
+      if (usable.length === 0) return null;
+      try {
+        const broker = await McpBroker.start({
+          servers,
+          cwd: this.mcpProjectCwd() ?? undefined,
+          log: (level, message) => this.log[level](`[mcp-broker] ${message}`),
+        });
+        this.mcpBroker = broker;
+        // Eager handshake so failures land in the log early instead of only on
+        // the first tool call; never awaited — a slow `npx` must not delay the
+        // child spawn (the child's own initialize waits on the same promise).
+        void broker.prewarm();
+        this.log.info(
+          `MCP broker listening on ${broker.baseUrl} for: ${broker.names().join(", ")}`,
+        );
+        return broker;
+      } catch (error) {
+        this.log.error(`MCP broker failed to start: ${errorMessage(error)}`);
+        this.store.sendToast(
+          "error",
+          vscode.l10n.t("MCP 共享代理启动失败，子会话将无 MCP 工具：{0}", errorMessage(error)),
+        );
+        return null;
+      }
+    })().finally(() => {
+      this.mcpBrokerStarting = null;
+    });
+    return this.mcpBrokerStarting;
+  }
+
   /** Spawn a CLI client for a child session (own process, own worktree). */
   private async createSuperClient(params: {
     cwd: string;
@@ -7441,7 +8152,16 @@ export class ChatPanel implements vscode.Disposable {
     // a merge child gets the main repo root so the CLI's own workspace check
     // and our fs boundary agree on what it may read.
     const includeDirectories = params.includeDirectories;
-    const { args } = buildAcpCommand(entry, includeDirectories);
+    // 子会话必须能用 MCP，但**不能**每个子会话各起一套服务器：宿主 broker
+    // 先认领每个配置的 server（每 server 只一份进程），子会话经 loopback
+    // streamable-HTTP 连它。这里把子会话的 CLI 进程作用域收窄到 broker 的
+    // server 名，用户配置里的 stdio server 因此在子会话进程里根本不会被拉起。
+    // broker 为空（没有配置 / 启动失败）时传空数组 → 哨兵 → 子会话无 MCP，
+    // 与启动失败时的 toast 一起如实暴露，绝不伪造共享。
+    const broker = await this.ensureMcpBroker();
+    const { args } = buildAcpCommand(entry, includeDirectories, {
+      mcpServerNames: broker?.names() ?? [],
+    });
     const systemPromptFile = await this.materializeSystemPrompt();
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
@@ -7478,17 +8198,30 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 换会话 / 恢复会话 / 热重认证时重置委派扫描状态。
+   * 换会话 / 恢复会话 / 热重认证时重置委派与动作扫描状态。
    *
    * 滚动缓冲里是上一个会话的助手文本（可能还有没收口的围栏），去重账本里是
    * 上一个会话派发过的载荷 —— 两者都跟新会话无关：不清掉会让新会话的扫描
    * 基线落在别人的文本上，还会把本该重新派发的指令误判成重复。
+   *
+   * 动作通道同理：`superActionScanText/Offset` 是上一个会话的助手文本与消费
+   * 偏移；`superActionReceiptLast` 是**上一个会话**最后一条回执文本。
+   * 后者不清会让另一个主会话里**一模一样**的动作回执被当成重复丢弃 ——
+   * 那个会话根本没收到过这条回执，主会话因此以为动作没生效、反复重发。
    */
   private resetSuperDirectiveScans(): void {
     this.superScan.reset();
     this.superDispatchedDirectives.clear();
     this.superToolCallWarned.clear();
     this.superToolCallActionsDone.clear();
+    this.superToolCallOutcomes.clear();
+    this.superToolCallCorrections.clear();
+    this.superActionScanText = "";
+    this.superActionScanOffset = 0;
+    this.superActionPending = false;
+    this.superActionPendingBody = "";
+    this.superActionZeroWarned = false;
+    this.superActionReceiptLast = "";
   }
 
   /**
@@ -7519,7 +8252,7 @@ export class ChatPanel implements vscode.Disposable {
       );
     }
     if (scan.blocks.length === 0) return;
-    this.dispatchSuperTasks(scan.blocks);
+    this.dispatchSuperTasks(scan.blocks, scan.issues);
   }
 
   /**
@@ -7530,11 +8263,29 @@ export class ChatPanel implements vscode.Disposable {
    * toast 文案都不允许两条通道各写一份 —— 同一份载荷从两条路径同时到达时，
    * `superDirectiveDedupeKey` 必须能看见同一个账本，否则会双开子会话。
    */
-  private dispatchSuperTasks(blocks: readonly SuperTaskSpec[][]): void {
+  private dispatchSuperTasks(
+    blocks: readonly SuperTaskSpec[][],
+    issues: readonly string[] = [],
+  ): void {
     const manager = this.getSuperAgent();
     if (!manager) {
       this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
       return;
+    }
+    if (issues.length > 0) {
+      // 混合载荷：合法任务照常派发，但被丢掉的畸形条目必须可见 —— 静默丢一半
+      // 正是「用户只看到一堵 JSON 墙」的来源。只报首条原因，避免 toast 过长。
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t(
+          "已忽略 {0} 个格式错误的任务条目（{1}）",
+          issues.length,
+          issues[0] ?? "",
+        ),
+      );
+      // 被丢掉的条目不会自己回来：把原因送回主会话，让模型重发完整条目。
+      // 与「整体不可解析」共用同一限次账本（同一轮最多 2 次）。
+      this.queueSuperToolCallCorrection(issues[0] ?? "");
     }
     let dispatched = 0;
     let droppedAttachments = 0;
@@ -7550,6 +8301,12 @@ export class ChatPanel implements vscode.Disposable {
           droppedAttachments += count;
         });
         const session = manager.spawn(spec);
+        // 注入回合（qqInjectedTaskId 非空）里派生的子会话归属该 QQ 主任务：记下
+        // 映射，子会话随后 ask_user_question 时才能把提醒转发给同一个 QQ 用户。
+        // 本地回合派生（qqInjectedTaskId 为空）不登记，保持本地提问不转发。
+        if (this.qqInjectedTaskId) {
+          this.qqTaskBySuperSession.set(session.id, this.qqInjectedTaskId);
+        }
         this.rememberDispatchedDirective(dedupeKey);
         dispatched++;
         this.log.info(`super agent: dispatched ${session.id} 「${spec.title}」`);
@@ -7592,16 +8349,33 @@ export class ChatPanel implements vscode.Disposable {
    */
   private handleSuperToolCall(update: ToolCallBase): void {
     const name = (update.toolName ?? update.title ?? "").trim();
-    const kind = classifySuperToolName(name);
+    // 名字归一之外也认 getDescription 的短标签：智能审批形态的权限请求 /
+    // 工具帧可能只带标题（`Delegate 1 task` / `Manage 1 child session action`），
+    // 见 shared/super-tool-call.ts 的 classifySuperToolTitle。
+    const kind = classifySuperToolName(name) ?? classifySuperToolTitle(name);
     if (!kind) return;
-    // Wire 实证（CLI 0.5.19，见 protocol.ts 的 `args` 注释）：原始参数只随
-    // `tool_call_update(in_progress)` 到达，pending 帧通常没有 args。此时还
-    // 不能下结论 —— 下一帧就会带载荷；在这里弹「未派发子会话」是误报
-    // （用户先看到「没派」，紧接着又看到真的派了）。
-    if (update.status === "pending" && (update.args === undefined || update.args === null)) return;
+    // 账本键与 superToolCallWarned 用同一个原始 id（不裁剪），否则同一个
+    // 工具调用的告警记录与结果记录会被当成两个键。
+    const toolCallId = update.toolCallId ?? "";
+    // 失败帧已经由内核把真实错误回给模型（functionResponse.error），宿主
+    // 不需要再核对 —— 再说一遍只会制造重复噪音。
+    if (update.status === "failed") return;
+    // 同一条调用已经处理过（派发 / 动作 / 已留痕），后续帧一律跳过：
+    // 否则 in_progress 与 completed 各带一次载荷会各派一遍。
+    if (toolCallId && this.superToolCallOutcomes.has(toolCallId)) return;
+    const hasArgs = update.args !== undefined && update.args !== null;
+    if (!hasArgs) {
+      // Wire 实证（CLI 0.5.19，见 protocol.ts 的 `args` 注释）：原始参数只随
+      // `tool_call_update(in_progress)` 到达，pending 帧通常没有 args。此时还
+      // 不能下结论 —— 下一帧就会带载荷；在 pending 帧弹「未派发子会话」是
+      // 误报。但 completed 帧仍然没有载荷，就说明这次调用整轮都没把东西交给
+      // 宿主，必须核对（工具层只回 ack，模型会以为派成功）。
+      if (update.status === "completed") this.auditSuperToolCallCompletion(update, name);
+      return;
+    }
     const parsed = parseSuperToolCall(kind, update.args);
     if (!parsed.ok) {
-      this.warnUnsupportedSuperToolCall(update, name, parsed.reason);
+      this.warnUnsupportedSuperToolCall(update, name, parsed.reason, parsed.issues);
       return;
     }
     // 载荷纠偏：新版 `super-agent` 工具同时收 tasks / actions，模型做管理动作
@@ -7611,7 +8385,10 @@ export class ChatPanel implements vscode.Disposable {
       `super agent: accepted structured ${parsed.kind} tool call (${update.toolCallId || "no-id"})`,
     );
     if (parsed.kind === "dispatch") {
-      this.dispatchSuperTasks(parsed.tasks);
+      this.dispatchSuperTasks(parsed.tasks, parsed.issues);
+      // 记账放在派发之后：dispatchSuperTasks 是同步的，完成后才写终态，
+      // 避免「记了已派发、实际抛错」的假账。
+      this.recordSuperToolCallOutcome(toolCallId, "dispatched");
       return;
     }
     // 同一工具帧会在 pending / in_progress 两帧各带一次载荷；动作没有载荷
@@ -7623,10 +8400,67 @@ export class ChatPanel implements vscode.Disposable {
       this.log.info(
         `super agent: skipped-duplicate structured actions tool call (${update.toolCallId || "no-id"})`,
       );
+      this.recordSuperToolCallOutcome(toolCallId, "actions");
       return;
     }
     this.rememberSuperToolCallActions(actionKey);
-    void this.runSuperActions(parsed.actions);
+    // 记账在启动前：runSuperActions 是异步的，completed 帧可能在它 settle 前
+    // 到达，先记才能保证不重复执行同一条动作。
+    this.recordSuperToolCallOutcome(toolCallId, "actions");
+    // 带上 toolCallId：runSuperActions 收尾时把每条动作的真实结果回填到这张
+    // 工具帧，动作卡才能显示「中断成功 / not-found」而不是绿色「已完成」。
+    void this.runSuperActions(parsed.actions, update.toolCallId);
+  }
+
+  /**
+   * completed 帧核对：这次结构化工具调用到底有没有把载荷交给宿主。
+   *
+   * 触发条件是「载荷整轮都没到达」（见 {@link handleSuperToolCall} 的
+   * `!hasArgs` 分支）。此时工具层已经向模型回了 `Delegation request accepted.`，
+   * 但宿主什么都没做 —— 用户会看到「模型说已派发、看板空空如也」。这里补上
+   * 两条留痕：用户可见 toast + 回给主会话的纠错提示（带原因与正确格式），
+   * 让模型能在同一轮里重发。
+   *
+   * 之前报过「载荷不合法」的调用不再重复报（toast 已经在
+   * {@link warnUnsupportedSuperToolCall} 里弹过），只补记终态。
+   */
+  private auditSuperToolCallCompletion(update: ToolCallBase, name: string): void {
+    const id = update.toolCallId ?? "";
+    if (id && this.superToolCallOutcomes.has(id)) return;
+    if (id && this.superToolCallWarned.has(id)) {
+      this.recordSuperToolCallOutcome(id, "rejected");
+      return;
+    }
+    this.recordSuperToolCallOutcome(id, "dropped");
+    this.log.warn(
+      `super agent: tool call 「${name}」 (${id || "no-id"}) completed without a usable payload — NOTHING was dispatched`,
+    );
+    this.store.sendToast(
+      "warning",
+      vscode.l10n.t("super-agent 工具调用已完成，但宿主没有收到派发载荷，未派发任何子会话"),
+    );
+    this.queueSuperToolCallCorrection(
+      "the tool call completed without a usable payload — no tasks/actions ever reached the host, so nothing was dispatched",
+    );
+  }
+
+  /**
+   * 记一条结构化工具调用的终态（有界 Map，超了丢最早一条）。
+   *
+   * 与 {@link superToolCallWarned} / {@link superToolCallActionsDone} 同一套
+   * 有界做法：工具帧数量本身不设界，账本必须有上限；换会话 / 恢复会话 /
+   * 热重认证时由 {@link resetSuperDirectiveScans} 清空。
+   */
+  private recordSuperToolCallOutcome(
+    toolCallId: string,
+    outcome: SuperToolCallOutcome,
+  ): void {
+    if (!toolCallId) return;
+    if (this.superToolCallOutcomes.size >= ChatPanel.SUPER_TOOL_CALL_OUTCOME_CAP) {
+      const oldest = this.superToolCallOutcomes.keys().next().value;
+      if (oldest !== undefined) this.superToolCallOutcomes.delete(oldest);
+    }
+    this.superToolCallOutcomes.set(toolCallId, outcome);
   }
 
   /** 记住一条已执行的动作工具调用（有界 Set，超了丢最早一条）。 */
@@ -7679,7 +8513,12 @@ export class ChatPanel implements vscode.Disposable {
    * 数量本身不设界，不能让它无限增长；换会话时由
    * {@link resetSuperDirectiveScans} 清空。
    */
-  private warnUnsupportedSuperToolCall(update: ToolCallBase, name: string, reason: string): void {
+  private warnUnsupportedSuperToolCall(
+    update: ToolCallBase,
+    name: string,
+    reason: string,
+    issues: readonly string[] = [],
+  ): void {
     const key = update.toolCallId || `${name}#${update.status ?? ""}`;
     if (this.superToolCallWarned.has(key)) return;
     if (this.superToolCallWarned.size >= ChatPanel.SUPER_TOOL_CALL_WARN_CAP) {
@@ -7692,11 +8531,99 @@ export class ChatPanel implements vscode.Disposable {
     );
     this.store.sendToast(
       "warning",
-      vscode.l10n.t(
-        "模型调用了不存在的 super-agent 工具（{0}，工具列表里没有它），未派发子会话",
-        name,
-      ),
+      vscode.l10n.t("super-agent 调用载荷不合法（{0}），未派发子会话", reason),
     );
+    // 宿主能看见「这次没派出去」，模型却只收到一个 failed 工具帧 —— 补一条
+    // hidden prompt 把原因和正确格式送回主会话上下文，让它在同一轮里自行修正。
+    this.queueSuperToolCallCorrection(issues[0] ?? reason);
+  }
+
+  /**
+   * 入队一条「super-agent 参数不合法」的纠错提示（hidden prompt）。
+   *
+   * 限次是硬约束：同一主会话同一轮最多 {@link SUPER_TOOL_CALL_CORRECTION_CAP}
+   * 次，超出只留 toast 与日志 —— 工具层已经会让这次调用 failed，模型若坚持
+   * 写同样的错误参数，宿主不能无限给自己喂回合。
+   *
+   * 提示词只带**原因**与**正确格式示例**，绝不回贴畸形原文：原文可能就是
+   * 一大段错位 JSON，贴回上下文既浪费 token，又可能诱导模型照抄。
+   */
+  private queueSuperToolCallCorrection(detail: string): void {
+    const owner = this.currentMainSessionId();
+    const key = owner ?? "";
+    const used = this.superToolCallCorrections.get(key) ?? 0;
+    if (used >= ChatPanel.SUPER_TOOL_CALL_CORRECTION_CAP) {
+      this.log.info(
+        `super agent: parameter-correction prompt suppressed (${used}/${ChatPanel.SUPER_TOOL_CALL_CORRECTION_CAP} used this round)`,
+      );
+      return;
+    }
+    this.superToolCallCorrections.set(key, used + 1);
+    const text = [
+      "[super-agent tool call rejected]",
+      `Reason: ${detail}`,
+      "Required format:",
+      '{"tasks":[{"title":"short title","task":"self-contained brief"}]}',
+      "请修正后重新调用 super-agent（不要重复提交同样的参数）。",
+    ].join("\n");
+    this.pendingSuperToolCallCorrections.push({ mainSessionId: owner, text });
+    this.log.info("super agent: queued a parameter-correction prompt for the main session");
+    // 工具调用必然发生在主会话生成中，几乎一定等不到空闲 —— 点着心跳，
+    // 回合结束后由统一仲裁补投；心跳也会在没有其它待办时自行停表。
+    this.ensureSuperHeartbeat();
+    void this.drainSuperAutoTurns();
+  }
+
+  /**
+   * 把排队的纠错提示逐条投给主会话。
+   *
+   * 与子会话汇报 / 动作回执 / 合并请求共用同一条「主会话空闲」车道：同一时刻
+   * 只能有一个回合跑在同一个 ACP 会话上。条件不满足就把提示留在队列里，
+   * 由心跳重试 —— 丢了它模型就永远不知道自己错在哪。
+   */
+  private async drainSuperToolCallCorrections(): Promise<void> {
+    if (this.disposed || this.superReportRunning) return;
+    if (this.autoTurnsHeld()) return;
+    // 与汇报 / 动作回执 / 改道消息补投共用 superReportRunning 这一条车道：
+    // mainLane 的同步申领才是「同一时刻只有一个回合」的实际保证，四个 drain
+    // 用同一把重入锁即可，不需要另立一把（那只会让注释与实现漂移）。
+    this.superReportRunning = true;
+    try {
+      while (this.pendingSuperToolCallCorrections.length > 0) {
+        if (this.disposed) return;
+        if (this.autoTurnsHeld()) break;
+        if (!this.mainSessionFree()) break;
+        // 合并子会话在主仓工作区跑 git：主会话此时再跑回合会互相踩。
+        if (
+          this.superMergeRunning ||
+          this.pendingSuperMerges.length > 0 ||
+          this.superMergeChildRunning()
+        ) {
+          break;
+        }
+        // 只投当前主会话的提示：别的会话等用户切过去再投（串台）。
+        const owner = this.currentMainSessionId();
+        const index = this.pendingSuperToolCallCorrections.findIndex(
+          (item) => item.mainSessionId === owner,
+        );
+        if (index === -1) break;
+        const item = this.pendingSuperToolCallCorrections[index]!;
+        this.log.info("super agent: delivering the parameter-correction prompt as a hidden main-session turn");
+        const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
+          delegateOnBusy: false,
+          hidden: true,
+        });
+        if (!started) break; // 主会话被占：留在队列里等心跳重投。
+        const pos = this.pendingSuperToolCallCorrections.indexOf(item);
+        if (pos !== -1) this.pendingSuperToolCallCorrections.splice(pos, 1);
+        // 这一轮端点 / 内核报错：别在心跳里连续喂下一条，留给用户处理。
+        if (this.store.getState().status === "error") break;
+      }
+    } catch (error) {
+      this.log.warn(`super agent correction delivery failed: ${errorMessage(error)}`);
+    } finally {
+      this.superReportRunning = false;
+    }
   }
 
   /**
@@ -7718,7 +8645,9 @@ export class ChatPanel implements vscode.Disposable {
     if (scan.invalidBlocks.length > 0) {
       this.store.sendToast("warning", vscode.l10n.t("子会话管理指令无法解析，已忽略"));
     }
-    if (scan.actions.length > 0) void this.runSuperActions(scan.actions);
+    if (scan.actions.length > 0) {
+      void this.runSuperActions(scan.actions);
+    }
     // 围栏开了没收：记住它。流式期间这是正常中间态（载荷下一帧才到），不在
     // 每帧报警；但**回合都结束了还停在这里**，说明这个动作块永远不会被执行
     // —— 回合收尾时复核并留痕（见 `auditSuperActionsAtSettle`）。
@@ -7791,7 +8720,10 @@ export class ChatPanel implements vscode.Disposable {
    * 看板摘要是每轮开篇冻结的，同一轮里它看不到自己动作的效果 —— 没有回执它
    * 就会重复发同一个动作。
    */
-  private async runSuperActions(actions: readonly SuperAction[]): Promise<void> {
+  private async runSuperActions(
+    actions: readonly SuperAction[],
+    toolCallId?: string,
+  ): Promise<void> {
     const manager = this.getSuperAgent();
     if (!manager) return;
     let applied = 0;
@@ -7813,7 +8745,7 @@ export class ChatPanel implements vscode.Disposable {
             break;
           }
           case "cancel": {
-            const outcome = await manager.cancel(action.sessionId);
+            const outcome = await manager.cancel(action.sessionId, "agent");
             receipt = {
               action: "cancel",
               sessionId: action.sessionId,
@@ -7825,6 +8757,18 @@ export class ChatPanel implements vscode.Disposable {
                   ? { detail: "no such child session (it may have been cleaned up already)" }
                   : {}),
             };
+            // hidden 回执只进主会话上下文，用户看不到。主 Agent 从每轮冻结的
+            // 看板摘要里抄 id，抄错时 cancel 返回 not-found —— 这正是「中断没
+            // 生效」的真实故障现场。这里额外给用户一条带 id 的明确提示。
+            if (!outcome.ok && outcome.reason === "not-found") {
+              this.store.sendToast(
+                "warning",
+                vscode.l10n.t(
+                  "中断失败：找不到子会话 {0}，可能已被清理或 id 有误",
+                  action.sessionId,
+                ),
+              );
+            }
             break;
           }
           case "answer": {
@@ -7885,6 +8829,40 @@ export class ChatPanel implements vscode.Disposable {
         vscode.l10n.t("{0} 个子会话管理动作未生效（目标不存在或状态不适用）", ignored),
       );
     }
+    // 工具调用触发的动作：把真实结果回填到那张工具帧，动作卡据此显示
+    // 「完成 / 未找到 / 失败」而不是把「工具调用完成」当成动作成功。
+    // 同时把每条动作的目标子会话标题一并回填 —— 标题只存在于宿主的
+    // super-session 记录里（webview 无权查表），带下去卡片才能显示
+    // 「标题（id）」而不是裸 id。取不到标题（记录已清理）就留空，
+    // 卡片优雅退回只显示 id。
+    if (toolCallId) {
+      const enriched: SuperDirectiveAction[] = actions.map((action) => {
+        const title = manager.get?.(action.sessionId)?.title?.trim() || undefined;
+        switch (action.action) {
+          case "answer":
+            return {
+              action: action.action,
+              sessionId: action.sessionId,
+              ...(title ? { title } : {}),
+              answerCount: Object.keys(action.answers ?? {}).length,
+            };
+          case "cleanup":
+            return {
+              action: action.action,
+              sessionId: action.sessionId,
+              ...(title ? { title } : {}),
+              ...(action.keepBranch ? { keepBranch: true } : {}),
+            };
+          default:
+            return {
+              action: action.action,
+              sessionId: action.sessionId,
+              ...(title ? { title } : {}),
+            };
+        }
+      });
+      this.store.superActionResult(toolCallId, receipts, enriched);
+    }
     this.queueSuperActionReceipt(receipts);
   }
 
@@ -7904,7 +8882,7 @@ export class ChatPanel implements vscode.Disposable {
     this.superActionReceiptLast = text;
     this.pendingSuperActionReceipts.push({ mainSessionId: this.currentMainSessionId(), text });
     this.ensureSuperHeartbeat();
-    void this.drainSuperActionReceipts();
+    void this.drainSuperAutoTurns();
   }
 
   /**
@@ -7936,7 +8914,12 @@ export class ChatPanel implements vscode.Disposable {
       // 回合没跑起来（主会话被别的回合占着）：这条回执**留在队列里**，等空闲
       // 时重投 —— 回执丢了主会话就会重复发同一个动作。
       if (!started) return;
-      this.pendingSuperActionReceipts.splice(index, 1);
+      // 等 sendPrompt 的这几分钟里 deleteSession / dispose 会并发改写队列，
+      // 之前 findIndex 拿到的 index 可能已经指向别人。按对象身份重定位，
+      // 与 drainSuperReports / drainDelegatedUserTurns 同一套出队纪律：
+      // 宁可找不到（已被删除会话清掉）也不误删别的会话刚投出的回执。
+      const pos = this.pendingSuperActionReceipts.indexOf(item);
+      if (pos !== -1) this.pendingSuperActionReceipts.splice(pos, 1);
     } catch (error) {
       this.log.warn(`super agent action receipt delivery failed: ${errorMessage(error)}`);
     } finally {
@@ -8107,8 +9090,10 @@ export class ChatPanel implements vscode.Disposable {
    * 只取**当前主会话**的子会话：别的会话的孩子还在跑（或者刚跑完），它的
    * 汇报要等用户切到那个会话再投。
    *
-   * 来源子会话已经被清理（用户点清理 / 合并完释放）时，它的汇报再也没人能
-   * 接 —— 如实记一笔然后丢掉，不能让面板卡在忙碌态。
+   * 来源子会话已经被清理（用户点清理 / 合并完释放）时，它的汇报没法再作为
+   * 一次「实时汇报」投进主会话 —— 但结论不静默丢失：以「已归档子会话的迟到
+   * 结论」提示落到看板（见 {@link announceArchivedLateReports}），既不伪造活
+   * 跃子会话的汇报，也让用户真正看到那个结论。面板不会卡在忙碌态。
    *
    * 心跳与看板变化时都补一次重算：子会话被清理之后可能再没有人来触发取件
    * （它的 onReport 不会再来第二次）。
@@ -8117,14 +9102,15 @@ export class ChatPanel implements vscode.Disposable {
     if (this.disposed || this.superReportRunning) return;
     if (this.pendingSuperReports.size === 0) return;
     const live = this.superAgent?.list() ?? [];
-    // 来源子会话已不存在：这份汇报没人能接，丢掉（否则面板永久忙碌）。
-    // 用**全部**活子会话判：别的会话的汇报也得保住（只是现在没人接）。
+    // 来源子会话已不存在：结论不能静默丢 —— 用**全部**活子会话判（别的会话
+    // 的汇报也得保住，只是现在没人接），取回完整条目交给看板提示。
     for (const buffer of this.pendingSuperReports.values()) {
-      const dropped = buffer.dropMissing(live);
-      if (dropped.length > 0) {
+      const archived = buffer.takeMissing(live);
+      if (archived.length > 0) {
         this.log.warn(
-          `super agent: dropped ${dropped.length} child report(s) whose session(s) were cleaned up before delivery: ${dropped.join(", ")}`,
+          `super agent: ${archived.length} child report(s) arrived after their session(s) were cleaned up; surfacing as archived late conclusion(s)`,
         );
+        this.announceArchivedLateReports(archived);
       }
     }
     // 只取当前主会话那一桶：别的会话的汇报留在它自己的桶里等用户切过去。
@@ -8133,12 +9119,74 @@ export class ChatPanel implements vscode.Disposable {
     const mine = live.filter((session) => this.superBelongsToCurrentMain(session));
     const batch = buffer.takeSettled(mine);
     if (!batch) return; // 全都还在跑：继续积累。
-    const text = this.superAgent?.reportPrompt(batch) ?? "";
+    const manager = this.superAgent;
+    // 汇报归属会话：pendingCount 与 QQ awaiter 归属都用它，避免从 entries[0]
+    // 推断时因异步归属回填而与 awaiter 漂移（R2）。
+    const reportOwner = this.currentMainSessionId();
+    let text = "";
+    let pendingCount: number | undefined;
+    if (manager && typeof manager.reportPromptWithPending === "function") {
+      const prompt = manager.reportPromptWithPending(batch, { pendingOwner: reportOwner });
+      text = prompt.text;
+      pendingCount = prompt.pendingCount;
+    } else {
+      // 兼容只提供 reportPrompt 的假实现（测试夹具）：文本逐字节照旧，
+      // pendingCount 在下面按同一口径用 list() 重算。
+      text = manager?.reportPrompt(batch) ?? "";
+    }
     if (!text) return;
+    if (pendingCount === undefined) {
+      const owner = batch[0]?.session.mainSessionId ?? this.currentMainSessionId() ?? null;
+      pendingCount = (manager?.list() ?? []).filter(
+        (session) =>
+          !isTerminalSuperStatus(session.status) && (session.mainSessionId ?? owner) === owner,
+      ).length;
+    }
     this.log.info(`super agent: queued report for ${batch.length} settled child session(s)`);
-    this.pendingSuperReportPrompts.push({ mainSessionId: this.currentMainSessionId(), text });
+    // pendingCount=0 即「所有子会话都已结束」的汇总轮 —— 主 Agent 在这一轮
+    // 给出最终完整汇报，是 QQ 最终回执应当采用的那一轮文本。
+    // R2 迟到补发：若该会话的 QQ awaiter 已等过阈值，而 pendingCount 因别的
+    // 非终态子会话（复核子会话等）长期 >0，就别让 final 永远=false —— 以本轮
+    // 文本作为最终回执（空文本再由 deliverQqMainFinalAnswer 兜底）。
+    const rescueDue = this.qqFinalRescueDue(reportOwner);
+    if (rescueDue && pendingCount !== 0) {
+      this.log.warn(`QQ 最终回执迟到补发：汇报轮 pendingCount=${pendingCount}，仍按 final 投递`);
+    }
+    this.pendingSuperReportPrompts.push({
+      mainSessionId: reportOwner,
+      text,
+      final: pendingCount === 0 || rescueDue,
+    });
     this.ensureSuperHeartbeat();
-    void this.drainSuperReports();
+    // 用户按过停止时补一次常驻「继续处理」提示：此后才结束的子会话此前不会
+    // 触发 announceDeferredAutoTurns（那时待处理数还是 0），于是恢复只剩「下
+    // 条消息」这一个解除点。这里让新到的汇报也点亮那个可点动作。
+    if (this.autoTurnsHeld()) this.announceDeferredAutoTurns();
+    void this.drainSuperAutoTurns();
+  }
+
+  /**
+   * 已归档（被清理 / 合并释放）子会话的迟到结论：以可关闭的 `sticky` 提示落到
+   * 看板，明确标注来源已不存在，绝不伪装成活跃子会话的实时汇报或 hidden 回合
+   * （那会伪造用户气泡 / 会话标题 / checkpoint）。
+   *
+   * 每条结论单独一条提示并截断到摘要长度，避免长 summary 把 toast 栈撑爆；
+   * 文案只含本地标题与汇报正文，不含 id / 路径 / 凭据。
+   */
+  private announceArchivedLateReports(entries: readonly SuperReportEntry[]): void {
+    if (entries.length === 0 || this.disposed) return;
+    for (const entry of entries) {
+      const summary = entry.report.summary.trim() || vscode.l10n.t("（该汇报没有正文）");
+      const clipped =
+        summary.length > SUPER_ARCHIVED_REPORT_MAX_CHARS
+          ? `${summary.slice(0, SUPER_ARCHIVED_REPORT_MAX_CHARS)}…`
+          : summary;
+      this.store.sendToast(
+        "info",
+        vscode.l10n.t("已归档子会话「{0}」的迟到结论（该子会话已被清理，主会话未能在当时收取）：{1}", entry.session.title, clipped),
+        { sticky: true },
+      );
+    }
   }
 
   /**
@@ -8190,12 +9238,23 @@ export class ChatPanel implements vscode.Disposable {
         const item = this.pendingSuperReportPrompts[index]!;
         this.clearSuperWaitHeartbeat();
         this.log.info("super agent: delivering the settled child report as a fresh main-session turn");
+        // R2 迟到补发缓存：记下本轮开始前的可见文本锚点，回合结束后提取本轮
+        // 新增的 assistant 文本。正常 final 投递不受影响；仅当 QQ  awaiter 迟到
+        // 补发时才用到它（而没有真实正文时由兜底文案接管）。
+        const visibleBefore = this.store.getState().blocks.filter(
+          (block) => block.kind === "text" && !block.system,
+        );
+        const reportAnchorId = visibleBefore[visibleBefore.length - 1]?.id;
+        const reportTextBefore = visibleBefore.length;
         const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
           delegateOnBusy: false,
           hidden: true,
           // 这一轮是「主会话汇报子会话结果」：收尾时用 superReport 事件 +
           // done 音（与单个子会话收尾的 childDone + child 音区分开）。
           reportTurn: true,
+          // pendingCount=0 的汇总轮：收尾时把这一轮 assistant 文本作为 QQ
+          // 任务的真正最终答复回传（中途进度汇报轮不带此标记）。
+          finalReport: item.final === true,
         });
         if (!started) {
           // 回合没跑起来（主会话被别的回合占着）：这条汇报**留在队列里**，
@@ -8204,6 +9263,20 @@ export class ChatPanel implements vscode.Disposable {
         }
         const pos = this.pendingSuperReportPrompts.indexOf(item);
         if (pos !== -1) this.pendingSuperReportPrompts.splice(pos, 1);
+        // 本轮 assistant 正文：只含 agent 的 text 块（thought / tool / diff /
+        // 子会话卡都不在其中），与最终结果取文本同口径。
+        const reportTurnText = this.captureQqReportTurnText(reportAnchorId, reportTextBefore);
+        // R2：缓存本轮正文供迟到补发复用（只在该会话仍有 awaiter 时才有意义）。
+        if (reportTurnText && owner && this.qqFinalRescueOwnerPending(owner)) {
+          this.qqFinalRescueText.set(owner, reportTurnText);
+        }
+        // 中间正文轮同步：非汇总的汇报轮正文只是进度，转发给该会话所有在等
+        // 最终答复的 QQ 任务。汇总轮（final=true）绝不在这里转发 —— 它的正文
+        // 由 sendPrompt 收尾时的 deliverQqMainFinalAnswer 作为最终结果投递，
+        // 两边同时发就是重复。
+        if (!item.final && reportTurnText) {
+          void this.deliverQqMainIntermediateText(owner, reportTurnText);
+        }
         // 这一轮失败了（端点 / 内核报错）：别在心跳里连续喂下一批，留给用户
         // 处理错误后自然的下一轮。
         if (this.store.getState().status === "error") break;
@@ -8277,16 +9350,96 @@ export class ChatPanel implements vscode.Disposable {
     this.superHeartbeatTimer = timer;
   }
 
+  /**
+   * 5 条宿主自动回合队列的**统一仲裁点**。
+   *
+   * 心跳 / 回合收尾 / 压制解除都只调它，不再各自按固定顺序 fire-and-forget 5
+   * 个 drain：每一拍只仲裁**一条**队列并把轮转游标挪到下一位；被选中的队列
+   * 仍沿用自己原有的顺序投递语义（一次可投完自己队列里当前可投的几条）。于是：
+   *  - **明确优先级**：数组先后即投递先后（见 {@link SUPER_AUTO_TURN_PRIORITY}）；
+   *  - **不饿死**：卡在 error / Stop / 主会话忙的高优先级队列只占一拍，下一拍
+   *    轮到别人 —— 不再把「用户下次发消息」当成唯一恢复点；
+   *  - **不破坏单回合不变量**：每个 drain 内部照旧同步申领 `superReportRunning`，
+   *    `mainLane` 仍是「同一 ACP 会话同时只有一个回合」的唯一保证；这里只决定
+   *    「先叫谁」，一条回合在飞时其余 drain 仍被重入锁挡在门外。
+   *
+   * 合并队列不带主会话归属、用独立的 `superMergeRunning` 锁，因此同样由它仲裁
+   * （选中时让它的既有互斥门控生效），但不改变合并串行执行、主工作区单一窗口
+   * 的纪律。
+   */
+  private async drainSuperAutoTurns(): Promise<void> {
+    if (this.disposed || this.superReportRunning) return;
+    const order = ChatPanel.SUPER_AUTO_TURN_PRIORITY;
+    const owner = this.currentMainSessionId();
+    for (let i = 0; i < order.length; i++) {
+      if (this.disposed || this.superReportRunning) return;
+      const slot = (this.superAutoTurnCursor + i) % order.length;
+      const kind = order[slot]!;
+      if (!this.superAutoTurnHasWork(kind, owner)) continue;
+      // 给过机会就往后挪：卡住的队列（error / Stop 压住 / 主会话忙 / 合并
+      // 互斥）下一拍不再排在最前，其余队列因此有稳定的唤醒机会。
+      this.superAutoTurnCursor = (slot + 1) % order.length;
+      switch (kind) {
+        case "reports":
+          await this.drainSuperReports();
+          break;
+        case "actionReceipts":
+          await this.drainSuperActionReceipts();
+          break;
+        case "delegated":
+          await this.drainDelegatedUserTurns();
+          break;
+        case "corrections":
+          await this.drainSuperToolCallCorrections();
+          break;
+        case "merges":
+          await this.drainSuperMerges();
+          break;
+      }
+      return; // 一条队列一拍：其余队列交给下一拍 / 回合收尾的再次仲裁。
+    }
+  }
+
+  /**
+   * 某条自动回合队列此刻是否有「属于当前主会话」的待投递项。
+   *
+   * 只做轻量非空判断（真正的门控 —— mainSessionFree / error / Stop / 合并互斥
+   * —— 仍留在各 drain 里，避免两处规则漂移）。合并队列不带主会话归属，只看
+   * 非空。
+   */
+  private superAutoTurnHasWork(
+    kind: (typeof ChatPanel.SUPER_AUTO_TURN_PRIORITY)[number],
+    owner: string | null,
+  ): boolean {
+    switch (kind) {
+      case "reports":
+        return this.pendingSuperReportPrompts.some((item) => item.mainSessionId === owner);
+      case "actionReceipts":
+        return this.pendingSuperActionReceipts.some((item) => item.mainSessionId === owner);
+      case "delegated":
+        return this.pendingDelegatedUserTurns.some((item) => item.mainSessionId === owner);
+      case "corrections":
+        return this.pendingSuperToolCallCorrections.some((item) => item.mainSessionId === owner);
+      case "merges":
+        return this.pendingSuperMerges.length > 0;
+    }
+  }
+
   private superHeartbeatTick(): void {
     if (this.disposed) {
       this.stopSuperHeartbeat();
       return;
     }
-    this.refreshSuperWaitHeartbeat();
-    void this.drainSuperReports();
-    void this.drainSuperActionReceipts();
-    void this.drainDelegatedUserTurns();
-    void this.drainSuperMerges();
+    // 心跳是 fire-and-forget 的 interval 回调：任何一步同步抛错都必须吞掉，
+    // 否则下面的 auto-stop 判断不执行，interval 会永久存活（且错误只在
+    // console 里一闪而过）。drain 自身都有 catch，这里主要护住
+    // refreshSuperWaitHeartbeat / syncSuperWaitingState 这类同步 UI 刷新。
+    try {
+      this.refreshSuperWaitHeartbeat();
+      void this.drainSuperAutoTurns();
+    } catch (error) {
+      this.log.warn(`super agent heartbeat tick failed: ${errorMessage(error)}`);
+    }
     if (!this.hasSuperWork()) this.stopSuperHeartbeat();
   }
 
@@ -8300,6 +9453,9 @@ export class ChatPanel implements vscode.Disposable {
     // 待补投的「被改道用户消息」同样是欠着主会话的一轮：心跳停了它就永远
     // 投不出去，那条消息又会像修复前一样在主会话里丢失。
     if (this.pendingDelegatedUserTurns.length > 0) return true;
+    // 排队的参数纠错提示也是一轮欠账：模型不知道自己的调用为何失败，就会
+    // 在下一轮继续重复同一份错误载荷。
+    if (this.pendingSuperToolCallCorrections.length > 0) return true;
     if (this.pendingSuperMerges.length > 0) return true;
     // 汇报已交上来但来源子会话还没终态：它的汇报还欠着主会话，心跳必须
     // 继续跑，否则既没有汇报也没有忙碌态刷新。
@@ -8538,7 +9694,7 @@ export class ChatPanel implements vscode.Disposable {
       }
       case "cancel": {
         if (!msg.sessionId) return;
-        const outcome = await manager.cancel(msg.sessionId);
+        const outcome = await manager.cancel(msg.sessionId, "user");
         // 与 cancelAll / cleanup / retry 一致，单个中断也要有可见回执。
         // 按 SuperCancelOutcome 的真实 reason 区分文案：幂等重复（已终态）
         // 不是失败，但要如实告诉用户「无需中断」，避免以为刚才那下没生效。
@@ -8552,7 +9708,7 @@ export class ChatPanel implements vscode.Disposable {
         break;
       }
       case "cancelAll": {
-        const count = await manager.cancelAll();
+        const count = await manager.cancelAll("user");
         this.store.sendToast("info", vscode.l10n.t("已中断 {0} 个子会话", count));
         break;
       }
@@ -8565,7 +9721,14 @@ export class ChatPanel implements vscode.Disposable {
       case "cleanup": {
         if (!msg.sessionId) return;
         const result = await manager.cleanup(msg.sessionId, { keepBranch: msg.keepBranch });
-        if (result.branchKept) {
+        if (!result.ok) {
+          // 拒绝清理（还在跑 / 工作目录有未提交改动）时目录其实还在磁盘上，
+          // 谎报「已清理」会让用户以为工作已经被回收。
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("未能清理：{0}", result.reason ?? "未知原因"),
+          );
+        } else if (result.branchKept) {
           this.store.sendToast(
             "info",
             vscode.l10n.t("已清理工作目录，分支已保留：{0}", result.reason ?? ""),
@@ -8620,6 +9783,1696 @@ export class ChatPanel implements vscode.Disposable {
         break;
       }
     }
+  }
+
+  // --- QQ 远程任务通道 -------------------------------------------------------
+  //
+  // 一条通道 = 一份 QqService + QQBot 官方 adapter（直连官方网关，无子进程）。
+  // 面板只做编排：命令解析 / 白名单 / 审批桥 / 结果回传全在 QqService 里；本节
+  // 负责把它们接起来、把生命周期管住、把状态投影给 UI。
+  //
+  // 纪律：
+  //  - 所有入口先判 `this.qq` 是否存在 —— 半启动的现场绝不能被消息驱动；
+  //  - 主动停止走 `qqStopping` 标记，防止与在飞的启停重叠；
+  //  - 连接类设置改动重建服务，其余字段就地热更新（见 src/qq/wiring.ts）。
+
+  /** 设置启用 → 启动通道；任何失败都把半启动现场收干净并如实提示。 */
+  private startQqIfEnabled(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    // 待审核记录与通道是否启用无关：启动时先推一次，面板打开即可看到历史。
+    void this.pushQqPendingUsers();
+    if (this.qqStarting) return this.qqStarting;
+    const task = this.doStartQq()
+      .catch(async (error: unknown) => {
+        const detail = errorMessage(error);
+        if (!this.disposed) this.log.warn(`QQ 通道启动失败：${detail}`);
+        if (!this.disposed) {
+          this.store.sendToast("warning", vscode.l10n.t("QQ 通道启动失败：{0}", detail));
+          this.pushQqStatus(false, detail);
+        }
+        // 半启动的现场必须收干净：不留 adapter 连接或扫码绑定残留。
+        await this.stopQq().catch(() => undefined);
+      })
+      .finally(() => {
+        this.qqStarting = null;
+      });
+    this.qqStarting = task;
+    return task;
+  }
+
+  /**
+   * 读设置 → 校验 → 建 IPC / 服务 / bridge。
+   *
+   * `enabled=false` 时只读一次配置就返回（不产生任何进程）；校验里有 error
+   * 级问题时**一个零件都不启动**，只提示 —— 半启动的通道比不启动更难排查。
+   */
+  private async doStartQq(): Promise<void> {
+    if (this.qq) return;
+    const generation = this.qqGeneration;
+    const io = this.qqIo();
+    const snapshot = await readQqSettings(io);
+    const { config, warnings } = normalizeQqConfig({ ...snapshot } as Record<string, unknown>);
+    for (const warning of warnings) this.log.warn(`QQ 设置：${warning}`);
+    if (!config.enabled) {
+      this.log.info("QQ 通道未启用，跳过启动");
+      return;
+    }
+
+    const roots = this.qqWorkspaceRoots();
+    const issues = validateQqConfig(config, roots);
+    for (const issue of issues) {
+      const line = `QQ 配置${issue.severity === "error" ? "错误" : "提示"}（${issue.code}）：${issue.message}`;
+      if (issue.severity === "error") this.log.warn(line);
+      else this.log.info(line);
+    }
+    const errors = issues.filter((issue) => issue.severity === "error");
+    if (errors.length > 0) {
+      const first = errors[0]!;
+      this.store.sendToast("warning", vscode.l10n.t("QQ 通道未启动：{0}", first.message));
+      this.pushQqStatus(false, first.message);
+      return;
+    }
+
+    // 硬门控：workspace 必须落在当前工作区根（远程任务由主仓 worktree 执行）。
+    const gateIssues = checkQqStartupGate(config, this.superRepoRoot());
+    if (gateIssues.length > 0) {
+      const first = gateIssues[0]!;
+      this.log.warn(`QQ 配置错误（${first.code}）：${first.message}`);
+      this.store.sendToast("warning", vscode.l10n.t("QQ 通道未启动：{0}", first.message));
+      this.pushQqStatus(false, first.message);
+      return;
+    }
+
+    await this.startQqBotChannel(config, io, generation);
+  }
+
+  // --- QQBot 官方路线（M3-C）-----------------------------------------------
+
+  /**
+   * QQBot 通道启动的**并发闸门**。
+   *
+   * 两个调用方（配置事件路径的 `doStartQq`、扫码成功路径的 `onQqBotBound`）
+   * 都可能同时到达；同步占位保证只有一份启动在跑，后来者复用它。发现通道
+   * 已经在跑时直接返回（配置事件路径在 enable 落盘后重入）。
+   */
+  private startQqBotChannel(
+    config: QqConfig,
+    io: QqSettingsIo,
+    generation: number,
+  ): Promise<void> {
+    if (this.qqChannelStarting) return this.qqChannelStarting;
+    if (this.qq) return Promise.resolve();
+    let task!: Promise<void>;
+    task = this.doStartQqBotChannel(config, io, generation).finally(() => {
+      if (this.qqChannelStarting === task) this.qqChannelStarting = null;
+    });
+    this.qqChannelStarting = task;
+    return task;
+  }
+
+  /**
+   * QQBot 官方通道的常规启动：不建 IPC、不 spawn bridge、不下载外部组件。
+   *
+   * 用 SecretStorage 里扫码写入的 appId/appSecret 建官方 adapter，入站事件
+   * 经 `setEventCallback` 直接进 QqService，出站由 adapter.send 完成。没有
+   * 凭据时如实提示先绑定，绝不退化成其它通道。
+   */
+  private async doStartQqBotChannel(
+    config: QqConfig,
+    io: QqSettingsIo,
+    generation: number,
+  ): Promise<void> {
+    const creds = await readQqBotCredentials(io);
+    if (!creds) {
+      const detail = "QQBot 尚未扫码绑定，请先在设置页完成扫码绑定";
+      this.store.sendToast("warning", vscode.l10n.t(detail));
+      this.pushQqStatus(false, detail);
+      this.postToWebview(qrFailureMessage(detail));
+      return;
+    }
+
+    const root = path.join(
+      this.context.storageUri?.fsPath ?? this.context.globalStorageUri.fsPath,
+      "qq",
+    );
+    const taskStore = new QqTaskStore(root);
+    const service = new QqService({
+      config,
+      store: taskStore,
+      host: createQqServiceHost(this.createQqHostPorts()),
+      log: (line) => this.log.info(line),
+      // 服务里每一次任务状态变化（派发 / 运行 / 终态 / 回包）都要回写到看板
+      // 投影：否则卡片永远停在「已校验 · 耗时 0 秒 · 停止」。
+      onChanged: () => this.refreshQqTaskProjection(),
+    });
+    const deps = this.services.qqbotDeps ?? {};
+    const dispatch = createQqChannelDispatch(config, {
+      appId: creds.appId,
+      appSecret: creds.appSecret,
+      onInbound: (msg) => {
+        const live = this.qq?.service;
+        // F3：服务 start() 尚未完成时（connect→start 窗口）不接消息 —— 否则
+        // 建出的任务会被紧随其后的「非终态标 failed(host_restarted)」误杀，
+        // 甚至派出孤儿子会话。窗口很短，丢弃优于错处理，QQ 侧会重发。
+        if (!live?.isReady()) return;
+        void live.handleInboundMessage(msg).catch((error: unknown) => {
+          this.log.warn(`QQBot 入站处理失败：${errorMessage(error)}`);
+        });
+        this.refreshQqTasks();
+      },
+      log: (line) => this.log.info(line),
+      ...(deps.transport ? { transport: deps.transport } : {}),
+      ...(deps.adapterFactory ? { adapterFactory: deps.adapterFactory } : {}),
+      ...(deps.gatewayUrl ? { gatewayUrl: deps.gatewayUrl } : {}),
+    });
+    const owner: NonNullable<ChatPanel["qq"]> = {
+      service,
+      store: taskStore,
+      config,
+      io,
+      qqbot: { adapter: dispatch.adapter },
+    };
+    this.qq = owner;
+    // F3：现场在 connect 前发布（既有「配置事件不反杀半成品通道」的语义依赖
+    // 这一点），但窗口期的入站消息由 QqService 的 ready 标志挡住 —— start()
+    // 成功前 handleInboundMessage 一律丢弃，不会被「非终态标 failed」误杀、也
+    // 不会派出孤儿子会话。
+    try {
+      await dispatch.adapter.connect();
+      if (generation !== this.qqGeneration || this.disposed) {
+        if (this.qq === owner) this.qq = undefined;
+        await this.disposeQqOwner(owner);
+        return;
+      }
+      await service.start();
+    } catch (error) {
+      if (this.qq === owner) this.qq = undefined;
+      await this.disposeQqOwner(owner);
+      throw error;
+    }
+    if (generation !== this.qqGeneration || this.disposed) {
+      if (this.qq === owner) this.qq = undefined;
+      await this.disposeQqOwner(owner);
+      return;
+    }
+    this.pushQqStatus(true, "QQBot 官方网关已连接");
+    this.refreshQqTasks();
+    this.log.info("QQBot 官方通道已启动（无 bridge / 无外部托管进程）");
+  }
+
+  /** 当前 QQ 配置（测试 IO 优先，读失败回默认）。 */
+  private async currentQqConfig(): Promise<QqConfig> {
+    const snapshot = await readQqSettings(this.qqIo());
+    const { config } = normalizeQqConfig({ ...snapshot } as Record<string, unknown>);
+    return config;
+  }
+
+  /** 停掉在飞的扫码会话（幂等；成功/失败/stop 都调用）。 */
+  private stopQqBotBinding(): void {
+    const binding = this.qqbotBinding;
+    this.qqbotBinding = null;
+    if (this.qq?.qqbot?.bindSession) {
+      this.qq.qqbot.bindSession.stop();
+      this.qq.qqbot.bindSession = undefined;
+    }
+    binding?.stop();
+  }
+
+  /**
+   * 官方扫码绑定：协议 → 会话 → webview 消息 / 凭据落盘 → 启动官方通道。
+   * 这条路径完全不碰外部托管进程的下载、端口探测与 manager。
+   */
+  private async startQqBotBind(config: QqConfig): Promise<void> {
+    if (this.disposed) return;
+    this.stopQqBotBinding();
+    const runtime = createQqBotBindRuntime(this.services.qqbotDeps?.bind ?? {});
+    this.qqbotBinding = runtime.session;
+    this.postManagedStatus({ phase: "checking", message: "正在获取 QQBot 登录二维码" });
+    try {
+      await runtime.session.start({
+        onQr: (dataUrl, expiresAt) => {
+          if (this.disposed) return;
+          this.postToWebview(sanitizeQrLoginMessage(qrReadyMessage(dataUrl, expiresAt)));
+          this.postManagedStatus({ phase: "waiting_login", message: "请用 QQ 扫码绑定机器人" });
+        },
+        onProgress: (phase) => {
+          if (this.disposed) return;
+          this.postToWebview(qrProgressMessage(phase));
+        },
+        onSuccess: (creds) => {
+          if (this.disposed) return;
+          void this.onQqBotBound(creds, config);
+        },
+        onFailure: (message) => {
+          if (this.disposed) return;
+          this.stopQqBotBinding();
+          this.postToWebview(qrFailureMessage(message));
+        },
+      });
+    } catch (error) {
+      this.stopQqBotBinding();
+      this.postToWebview(qrFailureMessage(errorMessage(error)));
+    }
+  }
+
+  /**
+   * 扫码成功：凭据写 SecretStorage → **扫码者 openid 去重写入白名单**（以磁盘
+   * 最新值为基准合并，另一个窗口新增的条目与备注不会被内存快照覆盖）→
+   * 内存置 enabled → 停扫码 → 重建官方通道 → 首次绑定把 enabled 落盘 →
+   * 推已连接回执。
+   *
+   * **顺序是刻意的**：`writeAll` 走 Workspace 作用域，会触发
+   * `onDidChangeConfiguration` 的 QQ 监听；若先落盘再启动，监听会在
+   * `this.qq` 还没赋值时并发发起一次启动，而首次绑定时白名单通常还是空的，
+   * 那一次启动会被 `allowlist_empty` 拦下（现在降为 warning，但并发启动
+   * 本身仍会制造两套现场）。先启动则监听看到的是同一份运行中的配置，
+   * `shouldRestartOnPatch` 判定无需重启。
+   */
+  private async onQqBotBound(creds: Parameters<typeof storeQqBotCredentials>[1], config: QqConfig): Promise<void> {
+    try {
+      const io = this.qqIo();
+      const wasEnabled = config.enabled === true;
+      await storeQqBotCredentials(io, creds);
+      // 扫码者自动入白名单（授权模型 2026-11-17）：官方接口只给 openid，
+      // 扫码结果里的 `userOpenid` 就是扫码者本人。不写进去，扫码完仍然谁也
+      // 派不了任务。写入刻意在启动通道之前——QqService 持有的就是这份
+      // config 对象，通道一起来就能命中。落盘失败不静默：内存里照常放行
+      // （本次可用），但如实说明重启后会丢。
+      const openid = typeof creds.userOpenid === "string" ? creds.userOpenid.trim() : "";
+      if (openid.length > 0) {
+        // 与「放行待审核」（handleQqUserAction）同构：以**磁盘最新值**为基准
+        // 合并，绝不用内存快照整体覆盖 —— `allowedUsers` 是整体替换语义，
+        // 另一个 VSCode 窗口在磁盘上加过的用户（含备注）必须原样保住。
+        // 本窗口内存里的条目一并并进去（它们可能来自尚未落盘的放行），但交给
+        // `applyQqSettingsPatch` 的只有裸 openid：coerceAllowList 会保留磁盘上
+        // 同名条目的 note，内存里从未有过备注意图，不能替用户清空它。
+        let users: string[];
+        try {
+          const fresh = await readQqSettings(io);
+          const seen = new Set<string>();
+          const merged: string[] = [];
+          for (const entry of fresh.allowedUsers) {
+            if (seen.has(entry.openid)) continue;
+            seen.add(entry.openid);
+            merged.push(entry.openid);
+          }
+          for (const entry of config.allowedUsers) {
+            const id = entry.trim();
+            if (id.length === 0 || seen.has(id)) continue;
+            seen.add(id);
+            merged.push(id);
+          }
+          if (!seen.has(openid)) merged.push(openid);
+          users = merged;
+        } catch (error) {
+          // 读盘失败时**不能**改回「凭内存覆盖磁盘」的旧行为（那正是丢数据的
+          // 路径），只在内存态上追加扫码者并如实记录。
+          this.log.warn(`QQ 白名单读取失败，仅更新内存白名单：${errorMessage(error)}`);
+          users = config.allowedUsers.includes(openid)
+            ? config.allowedUsers
+            : [...config.allowedUsers, openid];
+        }
+        config.allowedUsers = users;
+        try {
+          await applyQqSettingsPatch(io, { allowedUsers: users });
+        } catch (error) {
+          this.log.warn(`QQ 白名单写入失败：${errorMessage(error)}`);
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("扫码者未能写入白名单（重启后会丢失）：{0}", errorMessage(error)),
+          );
+        }
+      } else {
+        // 没有 openid 就无法自动授权：如实记日志，绝不假装已授权。
+        this.log.warn("扫码结果没有 userOpenid，未自动加入白名单");
+      }
+      // 内存里先置启用：QqService 读的就是这个对象（私聊自由文本任务要求
+      // enabled），落盘刻意放在启动之后。
+      config.enabled = true;
+      // 新凭据建立的新通道拥有完整的失败预算。
+      this.qqHealthRestarts = 0;
+      this.stopQqBotBinding();
+      // 成功即清掉 webview 里的二维码旧帧。`qqLoginQr` 是独立于快照的通道，
+      // 宿主不覆盖的话，上一帧 waiting_scan 会连同倒计时一直挂着（用户实测：
+      // 底部已显示「已连接 QQBot 官方网关」，中间仍是大二维码 +「剩余 40s」）。
+      // 空 dataUrl 过不了 isQrDataUrl，因此 webview 侧也不会把它送进 <img>。
+      this.postToWebview(buildConfirmedQrMessage());
+      if (this.qq) await this.stopQq();
+      await this.startQqBotChannel(config, io, this.qqGeneration);
+      if (!wasEnabled) {
+        // 首次绑定自动开启远程任务。写失败不能谎报成功：通道已经连上，
+        // 只是开关没落盘，明确让用户手动打开。
+        try {
+          await applyQqSettingsPatch(io, { enabled: true });
+        } catch (error) {
+          this.log.warn(`QQ 设置写入失败：${errorMessage(error)}`);
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("已连接，但无法自动开启远程任务，请手动打开开关"),
+          );
+        }
+      }
+      this.postManagedStatus({ phase: "logged_in", message: "QQBot 绑定成功，官方网关已连接" });
+      // 连接状态显式再推一次：startQqBotChannel 成功路径已推过，这里保证即便
+      // 该路径因代际变化提前返回、只要本面板仍持有通道，webview 也拿到已连接。
+      if (this.qq) this.pushQqStatus(true, "QQBot 官方网关已连接");
+      await this.pushQqSettings();
+    } catch (error) {
+      this.stopQqBotBinding();
+      this.postToWebview(qrFailureMessage(errorMessage(error)));
+    }
+  }
+
+  // --- 一键托管 / 窗口内扫码（Wave5-C）------------------------------------
+
+  /** QQ 设置 IO：测试注入优先，否则用真实 vscode 实现。 */
+  private qqIo(): QqSettingsIo {
+    return this.services.qqSettingsIo ?? createVscodeQqSettingsIo(this.context.secrets);
+  }
+
+  /** 扫码阶段 → qqManagedStatus（message 过 token 脱敏）。 */
+  private postManagedStatus(status: Parameters<typeof toManagedStatusMessage>[0], token?: string): void {
+    if (this.disposed) return;
+    this.postToWebview(toManagedStatusMessage(status, token));
+  }
+
+  /** qqManagedSetup 消息入口：QQBot 单一路径，start 走官方扫码、stop 停扫码会话。 */
+  private async handleQqManagedSetup(action: "start" | "stop"): Promise<void> {
+    if (action === "stop") {
+      this.stopQqBotBinding();
+      if (!this.disposed) {
+        this.postToWebview({ type: "qqManagedStatus", phase: "idle", message: "QQBot 扫码已停止" });
+      }
+      return;
+    }
+    const config = await this.currentQqConfig();
+    await this.startQqBotBind(config);
+  }
+
+  /** 停掉整条通道（QQBot adapter → 服务），每一项都有 2s 上限。 */
+  private async stopQq(): Promise<void> {
+    // 任何停止意图都必须让在飞的启动失效 —— 哪怕这次因为已有停止在进行而
+    // 直接返回：那个慢启动不能在 stop 之后把一份陈旧通道装回 this.qq。
+    const generation = ++this.qqGeneration;
+    // F6：停通道 = 立刻放手主会话注入。只 abort 服务信号不够 —— 已经开始的
+    // ACP 回合不会被它打断，会继续流式跑完且 QQ 早已停止、收不到结果。这里
+    // 对「当前真正跑在主会话上的那一轮」发 session/cancel，并撤掉所有等待者。
+    this.cancelAllQqMainInjections();
+    this.stopQqBotBinding();
+    if (this.qqStopping) return;
+    this.qqStopping = true;
+    try {
+      if (this.qqRestartTimer) {
+        clearTimeout(this.qqRestartTimer);
+        this.qqRestartTimer = null;
+      }
+      const owner = this.qq;
+      this.qq = undefined;
+      if (!owner) return;
+      await this.disposeQqOwner(owner);
+      // 拆旧 owner 是异步的（socket 关闭 + 服务停止），期间可能有一条新通道
+      // 已经装回 this.qq，或又有一次 stop 把 generation 推进。那一刻再清空
+      // 看板/推「已停止」，就会把**新通道**的看板抹掉。
+      if (
+        this.disposed ||
+        generation !== this.qqGeneration ||
+        this.qq !== undefined
+      ) {
+        return;
+      }
+      // 显式停用：清空看板投影并推一次（不留幽灵条目）。被动刷新
+      // （refreshQqTaskProjection 的 onChanged 竞态）不经过这里、也不会清空。
+      setQqTasks(this.store.getState(), []);
+      this.store.pushSnapshot();
+      this.pushQqStatus(false, "QQ 通道已停止");
+    } finally {
+      this.qqStopping = false;
+    }
+  }
+
+  /**
+   * 只拆**这一份** owner（QQBot adapter → 服务）。
+   *
+   * 与 stopQq 分开是为了「启动途中被停用」那条路径：那时 `this.qq` 可能已经
+   * 属于另一份现场（或已被 stopQq 清空），我们不能用 stopQq 去动它，只能把
+   * 自己造出来的这份拆干净。
+   */
+  private async disposeQqOwner(owner: NonNullable<ChatPanel["qq"]>): Promise<void> {
+    // 关 adapter（socket + 心跳）；扫码会话由 stopQqBotBinding 负责停。
+    this.stopQqBotBinding();
+    await this.raceQqTeardown(owner.qqbot.adapter.close());
+    await this.raceQqTeardown(owner.service.stop());
+  }
+
+  /** 单项收尾的硬上限：一个卡住的 socket 不能拖住窗口关闭。 */
+  private async raceQqTeardown(work: Promise<unknown>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        work.then(
+          () => undefined,
+          () => undefined,
+        ),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, QQ_BRIDGE_STOP_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private async restartQq(): Promise<void> {
+    // 先等在飞的启动落定：否则 startQqIfEnabled 会把它那个（即将被作废的）
+    // promise 直接还给我们，重启就成了空转。
+    const inFlight = this.qqStarting;
+    if (inFlight) await inFlight.catch(() => undefined);
+    await this.stopQq();
+    await this.startQqIfEnabled();
+  }
+
+  /**
+   * 面板重新可见时的一次静默健康检查。
+   *
+   * `op=9 invalid session` 之后 adapter 只是丢掉了会话，socket 可能仍显示
+   * connected 且永远不会再收到事件 —— 只看 `connected` 会一直「正常」。
+   * 这里按 health.detail 判定失活，并触发一次有限重启。
+   */
+  private async checkQqChannelHealth(): Promise<void> {
+    if (this.disposed) return;
+    const adapter = this.qq?.qqbot?.adapter;
+    if (!adapter) return;
+    let health: { connected: boolean; detail?: string };
+    try {
+      health = await adapter.health();
+    } catch (error) {
+      this.log.warn(`QQ 通道健康检查失败：${errorMessage(error)}`);
+      return;
+    }
+    if (this.disposed || this.qq?.qqbot?.adapter !== adapter) return;
+    if (isQqHealthHealthy(health)) {
+      this.qqHealthRestarts = 0;
+      return;
+    }
+    const detail =
+      typeof health.detail === "string" && health.detail.trim().length > 0
+        ? health.detail.trim()
+        : "unknown";
+    this.pushQqStatus(false, detail);
+    await this.recoverQqChannel(detail);
+  }
+
+  /**
+   * 失活后的恢复：**有限次**自动重启（{@link QQ_HEALTH_RESTART_LIMIT}），
+   * 用尽后如实要求重新扫码，绝不无限重启。
+   *
+   * 返回是否恢复出一条活着的通道。
+   */
+  private async recoverQqChannel(detail: string): Promise<boolean> {
+    if (this.disposed) return false;
+    // 正在绑定 / 启动 / 停止：这些路径自己会收尾，别抢。
+    if (this.qqbotBinding || this.qqChannelStarting || this.qqStopping) return false;
+    if (this.qqHealthRestarts >= QQ_HEALTH_RESTART_LIMIT) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("QQ 通道已失活且自动重启次数已用尽，请重新扫码绑定"),
+      );
+      this.pushQqStatus(false, "QQ 通道已失活，请重新扫码绑定");
+      return false;
+    }
+    this.qqHealthRestarts += 1;
+    this.log.warn(
+      `QQ 通道健康检查失活（${detail}），尝试自动重启（${this.qqHealthRestarts}/${QQ_HEALTH_RESTART_LIMIT}）`,
+    );
+    try {
+      await this.restartQq();
+    } catch (error) {
+      this.log.warn(`QQ 通道自动重启失败：${errorMessage(error)}`);
+    }
+    const alive = !this.disposed && this.qq !== undefined;
+    if (alive) {
+      this.store.sendToast(
+        "info",
+        vscode.l10n.t("QQ 通道已失活，已自动重启一次；若仍无法收发消息，请重新扫码绑定"),
+      );
+      this.pushQqStatus(true, "QQ 通道已重启");
+    } else {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("QQ 通道已失活且无法自动恢复，请重新扫码绑定"),
+      );
+      this.pushQqStatus(false, "QQ 通道已失活，请重新扫码绑定");
+    }
+    return alive;
+  }
+
+  /** 500ms 防抖的整服务重启（settings.json 一次编辑会触发多帧事件）。 */
+  private scheduleQqRestart(): void {
+    if (this.qqRestartTimer) clearTimeout(this.qqRestartTimer);
+    this.qqRestartTimer = setTimeout(() => {
+      this.qqRestartTimer = null;
+      if (this.disposed) return;
+      void this.restartQq().catch((error: unknown) => {
+        const detail = errorMessage(error);
+        this.log.warn(`QQ 服务重启失败：${detail}`);
+        this.store.sendToast("warning", vscode.l10n.t("QQ 服务重启失败：{0}", detail));
+      });
+    }, QQ_SETTINGS_RESTART_DEBOUNCE_MS);
+    this.qqRestartTimer.unref?.();
+  }
+
+  // --- QQ 入口校验工具 -------------------------------------------------------
+  //
+  // 收敛到 QQBot 单一路径后，入站消息由 setEventCallback 直接给出已归一化的
+  // InboundMessage，下面两个校验工具不再被 live 路径调用；保留为 public 供
+  // 既有接线测试使用。
+
+  isQqRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  isQqTaskAction(value: unknown): value is QqTaskAction {
+    return (
+      value === "approve" ||
+      value === "deny" ||
+      value === "answer" ||
+      value === "stop" ||
+      value === "merge" ||
+      value === "discard" ||
+      value === "refresh"
+    );
+  }
+
+  /**
+   * 把 wire 上的入站消息收敛成 `InboundMessage`。
+   *
+   * bridge 是另一个进程：坏帧不能用 `as` 硬转 —— 缺 `attachments` 会让服务
+   * 在 `.map` 上直接抛错。这里逐字段兜底，`mentionsBot` 只在明确为 true 时算
+   * true（无法证明被 @ 就不算，群聊会因此静默丢弃，这是安全的一侧）。
+   */
+  coerceQqInboundMessage(value: unknown): InboundMessage | null {
+    if (!this.isQqRecord(value)) return null;
+    const chatType = value["chatType"];
+    if (chatType !== "private" && chatType !== "group") return null;
+    const chatId = value["chatId"];
+    const senderId = value["senderId"];
+    const msgId = value["msgId"];
+    const text = value["text"];
+    if (
+      typeof chatId !== "string" ||
+      typeof senderId !== "string" ||
+      typeof msgId !== "string" ||
+      typeof text !== "string"
+    ) {
+      return null;
+    }
+    const rawAttachments = value["attachments"];
+    const attachments = Array.isArray(rawAttachments)
+      ? rawAttachments.filter(
+          (item): item is InboundMessage["attachments"][number] =>
+            this.isQqRecord(item) &&
+            (item["kind"] === "image" || item["kind"] === "file"),
+        )
+      : [];
+    const timestamp = value["timestamp"];
+    return {
+      chatType,
+      chatId,
+      senderId,
+      msgId,
+      text,
+      mentionsBot: value["mentionsBot"] === true,
+      attachments,
+      timestamp: typeof timestamp === "number" && Number.isFinite(timestamp) ? timestamp : Date.now(),
+    };
+  }
+
+  // --- QQ 宿主端口（QqServiceHost 的实现在这里） -----------------------------
+
+  /**
+   * 把面板能力映射成 `QqHostPorts`。
+   *
+   * 取消 / 合并 / 丢弃全部复用既有的 Super Agent 方法（`cancel` /
+   * `requestSuperMerge` / `cleanup`），本模块**不写第二套 git 逻辑**。
+   */
+  private createQqHostPorts(): QqHostPorts {
+    return {
+      workspaceRoots: () => this.qqWorkspaceRoots(),
+
+      spawnTask: (spec, opts) => {
+        const manager = this.getSuperAgent();
+        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        const session = manager.spawn(
+          { title: spec.title, task: spec.task },
+          {
+            policy: {
+              approval: opts.approval,
+              disallowedTools: opts.disallowedTools,
+              onPermissionRequest: opts.onPermission,
+            },
+          },
+        );
+        // spawn 是同步登记：worktree 与分支在 prepare 里才落地，此刻可能还
+        // 没有 branch / path —— 缺省即可，最终结果由 readSuper 里的快照补齐。
+        const isolation = session.isolation;
+        const branch = isolation.branch;
+        const worktreePath =
+          isolation.kind === "git_worktree" && isolation.path ? isolation.path : undefined;
+        return {
+          superSessionId: session.id,
+          ...(branch ? { branch } : {}),
+          ...(worktreePath ? { worktreePath } : {}),
+        };
+      },
+
+      /**
+       * 等子会话收尾。
+       *
+       * **为什么是轮询**：`SuperAgentManager` 只暴露一个 `onSessionsChanged`
+       * 回调（面板已经用来把投影写进 store），没有按订阅者分发的事件面；
+       * 为 QQ 通道去改它的公开接口会把「一次 emit → N 个监听」的生命周期
+       * 复杂度带进管理层。轮询 store 里的投影是零侵入的那条路。
+       *
+       * 上限：调用方（适配器）本来就有 2h 兜底；这里再封一层，保证即便被
+       * 单独调用也不会永远挂着。子会话曾被看到、之后又消失 = 被清理，直接
+       * 返回；从未被任何一方看到 = id 无效，抛错让服务记 failed。
+       */
+      waitForSettle: async (superSessionId, timeoutMs) => {
+        const cap =
+          typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+            ? Math.min(timeoutMs, QQ_DEFAULT_SETTLE_TIMEOUT_MS)
+            : QQ_DEFAULT_SETTLE_TIMEOUT_MS;
+        const deadline = Date.now() + cap;
+        let appeared = false;
+        for (;;) {
+          const session = this.findQqSuperSession(superSessionId);
+          if (session) {
+            appeared = true;
+            if (isQqTerminalSuperStatus(session.status)) return;
+          } else if (appeared) {
+            return;
+          } else if (!this.getSuperAgent()?.get(superSessionId)) {
+            throw new Error(`QQ 任务指向的子会话不存在：${superSessionId}`);
+          }
+          const remain = deadline - Date.now();
+          if (remain <= 0) throw new QqSettleTimeoutError(superSessionId, cap);
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, Math.min(QQ_SETTLE_POLL_MS, remain));
+            timer.unref?.();
+          });
+        }
+      },
+
+      cancel: async (superSessionId) => {
+        const manager = this.getSuperAgent();
+        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        // 对已终态的子会话再取消是幂等重复，管理器自己会如实返回。
+        await manager.cancel(superSessionId, "agent");
+      },
+
+      /**
+       * 合并回当前分支。
+       *
+       * 合并由**专用合并子会话**在主仓工作区里执行（冲突需要有人读代码），
+       * 因此这是一个异步动作：派发成功也只回报「已派出」，合并结果稍后写进
+       * 看板的 integration。**绝不**在这里谎报 ok=true；`requestSuperMerge`
+       * 没派出子会话时必须把真实原因回给 QQ（排队 / 主会话忙 / 已有合并在跑）。
+       */
+      merge: async (superSessionId) => {
+        const manager = this.getSuperAgent();
+        if (!manager) return { ok: false, detail: "Super Agent 不可用（未打开工作区）" };
+        const session = manager.get(superSessionId);
+        if (!session) return { ok: false, detail: "子会话不存在或已被清理" };
+        if (session.integration?.state === "merged") {
+          return { ok: true, detail: "改动已经在当前分支上" };
+        }
+        if (!isQqTerminalSuperStatus(session.status)) {
+          return { ok: false, detail: "子会话还没结束，完成后再合并" };
+        }
+        if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
+          return { ok: false, detail: "该子会话没有可合并的分支（仅目录隔离）" };
+        }
+        const outcome = await this.requestSuperMerge(superSessionId);
+        if (outcome.dispatched) {
+          return {
+            ok: false,
+            detail: "已派出合并子会话（异步执行），合并结果稍后在看板确认",
+          };
+        }
+        if (outcome.queued) {
+          return { ok: false, detail: `合并请求已排队，空闲后自动派发：${outcome.reason}` };
+        }
+        return { ok: false, detail: outcome.reason };
+      },
+
+      discard: async (superSessionId) => {
+        const manager = this.getSuperAgent();
+        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        // 如实回传 cleanup 的观测：分支还带未合并提交时 git 会保下分支
+        // （只删工作目录），QQ 回执与看板都要把这件事说清楚。
+        const result = await manager.cleanup(superSessionId, { keepBranch: false });
+        return {
+          ok: result.ok,
+          ...(result.branchKept === true ? { branchKept: true } : {}),
+          ...(result.reason ? { reason: result.reason } : {}),
+        };
+      },
+
+      readSuper: (superSessionId) => {
+        const session = this.findQqSuperSession(superSessionId);
+        if (!session) return null;
+        const snapshot: QqHostSuperSnapshot = { status: session.status };
+        const lastReport =
+          session.reports.length > 0 ? session.reports[session.reports.length - 1] : undefined;
+        // 「最后一条汇报」优先；没有汇报时退回会话摘要。都取不到就不填 ——
+        // 适配器会用占位文案，绝不编造内容。
+        const summary = (lastReport?.summary ?? session.summary ?? "").trim();
+        if (summary.length > 0) snapshot.summary = summary;
+        const branch = session.isolation.branch;
+        if (branch) snapshot.branch = branch;
+        // worktree 路径同样只在「真的还有目录」时给：released / recycled 表示
+        // 目录已经被清理，回传一个磁盘上不存在的路径只会误导合并/丢弃兜底。
+        const isolation = session.isolation;
+        if (
+          isolation.kind === "git_worktree" &&
+          isolation.path &&
+          isolation.released !== true &&
+          isolation.recycled !== true
+        ) {
+          snapshot.worktreePath = isolation.path;
+        }
+        if (session.integration) snapshot.merged = session.integration.state === "merged";
+        return snapshot;
+      },
+
+      injectIntoMain: (input) => this.injectQqMainTurn(input),
+      cancelMainInjection: (taskId) => this.cancelQqMainInjection(taskId),
+
+      /**
+       * 把 QQ 用户的回答送回远程子会话。`SuperAgentManager.respond` 会命中该
+       * 子会话挂起的 `_iflow/user/questions` 并让 agent 继续；已超时 / 已回答
+       * 时返回 false，服务侧据此如实回执。
+       */
+      answerRemoteQuestion: (superSessionId, answers) => {
+        const manager = this.getSuperAgent();
+        return manager ? manager.respond(superSessionId, { answers }) : false;
+      },
+
+      /**
+       * main 渠道任务的回答回灌：按 taskId 命中本注入回合的提问卡。超时 / 停止
+       * 时服务送来空答案（按未回答继续），语义与本地提问卡一致。
+       */
+      answerMainQuestion: (taskId, answers) => this.answerQqMainQuestion(taskId, answers),
+
+      notify: (text) => {
+        if (this.disposed) return;
+        this.store.sendToast("info", text);
+      },
+
+      deliver: async (msg) => {
+        const adapter = this.qq?.qqbot?.adapter;
+        if (!adapter) return { ok: false }; // 入口防御：通道未起 / 未绑定
+        return deliverViaQqBotAdapter(adapter, msg);
+      },
+
+      onPendingUser: (info) =>
+        this.handleQqPendingUser(info).catch((error: unknown) => {
+          this.log.warn(`QQ 待审核记录写入失败：${errorMessage(error)}`);
+          // 写失败 = 未记入：如实回报 dropped，服务侧不得虚称「已记入」。
+          return { dropped: true };
+        }),
+      unbindAccount: () => this.unbindQqAccount(),
+    };
+  }
+
+  // --- QQ 主会话渠道（QQ 消息固定去向）---------------------------------------
+
+  /**
+   * 把一条 QQ 消息注入主会话，等那一轮结束，返回该轮 assistant 正文。
+   *
+   * 四条硬纪律：
+   *  1. **remotePolicy 闸门**：与 child 渠道走同一个 `qqSpawnPolicyFor` 判定，
+   *     readonly 策略下主会话渠道（无法保证只读）一律拒绝注入；
+   *  2. **等空闲再投**：`mainSessionFree()` 是 sendPrompt 自己那道门的镜像
+   *     （status / initializing / replaying / historySync / mainLane），所以
+   *     不会与本地回合或宿主回合并发跑在同一 ACP 会话上；
+   *  3. **转录可区分**：正常 user 气泡（`hidden:false`）+ `origin:"qq"` 徽标；
+   *     模型看到的是带来源包裹的正文（服务生成），本机用户看到的是原文；
+   *  4. **轮次锚定**：记下回合开始时的 sessionId 与末尾可见 text 块的稳定 id，
+   *     结束时 sessionId 必须一致、锚块必须仍在，只取锚块之后的 assistant 文本
+   *     —— 上一轮、后续轮次与「会话被替换后的无关文本」都不会被回给 QQ。
+   *
+   * 忙（撞上本地回合刚抢到车道）时不会失败：短暂等待后重试，直到超时上限。
+   * 排队等空闲期间被 `/qq stop` 打断就返回 canceled，由服务侧收尾。
+   */
+  private async injectQqMainTurn(input: QqMainInjectInput): Promise<QqMainInjectResult> {
+    const taskId = input.task.taskId;
+    // F1：main 渠道跑在用户自己的主会话里，不能像 child 那样剔除写工具。
+    // 与 child 走同源策略判定：readonly（deny）一律拒绝，绝不注入。
+    if (qqSpawnPolicyFor(input.task.policy.remotePolicy).approval === "deny") {
+      return {
+        injected: false,
+        reason: "当前远程策略为只读，主会话渠道无法保证只读约束，任务未注入。请改用 child 渠道或调整远程策略。",
+      };
+    }
+    const controller = new AbortController();
+    const onServiceAbort = (): void => controller.abort();
+    if (input.signal.aborted) controller.abort();
+    else input.signal.addEventListener("abort", onServiceAbort, { once: true });
+    this.qqInjectAborts.set(taskId, controller);
+
+    const deadline = Date.now() + Math.max(0, input.timeoutMs);
+    // 本轮是否真的把任务派给了子会话：finally 也要据此决定是否撤销预登记的
+    // 等最终答复记账，因此必须在 try 之外声明。
+    let delegated = false;
+    try {
+      // 阶段一：等主会话空闲（被取消 / 超时都如实返回，绝不硬塞）。
+      const free = await this.waitForQqMainFree(controller.signal, deadline);
+      if (free !== "free") {
+        return free === "canceled"
+          ? { injected: false, canceled: true }
+          : {
+              injected: false,
+              reason: "主会话长时间未空闲，消息未注入（可在主会话空闲后重发）。",
+            };
+      }
+
+      // 阶段二：发一轮。撞上忙窗口（本地回合先抢到车道）不算失败，等一拍
+      // 再来；一旦这一轮真的开始（started），后续只收本轮文本、不再重试。
+      while (true) {
+        if (this.disposed || controller.signal.aborted) {
+          return { injected: false, canceled: true };
+        }
+        if (Date.now() > deadline) {
+          return {
+            injected: false,
+            reason: "主会话长时间未空闲，消息未注入（可在主会话空闲后重发）。",
+          };
+        }
+
+        // 轮次锚点：sessionId + 「基线末尾那一个可见 text 块的稳定 id」。
+        // 基线口径与取结果口径一致（都排除 system 块），避免数量错位；块 id
+        // 让「会话被替换后同样数量的文本」也能被识别成串包而非本轮结果。
+        const before = this.store.getState();
+        const sessionIdBefore = before.sessionId;
+        const visibleTextBefore = before.blocks.filter(
+          (block) => block.kind === "text" && !block.system,
+        );
+        const textCountBefore = visibleTextBefore.length;
+        const anchorId = visibleTextBefore[visibleTextBefore.length - 1]?.id;
+
+        let started = false;
+        // 子会话基线：这一轮开始时该主会话已有的子会话 id。轮末若出现新 id，
+        // 说明主 Agent 把任务派了出去 —— 本轮文本只是「已安排」的占位，真正
+        // 答复要等子会话汇报汇总轮（见 delegated / qqMainFinalAwaiters）。
+        let superIdsBefore: ReadonlySet<string> = new Set();
+        await this.sendPrompt(input.text, undefined, undefined, undefined, {
+          // 宿主驱动回合：不改会话标题、不拍 checkpoint（QQ 正文不写进
+          // 会话标签/工作区快照）；但**不 hidden** —— 转录里要有用户气泡。
+          internal: true,
+          delegateOnBusy: false,
+          quietBusy: true,
+          origin: "qq",
+          displayText: input.displayText,
+          onTurnStarted: async () => {
+            started = true;
+            this.qqInjectedTaskId = taskId;
+            // 先登记再发：汇报轮可能在注入轮收尾的同一拍就被仲裁投递，记账
+            // 必须在这之前存在。轮末若确认没派生子会话会撤销（见 finally）。
+            if (sessionIdBefore) {
+              this.qqMainFinalAwaiters.set(taskId, sessionIdBefore);
+              this.qqMainFinalAwaiterSince.set(taskId, Date.now());
+              // 新一轮开始：清掉上一轮遗留的补发缓存，避免迟到补发误用旧结论。
+              this.qqFinalRescueText.delete(sessionIdBefore);
+              this.ensureQqFinalRescueTimer();
+            }
+            superIdsBefore = new Set(
+              (this.getSuperAgent()?.list() ?? [])
+                .filter((s) => (s.mainSessionId ?? sessionIdBefore) === sessionIdBefore)
+                .map((s) => s.id),
+            );
+            await input.onInjected();
+          },
+        });
+
+        if (!started) {
+          // 车道被别的回合抢走（本地回合优先）：等下一拍重试。
+          await this.waitForMainFreeTick(controller.signal, deadline);
+        } else {
+          // 这一轮真的跑过：无论成败，结果都属于它。
+          const state = this.store.getState();
+          // F5：会话在回合中被替换（切会话 / 新会话 / 恢复）时基线来自旧会话，
+          // 结果读自新会话 —— 绝不把无关文本当成本轮结果回给 QQ。
+          if (state.sessionId !== sessionIdBefore) {
+            return {
+              injected: true,
+              text: "",
+              failed: true,
+              reason: "会话在本轮执行期间被切换，未能取回本轮结果。",
+            };
+          }
+          const visibleText = state.blocks.filter(
+            (block) => block.kind === "text" && !block.system,
+          );
+          let resultStart = 0;
+          if (anchorId !== undefined) {
+            const anchorIndex = visibleText.findIndex((block) => block.id === anchorId);
+            if (anchorIndex < 0) {
+              // 基线锚块消失（转录被清空/重排）：同样不能安全地按数量切片。
+              return {
+                injected: true,
+                text: "",
+                failed: true,
+                reason: "本轮转录基线已失效，未能取回本轮结果。",
+              };
+            }
+            resultStart = anchorIndex + 1;
+          } else {
+            // 没有锚块（历史数据无稳定 id）：退回数量口径，但 sessionId 已校验。
+            resultStart = textCountBefore;
+          }
+          const text = visibleText
+            .slice(resultStart)
+            .map((block) => (block.kind === "text" ? block.text : ""))
+            .join("\n")
+            .trim();
+          const failed = state.status === "error";
+          // 本轮是否派生了子会话（相对轮初基线出现新 id）。派生了就把本任务
+          // 登记为「等最终答复」：这一轮文本只是占位，真正的答复将在子会话
+          // 汇报汇总轮结束时经 completeMainFinalAnswer 回传 QQ。
+          if (!failed && sessionIdBefore) {
+            // R3：子会话的登记（onSessionsChanged → list()）可能与回合收尾差错一拍，
+            // 立刻判定会把「已派子会话」误判成直答、在 finally 里提前摘掉 awaiter。
+            // 留一个很短的宽限期再核对一次（不阻塞主机、只延迟本轮结果一小段）。
+            if (this.qqDelegationGraceMs > 0 && !controller.signal.aborted) {
+              await new Promise<void>((resolve) =>
+                setTimeout(resolve, this.qqDelegationGraceMs),
+              );
+            }
+            delegated = (this.getSuperAgent()?.list() ?? []).some(
+              (s) =>
+                (s.mainSessionId ?? sessionIdBefore) === sessionIdBefore &&
+                !superIdsBefore.has(s.id),
+            );
+            this.log.info(
+              `QQ 注入轮 delegated 判定：task=${taskId} delegated=${delegated} baseline=${superIdsBefore.size} current=${this.getSuperAgent()?.list().length ?? 0}`,
+            );
+          }
+          // 中间正文轮同步：派生子会话的注入轮，其 assistant 正文只是「已安排」
+          // 的占位说明，永远不会被当成最终结果（真正答复在汇报汇总轮经
+          // completeMainFinalAnswer 回传）。这里把这段正文作为进度文本转发一次，
+          // 让 QQ 发起者看到主会话真实说了什么。直答轮（未派生）不转发 —— 那段
+          // 正文马上由 finalizeMainTask 作为最终结果投递，再转一次就是重复。
+          if (delegated && !failed) {
+            void this.deliverQqMainIntermediateText(sessionIdBefore, text, [taskId]);
+          }
+          return {
+            injected: true,
+            text,
+            ...(state.stopReason ? { stopReason: state.stopReason } : {}),
+            ...(delegated ? { delegated: true } : {}),
+            ...(failed
+              ? { failed: true, reason: state.errorMessage ?? "主会话本轮执行失败。" }
+              : {}),
+          };
+        }
+      }
+    } finally {
+      // 只有确认派生了子会话才保留记账等最终答复；其余（未派生 / 失败 /
+      // 会话切换 / 取消 / 注入未成功）一律撤销，避免迟到的汇报回错任务。
+      if (!delegated) {
+        this.qqMainFinalAwaiters.delete(taskId);
+        this.qqMainFinalAwaiterSince.delete(taskId);
+      }
+      if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
+      this.qqInjectAborts.delete(taskId);
+      if (this.qqInjectedTaskId === taskId) this.qqInjectedTaskId = null;
+      input.signal.removeEventListener("abort", onServiceAbort);
+    }
+  }
+
+  /**
+   * 子会话汇报**汇总轮**（pendingCount=0）结束时，把该轮 assistant 文本作为
+   * 真正最终答复回传给对应的 QQ 任务。
+   *
+   * 按归属会话取所有登记过的任务（一轮汇总结论覆盖该主会话里正在等答案的
+   * QQ 任务）。空文本不再静默留账：改为回传一条如实兜底文案并摘除记账，
+   * 避免 QQ 永久停在「已受理」（R1）。单次投递 / 幂等由服务的 resultDeliveredAt
+   * 保证。onlyTaskIds 供 R2 迟到补发精确命中单个任务，避免误伤同会话其它 awaiter。
+   */
+  private async deliverQqMainFinalAnswer(
+    sessionId: string | null,
+    rawText: string,
+    stopReason: string,
+    onlyTaskIds?: ReadonlySet<string>,
+  ): Promise<void> {
+    if (this.disposed || !sessionId) return;
+    // R1：汇总轮可能只调了合并/复核动作而没有 assistant 正文。旧实现在这里
+    // 静默 return 且不摘记账 —— QQ 永远停在「已受理」。改为如实兜底：摘除记账
+    // 并回传一条明确文案（走 completeMainFinalAnswer 的 forceActive 主动消息，
+    // 长任务下也真能发出），绝不伪造「已完成」之类内容。
+    const text =
+      rawText.trim().length > 0
+        ? rawText.trim()
+        : vscode.l10n.t("子会话任务已完成，但未产生可转发的正文摘要。");
+    const taskIds = [...this.qqMainFinalAwaiters.entries()]
+      .filter(([, owner]) => owner === sessionId)
+      .map(([taskId]) => taskId)
+      .filter((taskId) => (onlyTaskIds ? onlyTaskIds.has(taskId) : true));
+    for (const taskId of taskIds) {
+      this.qqMainFinalAwaiters.delete(taskId);
+      this.qqMainFinalAwaiterSince.delete(taskId);
+      try {
+        await this.qq?.service.completeMainFinalAnswer({ taskId, text, stopReason });
+      } catch (error) {
+        this.log.warn(`QQ 主会话最终答复回传失败：${errorMessage(error)}`);
+      }
+    }
+    // 该会话已无 awaiter：清掉补发缓存，避免下一条任务误用上一轮的旧结论。
+    if (![...this.qqMainFinalAwaiters.values()].includes(sessionId)) {
+      this.qqFinalRescueText.delete(sessionId);
+    }
+    if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
+  }
+
+  /** 该归属会话是否还有 QQ awaiter（决定是否值得缓存汇报正文供补发）。 */
+  private qqFinalRescueOwnerPending(owner: string): boolean {
+    return [...this.qqMainFinalAwaiters.values()].includes(owner);
+  }
+
+  /** 该归属会话是否存在已等过软阈值的 QQ awaiter（R2 汇报轮 final 放宽的依据）。 */
+  private qqFinalRescueDue(owner: string | null): boolean {
+    if (!owner) return false;
+    const now = Date.now();
+    for (const [taskId, taskOwner] of this.qqMainFinalAwaiters.entries()) {
+      if (taskOwner !== owner) continue;
+      const since = this.qqMainFinalAwaiterSince.get(taskId) ?? now;
+      if (now - since >= this.qqFinalRescueMs) return true;
+    }
+    return false;
+  }
+
+  /** 迟到补发定时器：仅在有 awaiter 时存活，避免无谓唤醒宿主。 */
+  private ensureQqFinalRescueTimer(): void {
+    if (this.disposed || this.qqFinalRescueTimer) return;
+    const timer = setInterval(() => this.rescueStaleQqFinalAwaiters(), QQ_FINAL_RESCUE_POLL_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.qqFinalRescueTimer = timer;
+  }
+
+  private stopQqFinalRescueTimer(): void {
+    if (this.qqFinalRescueTimer) {
+      clearInterval(this.qqFinalRescueTimer);
+      this.qqFinalRescueTimer = null;
+    }
+  }
+
+  /**
+   * R2 迟到补发：等最终答复的 awaiter 若等得太久，强制以「最近一次汇报文本（或兜底）」
+   * 收尾，避免 QQ 永久停在「已受理」。
+   *  - 软阈值：已超 qqFinalRescueMs 且本会话已无活跃子会话（正常长任务的收尾窗口）；
+   *  - 硬上限：已超 qqFinalHardRescueMs，即便还有子会话卡在非终态也补发
+   *    （复核子会话卡在等输入时不能让发起者永远等下去）。
+   * 只补发到点的那一个 taskId（onlyTaskIds 过滤），不误伤同会话刚开始的其它 awaiter。
+   */
+  private rescueStaleQqFinalAwaiters(): void {
+    if (this.disposed || this.qqMainFinalAwaiters.size === 0) return;
+    const now = Date.now();
+    const live = this.getSuperAgent()?.list() ?? [];
+    for (const [taskId, owner] of [...this.qqMainFinalAwaiters.entries()]) {
+      const since = this.qqMainFinalAwaiterSince.get(taskId) ?? now;
+      const age = now - since;
+      const activeChildren = live.filter(
+        (s) => (s.mainSessionId ?? owner) === owner && !isTerminalSuperStatus(s.status),
+      ).length;
+      const due =
+        age >= this.qqFinalHardRescueMs ||
+        (age >= this.qqFinalRescueMs && activeChildren === 0);
+      if (!due) continue;
+      this.log.warn(
+        `QQ 主会话最终答复迟到补发：task=${taskId} waited=${age}ms activeChildren=${activeChildren}`,
+      );
+      void this.deliverQqMainFinalAnswer(
+        owner,
+        this.qqFinalRescueText.get(owner) ?? "",
+        "end_turn",
+        new Set([taskId]),
+      );
+    }
+    if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
+  }
+
+  /** 汇报回合收尾后提取「本轮新增」的 assistant 文本，供迟到补发复用。 */
+  private captureQqReportTurnText(anchorId: string | undefined, beforeCount: number): string {
+    const visible = this.store.getState().blocks.filter(
+      (block) => block.kind === "text" && !block.system,
+    );
+    let start = beforeCount;
+    if (anchorId !== undefined) {
+      const idx = visible.findIndex((block) => block.id === anchorId);
+      start = idx >= 0 ? idx + 1 : beforeCount;
+    }
+    return visible
+      .slice(start)
+      .map((block) => (block.kind === "text" ? block.text : ""))
+      .join("\n")
+      .trim();
+  }
+
+  /**
+   * 把主会话某一轮的 assistant 正文经 QQ 进度通道转发一次。
+   *
+   * 只投给该归属会话里仍在等最终答复的 QQ 任务 —— `qqMainFinalAwaiters` 就是
+   * 权威记账，任务取消 / 通道停止 / 会话切换 / dispose 都会清它，天然不串台；
+   * 服务侧再以 status=injected + 独立分支节流 / 指纹去重 + 终态短路作二次防线。
+   * 最终汇报轮的正文不走这里（由 {@link deliverQqMainFinalAnswer} 投递），
+   * 因此同一段正文绝不会被当成中间正文再发一次。
+   */
+  private async deliverQqMainIntermediateText(
+    owner: string | null,
+    text: string,
+    taskIds?: readonly string[],
+  ): Promise<void> {
+    if (this.disposed || !owner || !text.trim()) return;
+    const service = this.qq?.service;
+    // 部分测试夹具只提供最终答复通道：没有中间正文通道就安静跳过，不误伤。
+    if (!service || typeof service.deliverMainTurnText !== "function") return;
+    const targets =
+      taskIds ??
+      [...this.qqMainFinalAwaiters.entries()]
+        .filter(([, sessionId]) => sessionId === owner)
+        .map(([taskId]) => taskId);
+    for (const taskId of targets) {
+      try {
+        await service.deliverMainTurnText(taskId, text);
+      } catch (error) {
+        this.log.warn(`QQ 主会话中间正文回传失败：${errorMessage(error)}`);
+      }
+    }
+  }
+
+  /** 等主会话进入可注入状态。
+   *
+   * 判定口径与 `sendPrompt` 自己的门一致（`mainSessionFree`：会话就绪、非
+   * streaming / initializing / replaying / historySync、且主会话车道空闲）。
+   * 被取消或超过 deadline 就返回对应状态，由调用方如实收尾。
+   */
+  private async waitForQqMainFree(
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<"free" | "canceled" | "timeout"> {
+    while (true) {
+      if (this.disposed || signal.aborted) return "canceled";
+      if (this.mainSessionFree()) return "free";
+      if (Date.now() > deadline) return "timeout";
+      await this.waitForMainFreeTick(signal, deadline);
+    }
+  }
+
+  /** 等一拍再看主会话是否空闲；取消/销毁/超时立刻返回。 */
+  private async waitForMainFreeTick(signal: AbortSignal, deadline: number): Promise<void> {
+    const remain = deadline - Date.now();
+    if (remain <= 0) return;
+    const ms = Math.min(QQ_MAIN_IDLE_POLL_MS, remain);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(finish, ms);
+      const onAbort = (): void => finish();
+      function finish(): void {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }
+      if (signal.aborted) {
+        finish();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      timer.unref?.();
+    });
+  }
+
+  /**
+   * 停止整条 QQ 通道时的一次性放手（F6）：撤掉所有「等空闲」的注入，并打断
+   * 当前真正跑在主会话上的那一轮。与单任务 {@link cancelQqMainInjection} 同源
+   * 的 session/cancel 语义 —— 只有 qqInjectedTaskId 命中才打，绝不误伤本地回合。
+   */
+  private cancelAllQqMainInjections(): void {
+    const activeTaskId = this.qqInjectedTaskId;
+    for (const controller of this.qqInjectAborts.values()) controller.abort();
+    this.qqInjectAborts.clear();
+    // 只有「整条 QQ 通道停止」才会走到这里（stopQq）：撤销全部等最终答复的
+    // 记账是正确语义。R3 不变量：普通任务收尾 / 汇报轮绝不调本方法，绝不因
+    // 本地回合收尾而把 delegated=true 的 awaiter 误摘。
+    this.qqMainFinalAwaiters.clear();
+    this.qqMainFinalAwaiterSince.clear();
+    this.qqFinalRescueText.clear();
+    this.qqTaskBySuperSession.clear();
+    this.stopQqFinalRescueTimer();
+    if (activeTaskId !== null) {
+      this.qqInjectedTaskId = null;
+      this.cancelSeen = true;
+      const sessionId = this.store.getState().sessionId;
+      if (sessionId) this.sendTurnCancel(sessionId, this.client);
+    }
+  }
+
+  /**
+   * 停止某个主会话渠道任务：放弃等待空闲，必要时打断正在跑的那一轮。
+   *
+   * 只有当前注入的就是这个任务时才 `session/cancel` —— 绝不能因为 QQ 的任务
+   * 被停，把用户本地正在跑的回合一起打掉。
+   */
+  private cancelQqMainInjection(taskId: string): boolean {
+    const controller = this.qqInjectAborts.get(taskId);
+    const isActiveTurn = this.qqInjectedTaskId === taskId;
+    const wasAwaitingFinal = this.qqMainFinalAwaiters.delete(taskId);
+    if (wasAwaitingFinal) this.qqMainFinalAwaiterSince.delete(taskId);
+    if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
+    if (!controller && !isActiveTurn && !wasAwaitingFinal) return false;
+    controller?.abort();
+    if (isActiveTurn) {
+      this.cancelSeen = true;
+      const sessionId = this.store.getState().sessionId;
+      if (sessionId) this.sendTurnCancel(sessionId, this.client);
+    }
+    return true;
+  }
+
+  /** 子会话快照：优先 store 的投影（webview 看到的那份），再退回管理器。 */
+  private findQqSuperSession(id: string): SuperSessionUi | null {
+    const projected = this.store.getState().superSessions;
+    const fromState = projected?.find((session) => session.id === id);
+    if (fromState) return fromState;
+    return this.getSuperAgent()?.get(id) ?? null;
+  }
+
+  // --- QQ 待审核用户 / 账号授权 ---------------------------------------------
+
+  /** 待审核用户存储（懒建；与通道生命周期无关，通道没起也能看历史记录）。 */
+  private qqPendingStore(): QqPendingUserStore {
+    if (!this.qqPendingUsers) {
+      const root = path.join(
+        this.context.storageUri?.fsPath ?? this.context.globalStorageUri.fsPath,
+        "qq",
+      );
+      this.qqPendingUsers = new QqPendingUserStore(root);
+    }
+    return this.qqPendingUsers;
+  }
+
+  /**
+   * 服务上报一条白名单外消息：累加记录并推全量列表。
+   *
+   * 返回 `{dropped}`：队列满（{@link QQ_PENDING_MAX_USERS}）或写入失败时为
+   * true，服务侧据此不虚称「已记入待审核」。丢弃提示里只出现脱敏 openid
+   * （`maskQqOpenId`），完整值只留在存储里作为放行依据。
+   *
+   * 丢弃 warning 按 openid 冷却（{@link QQ_PENDING_DROPPED_TOAST_COOLDOWN_MS}）：
+   * 满队时外部每条消息都触发一次丢弃事件，没有冷却会把操作者的面板刷满屏；
+   * 不同用户的首次丢弃仍各自提示，不吞真实信号。
+   */
+  private async handleQqPendingUser(info: QqPendingUserInput): Promise<{ dropped: boolean }> {
+    if (this.disposed) return { dropped: false };
+    let outcome: { users: QqPendingUser[]; dropped: boolean; openid: string };
+    try {
+      outcome = await this.qqPendingStore().record(info);
+    } catch (error) {
+      this.log.warn(`QQ 待审核记录写入失败：${errorMessage(error)}`);
+      // 写失败 = 未记入：如实回报 dropped，服务侧不得虚称「已记入」。
+      return { dropped: true };
+    }
+    this.postQqPendingUsers(outcome.users);
+    if (outcome.dropped) {
+      const key = typeof info.openid === "string" ? info.openid.trim() : "";
+      const at = Date.now();
+      const last = this.qqPendingDropToastAt.get(key);
+      if (last === undefined || at - last >= QQ_PENDING_DROPPED_TOAST_COOLDOWN_MS) {
+        this.qqPendingDropToastAt.set(key, at);
+        const masked = maskQqOpenId(outcome.openid) || "（未知用户）";
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t(
+            "待审核队列已满（上限 {0} 条），已丢弃来自 {1} 的新请求；请先处理现有记录",
+            QQ_PENDING_MAX_USERS,
+            masked,
+          ),
+        );
+      }
+    }
+    return { dropped: outcome.dropped };
+  }
+
+  /** 推待审核列表（每次全量，webview 直接替换）。 */
+  private postQqPendingUsers(users: QqPendingUser[]): void {
+    if (this.disposed) return;
+    this.postToWebview({ type: "qqPendingUsers", users });
+  }
+
+  /** 读存储后推一次（面板重开 / 通道启动时）。 */
+  private async pushQqPendingUsers(): Promise<void> {
+    if (this.disposed) return;
+    try {
+      this.postQqPendingUsers(await this.qqPendingStore().list());
+    } catch (error) {
+      this.log.warn(`QQ 待审核列表读取失败：${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * 面板对一条待审核记录的处置。
+   *
+   * approve → 移出队列 + 去重追加进 `allowedUsers`（落盘 + 热更新运行中的
+   * config）+ 推设置快照；reject → 移出队列并记入拒绝集合（同一 openid 不会
+   * 再冒出来）。写盘失败时**不删记录**并如实提示 —— 否则用户点了「放行」
+   * 记录就消失，而白名单里其实没有他。
+   */
+  private async handleQqUserAction(
+    openid: string,
+    action: "approve" | "reject",
+  ): Promise<void> {
+    if (this.disposed) return;
+    const id = typeof openid === "string" ? openid.trim() : "";
+    if (id.length === 0) {
+      this.store.sendToast("warning", vscode.l10n.t("待审核记录缺少用户标识"));
+      return;
+    }
+    const pending = this.qqPendingStore();
+    if (action === "reject") {
+      this.postQqPendingUsers(await pending.reject(id));
+      return;
+    }
+
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    try {
+      const fresh = await readQqSettings(io);
+      // 快照里是带备注的条目；匹配与下面同步给运行中 config 的必须是完整 openid。
+      const users = fresh.allowedUsers.some((entry) => entry.openid === id)
+        ? fresh.allowedUsers
+        : [...fresh.allowedUsers, { openid: id }];
+      await applyQqSettingsPatch(io, { allowedUsers: users });
+      // 与服务共享同一个 config 对象：白名单立刻生效，不必等重启。
+      if (this.qq) this.qq.config.allowedUsers = users.map((entry) => entry.openid);
+      this.postQqPendingUsers(await pending.approve(id));
+      await this.pushQqSettings();
+      this.log.info(`QQ 已放行用户 ${id}（当前 ${users.length} 个账号）`);
+    } catch (error) {
+      this.log.warn(`QQ 白名单写入失败：${errorMessage(error)}`);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("无法写入 QQ 白名单：{0}", errorMessage(error)),
+      );
+    }
+  }
+
+  /**
+   * 解除绑定并清除本地授权：删除扫码写入的 appId / appSecret、清空用户白名单
+   * （群白名单不动）、把 enabled 落盘为 false，然后停掉通道。
+   *
+   * 手填凭据移除后这是唯一「忘掉机器人」的入口，所以必须连 SecretStorage
+   * 里的凭据一起删 —— 只清白名单会让用户以为已经解绑，实际机器人凭据仍在。
+   */
+  private async unbindQqAccount(): Promise<{ ok: boolean; message: string }> {
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    await io.deleteSecret(QQBOT_APP_ID_SECRET_KEY);
+    await io.deleteSecret(QQ_SECRET_KEYS.appSecret);
+    try {
+      await applyQqSettingsPatch(io, { allowedUsers: [], enabled: false });
+    } catch (error) {
+      // writeAll 走 Workspace 作用域：没打开工作区时会抛错。凭据已经删除，
+      // 这里只记日志 —— 不谎报设置已落盘。
+      this.log.warn(`QQ 设置写入失败：${errorMessage(error)}`);
+    }
+    if (this.qq) this.qq.config.allowedUsers = [];
+    await this.stopQq();
+    await this.pushQqSettings();
+    return { ok: true, message: "已解除绑定并清除本地授权" };
+  }
+
+  // --- QQ 设置 / 凭据 / 状态消息 --------------------------------------------
+
+  /**
+   * 设置区改动 → 落盘 + 推快照 + 同步运行中的服务。
+   *
+   * 落盘走 `applyQqSettingsPatch`（白名单键 + 拒绝脏值）；是否重启由
+   * `syncQqServiceWithSettings` 按连接类字段判定。
+   */
+  private async handleQqSettingsPatch(patch: QqSettingsPatch): Promise<void> {
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    let result: Awaited<ReturnType<typeof applyQqSettingsPatch>>;
+    try {
+      result = await applyQqSettingsPatch(io, patch);
+    } catch (error) {
+      // writeAll 走 Workspace 作用域：没打开工作区时会抛错。与
+      // unbindQqAccount 一致如实提示，绝不让它冒泡出 handleWebviewMessage
+      // 变成一次静默失败（用户以为设置生效了，实际一个字都没落盘）。
+      this.log.warn(`QQ 设置写入失败：${errorMessage(error)}`);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("无法写入 QQ 设置：{0}（请在已打开的工作区中设置）", errorMessage(error)),
+      );
+      return;
+    }
+    if (result.ignored.length > 0) {
+      this.log.warn(`QQ 设置补丁忽略了：${result.ignored.join(", ")}`);
+    }
+    // 落盘会触发 `onDidChangeConfiguration` → `scheduleQqSettingsChanged`，
+    // 由它统一做一轮快照 + 重启/热更新。这里**不再**直接调
+    // `onQqSettingsChanged`，否则一次补丁会同步两轮（直接调用 + 事件回显）。
+    // 立即回推归一化快照只是让设置页马上看到裁剪后的值。
+    await this.pushQqSettings();
+  }
+
+  /** 设置页 QQ 卡片的动作。扫码登录三动作在 Wave5-C 落地：二维码桥随托管
+   * 现场（this.qq）生灭，未启动时安静返回。 */
+  private async handleQqConfigAction(
+    action: "testConnection" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin",
+  ): Promise<void> {
+    switch (action) {
+      case "testConnection": {
+        const adapter = this.qq?.qqbot?.adapter;
+        if (!adapter) {
+          this.pushQqStatus(false, "QQBot 未连接");
+          return;
+        }
+        const health = await adapter.health();
+        if (isQqHealthHealthy(health)) {
+          // 健康即清零：下一次失活仍有一次自动重启的机会。
+          this.qqHealthRestarts = 0;
+          this.pushQqStatus(true, vscode.l10n.t("QQBot 官方网关已连接"));
+          return;
+        }
+        const detail =
+          typeof health.detail === "string" && health.detail.trim().length > 0
+            ? health.detail.trim()
+            : vscode.l10n.t("QQBot 未连接");
+        // 先如实显示失活状态（绝不显示「正常」），再尝试恢复。
+        this.pushQqStatus(false, detail);
+        await this.recoverQqChannel(detail);
+        return;
+      }
+      case "unbind": {
+        const result = await this.unbindQqAccount();
+        this.store.sendToast(result.ok ? "info" : "warning", result.message);
+        return;
+      }
+      case "startQrLogin": {
+        const config = this.qq?.config ?? (await this.currentQqConfig());
+        await this.startQqBotBind(config);
+        return;
+      }
+      case "refreshQr": {
+        // QQBot 扫码会话不可原地刷新：重新发起一次扫码绑定。
+        const config = this.qq?.config ?? (await this.currentQqConfig());
+        await this.startQqBotBind(config);
+        return;
+      }
+      case "cancelQrLogin": {
+        if (!this.qqbotBinding && !this.qq?.qqbot?.bindSession) return;
+        this.stopQqBotBinding();
+        this.postToWebview(buildClearedQrMessage(Date.now()));
+        return;
+      }
+    }
+  }
+
+  /** 看板 / IPC 的任务操作：交给服务执行，然后刷新投影。 */
+  private async handleQqTaskAction(
+    taskId: string,
+    action: QqTaskAction,
+    text?: string,
+  ): Promise<void> {
+    const service = this.qq?.service;
+    if (!service) {
+      this.store.sendToast("warning", vscode.l10n.t("QQ 通道未启动"));
+      return;
+    }
+    await service.handleTaskAction(taskId, action, text);
+    this.refreshQqTasks();
+  }
+
+  /**
+   * 设置事件合并入口（`onDidChangeConfiguration` 的唯一调用点）。
+   *
+   * 一次补丁会逐键 `writeAll`，事件会连发多轮；每轮都做读设置 + 推送 +
+   * 重启判定纯属浪费。窗口内的多轮合并成一次完整同步。
+   */
+  private scheduleQqSettingsChanged(): void {
+    if (this.disposed) return;
+    if (this.qqSettingsSyncTimer) clearTimeout(this.qqSettingsSyncTimer);
+    this.qqSettingsSyncTimer = setTimeout(() => {
+      this.qqSettingsSyncTimer = null;
+      if (this.disposed) return;
+      void this.onQqSettingsChanged().catch((error: unknown) => {
+        this.log.warn(`QQ 设置变更处理失败：${errorMessage(error)}`);
+      });
+    }, QQ_SETTINGS_SYNC_DEBOUNCE_MS);
+    this.qqSettingsSyncTimer.unref?.();
+  }
+
+  /**
+   * 配置变更后的统一处理：推快照 → 按需重启或热更新。
+   *
+   * 非连接类字段（白名单 / 策略 / 并发 / 限流 / 详略 / 自动合并）直接写进
+   * 运行中的 config 对象 —— QqService 在每次使用时读它，所以即时生效且不
+   * 打断在跑的任务；连接类字段交给 500ms 防抖的重启。
+   */
+  private async onQqSettingsChanged(): Promise<void> {
+    if (this.disposed) return;
+    await this.pushQqSettings();
+    await this.syncQqServiceWithSettings();
+    this.refreshQqTasks();
+  }
+
+  private async syncQqServiceWithSettings(): Promise<void> {
+    if (this.disposed) return;
+    // 扫码绑定进行中 / 通道正在启动：绑定路径与启动路径自己会收尾，此刻任何
+    // 按磁盘配置做的停/起都会把刚建好的 owner 反杀（首绑 enable 尚未落盘，
+    // 配置事件读到 false 就会 stopQq）。等它们结束后由事件/心跳补一次同步。
+    if (this.qqbotBinding || this.qqChannelStarting || this.qqStopping) return;
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    const snapshot = await readQqSettings(io);
+    const { config, warnings } = normalizeQqConfig({ ...snapshot } as Record<string, unknown>);
+    for (const warning of warnings) this.log.warn(`QQ 设置：${warning}`);
+
+    if (!config.enabled) {
+      // 只停仍在跑的通道：内存里的 enabled 已经是 false（刚停过 / 从未起过）
+      // 时再调 stopQq 会白白推进代次并打断正在收尾的启动。
+      if (this.qq && this.qq.config.enabled !== false) await this.stopQq();
+      this.pushQqStatus(false, "QQ 通道已停用");
+      return;
+    }
+    if (!this.qq) {
+      await this.startQqIfEnabled();
+      return;
+    }
+    if (
+      shouldRestartOnPatch(this.qq.config, {
+        enabled: config.enabled,
+      })
+    ) {
+      this.scheduleQqRestart();
+      return;
+    }
+    // 热更新：QqService 持有的就是这个对象，改字段即改行为。
+    const live = this.qq.config;
+    live.allowedUsers = [...config.allowedUsers];
+    live.allowedGroups = [...config.allowedGroups];
+    live.workspace = config.workspace;
+    live.remotePolicy = config.remotePolicy;
+    live.maxConcurrentTasks = config.maxConcurrentTasks;
+    live.rateLimitPerMin = config.rateLimitPerMin;
+    live.resultDetail = config.resultDetail;
+    live.autoMerge = config.autoMerge;
+  }
+
+  /**
+   * 面板打开 / webview 重连 / 设置变更后的一次性全量推送。
+   *
+   * 二维码（`qqLoginQr`）是独立的一次性通道，**刻意不在这里补推**：宿主
+   * 从不缓存二维码帧，补推只会把已经清屏的旧码重新塞回 webview。扫码状态
+   * 由 `startQqBotBind` / `onQqBotBound` 主动推送。
+   */
+  private pushQqState(): void {
+    this.refreshQqTasks();
+    void this.pushQqPendingUsers();
+    // 面板打开/重新可见时检查一次通道健康：op=9 之后 socket 可能仍「看着
+    // 活着」但永远不会再来事件，只在用户点「测试连接」时才检查就太晚了。
+    void this.checkQqChannelHealth();
+  }
+
+  /** QQ 设置快照（无明文凭据，只有 hasAppSecret 布尔）。 */
+  private async pushQqSettings(): Promise<void> {
+    if (this.disposed) return;
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    try {
+      const values = await readQqSettings(io);
+      this.postToWebview({ type: "qqSettings", values });
+    } catch (error) {
+      this.log.warn(`QQ 设置读取失败：${errorMessage(error)}`);
+    }
+  }
+
+  /** 连接状态。`detail` 省略 = 沿用上一次的说明（不把它擦成空）。 */
+  private pushQqStatus(connected: boolean, detail?: string): void {
+    if (this.disposed) return;
+    this.qqConnected = connected;
+    if (detail !== undefined) this.qqLastDetail = detail;
+    const message: { type: "qqStatus"; connected: boolean; detail?: string } = {
+      type: "qqStatus",
+      connected,
+    };
+    if (this.qqLastDetail !== null) message.detail = this.qqLastDetail;
+    this.postToWebview(message);
+  }
+
+  /**
+   * 只刷新任务看板投影（服务状态一变就调用）。
+   *
+   * 任务从「已校验」走到终态期间会 persist 好几次，每次都连带读设置 / 推连接
+   * 状态是纯浪费（还要碰 SecretStorage）；这里只做 `setQqTasks` + 快照。
+   */
+  private refreshQqTaskProjection(): void {
+    if (this.disposed) return;
+    const service = this.qq?.service;
+    // 通道为空（dispose / 重建竞态）时保持现状：清空看板会闪出一帧空列表，
+    // 而显式停用路径（stopQq）不经过这里，不需要「空推送」。
+    if (!service) return;
+    setQqTasks(this.store.getState(), capQqTaskProjection(service.listTasks()));
+    this.scheduleQqSnapshotFlush();
+  }
+
+  /**
+   * 节流推送（而非立即 `pushSnapshot`）。
+   *
+   * 一个任务从 received 走到终态会 persist 多次，`onChanged` 每次都立即
+   * push 会把整份快照风暴式推给 webview。`SessionStore` 的 `scheduleFlush`
+   * 正是同一套节流器；它目前是私有方法（`store.ts` 不在本次改动边界内），
+   * 这里用窄类型桥接，方法缺失时退回立即推送。
+   */
+  private scheduleQqSnapshotFlush(): void {
+    const store = this.store as unknown as { scheduleFlush?: () => void };
+    if (typeof store.scheduleFlush === "function") store.scheduleFlush();
+    else this.store.pushSnapshot();
+  }
+
+  /**
+   * 任务看板投影：服务里的任务列表 → `SessionState.qqTasks`。
+   *
+   * 与 `superSessions` 一样是**非 blocks 元数据**，因此复用 store 既有的
+   * 节流快照 / blockPatch 通道（`pushSnapshot`），不自建推送。
+   */
+  private refreshQqTasks(): void {
+    if (this.disposed) return;
+    this.refreshQqTaskProjection();
+    // 「一次刷新 = 三样都推」：看板条目变化往往伴随状态/设置变化（桥接上、
+    // 任务新建），分开推只会让设置卡与看板短暂不同步。读设置是内存 + 一次
+    // SecretStorage 探测，QQ 消息频率下这点开销可以忽略。
+    void this.pushQqSettings();
+    this.pushQqStatus(this.qqConnected);
+  }
+
+  private qqWorkspaceRoots(): string[] {
+    return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
   }
 
   /**
@@ -8685,25 +11538,39 @@ export class ChatPanel implements vscode.Disposable {
   private async requestSuperMerge(
     id: string,
     options?: { auto?: boolean; reason?: string },
-  ): Promise<void> {
+  ): Promise<SuperMergeDispatchResult> {
     const manager = this.getSuperAgent();
-    if (!manager) return;
+    if (!manager) {
+      return {
+        dispatched: false,
+        queued: false,
+        reason: "Super Agent 不可用（未打开工作区）",
+      };
+    }
     const session = manager.get(id);
     if (!session) {
       this.store.sendToast("warning", vscode.l10n.t("该子会话不存在或已被清理"));
-      return;
+      return { dispatched: false, queued: false, reason: "该子会话不存在或已被清理" };
     }
     if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
       this.store.sendToast("warning", vscode.l10n.t("该子会话没有可合并的分支（仅目录隔离）"));
-      return;
+      return {
+        dispatched: false,
+        queued: false,
+        reason: "该子会话没有可合并的分支（仅目录隔离）",
+      };
     }
     if (session.integration?.state === "merged") {
       this.store.sendToast("info", vscode.l10n.t("该子会话的改动已经合并"));
-      return;
+      return { dispatched: false, queued: false, reason: "该子会话的改动已经合并" };
     }
     if (!isTerminalSuperStatus(session.status)) {
       this.store.sendToast("warning", vscode.l10n.t("子会话还没结束，完成后再让智能体合并"));
-      return;
+      return {
+        dispatched: false,
+        queued: false,
+        reason: "子会话还没结束，完成后再让智能体合并",
+      };
     }
     const state = this.store.getState();
     if (
@@ -8716,21 +11583,30 @@ export class ChatPanel implements vscode.Disposable {
         // 主会话正忙着：留在队列里等它空闲。自动路径不能就此丢掉 —— 丢掉就
         // 等于把这件事又推回给用户手动点按钮，那正是这次要改掉的行为。
         this.scheduleSuperMerge(id, options.reason ?? "");
-        return;
+        return {
+          dispatched: false,
+          queued: true,
+          reason: "主会话正忙，合并请求已排队，空闲后自动派发",
+        };
       }
+      const reason = "主会话正在生成，未派出合并子会话，请等本轮结束后重试";
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("主会话正在生成，等本轮结束后再让智能体合并"),
+        vscode.l10n.t("主会话正在生成，未派出合并子会话，请等本轮结束后重试"),
       );
-      return;
+      return { dispatched: false, queued: false, reason };
     }
     if (!state.sessionId) {
       if (options?.auto) {
         this.scheduleSuperMerge(id, options.reason ?? "");
-        return;
+        return {
+          dispatched: false,
+          queued: true,
+          reason: "会话未就绪，合并请求已排队，就绪后自动派发",
+        };
       }
       this.store.sendToast("warning", vscode.l10n.t("会话未就绪，无法让智能体合并"));
-      return;
+      return { dispatched: false, queued: false, reason: "会话未就绪，无法让智能体合并" };
     }
     // 派一个跑在主仓工作区的合并子会话：任务书就是合并任务书本身。
     const branch = session.isolation.branch;
@@ -8747,13 +11623,21 @@ export class ChatPanel implements vscode.Disposable {
         // 已有合并子会话在跑（主仓工作区没有版本隔离）：自动路径不能就此丢掉
         // —— 重新排队，等前一个合并子会话跑完再派。
         this.scheduleSuperMerge(id, options.reason ?? "");
-        return;
+        return {
+          dispatched: false,
+          queued: true,
+          reason: "已有合并子会话在跑，合并请求已排队，等它结束后派发",
+        };
       }
       this.store.sendToast(
         "warning",
         vscode.l10n.t("已有合并子会话在跑，等它结束后再合并：{0}", branch),
       );
-      return;
+      return {
+        dispatched: false,
+        queued: false,
+        reason: `已有合并子会话在跑，未派出新的合并子会话（分支 ${branch}），请稍后重试`,
+      };
     }
     this.store.sendToast(
       "info",
@@ -8761,6 +11645,7 @@ export class ChatPanel implements vscode.Disposable {
         ? vscode.l10n.t("子会话「{0}」的改动没能自动合并，已派出合并子会话", session.title)
         : vscode.l10n.t("已派出合并子会话，合并子会话「{0}」的分支", session.title),
     );
+    return { dispatched: true, mergeSessionId: child.id };
   }
 
   /**
@@ -8807,14 +11692,40 @@ export class ChatPanel implements vscode.Disposable {
         if (this.superReportRunning) break;
         // 主仓工作区没有版本隔离：同一时刻只能有一个合并子会话在跑。
         if (this.superMergeChildRunning()) break;
+        // 先把队首**取下**再 request：派发失败时 requestSuperMerge 的 auto
+        // 路径会用 scheduleSuperMerge 把 id 重新排到**队尾**（按 id 去重），
+        // 绝不再把同一个 id 塞回队首反复挡住后面的合并请求。
         const next = this.pendingSuperMerges.shift();
         if (!next) break;
-        await this.requestSuperMerge(next.id, { auto: true, reason: next.reason });
+        const result = await this.requestSuperMerge(next.id, { auto: true, reason: next.reason });
+        if (!result.dispatched && this.pendingSuperMerges.length > 0) {
+          // 没派出去：合并子会话可能压根没起，onMergeResult 永远不会来 ——
+          // 只靠外部回调会卡住整条队列。登记一次性唤醒，下一拍自己再试。
+          this.scheduleSuperMergeWakeup();
+        }
         // 合并子会话跑完才派下一个（onMergeResult 会再叫一次 drain）。
         break;
       }
     } finally {
       this.superMergeRunning = false;
+    }
+  }
+
+  /**
+   * 合并队列的一次性唤醒（与心跳并行的一道保险，见 superMergeWakeupTimer）。
+   *
+   * 有定时器在就不再叠加新的：多次失败重投只留一拍，避免定时器风暴。
+   */
+  private scheduleSuperMergeWakeup(): void {
+    if (this.disposed || this.superMergeWakeupTimer) return;
+    this.superMergeWakeupTimer = setTimeout(() => {
+      this.superMergeWakeupTimer = null;
+      if (this.disposed) return;
+      void this.drainSuperMerges();
+    }, SUPER_HEARTBEAT_MS);
+    // 与心跳同理：别为一个唤醒把扩展宿主钉在内存里。
+    if (typeof this.superMergeWakeupTimer.unref === "function") {
+      this.superMergeWakeupTimer.unref();
     }
   }
 
@@ -8917,7 +11828,17 @@ export class ChatPanel implements vscode.Disposable {
         .map((f) => f.uri.fsPath)
         .filter((p) => p !== workspaceRoot);
 
-      const { args } = buildAcpCommand(entry, allowedRoots);
+      // Main-session MCP scope. This CLI process must not hold ANY MCP server:
+      // MCP tools are registered by `discoverAllTools()` AFTER
+      // `createToolRegistry()`, so the `allowed_tools` whitelist cannot stop
+      // them — and their names are per-user (every install configures different
+      // servers), so they must never be enumerated. `--allowed-mcp-server-names`
+      // with a never-matching sentinel filters the resolved server map down to
+      // nothing: nothing is spawned and no MCP tool is ever registered.
+      // Child spawns (createSuperClient) pass the host BROKER's server names
+      // instead: one shared server process per configuration, reached over
+      // loopback HTTP — never a per-child copy.
+      const { args } = buildAcpCommand(entry, allowedRoots, { disableMcpServers: true });
       // Log the ACTUAL spawn executable (node, not buildAcpCommand's
       // process.execPath default): the old line printed buildAcpCommand's
       // command while AcpClient received `node`, so the log showed
@@ -9001,7 +11922,6 @@ export class ChatPanel implements vscode.Disposable {
             void this.persistActiveTranscript();
             this.client = null;
             this.cancelAllApprovals(vscode.l10n.t("内核进程已退出"));
-            this.cancelAllPlanExits(vscode.l10n.t("内核进程已退出，计划审批已跳过"));
             this.cancelAllPendingQuestions(vscode.l10n.t("内核进程已退出，提问已跳过"));
             this.store.markError(vscode.l10n.t("内核进程已退出，重新打开面板可重试"));
             // Async failure — the user is likely in the editor; cue it.
@@ -9018,19 +11938,6 @@ export class ChatPanel implements vscode.Disposable {
             // autoApproveSuperAgentTool）。其它工具不受影响。
             const superTool = this.autoApproveSuperAgentTool(req);
             if (superTool) return superTool;
-            // M4 P1-1: the rule table answers matching requests without a card.
-            // A failing pre-review must NEVER strand the agent — degrade to the
-            // card (the pre-P1-1 behaviour) instead of rejecting or throwing.
-            const auto = await this.preReviewApproval(req).catch((error: unknown) => {
-              this.log.warn(`approval pre-review failed: ${errorMessage(error)}`);
-              return null;
-            });
-            if (auto) return auto;
-            // Re-check after the await: the client may have been torn down
-            // while the policy files were read (A3 discipline).
-            if (this.client !== client || this.disposed) {
-              return { outcome: { outcome: "cancelled" } as const };
-            }
             return this.requestPermissionFromUser(req);
           },
           onUserQuestions: (req: UserQuestionsRequest) => {
@@ -9038,13 +11945,12 @@ export class ChatPanel implements vscode.Disposable {
             return this.userQuestionsFromAgent(req);
           },
           onExitPlanMode: async (req: ExitPlanModeRequest) => {
-            // Route Plan-mode exit through the unified webview confirmation card
-            // (mirrors session/request_permission) instead of a native
-            // QuickPick: the card lives inside the panel where the user is
-            // looking, so it can't be dismissed by a stray click the way a
-            // native popup could (which silently rejected and stranded Plan mode).
+            // 计划模式已移除（2026-11-18）。CLI 仍可能从旧会话归档或外部
+            // `~/.iflow/settings.json` 的 approvalMode=plan 进入 plan 模式并发来
+            // `_iflow/plan/exit`；这里不弹卡、不阻塞，直接放行（见
+            // handleRemovedPlanExit）。
             if (this.client !== client) return { approved: false, reason: "client busy" };
-            return this.requestPlanExitFromUser(req);
+            return this.handleRemovedPlanExit(req);
           },
         },
       );
@@ -9314,69 +12220,43 @@ export class ChatPanel implements vscode.Disposable {
   // response must be written back into the store or the dropdown snaps back.
 
   /**
-   * Push the panel's authoritative mode to the CLI before a turn starts.
+   * Push the fixed main-session mode after `session/new` / `session/load`.
    *
-   * The CLI keeps the mode only in `Config.approvalMode` and never notifies us
-   * (no `current_mode_update`), so the panel's copy is an optimistic echo that
-   * nothing used to re-sync. Two drift faces were observed in real sessions:
-   * - stopping a pending Plan-exit card left the composer showing 计划 while
-   *   the CLI had left Plan mode, so the agent silently gained write access
-   *   (session 439fd54b: the next "继续" turn's `replace`/`write_file` all
-   *   completed even though `write_file` had just been rejected with
-   *   "Cannot execute write_file in PLAN mode");
-   * - after approving a plan the CLI could stay in Plan mode while the panel
-   *   showed the return mode (same transcript family: every edit rejected).
-   *
-   * Pushing the stored mode right before each prompt makes the CLI follow what
-   * the user sees; pushing the mode it already holds is a no-op CLI-side. A
-   * failure here must never block the prompt — the turn still runs as before.
+   * Same-value pushes are CLI-side no-ops, so calling this on every session
+   * start is idempotent. The store's optimistic echo is updated only when it
+   * actually changed. Never throws: a failure only logs — the turn still
+   * runs under whatever mode the CLI booted with.
    */
-  private async assertModeForPrompt(client: AcpClient, sessionId: string): Promise<void> {
-    const modeId = this.store.getState().modes?.currentModeId;
-    if (!modeId) return;
+  private async applyMainSessionMode(client: AcpClient, sessionId: string): Promise<void> {
     try {
-      await client.setMode(sessionId, modeId);
+      const resp = (await client.setMode(sessionId, MAIN_SESSION_MODE)) as
+        | { success?: boolean; currentModeId?: string }
+        | undefined;
+      const modes = this.store.getState().modes;
+      if (!modes) return;
+      const currentModeId = resp?.currentModeId ?? MAIN_SESSION_MODE;
+      if (modes.currentModeId !== currentModeId) {
+        this.store.sessionMeta({ modes: { ...modes, currentModeId } });
+      }
     } catch (error) {
-      this.log.warn(`mode re-assert failed (${modeId}): ${errorMessage(error)}`);
+      this.log.warn(`main session mode push failed (${MAIN_SESSION_MODE}): ${errorMessage(error)}`);
     }
   }
 
-  private async setMode(modeId: string): Promise<void> {
-    if (this.historySyncBusy) return;
-    const sessionId = this.store.getState().sessionId;
-    // C2: an empty sessionId would make the CLI bind the mode to a bogus
-    // session — refuse until a session actually exists.
-    if (!sessionId) {
-      vscode.window.showWarningMessage(vscode.l10n.t("会话未就绪"));
-      return;
-    }
+  /**
+   * Re-assert the fixed mode before a turn starts.
+   *
+   * The CLI keeps the mode only in its config and never notifies us (no
+   * `current_mode_update`), so an external drift (stale archived session,
+   * external `~/.iflow/settings.json`) must be pulled back before the turn
+   * goes out. Pushing the mode it already holds is a no-op CLI-side; a
+   * failure here must never block the prompt.
+   */
+  private async assertModeForPrompt(client: AcpClient, sessionId: string): Promise<void> {
     try {
-      // Capture the mode we're leaving so plan approval can switch back to it.
-      const modesBefore = this.store.getState().modes;
-      if (modesBefore) {
-        if (modesBefore.currentModeId === modeId) {
-          // no-op switch; keep existing memo
-        } else if (modesBefore.availableModes.find((m) => m.id === modeId)?.kind === "plan") {
-          this.planReturnModeId = modesBefore.currentModeId;
-        } else {
-          this.planReturnModeId = null;
-        }
-      }
-      const resp = (await this.client?.setMode(sessionId, modeId)) as
-        | { success?: boolean; currentModeId?: string }
-        | undefined;
-      if (resp?.success && resp.currentModeId) {
-        const modes = this.store.getState().modes;
-        if (modes) this.store.sessionMeta({ modes: { ...modes, currentModeId: resp.currentModeId } });
-        return;
-      }
-      vscode.window.showWarningMessage(
-        vscode.l10n.t("切换模式失败：{0}", JSON.stringify(resp ?? vscode.l10n.t("无响应"))),
-      );
+      await client.setMode(sessionId, MAIN_SESSION_MODE);
     } catch (error) {
-      vscode.window.showWarningMessage(
-        vscode.l10n.t("切换模式失败：{0}", errorMessage(error)),
-      );
+      this.log.warn(`mode re-assert failed (${MAIN_SESSION_MODE}): ${errorMessage(error)}`);
     }
   }
 
@@ -9659,70 +12539,6 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * MCP tool declarations the request carries: the CLI turns every connected
-   * server's tools into `functionDeclarations` on EVERY request (bundle:
-   * `bAo` builds them from the tool registry and the whole set rides
-   * `contents[].functionDeclarations`), and the ACP wire never reports them —
-   * the mcp-status Mod does. Query it at card-insert time and fold each server
-   * into one injected-context item, so the card's token total stays comparable
-   * with the MCP card's context chip (`estimateMcpContextTokens` uses the same
-   * declaration shape and the same o200k_base tokenizer).
-   *
-   * Honest degradation, same discipline as the MCP card's status lights: a
-   * server that had not finished connecting when the request started did NOT
-   * carry its tools, so it rides as a 0-token unloaded entry (no fabricated
-   * body, no invented tool names); a missing/disabled Mod (`available:false`)
-   * contributes nothing and the card stays exactly as honest as before. MCP
-   * discovery runs in the background (mcp-background-loader Mod), so at the
-   * FIRST prompt several servers can still report `connecting` — this card is
-   * a snapshot of that one request, the MCP settings card keeps live lights.
-   */
-  private async collectMcpContext(): Promise<InjectedContextItem[]> {
-    const client = this.client;
-    const sessionId = this.store.getState().sessionId;
-    if (!client || !sessionId) return [];
-    let report: McpStatusReport | null = null;
-    try {
-      report = await client.mcpStatus(sessionId);
-    } catch (error) {
-      this.log.warn(`injected card: mcpStatus unavailable: ${errorMessage(error)}`);
-      return [];
-    }
-    if (!report || !report.available) return [];
-    const scopes = this.readMcpScopes();
-    const items: InjectedContextItem[] = [];
-    for (const [name, view] of Object.entries(report.servers ?? {})) {
-      const tools = view.tools ?? [];
-      const scope = mcpScopeOf(name, scopes.global, scopes.project);
-      if (view.status === "connected") {
-        // A connected server that exposes no tools still rides the request
-        // (its registry entry exists); the old guard required tools.length > 0,
-        // so such a server vanished from the card entirely and the count lied.
-        // Honest shape: carried, with an empty body — never a fabricated tool.
-        items.push({
-          kind: "mcp",
-          label: name,
-          ...(scope ? { scope } : {}),
-          // One compact JSON declaration per line — the same bytes the CLI
-          // serializes into functionDeclarations.
-          content: tools
-            .map((tool) =>
-              JSON.stringify({
-                name: tool.name,
-                ...(tool.description ? { description: tool.description } : {}),
-                ...(tool.schemaOmitted || tool.schema === undefined ? {} : { parameters: tool.schema }),
-              }),
-            )
-            .join("\n"),
-        });
-      } else {
-        items.push({ kind: "mcp", label: name, ...(scope ? { scope } : {}), content: "", connected: false });
-      }
-    }
-    return items;
-  }
-
-  /**
    * Developer-only channel: write the core instruction (the reported system
    * prompt minus the joined memory / inlined context files, per
    * extractCorePrompt) to `storageUri/core-prompt.md`, overwritten on every
@@ -9769,13 +12585,14 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed) return;
     }
     const items = await this.collectInjectedContext(isFresh());
-    // The same request also carries every connected MCP server's tool
-    // declarations (mcp-status Mod channel, best effort): fold them in so the
-    // card answers "which MCP tools did this request carry" next to the
-    // system prompt it already explains.
-    const mcpItems = await this.collectMcpContext();
     if (this.disposed) return;
-    items.push(...mcpItems);
+    // No MCP items here on purpose. The main panel session's CLI process runs
+    // with every MCP server removed at process level (`buildAcpCommand`'s
+    // `disableMcpServers`), so it can never carry an MCP tool. Asking mcp-status
+    // only surfaced the user's configured-but-disabled servers as "N not
+    // connected" — a meaningless warning inside a card that lists what the
+    // model actually sees (2026-11-18 user report). The MCP settings card keeps
+    // the live server list and status.
     if (items.length === 0) return;
     // Null = the reducer skipped (card already present) — nothing to persist.
     if (this.store.injectedContext(items) === null) return;
@@ -9853,10 +12670,15 @@ export class ChatPanel implements vscode.Disposable {
    * the synchronous JSON.stringify no longer sits on the event path (P1).
    */
   private enqueueTranscriptWrite(sessionId: string, payloadFactory: () => string): Promise<void> {
+    this.persistPending += 1;
     const run = this.persistChain
       .then(() => new Promise<void>((resolve) => setImmediate(resolve)))
       .then(() => this.writeTranscriptFile(sessionId, payloadFactory()));
-    this.persistChain = run.catch(() => {});
+    this.persistChain = run
+      .catch(() => {})
+      .finally(() => {
+        this.persistPending = Math.max(0, this.persistPending - 1);
+      });
     return run;
   }
 
@@ -9908,7 +12730,13 @@ export class ChatPanel implements vscode.Disposable {
     // children (and their unmerged branches) on the next restore.
     const keptArchiveNames = new Set(kept.map((s) => superSessionFileName(s.id)));
     for (const name of await listSuperSessionArchiveFiles(this.superStoreDir())) {
-      if (name.endsWith(".json") && !keptArchiveNames.has(name)) {
+      // 归档本体（<name>.json）与损坏备份（<name>.json.corrupt）都要 GC。
+      // 备份名是归档名再加 .corrupt：剥掉后缀后按同一份 kept 集合比对——
+      // 正常归档（含仍归属的会话）一律不动，只有其会话已离开列表的残留
+      // 才回收，避免误删正在用的归档或把备份当独立会话。
+      const isBackup = name.endsWith(".corrupt");
+      const archiveName = isBackup ? name.slice(0, -".corrupt".length) : name;
+      if ((isBackup || archiveName.endsWith(".json")) && !keptArchiveNames.has(archiveName)) {
         await rm(path.join(superSessionsDir(this.superStoreDir()), name), { force: true });
       }
     }
@@ -10136,21 +12964,41 @@ export class ChatPanel implements vscode.Disposable {
   private async startNewSession(options?: { bypassSuperWait?: boolean }): Promise<void> {
     const running = this.newSessionRun;
     if (running) {
+      // 进行中重复点击：直接忽略，不重复发 `session/new`（join 同一个 run
+      // 只为让调用方的 await 语义保持一致），也不改写投影。
       this.log.info("new session: joining the in-flight run");
       await running;
       return;
     }
+    // 投影必须在第一个 await 之前落库：webview 收到快照后立刻禁用按钮并显示
+    // 「正在新建会话…」（webview 侧另有一层本地乐观锁覆盖 IPC 往返窗口）。
+    if (!this.disposed) this.store.setNewSessionPhase("starting");
     const run = this.runStartNewSession(options);
     this.newSessionRun = run;
     try {
       await run;
+    } catch (error) {
+      // 失败要可见：错误横幅（status=error）之外，继续抛给
+      // handleWebviewMessage 的统一 catch 打 toast —— 静默失败会让用户以为
+      // 按钮只是「点了没反应」。
+      if (!this.disposed && !(error instanceof DisposedError)) {
+        this.store.markError(errorMessage(error));
+      }
+      throw error;
     } finally {
       if (this.newSessionRun === run) this.newSessionRun = null;
+      // 成功 / 被拒 / 失败一律收回 idle，否则按钮会永久锁在加载态。
+      if (!this.disposed) this.store.setNewSessionPhase(null);
     }
   }
 
   private async runStartNewSession(options?: { bypassSuperWait?: boolean }): Promise<void> {
-    if (this.historySyncBusy) return;
+    if (this.historySyncBusy) {
+      // 不静默：命令面板会绕过 webview 的禁用按钮，点了却毫无反应会被读成
+      // 「按钮坏了」。投影由 startNewSession 的 finally 收回。
+      this.store.appendNotice(vscode.l10n.t("正在处理其他会话操作，请稍后再新建会话"));
+      return;
+    }
     // A3: never start a session into a destroyed panel.
     if (this.disposed) throw new DisposedError();
     // 等待子会话汇报期间不能新建会话：排队里的汇报与在飞的汇报回合会落到
@@ -10181,8 +13029,11 @@ export class ChatPanel implements vscode.Disposable {
       this.restoreAbort = true;
       this.pendingNewSession = true;
       this.log.info("new session requested during a restore: asking the restore to abort");
+      // 在等一个后台恢复收尾：明确告诉用户不是卡住了。
+      if (!this.disposed) this.store.setNewSessionPhase("waiting");
       const outcome = await restoreSettle.promise;
       this.pendingNewSession = false;
+      if (!this.disposed) this.store.setNewSessionPhase("starting");
       if (outcome === "aborted") {
         this.store.appendNotice(vscode.l10n.t("已取消正在进行的恢复，正在新建会话"));
       } else if (outcome === "completed") {
@@ -10191,6 +13042,13 @@ export class ChatPanel implements vscode.Disposable {
         this.store.appendNotice(vscode.l10n.t("恢复未完成，正在新建会话"));
       }
       // The panel may have been closed while we waited for the restore.
+      if (this.disposed) return;
+    }
+    // 跨全部历史会话的 Super Agent 残留检测：轻量读目录计数，命中才弹二次
+    // 确认框（「清空并新建」/「取消」）。profile 切换复用这条新建流程，但它
+    // 已有自己的对话框，不叠加这一层。
+    if (!options?.bypassSuperWait) {
+      await this.confirmAndPurgeSuperResidue();
       if (this.disposed) return;
     }
     // Anchor the CLI-transcript lookup before the empty-session cleanup (its
@@ -10207,9 +13065,14 @@ export class ChatPanel implements vscode.Disposable {
     // records every fresh session up front, so without this each reset /
     // profile switch would strand an empty "(无标题会话)" husk in the
     // switcher (empty sessions have no transcript → unrestorable).
+    // 清空转录前要先等落盘链收尾（profile 切换 / 上一轮的 transcript 写可能
+    // 还在飞）。真的在等就投影成 waiting —— 否则这段等待在 UI 上和卡死没区别。
+    const waitingOnPersist = this.persistPending > 0;
+    if (waitingOnPersist && !this.disposed) this.store.setNewSessionPhase("waiting");
     await this.cleanupEmptySession(
       this.store.getState().activeSessionId ?? this.store.getState().sessionId,
     );
+    if (waitingOnPersist && !this.disposed) this.store.setNewSessionPhase("starting");
     // Cancel an in-flight turn before anything else: `session/cancel` is a
     // no-op on an idle session, and without this the abandoned turn keeps
     // streaming server-side — its trailing updates would repopulate the
@@ -10241,7 +13104,6 @@ export class ChatPanel implements vscode.Disposable {
     // Settle pending approval/question cards BEFORE the clear: their
     // resolution notes belong to the old transcript and are cleared with it.
     this.cancelAllApprovals(vscode.l10n.t("会话已重置"));
-    this.cancelAllPlanExits(vscode.l10n.t("会话已重置，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
     // Defensive: a restore that STARTED after the abort request above (the
     // switcher can fire one while the panel is idle) must not interleave its
@@ -10287,7 +13149,12 @@ export class ChatPanel implements vscode.Disposable {
     // switches must not race the in-flight `session/new`).
     this.store.setInitializing(true, "newSession");
     try {
+    // 已有握手在飞（warmStart / 重启 / 首次连接）：ensureClient 会等它完成，
+    // 这段等待同样要如实投影，不能让面板看起来停在「正在新建会话」。
+    const waitingOnConnect = !this.client && this.connecting !== null;
+    if (waitingOnConnect && !this.disposed) this.store.setNewSessionPhase("waiting");
     const client = await this.ensureClient();
+    if (waitingOnConnect && !this.disposed) this.store.setNewSessionPhase("starting");
     // A3: a dispose during the handshake rejects ensureClient with
     // DisposedError; a dispose AFTER it must not write into the destroyed
     // store either.
@@ -10354,21 +13221,10 @@ export class ChatPanel implements vscode.Disposable {
       const pushId = await this.validateModelForPush(modelsPromise, currentModelId, cliModelId);
       if (pushId) await this.setModel(pushId);
     }
-    // iflow.defaultMode: the CLI boots with its own mode (session/new
-    // reports it in modes.currentModeId), so the configured default must be
-    // pushed explicitly on every fresh session — the setting was previously
-    // declared but never read (trap #14 class). Skip silently when the CLI
-    // does not offer the configured id (e.g. an older agent without "plan");
-    // a setMode that is actually attempted surfaces its own failure warning.
-    const configuredMode = vscode.workspace.getConfiguration("iflow").get<string>("defaultMode");
-    if (
-      configuredMode &&
-      session.modes &&
-      configuredMode !== session.modes.currentModeId &&
-      session.modes.availableModes.some((m) => m.id === configuredMode)
-    ) {
-      await this.setMode(configuredMode).catch(() => undefined);
-    }
+    // 主会话模式固定为 smart：CLI 会按自己的启动模式（外部 settings.json
+    // 的 approvalMode 或内置默认）开新会话，必须显式推回 smart。set_mode
+    // 同值推送在 CLI 侧是 no-op，因此每次新建会话都推送是幂等的。
+    await this.applyMainSessionMode(client, session.sessionId);
     await this.applyThinkLevel(client, session.sessionId, this.store.getState().thinkLevel);
     this.log.info(`session started: ${session.sessionId}`);
     await this.recordSession(session.sessionId, null);
@@ -10408,16 +13264,43 @@ export class ChatPanel implements vscode.Disposable {
      * action receipts and delegated-user-turn backfills are bookkeeping and
      * stay silent.
      *
+     * `finalReport: true` — 仅对 reportTurn 生效：这是 pendingCount=0 的汇总轮，
+     * 收尾时把该轮 assistant 文本作为 QQ 任务的真正最终答复回传（见
+     * {@link deliverQqMainFinalAnswer}）。中途进度汇报轮不带此标记。
+     *
      * 返回值：true = 这一回合真的在主会话上跑起来了；false = 被拒了（主会话
      * 正忙 / 正在恢复历史 / 已销毁）或被派发成了子会话。汇报队列靠它决定
      * 「这条汇报是投出去了」还是「还欠着」—— 汇报丢了主会话就永远读不到
      * 自己孩子的结果。
+     *
+     * QQ 主会话注入（QQ 消息固定去向）用到四个额外选项：
+     *  - `origin: "qq"`：user 块带来源标记，转录里渲染 QQ 徽标（外部渠道
+     *    消息必须与本机输入可区分）；
+     *  - `displayText`：转录气泡正文（QQ 原文），而 `text` 是模型可见的
+     *    带来源包裹版本 —— 本机用户看到的就是对方发来的内容；
+     *  - `quietBusy`：撞上忙窗口时安静返回 false（调用方排队重试），不要弹
+     *    「等本轮结束后再让智能体合并」那种误导性提示；
+     *  - `onTurnStarted`：这一轮真的开始后回调（服务据此把 QQ 任务从
+     *    「排队中」切到「已注入待回复」）。
      */
-    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean; reportTurn?: boolean },
+    options?: {
+      internal?: boolean;
+      delegateOnBusy?: boolean;
+      hidden?: boolean;
+      reportTurn?: boolean;
+      finalReport?: boolean;
+      origin?: "qq";
+      displayText?: string;
+      quietBusy?: boolean;
+      onTurnStarted?: () => void | Promise<void>;
+    },
   ): Promise<boolean> {
     const internal = options?.internal === true;
     const hidden = options?.hidden === true;
     const reportTurn = options?.reportTurn === true;
+    const finalReport = reportTurn && options?.finalReport === true;
+    /** QQ 主会话注入回合：对话派生的回合末任务（下一步 / 记忆）必须跳过。 */
+    const qqTurn = options?.origin === "qq";
     const trimmed = text.trim();
     const hasContexts = (contexts?.length ?? 0) > 0;
     if (!trimmed && !hasContexts) return false;
@@ -10433,6 +13316,10 @@ export class ChatPanel implements vscode.Disposable {
     if (!internal && !hidden) {
       this.autoTurnsStoppedFor = null;
       this.clearDeferredAutoTurnsToast();
+      // 用户真正开了一轮新对话：super-agent 参数纠错的每轮配额重新给满。
+      // 绝不能放在 hidden 分支：纠错提示自己会触发一次 hidden 回合，重置
+      // 配额就等于让限次失效（模型每错一次都能再拿 2 次提醒）。
+      this.superToolCallCorrections.delete(this.currentMainSessionId() ?? "");
     }
     // ── 主会话车道 ────────────────────────────────────────────────
     // 「用户回合」与「hidden 汇报回合」都跑在同一个 ACP 会话上：两个回合
@@ -10475,10 +13362,14 @@ export class ChatPanel implements vscode.Disposable {
       // an isolated child session would be wrong (the child's worktree has
       // its own branch). Refuse and say why instead of doing something else.
       if (options?.delegateOnBusy === false) {
-        this.store.sendToast(
-          "warning",
-          vscode.l10n.t("主会话正在生成，等本轮结束后再让智能体合并"),
-        );
+        // `quietBusy`：调用方（QQ 主会话注入）自己会排队重试，弹一条
+        // 「让智能体合并」的提示纯属误导。
+        if (options?.quietBusy !== true) {
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("主会话正在生成，等本轮结束后再让智能体合并"),
+          );
+        }
         return false;
       }
       const contextBlock = hasContexts
@@ -10623,10 +13514,10 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed) throw new DisposedError();
       promptSessionId = this.store.getState().sessionId;
       if (!promptSessionId) throw new Error(vscode.l10n.t("会话未就绪"));
-      // The CLI's mode is invisible to us (no `current_mode_update`), so a
-      // drift introduced by a Plan-exit interrupt would otherwise surface as
-      // the agent silently writing while the composer still says 计划 — make
-      // the CLI follow the mode the user sees before every turn.
+      // The CLI's mode is invisible to us (no `current_mode_update`), so any
+      // drift would otherwise surface as the agent silently acting under a
+      // different mode than the composer shows — make the CLI follow the mode
+      // the user sees before every turn.
       await this.assertModeForPrompt(client, promptSessionId);
       // First turn of this session: show what the request auto-injects
       // (system prompt / memory / context files) BEFORE the user bubble.
@@ -10652,10 +13543,14 @@ export class ChatPanel implements vscode.Disposable {
       // transcript — no user bubble, no session rename. The agent's answer
       // still streams in as an assistant message.
       if (!hidden) {
+        // QQ 注入：气泡显示对方原文，模型拿到的是带来源包裹的版本（服务
+        // 生成），来源标记另走 `origin` —— 三者不得混为一谈。
+        const bubbleText = options?.displayText ?? fullText;
         this.store.userPrompt(
-          fullText,
+          bubbleText,
           (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
           files,
+          options?.origin,
         );
         if (!internal) void this.labelSessionWithPrompt(fullText);
         void this.persistActiveTranscript(); // user turn lands even on a crash
@@ -10670,6 +13565,15 @@ export class ChatPanel implements vscode.Disposable {
       // 可以还回去 —— 否则回合收尾的家务（队列里的下一条消息、汇报投递）
       // 会被自己的车道挡住。
       releaseLane();
+      // QQ 注入的「已注入」锚点：user 气泡已落地、这一轮确定要跑。回调失败
+      // 只记日志 —— 它只是投影状态，不能把一整轮真实工作打红。
+      if (options?.onTurnStarted) {
+        try {
+          await options.onTurnStarted();
+        } catch (error) {
+          this.log.warn(`turn-started callback failed: ${errorMessage(error)}`);
+        }
+      }
       // M3 P0-1: snapshot the workspace BEFORE the agent runs so this turn's
       // file changes are revertible. Awaited — a parallel capture would race
       // the agent's writes and bake them into the "before" snapshot. Best
@@ -10699,6 +13603,16 @@ export class ChatPanel implements vscode.Disposable {
       for (const img of images ?? []) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
+      // 最终汇报轮的 assistant 文本锚点：与 injectQqMainTurn 同口径（可见
+      // text 块、排除 system），轮末只取基线之后的文本，避免把上一轮内容
+      // 当成本轮结论回给 QQ。
+      let finalReportAnchorId: string | undefined;
+      if (finalReport) {
+        const visible = this.store.getState().blocks.filter(
+          (block) => block.kind === "text" && !block.system,
+        );
+        finalReportAnchorId = visible[visible.length - 1]?.id;
+      }
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
       // 本轮已结束：委派指令只在流式期间出现，之后不该再把旧附件带给新子会话。
       if (!internal) this.currentTurnAttachments = null;
@@ -10710,6 +13624,29 @@ export class ChatPanel implements vscode.Disposable {
         return false;
       }
       this.store.promptCompleted(result.stopReason, result.usage);
+      // QQ 最终回执：pendingCount=0 的汇报汇总轮收尾后，把本轮 assistant 文本
+      // 作为等待中的 QQ 任务的真正答复回传（fire-and-forget，不挡回合收尾）。
+      // 锚点失效（转录被清空/重排）时保守放弃，绝不把上一轮文本当成本轮结论。
+      if (finalReport && result.stopReason !== "cancelled") {
+        const visible = this.store.getState().blocks.filter(
+          (block) => block.kind === "text" && !block.system,
+        );
+        let start = 0;
+        let anchorLost = false;
+        if (finalReportAnchorId !== undefined) {
+          const anchorIndex = visible.findIndex((block) => block.id === finalReportAnchorId);
+          if (anchorIndex >= 0) start = anchorIndex + 1;
+          else anchorLost = true;
+        }
+        if (!anchorLost) {
+          const answer = visible
+            .slice(start)
+            .map((block) => (block.kind === "text" ? block.text : ""))
+            .join("\n")
+            .trim();
+          void this.deliverQqMainFinalAnswer(promptSessionId, answer, result.stopReason);
+        }
+      }
       // 回合收尾：复核动作围栏 —— 回合都结束了还停在未闭合围栏上，说明这个
       // 动作块永远不会被执行。旧实现对此完全静默（零日志、零 toast）。
       this.auditSuperActionsAtSettle();
@@ -10755,7 +13692,9 @@ export class ChatPanel implements vscode.Disposable {
       if (promptSessionId && result.stopReason !== "cancelled") {
         void this.runTurnFollowup(promptSessionId, {
           allowTitle: true,
-          conversationTasks: !isCompressTurn && !autoCompressed,
+          // QQ 消息是外部渠道内容：绝不从中提炼「下一步」或写入自动记忆
+          // （记忆会进后续系统提示）。标题只是本地会话标签，不涉安全边界。
+          conversationTasks: !qqTurn && !isCompressTurn && !autoCompressed,
         });
       }
       // M2 P0-3: the turn settled — the idle slot is free, feed it the next
@@ -10763,17 +13702,11 @@ export class ChatPanel implements vscode.Disposable {
       // (cancelled) also drains: Stop interrupts the CURRENT turn, the queue
       // keeps steering (roadmap Steer semantics).
       void this.dispatchQueue();
-      // 主会话空闲了 → 发起排队的「让智能体合并」（子会话完成后自动合并的
-      // 那一路）。串行执行，一次只合并一个。
-      void this.drainSuperMerges();
-      // 同理：子会话汇报可能在别的事件里就绪（流式期间 / 恢复历史期间），
-      // 回合结束时补一次投递，并刷新「等待子会话」心跳 —— 主会话空闲而子会话
-      // 仍在跑时，这条常驻提示就是「流程没断，宿主在等」的唯一可见证据。
-      void this.drainSuperReports();
-      // 本回合里若有用户消息被改道给子会话，现在主会话空闲了 → 补投成下一
-      // 回合（hidden，不伪造用户气泡）。与汇报/合并共用同一条车道，谁先申领
-      // superReportRunning 谁跑；没抢到的留给心跳重投。
-      void this.drainDelegatedUserTurns();
+      // 主会话空闲了 → 统一仲裁 5 条自动回合队列（汇报 / 动作回执 / 被改道
+      // 消息 / 纠错 / 合并），按明确优先级 + 轮转每拍取一条队列投出（该队列
+      // 沿用既有顺序投递语义）。剩下的交给下一次仲裁或心跳 —— 任一队列卡住
+      // 都不会挡死其余。
+      void this.drainSuperAutoTurns();
       this.refreshSuperWaitHeartbeat();
       if (this.hasSuperWork()) this.ensureSuperHeartbeat();
     } catch (error) {
@@ -10804,9 +13737,9 @@ export class ChatPanel implements vscode.Disposable {
       this.log.error(`prompt failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
       // Policy 2026-10-16 (user restated): OS reminders exist for exactly the
-      // four triggers — question/approval/plan card displayed, turn completed.
-      // A failed turn keeps its in-panel banner (markError above) + the error
-      // chime (postSound below) but earns no system toast.
+      // blocking-card triggers — question/approval card displayed — plus turn
+      // completion. A failed turn keeps its in-panel banner (markError above) +
+      // the error chime (postSound below) but earns no system toast.
       // M2 P0-3: a real failure pauses auto-dispatch — every queued message
       // would hit the same broken endpoint/CLI. The composer's queue strip
       // shows 继续/清空; dispatch resumes on `queueAction: resume`.
@@ -11115,7 +14048,6 @@ export class ChatPanel implements vscode.Disposable {
           // (settle the blocking cards first, then cancel the session); the
           // completion handler dispatches the marked entry first.
           this.cancelAllApprovals(vscode.l10n.t("用户打断并立即发送"));
-          this.cancelAllPlanExits(vscode.l10n.t("用户打断并立即发送，计划审批已跳过"));
           this.cancelAllPendingQuestions(vscode.l10n.t("用户打断并立即发送"));
           this.cancelSeen = true;
           this.clearPostRejectionWatchdog();
@@ -11538,7 +14470,7 @@ export class ChatPanel implements vscode.Disposable {
     const state = this.store.getState();
     if (
       state.initializing || state.replaying || state.status === "streaming" || state.status === "connecting" ||
-      state.pendingApproval || state.pendingQuestions || state.pendingPlanExit
+      state.pendingApproval || state.pendingQuestions
     ) {
       this.store.appendNotice(vscode.l10n.t("正在生成、连接或等待确认，请先完成当前操作后再删除消息"));
       return;
@@ -11589,7 +14521,7 @@ export class ChatPanel implements vscode.Disposable {
             throw new Error("session changed during history synchronization");
           }
           const after = this.store.getState();
-          if (after.modes?.currentModeId) await client.setMode(sessionId, after.modes.currentModeId);
+          await client.setMode(sessionId, MAIN_SESSION_MODE);
           if (after.currentModelId) await client.setModel(sessionId, after.currentModelId);
         }
       } catch (error) {
@@ -11679,7 +14611,7 @@ export class ChatPanel implements vscode.Disposable {
     const state = this.store.getState();
     if (
       state.initializing || state.replaying || state.status === "streaming" || state.status === "connecting" ||
-      state.pendingApproval || state.pendingQuestions || state.pendingPlanExit
+      state.pendingApproval || state.pendingQuestions
     ) {
       this.store.appendNotice(vscode.l10n.t("正在生成、连接或等待确认，请先完成当前操作后再编辑消息"));
       return;
@@ -11803,9 +14735,6 @@ export class ChatPanel implements vscode.Disposable {
         // Fresh output flag per attempt: the gate below judges THIS attempt
         // only (a compress turn's own output must not mask an empty resend).
         this.turnHadAgentOutput = false;
-        // M4 P1-1: auto-approval transcript notes dedupe per turn — a new
-        // attempt (or turn) may legitimately re-note the same rule hit.
-        this.autoApprovalNoted.clear();
         try {
           // A `/compress` turn may be given a wall-clock ceiling
           // (`iflow.compressTimeoutSeconds`); 0 keeps the historical
@@ -12309,7 +15238,7 @@ export class ChatPanel implements vscode.Disposable {
     const state = this.store.getState();
     if (
       state.initializing || state.replaying || state.status === "streaming" || state.status === "connecting" ||
-      state.pendingApproval || state.pendingQuestions || state.pendingPlanExit
+      state.pendingApproval || state.pendingQuestions
     ) {
       this.store.appendNotice(vscode.l10n.t("正在生成、连接或等待确认，请先完成当前操作后再回滚"));
       return;

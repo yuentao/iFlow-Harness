@@ -25,8 +25,6 @@ const hostSettings = vi.hoisted(() => ({
   soundFeedback: true,
   osNotifications: "approvals",
   language: "",
-  defaultMode: "smart",
-  approvalMode: "",
   theme: "auto",
   auroraIntensity: 35,
   uiFontSize: "standard",
@@ -42,6 +40,9 @@ const hostSettings = vi.hoisted(() => ({
   costTable: [],
   thinkingModelRules: [],
   superAgentMaxConcurrent: 5,
+  superAgentIntegration: "merge",
+  superAgentMaxWorktrees: 10,
+  superAgentKeepWorktree: false,
 } as HostSettingsUi));
 const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,
@@ -86,7 +87,6 @@ vi.mock("../webview/src/store", () => ({
 }));
 vi.mock("../webview/src/i18n", () => ({
   t: (s: string, ...args: string[]) => s.replace(/\{(\d+)\}/g, (_, i) => args[Number(i)] ?? ""),
-  modeDisplay: () => ({ label: "mode", desc: "" }),
 }));
 // 新增用例只断言顶栏 / 设置页 / Composer 三处切换；转录与子会话看板不参与。
 vi.mock("../webview/src/components/MessageList", () => ({ MessageList: () => null }));
@@ -147,7 +147,7 @@ it("exposes the redesigned top-level categories", () => {
   expect(container.textContent).toContain("账户与模型");
   expect(container.textContent).toContain("对话");
   expect(container.textContent).toContain("外观与交互");
-  expect(container.textContent).toContain("权限与审批");
+  expect(container.textContent).not.toContain("权限与审批");
   expect(container.textContent).toContain("MCP 与工具");
   expect(container.textContent).toContain("记忆与知识");
   expect(container.textContent).toContain("运行与数据");
@@ -163,6 +163,105 @@ it("groups the eight tabs under four named sections", () => {
   const tabs = container.querySelectorAll('[role="tab"]');
   expect(tabs).toHaveLength(8);
   expect([...tabs].filter((el) => el.getAttribute("tabindex") === "0")).toHaveLength(1);
+});
+
+/**
+ * 窄屏（容器 <560px）导航：单行横向滚动 tab 条，不再纵向堆叠折行——旧实现
+ * 在 360px 视口下占 ~312px 高度，内容区只剩 224px。jsdom 不计算容器查询，
+ * 断言落在类名上：窄屏基类（横向滚动 / 无固定宽 / tab 不收缩）与宽屏变体
+ * （172px 侧栏）分开断言，两层合起来即「窄屏不占宽、宽屏不变」。
+ */
+describe("窄屏设置导航（横向滚动 tab 条）", () => {
+  const tablist = () => container.querySelector<HTMLElement>('[role="tablist"]')!;
+
+  it("窄屏下导航是单行横向滚动条，不占固定宽度，内容区全宽", () => {
+    const nav = tablist();
+    // 窄屏基类：横向滚动；无固定侧栏宽度（w-[172px] 只允许出现在宽屏变体里）。
+    expect(nav.className).toContain("overflow-x-auto");
+    const tokens = nav.className.split(/\s+/);
+    expect(tokens).not.toContain("w-[172px]");
+    expect(tokens).toContain("@min-[560px]:w-[172px]");
+    // 每个 tab 不折行不收缩：超出容器宽度的部分横向滚动，而不是挤压换行。
+    const tabs = nav.querySelectorAll("button");
+    expect(tabs).toHaveLength(8);
+    for (const tab of tabs) {
+      expect(tab.className).toContain("shrink-0");
+      expect(tab.className).not.toContain("basis-");
+    }
+    // 内容区 flex-1 + min-w-0 → 占满导航之外的全部宽度。
+    const content = container.querySelector("#settings-panel");
+    expect(content?.className).toContain("flex-1");
+    expect(content?.className).toContain("min-w-0");
+  });
+
+  it("分组语义保留，分组标题只在宽屏侧栏显示", () => {
+    const nav = tablist();
+    expect(nav.querySelectorAll('[role="group"]')).toHaveLength(4);
+    const labels = [...nav.querySelectorAll<HTMLElement>('div[aria-hidden="true"]')];
+    expect(labels.map((el) => el.textContent)).toEqual(["账户", "工作方式", "扩展", "系统"]);
+    for (const label of labels) {
+      expect(label.className).toContain("hidden");
+      expect(label.className).toContain("@min-[560px]:block");
+    }
+  });
+
+  it("宽屏保持左侧边栏（172px 固定宽 + 纵向排布 + 右分隔线）", () => {
+    const nav = tablist();
+    expect(nav.className).toContain("@min-[560px]:flex-col");
+    expect(nav.className).toContain("@min-[560px]:w-[172px]");
+    expect(nav.className).toContain("@min-[560px]:border-r");
+    expect(nav.className).toContain("@min-[560px]:overflow-y-auto");
+  });
+
+  it("tablist 键盘可达：ArrowRight / ArrowLeft / End / Home 切换并移动焦点", () => {
+    const onTabChange = vi.fn();
+    act(() =>
+      root.render(
+        <SettingsModal
+          tab="chat"
+          onTabChange={onTabChange}
+          onDismiss={() => {}}
+          dismissible
+          busy={false}
+          auth={BASIC_AUTH}
+        />,
+      ),
+    );
+    const active = tablist().querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')!;
+    expect(active.id).toBe("settings-tab-chat");
+    const fire = (key: string) =>
+      act(() => active.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })));
+    // 顺序：api → chat → appearance → mcp → memory → assets → qq → runtime。
+    fire("ArrowRight");
+    expect(onTabChange).toHaveBeenLastCalledWith("appearance");
+    expect(document.activeElement?.id).toBe("settings-tab-appearance");
+    fire("ArrowLeft");
+    expect(onTabChange).toHaveBeenLastCalledWith("api");
+    fire("End");
+    expect(onTabChange).toHaveBeenLastCalledWith("runtime");
+    fire("Home");
+    expect(onTabChange).toHaveBeenLastCalledWith("api");
+  });
+
+  it("切换后选中的 tab 滚入导航可视区", () => {
+    const target = container.querySelector<HTMLButtonElement>("#settings-tab-mcp");
+    expect(target).toBeTruthy();
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(target!, "scrollIntoView", { value: scrollIntoView, configurable: true });
+    act(() =>
+      root.render(
+        <SettingsModal
+          tab="mcp"
+          onTabChange={() => {}}
+          onDismiss={() => {}}
+          dismissible
+          busy={false}
+          auth={BASIC_AUTH}
+        />,
+      ),
+    );
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+  });
 });
 
 it("persists the theme choice through host settings", () => {
@@ -427,7 +526,7 @@ describe("API 配置行更多菜单", () => {
     container.querySelector<HTMLButtonElement>(`button[aria-label="配置 ${name} 的操作"]`);
   const rowOf = (name: string) => moreButton(name)?.closest<HTMLElement>(".card-lift");
   const overflowMenu = () =>
-    [...container.querySelectorAll<HTMLElement>('[role="menu"]')].find((menu) =>
+    [...document.body.querySelectorAll<HTMLElement>('[role="menu"]')].find((menu) =>
       menu.textContent?.includes("编辑") && menu.textContent?.includes("删除"),
     );
 
@@ -581,7 +680,6 @@ describe("活跃子会话禁用会话/模型/凭据切换", () => {
       currentModelId: "model-a",
       thinkLevel: "auto",
       pendingApproval: null,
-      pendingPlanExit: null,
       pendingQuestions: null,
       pendingProfileSwitch: null,
       auth: {
@@ -730,7 +828,7 @@ describe("API 配置保存按钮的 busy 门控", () => {
     const more = container.querySelector<HTMLButtonElement>(`button[aria-label="配置 ${name} 的操作"]`);
     expect(more).toBeTruthy();
     act(() => more!.click());
-    const editItem = [...container.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    const editItem = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
       (el) => el.textContent?.trim() === "编辑",
     );
     expect(editItem).toBeTruthy();

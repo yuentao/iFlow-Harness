@@ -968,4 +968,112 @@ describe("SuperActionsToolCallCard（super-agent 工具 actions 载荷）", () =
     expect(card.hasAttribute("data-super-delegation-origin")).toBe(false);
     expect([...card.querySelectorAll("li")].map((li) => li.textContent)).toEqual(fencedRows);
   });
+
+  it("工具帧 completed 但动作 not-found：显示真实失败与原因，不再谎报绿色已完成", () => {
+    // 修复点3 的回归：内核对 super-agent 工具只回 ack，cancel 抄错 id 报
+    // not-found 时工具帧同样是 completed —— 旧卡片据此染成绿色「已完成」。
+    const input = JSON.stringify({ actions: [{ action: "cancel", sessionId: "super-wrong" }] });
+    const block: ToolBlock = {
+      ...toolBlock(input, "completed"),
+      superActionResult: [
+        { action: "cancel", sessionId: "super-wrong", ok: false, reason: "not-found" },
+      ],
+    };
+
+    act(() => root.render(<SuperActionsToolCallCard block={block} />));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
+    expect(card.textContent).toContain("未找到目标");
+    expect(card.textContent).not.toContain("已完成");
+    const failed = card.querySelector<HTMLElement>('[data-testid="super-action-result-failed"]');
+    expect(failed).toBeTruthy();
+    expect(failed!.textContent).toContain("super-wrong");
+    expect(failed!.textContent).toContain("找不到该子会话");
+  });
+
+  it("动作结果全部生效：显示绿色已完成与成功摘要", () => {
+    const input = JSON.stringify({ actions: [{ action: "cancel", sessionId: "super-ok" }] });
+    const block: ToolBlock = {
+      ...toolBlock(input, "completed"),
+      superActionResult: [
+        { action: "cancel", sessionId: "super-ok", ok: true, reason: "applied" },
+      ],
+    };
+
+    act(() => root.render(<SuperActionsToolCallCard block={block} />));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
+    expect(card.textContent).toContain("已完成");
+    expect(card.querySelector('[data-testid="super-action-result-ok"]')).toBeTruthy();
+    expect(card.querySelector('[data-testid="super-action-result-failed"]')).toBeNull();
+  });
+
+  it("宿主回填带标题的动作：显示「标题（id）」而非裸 id，覆盖多种动作类型", () => {
+    // 用户实测截图 2026-11-18：中断卡只显示 super-mwm2zrdl-m 这种裸 id，
+    // 第一眼认不出针对哪个子会话。标题只存在于宿主的 super-session 记录，
+    // 由 runSuperActions 回填到 block.superActions，卡片直接渲染。
+    const input = JSON.stringify({ actions: [{ action: "cancel", sessionId: "super-mwm2zrdl-m" }] });
+    const block: ToolBlock = {
+      ...toolBlock(input, "completed"),
+      superActions: [
+        { action: "cancel", sessionId: "super-mwm2zrdl-m", title: "修复登录跳转" },
+        { action: "cleanup", sessionId: "super-cleanup-01", title: "补文档", keepBranch: true },
+      ],
+      superActionResult: [
+        { action: "cancel", sessionId: "super-mwm2zrdl-m", ok: true, reason: "applied" },
+        { action: "cleanup", sessionId: "super-cleanup-01", ok: true, reason: "applied" },
+      ],
+    };
+
+    act(() => root.render(<SuperActionsToolCallCard block={block} />));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
+    const rows = [...card.querySelectorAll("li")].map((li) => li.textContent ?? "");
+    // cancel 与 cleanup 两种动作都带上了标题 + id。
+    expect(rows[0]).toContain("中断");
+    expect(rows[0]).toContain("修复登录跳转（super-mwm2zrdl-m）");
+    expect(rows[1]).toContain("清理");
+    expect(rows[1]).toContain("补文档（super-cleanup-01）");
+    expect(rows[1]).toContain("保留分支");
+  });
+
+  it("没有标题（流式中 / 旧转录 / 记录已清理）：退回裸 id，不留空括号或分隔符", () => {
+    const input = JSON.stringify({ actions: [{ action: "cancel", sessionId: "super-bare-id" }] });
+    act(() => root.render(<SuperActionsToolCallCard block={toolBlock(input)} />));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
+    expect(card.textContent).toContain("super-bare-id");
+    expect(card.textContent).not.toContain("（）");
+    expect(card.textContent).not.toContain("(super-bare-id)");
+  });
+
+  it("标题为空字符串：同样降级为裸 id，不显示占位符", () => {
+    const input = JSON.stringify({ actions: [{ action: "retry", sessionId: "super-empty-title" }] });
+    const block: ToolBlock = {
+      ...toolBlock(input),
+      superActions: [{ action: "retry", sessionId: "super-empty-title", title: "   " }],
+    };
+    act(() => root.render(<SuperActionsToolCallCard block={block} />));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
+    expect(card.textContent).toContain("super-empty-title");
+    expect(card.textContent).not.toContain("（）");
+  });
+});
+
+describe("操作卡标题渲染（围栏路径与工具调用路径共用 ActionRows）", () => {
+  it("围栏 super-agent-actions 段带 title 时也显示「标题（id）」", () => {
+    renderSegment({
+      kind: "directive",
+      language: "super-agent-actions",
+      raw: "",
+      display: {
+        kind: "actions",
+        actions: [
+          { action: "cancel", sessionId: "super-fence-01", title: "围栏里的中断标题" },
+          { action: "answer", sessionId: "super-fence-02" },
+        ],
+      },
+    });
+    const body = text();
+    expect(body).toContain("围栏里的中断标题（super-fence-01）");
+    // 没有 title 的那条仍显示裸 id，且没有空括号。
+    expect(body).toContain("super-fence-02");
+    expect(body).not.toContain("（super-fence-02）");
+  });
 });

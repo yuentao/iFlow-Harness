@@ -17,6 +17,7 @@
  * 要么是旧内容，要么是新内容，不会留下半截 JSON（与转录文件的写法一致）。
  */
 
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -68,10 +69,27 @@ export function superSessionsDir(baseDir: string): string {
  *
  * 会话 id 来自 CLI 与 webview 消息 —— 限制成文件系统安全的字符集，恶意 id
  * 不能借此逃出目录（与转录文件的 `ownTranscriptFileName` 同一纪律）。
+ *
+ * **单射性**：旧实现把所有非 `[A-Za-z0-9_-]` 字符折叠成 `-`，`a.b`、`a-b`、
+ * `a/b` 会撞到同一个 `a-b.json`（远程 / QQ 来源的 id 含特殊字符时尤其容易），
+ * 跨会话覆盖或误删。现在：
+ *  - 本身就落在安全字符集里的 id：**保持原文件名**（映射本来就是单射，且旧
+ *    归档照常可读，零迁移成本）；
+ *  - 需要折叠的 id：追加 id 的短 hash 后缀，保证映射是单射。
  */
 export function superSessionFileName(sessionId: string): string {
   const safe = sessionId.replace(/[^A-Za-z0-9_-]/g, "-");
-  return `${safe}.json`;
+  if (safe === sessionId) return `${safe}.json`;
+  const hash = createHash("sha256").update(sessionId).digest("hex").slice(0, 8);
+  return `${safe}-${hash}.json`;
+}
+
+/**
+ * 旧版本（无 hash）的归档文件名，仅供读取兼容 —— 不用于写入 / 删除，避免
+ * 误删「恰好与某个折叠名同形」的另一个安全 id 的归档。
+ */
+function legacySuperSessionFileName(sessionId: string): string {
+  return `${sessionId.replace(/[^A-Za-z0-9_-]/g, "-")}.json`;
 }
 
 function archivePath(baseDir: string, sessionId: string): string {
@@ -110,30 +128,42 @@ let tmpSeq = 0;
  *
  * 文件读不出来（JSON 损坏 / 结构不对 / 版本不认识）时**如实返回损坏状态**：
  * 会话列表为空，但 `damaged` 为 true，调用方必须把它当故障提示用户，绝不能
- * 伪装成「这个会话没有子会话」。损坏的原件会被复制一份 `.corrupt-<时间戳>`
- * 留底（原文件保持在原处，这样下一次读取仍然能报出「损坏」，而不是变成
- * 「什么都没有」）。
+ * 伪装成「这个会话没有子会话」。损坏的原件会被复制一份 `.corrupt` 留底
+ * （**固定单份**，覆盖上一次的备份，不再每次读取新增一份带时间戳的副本；
+ * 原文件保持在原处，这样下一次读取仍然能报出「损坏」）。
+ *
+ * 新文件名不存在时会回退读一次旧文件名：远程 / QQ 来源的 id 含特殊字符时，
+ * 旧版本写出的文件没有 hash 后缀，升级后不能凭空消失。
  */
 export async function readSuperSessionArchive(
   baseDir: string,
   sessionId: string,
 ): Promise<SuperSessionArchiveRead> {
   const target = archivePath(baseDir, sessionId);
+  let actualTarget = target;
   let raw: string;
   try {
     raw = await readFile(target, "utf8");
   } catch {
-    return { sessions: [], damaged: false }; // ENOENT：还没归档过
+    // ENOENT：先试旧文件名（只对确实被折叠过的 id 有意义）。
+    const legacy = path.join(superSessionsDir(baseDir), legacySuperSessionFileName(sessionId));
+    if (legacy === target) return { sessions: [], damaged: false };
+    try {
+      raw = await readFile(legacy, "utf8");
+      actualTarget = legacy;
+    } catch {
+      return { sessions: [], damaged: false }; // 真的还没归档过
+    }
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return await damaged(target, "corrupt-json");
+    return await damaged(actualTarget, "corrupt-json");
   }
   const file = parsed as Partial<ArchiveFile> | null;
   if (!file || typeof file !== "object") {
-    return await damaged(target, "bad-shape");
+    return await damaged(actualTarget, "bad-shape");
   }
   if (file.version !== ARCHIVE_VERSION) {
     // 版本不认识多半来自更高版本的扩展：文件本身没坏，别把它当损坏留底，
@@ -141,7 +171,7 @@ export async function readSuperSessionArchive(
     return { sessions: [], damaged: true, damage: "unknown-version" };
   }
   if (!Array.isArray(file.sessions)) {
-    return await damaged(target, "bad-shape");
+    return await damaged(actualTarget, "bad-shape");
   }
   return {
     sessions: file.sessions.filter((s): s is PersistedSuperSession => !!s && typeof s.id === "string"),
@@ -149,9 +179,9 @@ export async function readSuperSessionArchive(
   };
 }
 
-/** 读不出来时的统一返回：留底损坏原件 + 如实标记损坏。 */
+/** 读不出来时的统一返回：留底损坏原件 + 如实标记损坏（备份固定单份）。 */
 async function damaged(target: string, damage: SuperArchiveDamage): Promise<SuperSessionArchiveRead> {
-  const backupPath = `${target}.corrupt-${Date.now()}`;
+  const backupPath = `${target}.corrupt`;
   try {
     await copyFile(target, backupPath);
   } catch {
@@ -208,6 +238,21 @@ export async function deleteSuperSessionArchive(baseDir: string, sessionId: stri
   const target = archivePath(baseDir, sessionId);
   await rm(target, { force: true });
   lastWritten.delete(target);
+}
+
+/**
+ * 等这个归档**已经排队的写**全部落定（会话删除前的收尾）。
+ *
+ * `writeSuperSessionArchive` 的写链是串行的：删除会话时如果直接 `rm`，
+ * 一个早已排队的写会在 rm 之后才 rename —— 文件被「复活」，而那个会话已经
+ * 不存在了。先等链尾（吞掉错误，与写入侧一致），再删才确定。
+ */
+export async function awaitSuperSessionArchiveWrite(
+  baseDir: string,
+  sessionId: string,
+): Promise<void> {
+  const pending = pendingWrites.get(archivePath(baseDir, sessionId));
+  if (pending) await pending.catch(() => undefined);
 }
 
 /** 归档目录里的文件名列表（清理孤儿归档用）。 */

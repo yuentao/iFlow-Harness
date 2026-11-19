@@ -19,7 +19,6 @@ const chat = vi.hoisted(() => ({
     uiFontSize: "standard" as const,
     uiDensity: "standard" as const,
     soundFeedback: true,
-    defaultMode: "smart" as const,
   },
   state: {
     status: "error" as string | null,
@@ -130,7 +129,7 @@ function connectWithPreset() {
 
 it("opens directly on the connect step without a separate welcome screen", () => {
   renderWizard();
-  expect(container.textContent).toContain("第 1 / 4 步");
+  expect(container.textContent).toContain("第 1 / 3 步");
   expect(container.textContent).toContain("连接模型服务");
   expect(container.textContent).toContain("欢迎使用 心流·驭光");
   expect(container.textContent).toContain("接口地址（Base URL）");
@@ -160,7 +159,7 @@ it("prefills a preset and saves the credentials", () => {
     profileName: null,
   });
   expect(container.textContent).toContain("这是新会话默认使用的模型");
-  expect(container.textContent).toContain("第 2 / 4 步");
+  expect(container.textContent).toContain("第 2 / 3 步");
 });
 
 it("validates the API form before saving", () => {
@@ -221,27 +220,6 @@ it("shows the model search only for long catalogs", () => {
   expect(container.textContent).not.toContain("Model 1");
 });
 
-it("persists the default approval mode and switches the live session", () => {
-  chat.state.sessionId = "session-1";
-  chat.state.modes = {
-    currentModeId: "smart",
-    availableModes: [
-      { id: "smart", name: "" },
-      { id: "yolo", name: "" },
-    ],
-  };
-  renderWizard();
-  connectWithPreset();
-  click("下一步");
-
-  expect(container.textContent).toContain("新会话默认用这个权限模式");
-  expect(container.textContent).toContain("第 3 / 4 步");
-  click("yolo");
-  expect(updateHostSetting).toHaveBeenCalledWith({ defaultMode: "yolo" });
-  expect(beginPending).toHaveBeenCalledWith("mode", "yolo");
-  expect(send).toHaveBeenCalledWith({ type: "setMode", modeId: "yolo" });
-});
-
 it("shows the host error even when the model list is not empty", () => {
   renderWizard();
   click("DeepSeek");
@@ -258,9 +236,8 @@ it("finishes onboarding without the old preferences summary", () => {
   renderWizard();
   connectWithPreset();
   click("下一步");
-  click("下一步");
 
-  expect(container.textContent).toContain("第 4 / 4 步");
+  expect(container.textContent).toContain("第 3 / 3 步");
   expect(container.textContent).toContain("配置完成");
   expect(container.textContent).not.toContain("standard / standard");
   expect(container.textContent).not.toContain("提示音");
@@ -274,7 +251,6 @@ it("links the moved preferences from the done step", () => {
   renderWizard();
   connectWithPreset();
   click("下一步");
-  click("下一步");
   click("外观与交互");
 
   expect(send).toHaveBeenCalledWith({ type: "setOnboardingDismissed", dismissed: true });
@@ -285,7 +261,6 @@ it("links the moved preferences from the done step", () => {
 it("opens the requested advanced settings after finishing", () => {
   renderWizard();
   connectWithPreset();
-  click("下一步");
   click("下一步");
   click("MCP 服务器");
 

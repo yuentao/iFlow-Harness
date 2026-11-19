@@ -1,8 +1,8 @@
 import { create } from "zustand";
 import {
   applyBlockPatch,
+  EVICT_KEEP_BLOCKS,
   evictBlockPayloads,
-  type ApprovalRule,
   type Block,
   type HostSettingsUi,
   type HostToWebview,
@@ -12,11 +12,13 @@ import {
   type MemoryScope,
   type MemoryStateUi,
   type ModelMetadataStateUi,
+  type QqSettingsUi,
   type SessionState,
   type SessionSummaryUi,
   type UiDensity,
   type UiFontSize,
   type WebviewToHost,
+  pickQqSettingsUi,
 } from "../../shared/messages";
 import { normalizeModelId } from "../../shared/context-window";
 import { collectTurnChanges } from "../../shared/turn-changes";
@@ -89,8 +91,6 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   soundFeedback: true,
   osNotifications: "approvals",
   language: "",
-  defaultMode: "smart",
-  approvalMode: "",
   theme: "auto",
   auroraIntensity: 35,
   uiFontSize: "standard",
@@ -106,6 +106,9 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   costTable: [],
   thinkingModelRules: [],
   superAgentMaxConcurrent: 5,
+  superAgentIntegration: "merge",
+  superAgentMaxWorktrees: 10,
+  superAgentKeepWorktree: false,
 };
 
 // --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------
@@ -227,10 +230,29 @@ function createMockHost(): HostApi {
   const mockHostSettings: HostSettingsUi = { ...DEFAULT_HOST_SETTINGS };
   /** 「联网补充模型数据」 mock: one in-flight timer (cancel clears it). */
   let mockMetadataTimer: number | null = null;
-  // Mock approval-policy table + 「始终允许」 draft (M4 P1-1), same shape as
-  // the host's approvalPolicy message.
-  let mockApprovalRules: ApprovalRule[] | undefined;
-  let mockApprovalDraft: ApprovalRule | null | undefined;
+  // Mock QQ settings (browser preview): the QQ tab renders straight from
+  // `qqSettings`, so seed the access-control tables with real entries —
+  // two users with notes plus one without (exercises the masked fallback)
+  // and one group with a note. Deleting a row in the preview pushes a
+  // `qqSettingsPatch` back, which empties that list and shows its empty state.
+  let mockQqSettings: QqSettingsUi = pickQqSettingsUi(
+    {
+      enabled: true,
+      workspace: "C:\\mock\\workspace",
+      allowedUsers: [
+        { openid: "D754A1B2C3D4E5F6A7B88D11", note: "我的手机（私聊）" },
+        { openid: "A1B2C3D4E5F6A7B8C9D0E1F2", note: "同事小林" },
+        { openid: "9F8E7D6C5B4A3928F0E1D2C3" },
+      ],
+      allowedGroups: [{ openid: "123456789", note: "项目讨论群" }],
+      remotePolicy: "supervised",
+      maxConcurrentTasks: 2,
+      rateLimitPerMin: 6,
+      resultDetail: "standard",
+      autoMerge: false,
+    },
+    { hasAppSecret: true },
+  );
 
   // Mock memory files (F3): enough to exercise the tab in a browser — one
   // global primary with structured facts, one project file, one legacy file.
@@ -499,7 +521,7 @@ function createMockHost(): HostApi {
     },
     {
       kind: "injected",
-      notice: "这次请求还自动带上了 7 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档、2 个 MCP 服务器、1 个 MCP 服务器未连接、1 个来自项目配置",
+      notice: "这次请求还自动带上了 4 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档",
       tokens: 31320,
       items: [
         {
@@ -526,24 +548,6 @@ function createMockHost(): HostApi {
           path: "J:\\git\\iflow-harness\\.iflow\\knowledge\\index.md",
           content: "# 项目知识索引\n\n## 概览\n…（mock：知识库正文，由 @.iflow/knowledge/index.md 展开）",
         },
-        {
-          kind: "mcp",
-          label: "apipost-mcp",
-          scope: "global",
-          content:
-            '{"name":"create_api","description":"Create an API endpoint","parameters":{"type":"object","properties":{"name":{"type":"string"}}}}\n' +
-            '{"name":"update_api","description":"Modify an API endpoint","parameters":{"type":"object"}}\n' +
-            '{"name":"list_projects","description":"List API projects","parameters":{"type":"object"}}',
-        },
-        // Declared in both settings files: the Core's merge lets the project
-        // entry win, so this row reads as project-scope overriding global.
-        {
-          kind: "mcp",
-          label: "chrome-devtools",
-          scope: "both",
-          content: '{"name":"navigate","description":"Navigate to a URL","parameters":{"type":"object"}}',
-        },
-        { kind: "mcp", label: "exa", scope: "global", content: "", connected: false },
       ],
     },
     {
@@ -683,30 +687,6 @@ function createMockHost(): HostApi {
       { optionId: "reject-once", name: "拒绝", kind: "reject_once" },
     ],
     // Mock the real host: 5-minute expiry window.
-    deadline: Date.now() + 5 * 60_000,
-    timeoutMs: 5 * 60_000,
-  };
-  // Demo plan-exit card: surfaced when the user switches to Plan mode in the
-  // mock host (mirrors the real flow — plan mode → agent exits plan → card).
-  // Markdown-heavy so the render/edit toggle in PlanExitCard is exercisable
-  // in browser debug mode.
-  const demoPlanExit: SessionState["pendingPlanExit"] = {
-    id: "plan-demo-1",
-    plan: [
-      "## Token 计费追踪优化",
-      "",
-      "先改 **shared/session-state.ts**：",
-      "",
-      "1. `appendTokenUsage` 流式追加改为增量累加 token（替代失效缓存），使流式缓存索失效前刷新 BPE 量",
-      "2. `upsertToolBlock` 仅内容变化才重算 token（纯态翻稳定缓存），消除工具更新的 BPE 热点",
-      "3. `refreshSessionUsage(state)` 引用稳定（数值不变换对象引用）",
-      "",
-      "再改 **src/panel/store.ts**：",
-      "",
-      "- `streaming` 期间在 `pushSnapshot` 按 500ms 节流刷新 usage chip",
-      "",
-      "> 风险：`gpt-tokenizer` 计数是 O(size)，长会话注意节流。",
-    ].join("\n"),
     deadline: Date.now() + 5 * 60_000,
     timeoutMs: 5 * 60_000,
   };
@@ -1046,9 +1026,10 @@ function createMockHost(): HostApi {
   const demoMeta = {
     sessionId: "mock-session",
     superSessions: demoSuperSessions,
+    qqTasks: [] as SessionState["qqTasks"],
     modes: { currentModeId: "smart", availableModes: [
       { id: "smart", name: "Smart" }, { id: "yolo", name: "YOLO" },
-      { id: "default", name: "Default" }, { id: "plan", name: "Plan" },
+      { id: "default", name: "Default" },
     ] },
     commands: [
       { name: "init", description: "分析项目并创建或更新定制的 IFLOW.md 文件" },
@@ -1107,7 +1088,6 @@ function createMockHost(): HostApi {
     // Demo: surface the question card so the option-description UI is visible
     // in browser debug mode.
     pendingQuestions: demoQuestions as SessionState["pendingQuestions"],
-    pendingPlanExit: null,
     pendingProfileSwitch: null as SessionState["pendingProfileSwitch"],
     replaying: false,
     initializing: false,
@@ -1204,6 +1184,11 @@ function createMockHost(): HostApi {
       if (m.type === "ready") {
         broadcast({ type: "theme", kind: mockTheme });
         broadcast({ type: "hostSettings", ...mockHostSettings });
+        // QQ channels are independent of the transcript snapshot (the real
+        // host pushes them separately), so the mock must seed them too —
+        // otherwise the settings hub's QQ tab renders empty tables.
+        broadcast({ type: "qqSettings", values: mockQqSettings });
+        broadcast({ type: "qqStatus", connected: false });
         broadcast({
           type: "snapshot",
           state: {
@@ -1216,6 +1201,14 @@ function createMockHost(): HostApi {
             auth: authState,
           },
         });
+        return;
+      }
+      if (m.type === "qqSettingsPatch") {
+        mockQqSettings = pickQqSettingsUi(
+          { ...mockQqSettings, ...m.patch } as Record<string, unknown>,
+          { hasAppSecret: mockQqSettings.hasAppSecret },
+        );
+        broadcast({ type: "qqSettings", values: mockQqSettings });
         return;
       }
       if (m.type === "requestTurnChanges") {
@@ -1454,29 +1447,6 @@ function createMockHost(): HostApi {
         }, 600);
         return;
       }
-      if (m.type === "respondPlanExit") {
-        // Replan with edited text (reason): record the revision in the mock
-        // transcript so the edited plan has a visible destination in demo.
-        const replanNote = m.replan && m.reason ? `（修改：${m.reason.slice(0, 60)}${m.reason.length > 60 ? "…" : ""}）` : "";
-        demoBlocks.push({
-          kind: "text",
-          text: `*plan exit — ${m.approved ? "已批准（mock）" : m.replan ? `已重新规划（mock）${replanNote}` : "已拒绝（mock）"}*`,
-        });
-        broadcast({
-          type: "snapshot",
-          state: {
-            blocks: [...demoBlocks],
-            status: "streaming",
-            errorMessage: null,
-            stopReason: null,
-            ...demoMeta,
-            pendingApproval: null,
-            pendingPlanExit: null,
-            auth: authState,
-          },
-        });
-        return;
-      }
       if (m.type === "revertTool") {
         for (const block of demoBlocks) {
           if (block.kind === "tool" && block.toolCallId === m.toolCallId) {
@@ -1516,34 +1486,6 @@ function createMockHost(): HostApi {
             stopReason: "end_turn",
             ...demoMeta,
             pendingApproval: activeApproval,
-            auth: authState,
-          },
-        });
-        return;
-      }
-      if (m.type === "setMode") {
-        // Mirrors real CLI behavior: respond with the new current mode.
-        demoMeta.modes = {
-          ...demoMeta.modes,
-          currentModeId: m.modeId,
-        };
-        // Mock plan-exit demo: switching INTO Plan mode surfaces the demo
-        // card (mirrors the real flow — plan mode → agent requests exit →
-        // card). Switching out clears it.
-        const showPlanCard = m.modeId === "plan";
-        if (showPlanCard) {
-          demoPlanExit.deadline = Date.now() + demoPlanExit.timeoutMs;
-        }
-        broadcast({
-          type: "snapshot",
-          state: {
-            blocks: [...demoBlocks],
-            status: "idle",
-            errorMessage: null,
-            stopReason: "end_turn",
-            ...demoMeta,
-            pendingApproval: activeApproval,
-            pendingPlanExit: showPlanCard ? demoPlanExit : null,
             auth: authState,
           },
         });
@@ -2187,35 +2129,6 @@ function createMockHost(): HostApi {
         );
         return;
       }
-      if (m.type === "listApprovalPolicy" || m.type === "saveApprovalPolicy" || m.type === "dismissApprovalRuleDraft") {
-        if (m.type === "saveApprovalPolicy") mockApprovalRules = m.rules;
-        if (m.type === "dismissApprovalRuleDraft") mockApprovalDraft = null;
-        if (!mockApprovalRules) {
-          mockApprovalRules = [
-            { id: "rule-read-src", label: "允许读取 src 下文件", enabled: true, action: "allow", kinds: ["read"], path: "src/**", hits: 12 },
-            { id: "deny-env", label: "拒绝读取 .env", enabled: true, action: "deny", path: "**/.env*" },
-            { id: "ask-push", label: "git push 弹卡", enabled: false, action: "ask", commands: ["git"] },
-          ];
-          mockApprovalDraft = {
-            id: `rule-draft-${Date.now().toString(36)}`,
-            label: "允许执行 git status",
-            enabled: true,
-            action: "allow",
-            kinds: ["execute"],
-            commands: ["git"],
-          };
-        }
-        const payload = {
-          type: "approvalPolicy",
-          rules: mockApprovalRules,
-          projectRules: [{ id: "proj-lock", label: "项目：拒绝改 lock 文件", enabled: true, action: "deny", path: "**/package-lock.json" }],
-          draft: mockApprovalDraft,
-          // Mirror the real host: a save is acknowledged with its outcome.
-          ...(m.type === "saveApprovalPolicy" ? { saveResult: "ok" as const } : {}),
-        };
-        window.setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: payload })), 80);
-        return;
-      }
       if (m.type === "stopSubagent") {
         // The mock mirrors the agent-cancel Mod: only the targeted agent
         // stops; the parent turn keeps running with an interrupted result.
@@ -2530,8 +2443,10 @@ const RESYNC_THROTTLE_MS = 1_000;
  * compression summaries) is released and rendered with a "released" marker;
  * the host state stays complete regardless (revert / export / persistence
  * read the host, not this projection).
+ *
+ * `EVICT_KEEP_BLOCKS` lives in `shared/messages` so the host-side child
+ * transcript (SuperAgentManager) trims with exactly the same window.
  */
-const EVICT_KEEP_BLOCKS = 200;
 
 /**
  * Eviction memo: input blocks array → evicted blocks array.
@@ -2615,6 +2530,38 @@ interface ChatStore {
    * sessions that still exist on every snapshot / patch.
    */
   superTranscripts: Record<string, Block[]>;
+  /**
+   * 新建会话时 host 检测到跨历史会话 Super Agent 残留，请求 webview 弹出
+   * 二次确认框。整条消息（含组装好的 title/message/按钮文案）原样存下，
+   * webview 只渲染不改写。null = 当前没有待确认请求。
+   */
+  superResidueConfirm: Extract<HostToWebview, { type: "superResidueConfirm" }> | null;
+  /** 回答残留清空确认框：清空展示态并只回传一次 respondSuperResidueConfirm。 */
+  respondSuperResidueConfirm: (confirmed: boolean) => void;
+  /**
+   * QQ 远程任务设置快照（Wave3-C）。独立于 `state`：`snapshot` / `blockPatch`
+   * 只换转录与会话元数据，绝不覆盖它。默认值由 `pickQqSettingsUi` 归一，
+   * 因此首帧就能渲染完整表单（凭据只有「已配置」布尔）。
+   */
+  qqSettings: QqSettingsUi;
+  /** 最近一次连接检查 / 适配器状态回执；null = 尚未收到。 */
+  qqStatus: { connected: boolean; detail?: string } | null;
+  /**
+   * QQ 授权模型：白名单外的人发来消息时留下的待审核记录（宿主每次全量重发，
+   * 这里直接替换）。顺序由宿主按 `lastSeenAt` 倒序保证。
+   */
+  qqPendingUsers: Extract<HostToWebview, { type: "qqPendingUsers" }>["users"];
+  /**
+   * 一键接入：QQ 官方机器人扫码授权二维码回执。独立于 `state`，
+   * `snapshot` / `blockPatch` 绝不覆盖；`dataUrl` 经 `isQrDataUrl` 护栏后才
+   * 能由 QqSettings 送进 `<img src>`。null = 当前没有二维码。
+   */
+  qqLoginQr: Extract<HostToWebview, { type: "qqLoginQr" }> | null;
+  /**
+   * 一键接入：QQ 官方机器人准备/配置/启动/授权各阶段的进度回执。
+   * 同样独立于 `state`，不被快照覆盖。null = 尚未开始接入。
+   */
+  qqManagedStatus: Extract<HostToWebview, { type: "qqManagedStatus" }> | null;
   /** Latest editor theme from the host; null until the first `theme` message. */
   editorTheme: "light" | "dark" | null;
   /**
@@ -2686,7 +2633,13 @@ import { setLocale } from "./i18n";
 
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
+  qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
+  qqStatus: null,
+  qqPendingUsers: [],
+  qqLoginQr: null,
+  qqManagedStatus: null,
   superTranscripts: {},
+  superResidueConfirm: null,
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
   modelMetadata: { state: "idle" },
@@ -2798,6 +2751,35 @@ export const useChat = create<ChatStore>((set, get) => ({
       });
       return;
     }
+    if (msg.type === "superResidueConfirm") {
+      // 宿主组装好的文案（含警示）原样存入，SuperResidueConfirmDialog 读取它
+      // 弹出阻断式确认框；answer 后由 respondSuperResidueConfirm 清空。
+      set({ superResidueConfirm: msg });
+      return;
+    }
+    if (msg.type === "qqSettings") {
+      set({ qqSettings: msg.values });
+      return;
+    }
+    if (msg.type === "qqStatus") {
+      set({ qqStatus: { connected: msg.connected, detail: msg.detail } });
+      return;
+    }
+    if (msg.type === "qqPendingUsers") {
+      // 授权模型：宿主每次全量重发（新增 / 放行 / 拒绝都会推），直接替换。
+      set({ qqPendingUsers: msg.users });
+      return;
+    }
+    if (msg.type === "qqLoginQr") {
+      // 一键托管的二维码回执走独立通道，快照不覆盖。dataUrl 的合法性由
+      // QqSettings 在送进 <img> 前用 isQrDataUrl 自检（防御恶意 host 消息）。
+      set({ qqLoginQr: msg });
+      return;
+    }
+    if (msg.type === "qqManagedStatus") {
+      set({ qqManagedStatus: msg });
+      return;
+    }
     if (msg.type === "hostSettings") {
       const { type, ...settings } = msg;
       void type;
@@ -2896,7 +2878,6 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "memoryFileContent" ||
       msg.type === "memoryCandidates" ||
       msg.type === "knowledgeJob" ||
-      msg.type === "approvalPolicy" ||
       msg.type === "profileDeleteResult" ||
       msg.type === "enhancedPrompt" ||
       msg.type === "queueEdited" ||
@@ -2910,6 +2891,15 @@ export const useChat = create<ChatStore>((set, get) => ({
     // commits silently drops unknown message kinds (e.g. a pre-P-1 webview
     // ignoring blockPatch) — the exact "blocks disappear" bug. Surface it.
     console.warn(`[iflow] unknown host message: ${(msg as { type?: string }).type}`);
+  },
+  respondSuperResidueConfirm: (confirmed) => {
+    const request = get().superResidueConfirm;
+    if (!request) return;
+    // Clear synchronously BEFORE sending: a second click / Esc-on-backdrop
+    // racing the re-render must not post a second answer. The host also
+    // de-dupes by requestId, but the webview never relies on that.
+    set({ superResidueConfirm: null });
+    get().send({ type: "respondSuperResidueConfirm", requestId: request.requestId, confirmed });
   },
   beginPending: (kind, target) => {
     if (pendingTimer) clearTimeout(pendingTimer);

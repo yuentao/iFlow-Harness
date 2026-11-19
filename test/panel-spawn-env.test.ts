@@ -17,10 +17,12 @@ import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
+import { MCP_SERVER_ALLOWLIST_FLAG, MCP_SERVER_ALLOWLIST_SENTINEL } from "../src/acp/cli-locator.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const mockAgent = path.join(here, "mock-acp-agent.mjs");
+const fakeMcpServer = path.join(here, "fixtures", "fake-mcp-server.mjs");
 
 function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
@@ -102,6 +104,7 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
   afterEach(async () => {
     await panel.dispose();
     delete process.env.ACP_MOCK_ENV_DUMP;
+    delete process.env.ACP_MOCK_ARGV_DUMP;
     delete process.env.IFLOW_SUPER_TOOL;
     delete process.env.IFLOW_HOME;
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -143,6 +146,142 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
       expect(env.IFLOW_SUPER_TOOL).toBeUndefined();
       // 子会话仍是 harness 子进程，只是没有派发工具。
       expect(env.IFLOW_HARNESS).toBe("1");
+    } finally {
+      await child.dispose();
+    }
+  }, 30000);
+
+  /**
+   * MCP 作用域按**进程**生效：主会话的 CLI 进程一个 MCP 服务器都不该有
+   * （MCP 工具绕过 `settings.allowed_tools` 白名单，只能这样整体移除）。
+   *
+   * 子会话反过来必须能用 MCP，但**不能**每个子会话各起一套：宿主 broker
+   * 先认领每个配置的 server（每 server 只 spawn 一份），子会话的 argv 只放
+   * broker 的 server 名 —— 用户配置里的 stdio server 因此在子会话进程里不会
+   * 被拉起，子会话经 loopback HTTP 连同一份 server。
+   *
+   * 断言的是宿主真的交给子进程的 argv（mock agent 自己 dump 的），不是某个
+   * 内部对象。
+   */
+  function readDumpedArgv(file: string): string[] {
+    return JSON.parse(fs.readFileSync(file, "utf8")) as string[];
+  }
+
+  function allowedMcpNames(argv: string[]): string[] {
+    const names: string[] = [];
+    for (let i = 0; i < argv.length; i += 1) {
+      if (argv[i] === MCP_SERVER_ALLOWLIST_FLAG) names.push(argv[i + 1] ?? "");
+    }
+    return names;
+  }
+
+  function writeConfiguredServer(spawnLog: string): void {
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        mcpServers: {
+          demo: {
+            command: process.execPath,
+            args: [fakeMcpServer, "--name", "demo"],
+            env: { FAKE_MCP_SPAWN_LOG: spawnLog },
+          },
+        },
+      }),
+      "utf8",
+    );
+  }
+
+  function spawnLines(file: string): string[] {
+    if (!fs.existsSync(file)) return [];
+    return fs
+      .readFileSync(file, "utf8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  it("主会话的 spawn argv 带 MCP 作用域参数（哨兵不可命中任何服务器）", async () => {
+    const dump = path.join(storageDir, "main-argv.json");
+    process.env.ACP_MOCK_ARGV_DUMP = dump;
+
+    await (panel as unknown as SpawnEnvInternals).ensureClient();
+
+    const argv = readDumpedArgv(dump);
+    const i = argv.indexOf(MCP_SERVER_ALLOWLIST_FLAG);
+    expect(i).toBeGreaterThan(-1);
+    expect(argv[i + 1]).toBe(MCP_SERVER_ALLOWLIST_SENTINEL);
+    // 既有参数没被破坏。
+    expect(argv).toContain("--experimental-acp");
+    expect(argv).toContain("--stream");
+  }, 30000);
+
+  it("子会话的 spawn argv 只放共享 broker 的 server 名（并发子会话仍只有一份 server 进程）", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-spawnenv-mcp-"));
+    const spawnLog = path.join(dir, "spawns.log");
+    fs.writeFileSync(spawnLog, "");
+    try {
+      writeConfiguredServer(spawnLog);
+      const dump = path.join(storageDir, "child-argv.json");
+      process.env.ACP_MOCK_ARGV_DUMP = dump;
+
+      const first = await (panel as unknown as SpawnEnvInternals).createSuperClient({
+        cwd: here,
+        allowedRoots: [here],
+        includeDirectories: [],
+        label: "spawn-argv-child-1",
+        callbacks: {},
+      });
+      const second = await (panel as unknown as SpawnEnvInternals).createSuperClient({
+        cwd: here,
+        allowedRoots: [here],
+        includeDirectories: [],
+        label: "spawn-argv-child-2",
+        callbacks: {},
+      });
+      try {
+        const argv = readDumpedArgv(dump);
+        expect(allowedMcpNames(argv)).toEqual(["demo"]);
+        expect(argv).not.toContain(MCP_SERVER_ALLOWLIST_SENTINEL);
+        // 内置工具能力不受影响：只改 MCP 作用域，参数仍是同一套 ACP 启动方式。
+        expect(argv).toContain("--experimental-acp");
+        expect(argv).toContain("--stream");
+
+        // 两个子会话共享同一份 broker → 服务端只被拉起一次。
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline && spawnLines(spawnLog).length === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(spawnLines(spawnLog)).toHaveLength(1);
+
+        // 同一个 broker 实例给两个子会话的是同一个地址（不是每次新起一套）。
+        const internals = panel as unknown as {
+          mcpBroker: { sessionServers: () => { url?: string }[] } | null;
+        };
+        expect(internals.mcpBroker?.sessionServers()).toHaveLength(1);
+      } finally {
+        await first.dispose();
+        await second.dispose();
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  }, 40000);
+
+  it("没有配置 MCP 时子会话仍退回哨兵（不伪造共享）", async () => {
+    const dump = path.join(storageDir, "child-no-mcp-argv.json");
+    process.env.ACP_MOCK_ARGV_DUMP = dump;
+
+    const child = await (panel as unknown as SpawnEnvInternals).createSuperClient({
+      cwd: here,
+      allowedRoots: [here],
+      includeDirectories: [],
+      label: "spawn-argv-child-none",
+      callbacks: {},
+    });
+    try {
+      const argv = readDumpedArgv(dump);
+      expect(allowedMcpNames(argv)).toEqual([MCP_SERVER_ALLOWLIST_SENTINEL]);
+      expect(argv).toContain("--experimental-acp");
     } finally {
       await child.dispose();
     }

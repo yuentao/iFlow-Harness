@@ -20,14 +20,15 @@ import {
   initialSessionState,
   hasAgentAttachmentBlock,
   normalizeUserPromptText,
+  withoutPlanModes,
   type Block,
   type InjectedContextItem,
   type ModelInfoUi,
   type PendingApprovalUi,
-  type PendingPlanExitUi,
   type PendingProfileSwitchUi,
   type PendingQuestionsUi,
   type PlanEntryUi,
+  type QqTaskUi,
   type SessionState,
   type SessionSummaryUi,
   type SessionUsageUi,
@@ -37,7 +38,8 @@ import {
   type ToolDiffUi,
   type UsageBreakdownUi,
 } from "./messages.js";
-import { classifySuperToolName, parseSuperDelegationTasks } from "./super-tool-call.js";
+import { classifySuperToolName, resolveSuperToolCallKind } from "./super-tool-call.js";
+import { parseSuperDelegationPayload, type SuperDirectiveAction } from "./super-agent.js";
 
 // --- merging helpers -------------------------------------------------------
 
@@ -243,23 +245,46 @@ export function formatToolInput(args: unknown): string | null {
  * parse runs ONLY for dispatch-class tool names; every other tool frame
  * skips it entirely.
  *
- * @returns the parsed tasks, or undefined when this is not a dispatch call or
- * the payload is unusable (never fabricate).
+ * @returns the parsed tasks and/or a diagnostic; undefined when this is not a
+ * dispatch call, carries no payload yet, or is really an actions payload
+ * (never fabricate tasks, never mislabel an actions call as malformed).
  */
-function superTasksForTool(
+interface SuperTaskParse {
+  /** Parsed tasks; absent when the payload is unusable (never fabricated). */
+  tasks?: SuperDelegatedTaskUi[];
+  /** Human-readable diagnostic for malformed payloads / dropped entries. */
+  error?: string;
+}
+
+function superTaskParseForTool(
   toolName: string | undefined,
   args: unknown,
-): SuperDelegatedTaskUi[] | undefined {
+): SuperTaskParse | undefined {
   if (classifySuperToolName(toolName ?? "") !== "dispatch") return undefined;
-  const tasks = parseSuperDelegationTasks(args);
-  if (!tasks || tasks.length === 0) return undefined;
-  return tasks.map((task) => ({
+  // Wire evidence: args ride only the in_progress frame; a pending frame has
+  // none. Treating "no payload yet" as a format error would stick a bogus
+  // diagnostic on the card forever (the merge rule keeps the first non-null
+  // error). Honest answer: nothing to parse yet.
+  if (args === undefined || args === null) return undefined;
+  // The `super-agent` tool schema also accepts `actions`; a pure actions
+  // payload goes through the actions lane and is NOT a malformed delegation.
+  if (resolveSuperToolCallKind("dispatch", args) === "actions") return undefined;
+  const parsed = parseSuperDelegationPayload(args);
+  if (!parsed.ok) return { error: parsed.reason };
+  const tasks: SuperDelegatedTaskUi[] = parsed.tasks.map((task) => ({
     title: task.title,
     task: task.task,
     // Count only: attachment bodies (file contents / inlined base64 images)
     // must never enter the snapshot (pitfall #27 discipline).
     attachmentCount: (task.attachments ?? []).length,
   }));
+  if (parsed.issues.length === 0) return { tasks };
+  // Mixed payload: keep the valid tasks, but say which entries were dropped —
+  // silently losing half the delegation is exactly the failure to avoid.
+  return {
+    tasks,
+    error: `已忽略 ${parsed.issues.length} 个格式错误的任务条目（${parsed.issues[0]}）`,
+  };
 }
 
 /**
@@ -384,6 +409,14 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
       // therefore the task list) arrive with the in_progress frame only — a
       // later frame without args must not wipe the card's task list.
       superTasks: patch.superTasks ?? block.superTasks,
+      // 同上：解析诊断只在带 args 的帧里产生，后续 completed 帧不能用
+      // undefined 把它擦掉（否则用户刚好在卡片上看到原因后又消失）。
+      superTasksError: patch.superTasksError ?? block.superTasksError,
+      // 动作结果由宿主在 runSuperActions 收尾时按 toolCallId 回填，wire 帧
+      // 永远不带它 —— 后续 completed 帧不能用 undefined 把真实结果擦掉。
+      superActionResult: patch.superActionResult ?? block.superActionResult,
+      // 同上：带标题的结构化动作也是宿主收尾回填，后续帧不得擦掉。
+      superActions: patch.superActions ?? block.superActions,
       reverted: patch.diff ? false : block.reverted,
       // P0-2: per-hunk decisions anchor to the diff text they were derived
       // from — a new diff invalidates them exactly like the revert marker.
@@ -747,19 +780,8 @@ function upsertPlanEntries(
   return blocks.length - 1;
 }
 
-/** Seed the turn's TaskList from an approved Plan-mode plan (3.5 ①: the
- * card otherwise only appears once the agent itself calls the todo tool,
- * so after approval the round had no task-level progress view). Reuses the
- * todo-tool merge rule — one live card per turn, and a later `todo_write`
- * replaces the seeded items (the agent's own bookkeeping wins). Returns
- * null for an empty list (nothing to seed). */
-export function addPlanChecklist(blocks: Block[], entries: PlanEntryUi[]): number | null {
-  if (entries.length === 0) return null;
-  return upsertPlanEntries(blocks, entries, () => ({ kind: "plan", id: nextBlockId(), entries }));
-}
-
 /** Tick/untick one checklist entry by stable block id (P4) — the user-side
- * progress control (the plan card is checkable even when the agent never
+ * progress control (the TaskList card is checkable even when the agent never
  * drives the todo tool). Only flips `pending`/`completed`; an `in_progress`
  * item completing is the agent's claim and stays untouched. Returns the
  * mutated index, or null when the block/entry is not addressable (stale
@@ -800,10 +822,11 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
       // ignored. During `session/load` replay (M4) user turns arrive through
       // this notification and must be rendered.
       return update.content.type === "text" ? appendTextToLast(blocks, "user", update.content.text) ?? null : null;
-    case "tool_call":
+    case "tool_call": {
       // Todo tools render ONLY as the unified TaskList card (see
       // isTodoToolName) — never as a generic tool card.
       if (isTodoToolName(update.toolName)) return null;
+      const delegation = superTaskParseForTool(update.toolName, update.args);
       return upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
@@ -813,12 +836,15 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         status: update.status ?? "pending",
         output: "",
         input: formatToolInput(update.args),
-        superTasks: superTasksForTool(update.toolName, update.args),
+        ...(delegation?.tasks ? { superTasks: delegation.tasks } : {}),
+        ...(delegation?.error ? { superTasksError: delegation.error } : {}),
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
-    case "tool_call_update":
+    }
+    case "tool_call_update": {
       if (isTodoToolName(update.toolName)) return null;
+      const delegation = superTaskParseForTool(update.toolName, update.args);
       return upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
@@ -828,10 +854,12 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         status: update.status ?? "pending",
         output: extractTextOutput(update.content),
         input: formatToolInput(update.args),
-        superTasks: superTasksForTool(update.toolName, update.args),
+        ...(delegation?.tasks ? { superTasks: delegation.tasks } : {}),
+        ...(delegation?.error ? { superTasksError: delegation.error } : {}),
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
+    }
     case "plan": {
       const entries = update.entries.map((e) => ({
         content: e.content,
@@ -982,7 +1010,11 @@ export function applySessionUpdate(
       state.commands = update.availableCommands;
       return null;
     case "current_mode_update":
-      if (state.modes) state.modes = { ...state.modes, currentModeId: update.currentModeId };
+      // Plan mode 已移除：CLI 若仍报 plan，归一到可用的非 plan 模式（见
+      // withoutPlanModes）。其余未知 id 原样保留（agent 可能新增模式）。
+      if (state.modes) {
+        state.modes = withoutPlanModes({ ...state.modes, currentModeId: update.currentModeId });
+      }
       return null;
     default:
       return null;
@@ -1226,6 +1258,41 @@ export function attachSynthesizedDiff(state: SessionState, toolCallId: string, d
   return null;
 }
 
+/**
+ * 把宿主执行 `super-agent` 管理动作后的真实结果回填到对应工具块。
+ *
+ * 日志/回执之外的第三处落点：动作卡据此把「工具帧 completed」的绿色已完成
+ * 换成真实结果（全 ok 才完成，not-found/失败给警告色与原因）。按 toolCallId
+ * 查找，兼容嵌在 SubAgent 卡里的工具块；返回顶层变更索引供 P-1 blockPatch。
+ * 重复回填（同一工具帧重放）直接覆盖，结果以最后一次宿主执行为准。
+ */
+export function attachSuperActionResult(
+  state: SessionState,
+  toolCallId: string,
+  result: NonNullable<ToolBlock["superActionResult"]>,
+  actions?: SuperDirectiveAction[] | null,
+): number | null {
+  for (let i = state.blocks.length - 1; i >= 0; i--) {
+    const block = state.blocks[i]!;
+    if (block.kind === "tool") {
+      if (block.toolCallId !== toolCallId) continue;
+      block.superActionResult = result;
+      if (actions) block.superActions = actions;
+      return i;
+    }
+    if (block.kind !== "subagent") continue;
+    const nested = block.entries.find(
+      (e): e is ToolBlock => e.kind === "tool" && e.toolCallId === toolCallId,
+    );
+    if (nested) {
+      nested.superActionResult = result;
+      if (actions) nested.superActions = actions;
+      return i;
+    }
+  }
+  return null;
+}
+
 // --- host-level transitions -------------------------------------------------
 
 // --- CLI slash-command vs. literal-text disambiguation -----------------------
@@ -1329,6 +1396,11 @@ export function beginUserPrompt(
   text: string,
   images?: string[],
   files?: { name: string; path: string }[],
+  /**
+   * 消息来源渠道：`"qq"` 表示这条用户消息由 QQ 机器人转来（宿主注入），
+   * 不是本机用户的直接输入。转录里必须可区分（webview 渲染 QQ 徽标）。
+   */
+  origin?: "qq",
 ): number {
   // Mirror the agent-facing attachment list in the transcript so the user
   // message block shows exactly what the agent was told about the files.
@@ -1337,10 +1409,11 @@ export function beginUserPrompt(
       ? "\n" + files.map((f) => `（文件：${f.name} → ${f.path}）`).join("\n")
       : "";
   const full = text + fileNote;
+  const originField = origin ? { origin } : {};
   state.blocks.push(
     images && images.length > 0
-      ? { kind: "user", text: full, images, id: nextBlockId() }
-      : { kind: "user", text: full, id: nextBlockId() },
+      ? { kind: "user", text: full, images, id: nextBlockId(), ...originField }
+      : { kind: "user", text: full, id: nextBlockId(), ...originField },
   );
   state.status = "streaming";
   state.stopReason = null;
@@ -1362,6 +1435,54 @@ export function setNextStepSuggestions(state: SessionState, suggestions: string[
  * slow dedicated model call is visible rather than invisible. */
 export function setNextStepLoading(state: SessionState, loading: boolean): void {
   state.nextStepLoading = loading;
+}
+
+// --- QQ remote tasks (Wave2-B) ----------------------------------------------
+// The QQ board is non-blocks metadata exactly like `superSessions`: it rides
+// the blockPatch tail channel, so NONE of these reducers touches `blocks` and
+// none of them reports a block mutation index (the returned numbers below are
+// projection indices, never feed them to the store's `noteMutationIndex`).
+
+/**
+ * Replace the whole QQ task projection (board refresh / restore).
+ * Returns the new row count.
+ */
+export function setQqTasks(state: SessionState, tasks: QqTaskUi[]): number {
+  state.qqTasks = tasks;
+  return tasks.length;
+}
+
+/**
+ * Insert or replace ONE task by `taskId`.
+ *
+ * - Existing id: the row is REPLACED IN PLACE so the board row does not jump
+ *   while a task progresses (stable ordering).
+ * - New id: APPENDED at the tail. Never spliced into the middle — the board's
+ *   ordering must stay append-only, mirroring the blockPatch tail-anchor
+ *   discipline this projection rides on.
+ *
+ * Returns the task's index in `qqTasks` (a projection index, NOT a transcript
+ * block index).
+ */
+export function upsertQqTask(state: SessionState, task: QqTaskUi): number {
+  const index = state.qqTasks.findIndex((t) => t.taskId === task.taskId);
+  if (index >= 0) {
+    state.qqTasks[index] = task;
+    return index;
+  }
+  state.qqTasks.push(task);
+  return state.qqTasks.length - 1;
+}
+
+/**
+ * Drop one task by id. Returns whether a row was removed; remaining rows keep
+ * their relative order (no reordering on removal).
+ */
+export function removeQqTask(state: SessionState, taskId: string): boolean {
+  const index = state.qqTasks.findIndex((t) => t.taskId === taskId);
+  if (index < 0) return false;
+  state.qqTasks.splice(index, 1);
+  return true;
 }
 
 /** List markers the fallback path strips ("- foo", "1. foo", "2、foo"). */
@@ -1443,6 +1564,12 @@ export function appendInjectedContext(
   if (fileCount > 0) parts.push(l10n.t("{0} 个项目记忆文件", String(fileCount)));
   const knowledgeCount = items.filter((i) => i.kind === "knowledge").length;
   if (knowledgeCount > 0) parts.push(l10n.t("{0} 个知识库文档", String(knowledgeCount)));
+  // NOTE (2026-11-18): the main panel session is spawned with all MCP servers
+  // disabled (process-level sentinel) and no longer queries mcp-status, so it
+  // does not produce MCP items in practice. This branch is intentionally kept
+  // intact: it is still covered by session-state.test.ts and may be reused when
+  // a child session's context is projected into an injected card. Do not strip
+  // it as "dead" without revisiting those call sites first.
   const mcpItems = items.filter((i) => i.kind === "mcp");
   if (mcpItems.length > 0) {
     const unloaded = mcpItems.filter((i) => i.connected === false).length;
@@ -1776,8 +1903,9 @@ export function closeOpenSubAgents(blocks: Block[], now = Date.now()): number | 
  * model's functionCall chunk streams (bundle, CLI 0.5.19 fork: stream path
  * `D && R.id && sendUpdate({sessionUpdate:"tool_call",…,status:"pending"})`),
  * but several settle paths answer the call WITHOUT any terminal
- * `tool_call_update`: PLAN-mode rejection of non-readonly tools
- * (`return u(new Error("Cannot execute … in PLAN mode"))` before the
+ * `tool_call_update`: rejection of non-readonly tools in the CLI's internal
+ * plan mode (legacy sessions / external settings — the panel no longer exposes
+ * it; `return u(new Error("Cannot execute … in PLAN mode"))` before the
  * in_progress/completed sendUpdate pair), `exit_plan_mode` itself
  * (handleExitPlanMode returns a functionResponse, never a sendUpdate),
  * tool-not-found, smart-approval failure, and user-cancelled approvals
@@ -2003,7 +2131,9 @@ export function setMeta(
   },
 ): void {
   if (meta.sessionId !== undefined) state.sessionId = meta.sessionId;
-  if (meta.modes !== undefined) state.modes = meta.modes;
+  // Plan mode 已移除（2026-11-18）：CLI 仍会上报 plan，但面板不再提供它。
+  // 每次写入 modes 都归一一次，旧会话 / 外部 settings 的 plan 值不会回流。
+  if (meta.modes !== undefined) state.modes = withoutPlanModes(meta.modes);
   if (meta.models !== undefined) state.models = meta.models;
   if (meta.currentModelId !== undefined) state.currentModelId = meta.currentModelId;
   if (meta.thinkLevel !== undefined) state.thinkLevel = meta.thinkLevel;
@@ -2071,7 +2201,6 @@ export function sortSessionSummaries(sessions: readonly SessionSummaryUi[]): Ses
 function clearTranscriptFields(state: SessionState): void {
   state.blocks = [];
   state.pendingApproval = null;
-  state.pendingPlanExit = null;
   state.pendingQuestions = null;
   state.errorMessage = null;
   state.stopReason = null;
@@ -2114,7 +2243,14 @@ export function newSessionState(state: SessionState): SessionState {
   // historical session showed no children at all. The manager re-publishes
   // the scoped projection right after the switch anyway.
   fresh.superSessions = state.superSessions;
+  // QQ 远程任务看板同理是面板级、非转录级的投影：会话切换 / 恢复不能把它清空
+  // （清空后要等下一次宿主写入才恢复，而终态任务不会再写）。
+  fresh.qqTasks = state.qqTasks;
   fresh.replaying = state.replaying;
+  // 新建会话流程的投影是「流程级」而非转录级：本函数就在该流程中途被调用
+  // （清空转录），这里若丢掉它，加载态会在流程还没结束时闪回空闲、按钮重新
+  // 可点。清空由 startNewSession 的 finally 统一负责。
+  fresh.newSessionPhase = state.newSessionPhase ?? null;
   // Connection-scoped like status/auth: a restart does replaceState FIRST and
   // then markConnecting (which stamps the next epoch), so dropping the counter
   // here would restart every restart back to 1 and the splash could not tell
@@ -2502,45 +2638,7 @@ export function clearPendingApproval(state: SessionState, id: string): boolean {
   return true;
 }
 
-// --- plan exit (_iflow/plan/exit) --------------------------------------------
-
-/** Show the Plan-mode exit confirmation card. The WebView answers via
- * `respondPlanExit`. */
-export function setPendingPlanExit(state: SessionState, pending: PendingPlanExitUi): void {
-  state.pendingPlanExit = pending;
-}
-
-/** Clear the card once answered (or timed out / cancelled host-side). */
-export function clearPendingPlanExit(state: SessionState, id: string): boolean {
-  if (state.pendingPlanExit?.id !== id) return false;
-  state.pendingPlanExit = null;
-  return true;
-}
-
-/**
- * Settle the pending `exit_plan_mode` tool call when the Plan card answers.
- * The CLI never sends a terminal update for this call (bundle, CLI 0.5.19
- * fork: handleExitPlanMode returns a functionResponse only), so the block
- * would linger at 等待执行 and the turn-end closeOpenToolBlocks sweep would
- * mislabel an APPROVED plan's call as failed. Approval → completed (the CLI
- * answered success:true); rejection/replan/timeout → failed (success:false).
- * Latest pending call wins — a replan loop makes the model call
- * exit_plan_mode again, and the answer always corresponds to the most recent
- * one. Returns the mutated index, or null when no pending call is recorded.
- */
-export function resolveExitPlanModeBlock(blocks: Block[], approved: boolean, now = Date.now()): number | null {
-  for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    const block = blocks[i]!;
-    if (block.kind !== "tool") continue;
-    if (block.toolName !== "exit_plan_mode") continue;
-    if (block.status !== "pending" && block.status !== "in_progress") continue;
-    block.status = approved ? "completed" : "failed";
-    if (block.startedAt !== undefined) block.completedAt ??= now;
-    return i;
-  }
-  return null;
-}
-
+// --- approval resolution notes -----------------------------------------------
 /**
  * Append a resolution note below the approval so the transcript records what
  * the user chose (the card itself is transient).

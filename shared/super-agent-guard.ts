@@ -51,6 +51,17 @@ export interface ChildShellGuardContext {
    */
   nodeModulesIsLink?: boolean;
   /**
+   * 子会话是否直接跑在**主仓工作区**（repo 档 / 合并子会话，无隔离）。
+   *
+   * 这一档没有自己的分支与临时工作目录：`git reset --hard` / `git clean -fd`
+   * / `git checkout -- .` 会直接在用户的工作区里丢掉未提交改动，不可逆。
+   * worktree 档的同一条命令只毁掉自己的临时工作目录（删掉即可重建），因此
+   * 破坏性 git 规则的判定**只在这一档生效** —— 由宿主按
+   * `session.isolation.kind === "repo"` 显式传入，不靠路径猜测（repo 档的
+   * 子会话可以 `cd` 到子目录里执行 git，路径相等判断会漏）。
+   */
+  repoWorkspace?: boolean;
+  /**
    * 读取子会话工作目录内的脚本文件内容（可选）。
    *
    * 由宿主注入（护栏本身零文件系统依赖，纯函数才能单测）。用途：判定
@@ -187,6 +198,68 @@ const INSTALL_CALL_IN_SCRIPT =
 /** 脚本里「创建链接」的 API 调用形态。 */
 const LINK_CALL_IN_SCRIPT = /symlinksync|symlink\s*\(|fs\.symlink|junction|mklink|hardlink/i;
 
+/** git 可执行名（basename，小写）。 */
+const GIT_BINARIES: ReadonlySet<string> = new Set(["git"]);
+
+/**
+ * git 的**取值型全局选项**：`git -C <dir> reset` / `git -c <k=v> ...` 里的
+ * 第一个非选项词其实是选项取值，不是子命令。不跳过它们会把子命令读成路径，
+ * 破坏性命令因此逃过判定。带 `=` 的形态（`--git-dir=x`）自带取值，不经这里。
+ */
+const GIT_GLOBAL_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+  "-c",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--exec-path",
+  "--super-prefix",
+  "--config-env",
+]);
+
+/**
+ * repo 档的破坏性 git 命令拒绝文案（英文，面向模型）。
+ *
+ * 这类命令在 worktree 档是允许的（毁掉的是自己的临时目录），所以文案必须
+ * 点名「这里是主仓工作区」，否则模型会以为自己被无理由拦下。
+ */
+const DESTRUCTIVE_GIT_REASON =
+  "Blocked by the host guard: this working directory is the MAIN repository workspace (no isolation), so destructive git commands are not allowed. `git reset --hard`, `git clean -fd`, `git checkout -- .` and `git restore` irreversibly discard the user's uncommitted work. Stop and report the repository state instead of throwing changes away.";
+
+/**
+ * repo 档合并子会话的「任务书硬边界」拒绝文案（`session` 档）。
+ *
+ * 与上面的破坏性 git 规则分开：这些命令不一定毁掉工作区文件，但都越过
+ * 了合并任务书明确写死的边界 —— push 会把结果推到远端（不可逆、外部可见），
+ * rebase 改写历史，删分支会丢掉来源子会话的工作，切分支会离开合并现场，
+ * stash 会把用户的改动藏进栈里。任何一条都说明执行者没有遵守硬边界，
+ * 必须在命令执行前终止整个子会话。
+ */
+const MERGE_BOUNDARY_GIT_REASON =
+  "Blocked by the host guard: this merge child session runs in the MAIN repository workspace under a merge-only boundary. `git push`, `git rebase`, branch deletion, branch switching and `git stash` are not part of the merge task and are not allowed. Finish the merge in the current branch and report faithfully.";
+
+/**
+ * repo 档合并子会话「会把用户其它改动卷进合并」的拒绝文案（`tool` 档）。
+ *
+ * 只拒这一次调用而非终止会话：这类命令最可能出现在冲突解决的中途，终止
+ * 会把仓库留在 MERGE_HEAD 中间态（任务书明令禁止），而拒掉单次调用后
+ * 执行者可以改用 `git add <具体文件>` / `git commit` 继续完成合并。
+ *
+ * 注意：预检路径（yolo 免确认）只能终止会话，无法拒单次调用，因此本条
+ * 只在审批路径生效；这正是「不把合成提交风险升级成半合并仓库」的取舍。
+ */
+const MERGE_STAGE_GIT_REASON =
+  "Blocked by the host guard: `git add -A` / `git add .` / `git commit -a` would stage the user's unrelated uncommitted changes into the merge. Stage only the conflicted files you resolved (e.g. `git add src/foo.ts`) and let `git merge` create the merge commit.";
+
+/**
+ * repo 档写/编辑工具命中受保护路径的拒绝文案（`session` 档）。
+ *
+ * `.git/` 是仓库元数据（config / hooks / MERGE_HEAD / refs），`.iflow/super/`
+ * 是宿主自己的子会话工作树与归档元数据 —— 两者都不是合并产物，改写它们
+ * 等于绕过宿主的安全网。命令还没执行就终止，避免留下半改写的元数据。
+ */
+const PROTECTED_PATH_REASON =
+  "Blocked by the host guard: this merge child session must not write to protected repository metadata (.git/) or the host's Super Agent metadata (.iflow/super/). Only resolve the conflicted source files and let git create the merge commit.";
+
 const LINK_REASON =
   "Blocked by the host guard: creating a link (mklink / junction / symlink) that points at node_modules is not allowed. A child session must not share the main workspace's dependencies — deleting a linked node_modules (e.g. `npm ci`) destroys the real dependency tree. Install dependencies inside your own working directory instead.";
 
@@ -239,24 +312,33 @@ function classifyText(
   const segments = splitSegments(text).map(tokenize);
   const lower = text.toLowerCase();
 
-  // ① 创建指向 node_modules 的链接（mklink / New-Item -ItemType Junction /
+  // ① repo 档（主仓工作区）的破坏性 git 命令 —— 不可逆地丢掉用户未提交
+  //    改动。worktree 档不走这条规则（毁掉的是自己的临时目录）。
+  //    紧随其后的是 repo 档合并任务书的硬边界（push / rebase / 删分支 /
+  //    切分支 / stash / 扫走用户改动的 add -A）—— 同样只作用于 repo 档，
+  //    在命令执行的那一帧就终止，不等它真的跑起来。
+  const gitVerdict =
+    classifyDestructiveGit(segments, ctx) ?? classifyMergeBoundaryGit(segments, ctx);
+  if (gitVerdict) return gitVerdict;
+
+  // ② 创建指向 node_modules 的链接（mklink / New-Item -ItemType Junction /
   //    ln -s / os.symlink / junction.exe ...）。
   if (mentionsNodeModules(text) && createsLink(lower)) {
     return { decision: "deny", reason: LINK_REASON, severity: linkSeverity(segments) };
   }
 
-  // ② Node 内联脚本 / 脚本文件 —— 命令藏在 JS 里，按词切分看不见。
+  // ③ Node 内联脚本 / 脚本文件 —— 命令藏在 JS 里，按词切分看不见。
   //    放在安装/删除规则之前：这类写法的命令文本里根本没有包管理器词。
   const nodeVerdict = classifyNodeInvocation(segments, ctx);
   if (nodeVerdict) return nodeVerdict;
 
-  // ③ 包管理器安装类命令 —— 只在「会动到主工作区依赖」时拒绝。
+  // ④ 包管理器安装类命令 —— 只在「会动到主工作区依赖」时拒绝。
   if (findInstallInvocation(segments)) {
     const reason = installDenyReason(segments, text, ctx);
     if (reason) return { decision: "deny", reason, severity: "session" };
   }
 
-  // ④ 显式删除依赖树（同一段里既有删除动词又提到 node_modules）。
+  // ⑤ 显式删除依赖树（同一段里既有删除动词又提到 node_modules）。
   if (deletesNodeModules(segments)) {
     return {
       decision: "deny",
@@ -303,6 +385,86 @@ export function classifyChildToolCall(
   const command = extractShellCommand({ title: frame.title, args: frame.args });
   if (!command) return null;
   return classifyChildShellCommand(command, ctx);
+}
+
+/**
+ * repo 档合并子会话的「写/编辑工具」预检（纯逻辑）。
+ *
+ * 背景：`run_shell_command` 的命令文本走 {@link classifyChildToolCall}，
+ * 但 `write_file` / `replace` 这类工具根本不带命令文本，护栏对它们完全失明
+ * —— 而合并子会话就跑在主仓工作区，能直接改写 `.git/config`、hooks、
+ * MERGE_HEAD 或宿主的 `.iflow/super/` 子会话元数据，绕过全部安全网。
+ * 这条检查补上这个缺口：只对 repo 档（`repoWorkspace`）生效，只看「即将
+ * 执行」的两帧，目标落在受保护路径下即终止会话。
+ *
+ * 目标取不到时返回 null（放行，不猜）—— 与 shell 护栏同一纪律：参数形态
+ * 未知时不假装拦得住，避免误伤正常的冲突文件编辑。
+ */
+export function classifyChildFileWrite(
+  frame: {
+    sessionUpdate?: string;
+    toolName?: string;
+    kind?: string;
+    status?: string;
+    args?: unknown;
+  },
+  ctx: ChildShellGuardContext,
+): ChildShellGuardResult | null {
+  if (!ctx.repoWorkspace) return null;
+  if (frame.sessionUpdate !== "tool_call" && frame.sessionUpdate !== "tool_call_update") {
+    return null;
+  }
+  if (frame.status !== "pending" && frame.status !== "in_progress") return null;
+  const name = (frame.toolName ?? "").trim().toLowerCase();
+  if (!WRITE_TOOL_NAMES.has(name) && frame.kind !== "edit") return null;
+  const target = extractWritePath(frame.args);
+  if (!target) return null;
+  const base = normalizePath(ctx.cwd).replace(/\/+$/, "");
+  if (!base) return null;
+  const resolved = resolvePath(base, target);
+  for (const protectedRel of PROTECTED_REPO_PATHS) {
+    const forbidden = `${base}/${protectedRel}`;
+    if (resolved === forbidden || resolved.startsWith(`${forbidden}/`)) {
+      return { decision: "deny", reason: PROTECTED_PATH_REASON, severity: "session" };
+    }
+  }
+  return null;
+}
+
+/** 会写文件的工具名（内核内置 + 常见编辑类 MCP 工具）。 */
+const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "write_file",
+  "replace",
+  "xml_escape",
+  "edit_block",
+  "fast_edit_block",
+  "edit_file",
+  "create_file",
+]);
+
+/** repo 档里禁止子会话直接改写的路径（相对主仓根，都是宿主 / git 元数据）。 */
+const PROTECTED_REPO_PATHS: readonly string[] = [".git", ".iflow/super"];
+
+/** 写工具参数里可能出现的路径键（与 shared/session-state.ts 的口径一致）。 */
+const WRITE_PATH_KEYS: readonly string[] = [
+  "file_path",
+  "absolute_path",
+  "filePath",
+  "path",
+  "file",
+  "filename",
+  "target_file",
+];
+
+/** 从写工具参数里取第一个能识别的路径字符串。 */
+function extractWritePath(args: unknown): string | null {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const record = args as Record<string, unknown>;
+  for (const key of WRITE_PATH_KEYS) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
 }
 
 /**
@@ -452,6 +614,208 @@ function createsLink(lowerCommand: string): boolean {
   if (/\bsymlink\b/.test(lowerCommand)) return true;
   if (/\bjunction\b/.test(lowerCommand)) return true;
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// repo 档：破坏性 git 命令
+// ---------------------------------------------------------------------------
+
+/**
+ * 判定命令里是否有「在主仓工作区里不可逆丢改动」的 git 调用。
+ *
+ * **只在 `ctx.repoWorkspace` 为真时生效**：worktree 档的目录是宿主建的临时
+ * 副本，`git reset --hard` / `git clean -fd` 毁掉的只是子会话自己的现场
+ * （而且这类命令在 worktree 里本来就是正常操作），拦它属于误伤。
+ *
+ * 处置档位是 `session`：预检路径（wire 上的 tool_call 帧）只能终止整个子会话，
+ * 而这些命令的后果是用户工作区里不可逆的数据丢失 —— 宁可停掉子会话，也绝不
+ * 让命令跑下去。审批路径下则拒掉这一次调用。
+ */
+function classifyDestructiveGit(
+  segments: string[][],
+  ctx: ChildShellGuardContext,
+): ChildShellGuardResult | null {
+  if (!ctx.repoWorkspace) return null;
+  for (const tokens of segments) {
+    const invocation = findGitInvocation(tokens);
+    if (!invocation) continue;
+    if (isDestructiveGitCommand(invocation.subcommand, invocation.args)) {
+      return { decision: "deny", reason: DESTRUCTIVE_GIT_REASON, severity: "session" };
+    }
+  }
+  return null;
+}
+
+/**
+ * repo 档合并子会话的「任务书硬边界」git 规则（仅 `repoWorkspace` 生效）。
+ *
+ * {@link classifyDestructiveGit} 管的是「丢用户未提交文件」，这里管的是
+ * 「越过合并任务书写死的边界」：push / rebase / 删分支 / 切分支 / stash
+ * 都是不可逆或会脱离合并现场的动作 —— 它们一旦执行，宿主就再也收不回
+ * 结果（推送到远端、改写历史、丢掉来源分支、藏起用户改动）。预检帧据此
+ * 终止整个子会话。
+ *
+ * 另一类 `git add -A` / `git commit -a` 会把用户**其它**未提交改动卷进
+ * 合并提交：后果严重但可由用户恢复，且这类命令常出现在冲突解决中途 ——
+ * 终止会话会把仓库留在 MERGE_HEAD 中间态（任务书明令禁止）。因此按
+ * `tool` 档处理：审批路径拒掉单次调用，预检路径刻意不终止（见
+ * MERGE_STAGE_GIT_REASON 的说明）。
+ *
+ * worktree 档完全不受这些规则约束：那些子会话本就被允许 push / 建 PR。
+ */
+function classifyMergeBoundaryGit(
+  segments: string[][],
+  ctx: ChildShellGuardContext,
+): ChildShellGuardResult | null {
+  if (!ctx.repoWorkspace) return null;
+  for (const tokens of segments) {
+    const invocation = findGitInvocation(tokens);
+    if (!invocation) continue;
+    const { subcommand, args } = invocation;
+    if (subcommand === "push" || subcommand === "rebase" || subcommand === "stash") {
+      return { decision: "deny", reason: MERGE_BOUNDARY_GIT_REASON, severity: "session" };
+    }
+    if (deletesBranch(subcommand, args) || switchesBranch(subcommand, args)) {
+      return { decision: "deny", reason: MERGE_BOUNDARY_GIT_REASON, severity: "session" };
+    }
+    if (stagesAllChanges(subcommand, args)) {
+      return { decision: "deny", reason: MERGE_STAGE_GIT_REASON, severity: "tool" };
+    }
+  }
+  return null;
+}
+
+/** `git branch -d/-D/--delete`（删分支会丢掉来源子会话的工作）。 */
+function deletesBranch(subcommand: string, args: readonly string[]): boolean {
+  if (subcommand !== "branch") return false;
+  return args.some((arg) => {
+    const lower = arg.toLowerCase();
+    return (
+      lower === "-d" || lower === "--delete" || shortFlagBundleIncludes(lower, "d")
+    );
+  });
+}
+
+/**
+ * `git checkout <分支>` / `git switch`（切分支会离开合并现场）。
+ *
+ * 刻意放行 `git checkout -b/-B/--orphan`（建分支而非切分支），与既有
+ * worktree 档 allowCase 一致；`git checkout -- .` / `-f` 已由破坏性规则先拦，
+ * 这里不再重复判定（返回 false 只是让破坏性 reason 保留）。
+ */
+function switchesBranch(subcommand: string, args: readonly string[]): boolean {
+  if (subcommand === "switch") return true;
+  if (subcommand !== "checkout") return false;
+  const lower = args.map((arg) => arg.toLowerCase());
+  if (lower.some((arg) => arg === "-b" || arg === "-B" || arg === "--orphan")) return false;
+  if (lower.includes("--")) return false;
+  return lower.some((arg) => !arg.startsWith("-") && arg !== "." && arg !== "./" && arg !== ".\\");
+}
+
+/** `git add -A` / `git add .` / `git commit -a`（把用户其它改动卷进合并）。 */
+function stagesAllChanges(subcommand: string, args: readonly string[]): boolean {
+  const lower = args.map((arg) => arg.toLowerCase());
+  if (subcommand === "add") {
+    return (
+      lower.some((arg) => arg === "-a" || arg === "--all") ||
+      lower.some((arg) => arg === "." || arg === "./" || arg === ".\\")
+    );
+  }
+  if (subcommand === "commit") {
+    return (
+      lower.includes("--all") ||
+      lower.some((arg) => shortFlagBundleIncludes(arg, "a"))
+    );
+  }
+  return false;
+}
+
+/**
+ * 在一个命令段里找 git 调用，返回子命令与它之后的参数。
+ *
+ * 跳过 git 的全局选项：取值型（`-C <dir>` / `-c <k=v>` / `--git-dir <path>`）
+ * 连它后面那个词一起跳过，布尔型（`--no-pager`）只跳过自己 —— 否则
+ * `git -C repo reset --hard` 的子命令会被读成 `repo`，规则直接失明。
+ */
+function findGitInvocation(tokens: string[]): { subcommand: string; args: string[] } | null {
+  for (let i = 0; i < tokens.length; i++) {
+    if (!GIT_BINARIES.has(commandName(tokens[i]!))) continue;
+    let j = i + 1;
+    while (j < tokens.length) {
+      const token = tokens[j]!;
+      if (!token.startsWith("-")) break;
+      if (token.includes("=")) {
+        j += 1;
+        continue;
+      }
+      if (GIT_GLOBAL_VALUE_OPTIONS.has(token.toLowerCase())) {
+        j += 2;
+        continue;
+      }
+      j += 1;
+    }
+    const subcommand = tokens[j];
+    if (!subcommand) return null;
+    return { subcommand: commandName(subcommand), args: tokens.slice(j + 1) };
+  }
+  return null;
+}
+
+/** 该子命令+参数是否会不可逆地丢改动（repo 档口径）。 */
+function isDestructiveGitCommand(subcommand: string, args: readonly string[]): boolean {
+  const lower = args.map((arg) => arg.toLowerCase());
+  switch (subcommand) {
+    // git reset --hard 丢掉工作区与暂存区的全部未提交改动。
+    case "reset":
+      return lower.some((arg) => arg === "--hard" || arg.startsWith("--hard="));
+    // git clean -fd 删除未跟踪文件/目录；`-n` 是 dry-run，不实际删除。
+    case "clean": {
+      const dryRun =
+        lower.some((arg) => arg === "--dry-run") ||
+        lower.some((arg) => shortFlagBundleIncludes(arg, "n"));
+      const force =
+        lower.some((arg) => arg === "--force") ||
+        lower.some((arg) => shortFlagBundleIncludes(arg, "f"));
+      return force && !dryRun;
+    }
+    // git checkout -- . / git checkout . / -f：用索引/HEAD 覆盖工作区。
+    case "checkout":
+      return discardsWorktreeViaCheckout(lower);
+    // git restore 默认就是把工作区文件恢复成索引版本（丢改动）；只暂存区
+    // 操作（`--staged` 且不带 `--worktree`）是安全的。
+    case "restore": {
+      const stagedOnly = lower.includes("--staged") && !lower.includes("--worktree");
+      return !stagedOnly;
+    }
+    default:
+      return false;
+  }
+}
+
+/** `-fd` / `-fdx` 这类短选项串里是否含某个字母（`-f` 单独出现也算）。 */
+function shortFlagBundleIncludes(token: string, letter: string): boolean {
+  if (!/^-[A-Za-z]+$/.test(token)) return false;
+  return token.slice(1).includes(letter);
+}
+
+/**
+ * checkout 是否在用路径/强制方式覆盖工作区。
+ *
+ * 判据（宁可多拦一点，也不放过不可逆丢失）：
+ *  - 出现 `--`：明确的路径检出（`git checkout -- .` / `[...] -- src/a.ts`）；
+ *  - `-f` / `--force`：强制覆盖；
+ *  - `-b` / `-B` / `--orphan`：这是建分支/切分支，不是用路径覆盖工作区（放行）；
+ *  - 位置参数是 `.`（`git checkout .`）。
+ */
+function discardsWorktreeViaCheckout(lower: readonly string[]): boolean {
+  if (lower.includes("--")) return true;
+  if (lower.some((arg) => arg === "-f" || arg === "--force" || shortFlagBundleIncludes(arg, "f"))) {
+    return true;
+  }
+  if (lower.some((arg) => arg === "-b" || arg === "-B" || arg === "--orphan")) return false;
+  return lower
+    .filter((arg) => !arg.startsWith("-"))
+    .some((arg) => arg === "." || arg === "./" || arg === ".\\");
 }
 
 /**
@@ -647,7 +1011,36 @@ function classifyNodeInvocation(
   return null;
 }
 
-/** 找出安装类调用（扫每个命令段，取该段第一个包管理器词后的首个非选项词）。 */
+/**
+ * 会「吃掉下一个词」的包管理器选项（取值型）。
+ *
+ * `npm --prefix <dir> ci` / `pnpm --dir <dir> install` / `yarn --cwd <dir>
+ * install` 里的第一个非选项词其实是选项的取值。旧实现把它当成子命令，于是
+ * 整条命令被判成「不是安装」—— 护栏对这类写法完全失明（审计发现的缺陷）。
+ *
+ * 只收这几个（外加 pnpm 的 `-C` 简写）：把所有选项都当成取值型会让
+ * `npm --silent ci` 里的 `ci` 被吞掉，那是反向的失明。`--opt=value` 自带取值，
+ * 不经这里。
+ */
+const VALUE_TAKING_MANAGER_OPTIONS: ReadonlySet<string> = new Set([
+  "--prefix",
+  "--dir",
+  "--cwd",
+  "-c",
+]);
+
+/** 这个选项是否把后一个词当作取值（`--opt=value` 不算）。 */
+function takesValueOption(token: string): boolean {
+  if (!token.startsWith("-") || token.includes("=")) return false;
+  return VALUE_TAKING_MANAGER_OPTIONS.has(token.toLowerCase());
+}
+
+/**
+ * 找出安装类调用（扫每个命令段，取该段包管理器词后的首个**真正的**子命令词）。
+ *
+ * 选项先跳过：取值型选项连它后面那个词一起跳过（见
+ * {@link VALUE_TAKING_MANAGER_OPTIONS}），布尔型选项只跳过自己。
+ */
 function findInstallInvocation(segments: string[][]): { manager: string; subcommand: string } | null {
   for (const tokens of segments) {
     for (let i = 0; i < tokens.length; i++) {
@@ -655,7 +1048,17 @@ function findInstallInvocation(segments: string[][]): { manager: string; subcomm
       const subcommands = INSTALL_SUBCOMMANDS[name];
       if (!subcommands) continue;
       const rest = tokens.slice(i + 1);
-      const first = rest.find((token) => !token.startsWith("-"));
+      let first: string | undefined;
+      for (let j = 0; j < rest.length; j += 1) {
+        const token = rest[j]!;
+        if (token.startsWith("-")) {
+          // 取值型选项：下一个词是它的取值，不是子命令。
+          if (takesValueOption(token)) j += 1;
+          continue;
+        }
+        first = token;
+        break;
+      }
       // `yarn` / `yarn --frozen-lockfile` / 裸 `pnpm` 本身就是安装。
       if ((name === "yarn" || name === "pnpm") && !first) {
         return { manager: name, subcommand: "" };
@@ -696,6 +1099,36 @@ function deletesNodeModules(segments: string[][]): boolean {
 }
 
 /**
+ * 路径段内部的字符（小写）。`root` 后面紧跟这些字符说明它只是更长路径的
+ * **前缀子串**（兄弟仓库 `J:\git\project-x` 以 `J:\git\proj` 开头），不是命中。
+ *
+ * 引号 / 空白 / `;` `,` `:` `=` / 括号 / `/` 等都不是段内字符 —— 带引号的
+ * `--prefix "J:\git\proj"` 与 `cd "J:\git\proj"` 仍按命中处理。
+ */
+function isPathSegmentChar(ch: string): boolean {
+  return /[a-z0-9._~-]/.test(ch);
+}
+
+/**
+ * `probe`（已统一成小写正斜杠）里 `root`（归一化路径）是否作为完整路径出现。
+ *
+ * 不裸用 `includes`：`J:\git\project-x` 会以 `J:\git\proj` 为前缀误命中，把对
+ * 兄弟仓库的操作升级成 `session` 档、终止整个合法子会话。逐个候选 occurrence
+ * 检查右边界，只有 root 后面是「路径段结束」才算命中。
+ */
+function probeContainsRoot(probe: string, root: string): boolean {
+  if (!root) return false;
+  let from = 0;
+  for (;;) {
+    const at = probe.indexOf(root, from);
+    if (at < 0) return false;
+    const after = probe.charAt(at + root.length);
+    if (!after || !isPathSegmentChar(after)) return true;
+    from = at + 1;
+  }
+}
+
+/**
  * 命令文本里是否出现主工作区根。
  *
  * 子会话的 worktree 就在主仓里面（`.iflow/super/worktrees/...`），所以先把
@@ -708,7 +1141,7 @@ function mentionsMainWorkspace(text: string, ctx: ChildShellGuardContext): boole
   let probe = text.replace(/\\/g, "/").toLowerCase();
   const cwd = normalizePath(ctx.cwd);
   if (cwd && cwd !== root) probe = probe.split(cwd).join(" ");
-  return probe.includes(root);
+  return probeContainsRoot(probe, root);
 }
 
 /** 命令里是否有 `cd` 落到主仓根（相对 / 绝对路径都解析；解析不了就不据此判定）。 */

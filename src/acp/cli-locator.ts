@@ -91,7 +91,65 @@ export function resolveVendoredEntry(extensionPath: string): string {
   return entry;
 }
 
-export function buildAcpCommand(entryJs: string, includeDirectories: string[] = []): IflowCommand {
+/**
+ * CLI flag that scopes which MCP servers a CLI PROCESS may use.
+ *
+ * Wire behavior (verified against `vendor/iflow-fork/bundle/iflow.js`,
+ * 2026-11-17): the CLI declares
+ *   `.option("allowed-mcp-server-names", { type: "array", string: true })`
+ * and the config builder filters the resolved `mcpServers` map with it:
+ *   `if (r.allowedMcpServerNames) { let x = new Set(...); x.size > 0
+ *      ? m = Object.fromEntries(Object.entries(m).filter(([Q, w]) => {
+ *          let D = x.has(Q); return D || p.push({ name: Q, ... }), D; }))
+ *      : (p.push(...all names), m = {}); }`
+ * — i.e. whatever is NOT named here is dropped from the config (and recorded in
+ * the display-only `blockedMcpServers` list). `mcpClientManager` is then built
+ * from that map, and `discoverAllMcpTools()` merges `config.getMcpServers()` on
+ * top, so an empty map means: no server is spawned and NO MCP tool is ever
+ * registered.
+ *
+ * That is the structural MCP gate for the main session — it needs no knowledge
+ * of the user's MCP servers, and no MCP tool name appears anywhere in this repo.
+ */
+export const MCP_SERVER_ALLOWLIST_FLAG = "--allowed-mcp-server-names";
+
+/**
+ * Sentinel passed to `MCP_SERVER_ALLOWLIST_FLAG` when the whole MCP surface must
+ * be disabled. It exists because the CLI's "block everything" branch requires
+ * the flag to be PRESENT with a non-empty set that matches nothing — passing the
+ * flag alone depends on yargs producing `[]`, which is an implementation detail
+ * we do not want to rely on. This string is never a real server name.
+ */
+export const MCP_SERVER_ALLOWLIST_SENTINEL = "__iflow_harness_no_mcp__";
+
+export interface BuildAcpCommandOptions {
+  /**
+   * Start this CLI process with ZERO MCP servers (no spawn, no MCP tools).
+   *
+   * Used by the main panel session only: it must never execute anything — its
+   * MCP tools (`new_page` / `take_screenshot` / …) bypass the built-in tool
+   * whitelist, because they are registered by `discoverAllTools()` after
+   * `createToolRegistry()`. Child sessions get the host broker's names below.
+   */
+  disableMcpServers?: boolean;
+  /**
+   * Keep ONLY these MCP server names for this CLI process. The filter runs on
+   * the merged map (settings + the session request's `mcpServers`), so passing
+   * the broker's names lets a child reach the broker endpoints and prevents it
+   * from ever spawning the user's configured stdio servers itself.
+   *
+   * An EMPTY array means "no MCP at all" and is emitted as the never-matching
+   * sentinel (yargs' `[]` behaviour is an implementation detail we do not rely
+   * on). `undefined` = no flag at all (the CLI keeps every configured server).
+   */
+  mcpServerNames?: string[];
+}
+
+export function buildAcpCommand(
+  entryJs: string,
+  includeDirectories: string[] = [],
+  options: BuildAcpCommandOptions = {},
+): IflowCommand {
   // --stream (probed, CLI 0.5.19 bundle): without it `config.stream` is false
   // and the ACP prompt handler awaits `sendMessageLatency` — the FULL model
   // response arrives as one dump after each turn, so the panel shows replies
@@ -112,6 +170,22 @@ export function buildAcpCommand(entryJs: string, includeDirectories: string[] = 
   const args = [path.resolve(entryJs), "--experimental-acp", "--stream"];
   for (const dir of includeDirectories) {
     if (dir) args.push("--include-directories", path.resolve(dir));
+  }
+  // Main-session MCP scope (see MCP_SERVER_ALLOWLIST_FLAG): a name that cannot
+  // exist drops every configured server from this process's config.
+  if (options.disableMcpServers) {
+    args.push(MCP_SERVER_ALLOWLIST_FLAG, MCP_SERVER_ALLOWLIST_SENTINEL);
+  } else if (options.mcpServerNames) {
+    // Child sessions: only the host broker's names survive the filter, so the
+    // child never spawns the user's configured stdio servers itself. An empty
+    // list must still mean "nothing" — hence the sentinel instead of no flag.
+    if (options.mcpServerNames.length === 0) {
+      args.push(MCP_SERVER_ALLOWLIST_FLAG, MCP_SERVER_ALLOWLIST_SENTINEL);
+    } else {
+      for (const name of options.mcpServerNames) {
+        args.push(MCP_SERVER_ALLOWLIST_FLAG, name);
+      }
+    }
   }
   return { command: process.execPath, args };
 }

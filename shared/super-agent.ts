@@ -492,6 +492,14 @@ function normalizeRestoredTodos(todos: SuperTodoUi[] | undefined): SuperTodoUi[]
   );
 }
 
+/**
+ * 谁中断了这个子会话。三类是刻意区分的：用户（看板上主动喊停）、智能体
+ * （主会话动作 / QQ 远程任务触发）、系统（宿主生命周期收口：面板关闭、会话
+ * 删除、护栏拦截、内核回合取消、重启恢复归一）。看板在「已中断」标题旁据此
+ * 标注，避免把「系统杀掉的」误读成「用户喊停的」。
+ */
+export type SuperInterruptSource = "user" | "agent" | "system";
+
 export interface SuperSessionUi {
   id: string;
   /** 人类可读标题（模型给的或用户给的）。 */
@@ -525,6 +533,8 @@ export interface SuperSessionUi {
   summary?: string;
   /** 失败原因。 */
   error?: string;
+  /** 中断来源（仅 `status === "cancelled"` 有意义）：看板在标题旁据此标注「由谁中断」。 */
+  interruptedBy?: SuperInterruptSource;
   /** 正在等待的应答。 */
   pending?: SuperPending;
   /** 子会话的 token 开销（回合结束后结算，见 SuperTokenUsage）。 */
@@ -568,7 +578,7 @@ export type SuperEvent =
   | { type: "input_resolved"; at: number }
   | { type: "report"; report: SuperReport; at: number }
   | { type: "failed"; error: string; at: number }
-  | { type: "cancelled"; at: number };
+  | { type: "cancelled"; at: number; source?: SuperInterruptSource };
 
 /** Report 状态 → 子会话状态。 */
 function statusForReport(state: SuperReportState): SuperStatus {
@@ -650,8 +660,23 @@ export function applySuperEvent(session: SuperSessionUi, event: SuperEvent): Sup
         // 终态不再等应答：卡死在那里的审批对用户没有意义。
         next.pending = undefined;
       }
-      if (status === "awaiting_input" && event.report.humanAction) {
-        next.summary = event.report.summary;
+      if (status === "awaiting_input") {
+        // `awaiting_input` 的契约是 pending 必须非空 —— reportForSession 完全
+        // 依赖它推导 blocked 汇报，没有 pending 就返回 null，主会话永远收不到
+        // 这条汇报（孤儿态）。report 本身不带结构化 pending，这里据报告合成
+        // 一个降级 pending：问题正文取 humanAction（退回 summary），requestId
+        // 用 session id + 事件时间保证确定，超时取 5 分钟兜底。
+        // 注意：当前宿主只 emit ready、blocked report 生产不可达；真被卡住时
+        // 仍走 needs_input（携带可路由回真实 ACP 请求的 pending）。此合成项仅
+        // 为守住导出状态机 API 的契约，不伪造任务 / 汇报内容。
+        const question = event.report.humanAction ?? event.report.summary;
+        next.pending = {
+          kind: "question",
+          requestId: `${session.id}:report:${event.at}`,
+          questions: [{ question, header: "需要人工处理", options: [], multiSelect: false }],
+          deadline: event.at + 300_000,
+          timeoutMs: 300_000,
+        };
       }
       return next;
     }
@@ -671,6 +696,7 @@ export function applySuperEvent(session: SuperSessionUi, event: SuperEvent): Sup
       return {
         ...session,
         status: "cancelled",
+        interruptedBy: event.source ?? "system",
         endedAt: event.at,
         updatedAt: event.at,
         pending: undefined,
@@ -760,6 +786,8 @@ export interface PersistedSuperSession {
   endedAt?: number;
   summary?: string;
   error?: string;
+  /** 中断来源（status==="cancelled" 时随归档落盘，重启恢复后仍能在标题旁标注）。 */
+  interruptedBy?: SuperInterruptSource;
   tokens?: SuperTokenUsage;
   integration?: SuperIntegration;
   reports: SuperReport[];
@@ -822,11 +850,63 @@ export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuper
     endedAt: session.endedAt,
     summary: session.summary,
     error: session.error,
+    interruptedBy: session.interruptedBy,
     tokens: session.tokens,
     integration: session.integration,
     reports: session.reports,
     todos: session.todos,
   };
+}
+
+/**
+ * 恢复时宿主核对过的磁盘事实（纯函数不碰磁盘，事实由调用方传入）。
+ *
+ * - `worktreePresent`：归档里的隔离目录此刻是否还在磁盘上；
+ * - `branchPresent`：归档里的 git 分支此刻是否还存在（省去时按归档自身的
+ *   `released` / `recycled` 推断，宿主无需为恢复特意跑一条 git 子进程）。
+ *
+ * 字段缺省 = 无法确定，此时不做对应校正，保留归档原样。
+ */
+export interface RestoredIsolationDiskFacts {
+  worktreePresent?: boolean;
+  branchPresent?: boolean;
+}
+
+/**
+ * 用磁盘事实校正恢复出来的隔离**展示态**（只改显示，绝不删目录/分支）。
+ *
+ * 归档记的是「上次运行结束时的状态」，目录 / 分支可能已被外部手工删除，
+ * 或上次失败的清理留下半删残迹。原样恢复会让看板对一个磁盘上早就不存在的
+ * 目录显示「清理工作目录」（点下去只能报错），或对一个其实还在的目录显示
+ * 「已清理」。这里只修正 `released` / `recycled` 两个标记；「孤儿一律不自动
+ * 删」的取舍保持不变 —— 要不要处理留给用户在看板上确认。
+ *
+ * `repo` 档的 path 就是主仓根、不是隔离产物，永不标 released / recycled。
+ */
+export function reconcileRestoredIsolation(
+  isolation: SuperIsolation,
+  disk?: RestoredIsolationDiskFacts,
+): SuperIsolation {
+  if (!disk || disk.worktreePresent === undefined || isolation.kind === "repo") return isolation;
+
+  if (disk.worktreePresent) {
+    // 归档说已清理，目录其实还在：撤销过期的 released / recycled。
+    if (!isolation.released && !isolation.recycled) return isolation;
+    const { released: _released, recycled: _recycled, ...rest } = isolation;
+    return rest;
+  }
+
+  // 目录已不在磁盘上：不能再显示「待清理」。分支是否还在决定措辞：
+  // 分支明确没了 → released（目录+分支都没了）；分支还在或无法确定 →
+  // recycled（目录已删、分支保留），保守提示用户去核对分支，绝不谎报
+  // 「什么都没有了」而让用户丢掉可能存在的未合并提交。
+  const branchPresent =
+    disk.branchPresent ??
+    (isolation.released ? (isolation.recycled ? true : false) : undefined);
+  if (isolation.kind === "directory" || branchPresent === false) {
+    return { ...isolation, released: true, recycled: false };
+  }
+  return { ...isolation, released: true, recycled: true };
 }
 
 /**
@@ -837,7 +917,10 @@ export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuper
  * 汇报永远等不到「全部结束」，也会让看板谎报进度。分支与工作目录照旧保留：
  * 它们在磁盘上还在，清理与合并仍然可用。
  */
-export function fromPersistedSuperSession(record: PersistedSuperSession): SuperSessionUi {
+export function fromPersistedSuperSession(
+  record: PersistedSuperSession,
+  disk?: RestoredIsolationDiskFacts,
+): SuperSessionUi {
   const terminal = isTerminalSuperStatus(record.status);
   return {
     id: record.id,
@@ -846,7 +929,7 @@ export function fromPersistedSuperSession(record: PersistedSuperSession): SuperS
     status: terminal ? record.status : "cancelled",
     mainSessionId: record.mainSessionId,
     restored: true,
-    isolation: normalizeIsolation(record.isolation),
+    isolation: reconcileRestoredIsolation(normalizeIsolation(record.isolation), disk),
     model: record.model,
     attempts: record.attempts,
     createdAt: record.createdAt,
@@ -855,6 +938,7 @@ export function fromPersistedSuperSession(record: PersistedSuperSession): SuperS
     endedAt: record.endedAt ?? (terminal ? undefined : record.updatedAt),
     summary: record.summary,
     error: record.error,
+    interruptedBy: record.interruptedBy ?? "system",
     tokens: record.tokens,
     integration: record.integration,
     reports: record.reports,
@@ -903,6 +987,13 @@ export interface SuperInvalidBlock {
   body: string;
   /** 失败原因（中文短语，直接进 toast —— 只报「无法解析」等于没报）。 */
   reason: string;
+  /**
+   * 字段级诊断（如 `tasks[0].task 必须是字符串`）。
+   *
+   * `reason` 是给人看的一句话；这里是逐条的具体位置，混在合法块里被丢弃的
+   * 畸形条目也走同一份措辞，用户/模型才能一眼定位是哪个字段写错了。
+   */
+  issues?: string[];
 }
 
 /**
@@ -927,6 +1018,13 @@ export interface SuperDirectiveScan {
   blocks: SuperTaskSpec[][];
   /** 解析失败的块（宿主据此提示用户，不静默吞掉）。 */
   invalidBlocks: SuperInvalidBlock[];
+  /**
+   * 字段级诊断汇总（如 `tasks[1] 必须是对象`）。
+   *
+   * 合法块里被丢弃的畸形条目也在这里 —— 宿主仍然派发其余合法任务，但要补一条
+   * warning 说明「哪几条被忽略了」，不能让畸形条目静默消失。
+   */
+  issues: string[];
   /**
    * 扫描结束位置（消费偏移）。调用方把它当作下一轮的起点 —— 已消费的块不会
    * 被二次派发，即使同一段文本在后续 chunk 里再次出现。
@@ -1002,6 +1100,8 @@ export interface SuperProtocolRegion {
   tasks: SuperTaskSpec[] | null;
   /** 载荷非法的原因（宿主据此提示用户）。 */
   reason?: string;
+  /** 该载荷的字段级诊断（合法块里被丢弃的条目也在这里）。 */
+  issues?: string[];
   /** 载荷没收全（流式中间态）—— 区域尚未成形。 */
   pending: boolean;
 }
@@ -1154,6 +1254,7 @@ function scanSuperProtocolRegions(
       body: resolved.body,
       tasks: parsed && parsed.ok ? parsed.tasks : null,
       ...(parsed && !parsed.ok ? { reason: parsed.reason } : {}),
+      ...(parsed && parsed.issues.length > 0 ? { issues: parsed.issues } : {}),
       pending: false,
     });
     fenceSpans.push([open.lineStart, resolved.closeEnd]);
@@ -1175,7 +1276,15 @@ function scanSuperProtocolRegions(
         end: match.end,
         body: match.body,
         tasks: match.tasks,
-        ...(match.tasks ? {} : { reason: "工具调用式载荷里的任务字段非法" }),
+        ...(match.tasks
+          ? {}
+          : {
+              reason:
+                match.issues && match.issues.length > 0
+                  ? `工具调用式载荷里的任务字段非法（${match.issues[0]}）`
+                  : "工具调用式载荷里的任务字段非法",
+            }),
+        ...(match.issues && match.issues.length > 0 ? { issues: match.issues } : {}),
         pending: false,
       });
     }
@@ -1262,6 +1371,7 @@ export function extractSuperDirectives(
   return {
     blocks: core.blocks,
     invalidBlocks: core.invalidBlocks,
+    issues: core.issues,
     end: core.end,
     ...(core.pendingOpen ? { pendingOpen: core.pendingOpen } : {}),
   };
@@ -1288,6 +1398,7 @@ function scanSuperDirectives(
 ): SuperDirectiveScanCore {
   const blocks: SuperTaskSpec[][] = [];
   const invalidBlocks: SuperInvalidBlock[] = [];
+  const issues: string[] = [];
   let end = fromOffset;
   let pendingOpen: SuperPendingFence | undefined;
 
@@ -1312,8 +1423,15 @@ function scanSuperDirectives(
     if (consumedEnd > end) end = consumedEnd;
     // 动作块（super-agent-actions）由 extractSuperActions 处理，这里只跳过。
     if (region.language !== "super-agent") continue;
+    if (region.issues && region.issues.length > 0) issues.push(...region.issues);
     if (region.tasks) blocks.push(region.tasks);
-    else if (region.body) invalidBlocks.push({ body: region.body, reason: region.reason ?? "载荷不是合法 JSON" });
+    else if (region.body) {
+      invalidBlocks.push({
+        body: region.body,
+        reason: region.reason ?? "载荷不是合法 JSON",
+        ...(region.issues && region.issues.length > 0 ? { issues: region.issues } : {}),
+      });
+    }
   }
 
   // 还在等载荷的工具调用式标记：只有落在最后一个完整块**之后**才算「还在等」。
@@ -1336,6 +1454,7 @@ function scanSuperDirectives(
   return {
     blocks,
     invalidBlocks,
+    issues,
     end,
     ...(pendingOpen ? { pendingOpen } : {}),
     deadEnd,
@@ -1413,6 +1532,7 @@ export class SuperDirectiveScanner {
     return {
       blocks: core.blocks,
       invalidBlocks: core.invalidBlocks,
+      issues: core.issues,
       end: this.offset,
       ...(this.pending ? { pendingOpen: this.pending } : {}),
     };
@@ -1452,6 +1572,8 @@ const MAX_INCOMPLETE_TOOL_PAYLOAD = 256 * 1024;
 interface ToolStylePayload {
   /** 解析出的任务；null = 看起来是委派载荷但内容非法（宿主据此提示用户）。 */
   tasks: SuperTaskSpec[] | null;
+  /** 字段级诊断（如 `tasks[0].task 必须是字符串`）。 */
+  issues?: string[];
   /** 载荷原文。 */
   body: string;
   /** 标记偏移（渲染侧据此把包裹标记一起纳入卡片）。 */
@@ -1515,13 +1637,27 @@ function findToolStylePayloads(text: string, from: number): ToolStylePayloadScan
     }
     const tasks = parseToolStylePayload(text.slice(start, close + 1));
     if (tasks.tasks) {
-      out.push({ tasks: tasks.tasks, body: text.slice(start, close + 1), marker, start, end: close + 1 });
+      out.push({
+        tasks: tasks.tasks,
+        body: text.slice(start, close + 1),
+        marker,
+        start,
+        end: close + 1,
+        ...(tasks.issues.length > 0 ? { issues: tasks.issues } : {}),
+      });
       searchFrom = close + 1;
       continue;
     }
     if (tasks.looksLikeDelegation) {
       // 确实是委派载荷但内容非法 —— 交给宿主提示用户，而不是静默丢弃。
-      out.push({ tasks: null, body: text.slice(start, close + 1), marker, start, end: close + 1 });
+      out.push({
+        tasks: null,
+        body: text.slice(start, close + 1),
+        marker,
+        start,
+        end: close + 1,
+        ...(tasks.issues.length > 0 ? { issues: tasks.issues } : {}),
+      });
       searchFrom = close + 1;
       continue;
     }
@@ -1644,27 +1780,28 @@ function matchJsonValue(text: string, start: number): number {
 function parseToolStylePayload(body: string): {
   tasks: SuperTaskSpec[] | null;
   looksLikeDelegation: boolean;
+  issues: string[];
 } {
   const direct = parseDirectiveBody(body);
-  if (direct.ok) return { tasks: direct.tasks, looksLikeDelegation: true };
+  if (direct.ok) return { tasks: direct.tasks, looksLikeDelegation: true, issues: direct.issues };
   const loose = parseJsonLoose(body);
-  if (!loose.ok) return { tasks: null, looksLikeDelegation: false };
+  if (!loose.ok) return { tasks: null, looksLikeDelegation: false, issues: direct.issues };
   const parsed = loose.value;
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { tasks: null, looksLikeDelegation: false };
+    return { tasks: null, looksLikeDelegation: false, issues: direct.issues };
   }
   const record = parsed as Record<string, unknown>;
-  if ("tasks" in record) return { tasks: null, looksLikeDelegation: true };
+  if ("tasks" in record) return { tasks: null, looksLikeDelegation: true, issues: direct.issues };
   for (const key of ["arguments", "parameters", "input", "args"]) {
     const inner = record[key];
     if (typeof inner !== "object" || inner === null || Array.isArray(inner)) continue;
     const tasks = parseDirectiveBody(JSON.stringify(inner));
-    if (tasks.ok) return { tasks: tasks.tasks, looksLikeDelegation: true };
+    if (tasks.ok) return { tasks: tasks.tasks, looksLikeDelegation: true, issues: tasks.issues };
     if ("tasks" in (inner as Record<string, unknown>)) {
-      return { tasks: null, looksLikeDelegation: true };
+      return { tasks: null, looksLikeDelegation: true, issues: tasks.issues };
     }
   }
-  return { tasks: null, looksLikeDelegation: false };
+  return { tasks: null, looksLikeDelegation: false, issues: direct.issues };
 }
 
 interface FenceMatch {
@@ -1854,32 +1991,73 @@ function skipWhitespace(text: string, from: number): number {
   return -1;
 }
 
-/** 解析指令块正文的结果：失败要带原因，宿主才能提示得具体。 */
-type DirectiveParse = { ok: true; tasks: SuperTaskSpec[] } | { ok: false; reason: string };
+/**
+ * 解析指令块正文的结果。
+ *
+ * 两个分支都带 `issues`：
+ *  - `ok:false`：整块不可用，`issues` 是逐条字段级诊断（如
+ *    `tasks[0].task 必须是字符串`），`reason` 是给 toast 的一句话；
+ *  - `ok:true`：`issues` 通常为空；**混合载荷**（部分条目畸形、部分合法）里
+ *    非法条目被丢弃，`tasks` 保留合法项，`issues` 记下被丢掉的条目 ——
+ *    「静默丢一半」正是这次要消灭的故障。
+ */
+type DirectiveParse =
+  | { ok: true; tasks: SuperTaskSpec[]; issues: string[] }
+  | { ok: false; reason: string; issues: string[] };
+
+/** 委派载荷的公共解析结果（`parseSuperDelegationPayload` 的返回类型）。 */
+export type SuperDelegationPayloadParse = DirectiveParse;
 
 /**
- * 委派载荷的公共解析结果（公开入口的返回类型）。
+ * 把多条字段级诊断压成一句可读的原因（最多列 3 条，其余只报数量）。
  *
- * 与私有 {@link DirectiveParse} 同形 —— 公开入口刻意**不新增**语义，只是把
- * 同一份结果的类型暴露给外部调用方。
+ * 直接 join 一整份超长载荷会产出几百字的 toast；前 3 条足够定位问题。
  */
-export type SuperTaskPayloadParse = DirectiveParse;
+function summarizeIssues(issues: readonly string[]): string {
+  const head = issues.slice(0, 3).join("；");
+  return issues.length > 3 ? `${head}；等 ${issues.length} 处` : head;
+}
+
+/** 附件列表的字段级校验：数组元素必须是字符串（或带字符串 path 的对象）。 */
+function validateDirectiveAttachments(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (!Array.isArray(raw)) return "attachments 必须是数组";
+  for (let i = 0; i < raw.length; i++) {
+    const entry = raw[i];
+    if (typeof entry === "string") continue;
+    if (typeof entry === "object" && entry !== null && !Array.isArray(entry)) {
+      const record = entry as { path?: unknown };
+      if (typeof record.path === "string" && record.path.trim()) continue;
+    }
+    return `attachments[${i}] 必须是字符串或带 path 的对象`;
+  }
+  return null;
+}
 
 /**
- * 委派载荷的公共解析入口（已是 JSON 值）。
+ * 委派载荷的公共解析入口（原始值，可以是 JSON 字符串）。
  *
- * 与内部正文解析使用同一份校验，只是省掉「文本 → 值」这一步：
- * 工具调用帧的 `args` 本来就是值，不必 JSON.stringify 再 JSON.parse 一趟
- * （那是热路径，每帧都跑）。
+ * 工具调用帧的 `args` 可能是对象，也可能是装着 JSON 的字符串；两者都收，
+ * 字符串走项目已有的宽松解析（修原始换行 / 尾逗号）。载荷畸形时返回
+ * `ok:false` + 具体 `issues`，宿主据此给出可诊断的错误，而不是静默丢弃。
  */
-export function parseSuperTaskValue(value: unknown): SuperTaskPayloadParse {
+export function parseSuperDelegationPayload(raw: unknown): SuperDelegationPayloadParse {
+  let value: unknown = raw;
+  if (typeof raw === "string") {
+    const loose = parseJsonLoose(raw);
+    if (!loose.ok) return { ok: false, reason: "载荷不是合法 JSON", issues: [] };
+    value = loose.value;
+  }
+  if (!value || typeof value !== "object") {
+    return { ok: false, reason: "载荷必须是对象或数组", issues: [] };
+  }
   return parseDirectiveValue(value);
 }
 
 /** 解析指令块正文。 */
 function parseDirectiveBody(body: string): DirectiveParse {
   const parsed = parseJsonLoose(body);
-  if (!parsed.ok) return { ok: false, reason: "载荷不是合法 JSON" };
+  if (!parsed.ok) return { ok: false, reason: "载荷不是合法 JSON", issues: [] };
   return parseDirectiveValue(parsed.value);
 }
 
@@ -1890,13 +2068,37 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
     : typeof value === "object" && value !== null && Array.isArray((value as { tasks?: unknown }).tasks)
       ? (value as { tasks: unknown[] }).tasks
       : null;
-  if (!rawTasks) return { ok: false, reason: "缺少 tasks 数组" };
+  if (!rawTasks) return { ok: false, reason: "缺少 tasks 数组", issues: [] };
 
   const tasks: SuperTaskSpec[] = [];
-  for (const entry of rawTasks) {
-    if (typeof entry !== "object" || entry === null) return { ok: false, reason: "任务条目不是对象" };
+  const issues: string[] = [];
+  for (let index = 0; index < rawTasks.length; index++) {
+    const entry = rawTasks[index];
+    const where = `tasks[${index}]`;
+    // 数组条目是「把 task 写成了字符串数组」的典型畸形（`tasks:[["a","b"]]`）：
+    // 报 `task 必须是字符串` 才能指向模型真正写错的那一层。
+    if (Array.isArray(entry)) {
+      issues.push(`${where}.task 必须是字符串`);
+      continue;
+    }
+    if (typeof entry !== "object" || entry === null) {
+      issues.push(`${where} 必须是对象`);
+      continue;
+    }
     const record = entry as { title?: unknown; task?: unknown; attachments?: unknown };
-    const task = typeof record.task === "string" ? record.task.trim() : "";
+    if (typeof record.task !== "string") {
+      issues.push(`${where}.task 必须是字符串`);
+      continue;
+    }
+    if (record.title !== undefined && record.title !== null && typeof record.title !== "string") {
+      issues.push(`${where}.title 必须是字符串`);
+      continue;
+    }
+    const attachmentIssue = validateDirectiveAttachments(record.attachments);
+    // 附件是任务的附属信息：非法元素由 parseDirectiveAttachments 逐个跳过（既有
+    // 兼容行为），这里只补一条诊断，不因为一个坏附件就把整条合法任务丢掉。
+    if (attachmentIssue) issues.push(`${where}.${attachmentIssue}`);
+    const task = record.task.trim();
     // A task that is still a placeholder (the model echoed the documented
     // example back) is skipped — opening a child session for "<任务说明>"
     // would burn a process for nothing.
@@ -1911,9 +2113,19 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
     });
   }
   // 一条都派不出去不是「成功但为空」：模型可能只给了标题、或把协议示例原样
-  // 抄了回来。宿主需要知道这件事（否则用户只看到「什么都没发生」）。
-  if (tasks.length === 0) return { ok: false, reason: "没有可派发的任务（task 为空或全是占位符）" };
-  return { ok: true, tasks };
+  // 抄了回来。宿主需要知道这件事（否则用户只看到「什么都没发生」）。畸形条目
+  // 的原因要进 reason —— 只报「没有任务」会让用户和模型都没法自查。
+  if (tasks.length === 0) {
+    return {
+      ok: false,
+      reason:
+        issues.length > 0
+          ? `载荷格式错误：${summarizeIssues(issues)}`
+          : "没有可派发的任务（task 为空或全是占位符）",
+      issues,
+    };
+  }
+  return { ok: true, tasks, issues };
 }
 
 /**
@@ -2427,6 +2639,17 @@ function readTolerantString(
     if (ch === "\\") {
       const next = text.charAt(i + 1);
       if (next === "") break;
+      // \uXXXX：把 4 位十六进制真正解码成字符。原实现把反斜杠丢掉、把
+      // `u4E2D` 当普通正文读出，中文任务书因此变成乱码。十六进制非法时
+      // 退回普通转义处理（保留原文可读，不伪造内容）。
+      if (next === "u") {
+        const hex = text.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          value += String.fromCharCode(parseInt(hex, 16));
+          i += 6;
+          continue;
+        }
+      }
       value += decodeJsonEscape(next);
       i += 2;
       continue;
@@ -2631,7 +2854,8 @@ export class SuperReportBuffer {
    *
    * 仍在跑的子会话：条目**留在缓冲里**，等它结束后再取（同一个子会话的条目
    * 会被新汇报覆盖，不会重复转述）。来源子会话已经不在列表里（被清理 /
-   * 合并后释放）的条目不取也不删 —— 交由 {@link dropMissing} 处理。
+   * 合并后释放）的条目不取也不删 —— 交由 {@link takeMissing} 处理（把迟到
+   * 结论如实呈现给用户）。
    *
    * 无可取时返回 null（继续积累）。
    */
@@ -2650,21 +2874,35 @@ export class SuperReportBuffer {
   }
 
   /**
-   * 丢掉来源子会话已经不存在的条目，返回被丢掉的子会话 id。
+   * 移除来源子会话已经不存在的条目，**连同汇报正文一起返回**。
    *
-   * 子会话被用户清理 / 合并完释放后，它的那条汇报再也没人能接 —— 如实记一
-   * 笔然后丢掉，不能让面板永久停在忙碌态。
+   * 子会话被用户清理 / 合并完释放后，它那条汇报再没人能作为「实时汇报」接
+   * 收 —— 但结论本身不该就此消失。宿主用返回值把结论以「已归档子会话的迟
+   * 到结论」形式落到看板提示里（不伪装成活跃子会话的实时汇报）。返回后条
+   * 目从缓冲移除，面板不会卡在忙碌态，也不会重复提示。
+   *
+   * 仍存在于列表里的条目（含别的会话的子会话）一律保留。
    */
-  dropMissing(sessions: readonly SuperSessionUi[]): string[] {
+  takeMissing(sessions: readonly SuperSessionUi[]): SuperReportEntry[] {
     if (this.pending.size === 0) return [];
     const liveIds = new Set(sessions.map((session) => session.id));
-    const dropped: string[] = [];
-    for (const id of [...this.pending.keys()]) {
+    const dropped: SuperReportEntry[] = [];
+    for (const [id, entry] of [...this.pending]) {
       if (liveIds.has(id)) continue;
       this.pending.delete(id);
-      dropped.push(id);
+      dropped.push(entry);
     }
     return dropped;
+  }
+
+  /**
+   * 丢掉来源子会话已经不存在的条目，返回被丢掉的子会话 id。
+   *
+   * 保留此接口只为兼容只关心 id 的既有调用方；新代码应优先用
+   * {@link takeMissing} 拿到完整汇报并如实呈现迟到结论。
+   */
+  dropMissing(sessions: readonly SuperSessionUi[]): string[] {
+    return this.takeMissing(sessions).map((entry) => entry.session.id);
   }
 
   clear(): void {
@@ -2924,6 +3162,45 @@ const SUPER_BOARD_LABEL_EN = "[child-session board]";
  * 首轮还没有任何子会话，若这里返回空串，主会话就会被误判成子会话而自己
  * 动手干活 —— 委派根本没机会发生，模型还「看起来一切正常」。
  */
+/**
+ * 看板投影里任务说明的预览上限（字符）。
+ *
+ * 任务书是模型写的，可能几千字符；`superSessions` 是**非 blocks 元数据**，
+ * 随每次 snapshot / blockPatch 整份重发。webview 从不渲染这段正文（它只
+ * 渲染标题 / 状态 / 分支 / 摘要），每轮把全文重新发一遍纯属带宽与内存浪费。
+ * 投影里只留一句可追溯的摘要 + 子会话 `id`（追溯键）；**完整任务书仍留在
+ * 管理器的记录里** —— 重试、PR 正文与归档都读那边，信息不丢。
+ */
+export const SUPER_BOARD_TASK_PREVIEW_MAX_CHARS = 200;
+
+/**
+ * 看板投影：任务书压成单行预览，其余字段原样。
+ *
+ * 只在需要裁剪时才换对象（短任务书原引用返回），调用点可以安全地把它当作
+ * 每次投影的 mapper。末尾的 `…` 如实标记「这里还有被截掉的内容」，不装作
+ * 全文都在。
+ */
+export function toSuperBoardSession(session: SuperSessionUi): SuperSessionUi {
+  const task = session.task ?? "";
+  if (task.length <= SUPER_BOARD_TASK_PREVIEW_MAX_CHARS) return session;
+  const preview = `${task.slice(0, SUPER_BOARD_TASK_PREVIEW_MAX_CHARS - 1).trimEnd()}…`;
+  return { ...session, task: preview };
+}
+
+/**
+ * 活跃子会话的精简行：字符预算吃紧时保留 id + 状态 + 短标题，丢掉 summary /
+ * 分支 / 集成细节。`buildSuperDigest` 用它保证活跃 id 即使在上百个子会话的
+ * 看板里也不会被 `… (N omitted)` 折叠 —— 主 Agent 从摘要里抄 id 去执行
+ * cancel / answer，抄错 id 是实测故障（58 会话现场：活跃 id 恰好在尾部，
+ * 被从尾部截断的旧实现折叠，于是 cancel 报 not-found）。
+ */
+function describeSuperSessionCompactLine(session: SuperSessionUi): string {
+  const title = session.title.replace(/\s+/g, " ").trim();
+  const shortTitle = title.length > 24 ? `${title.slice(0, 23)}…` : title;
+  const suffix = `${session.queued && session.status === "preparing" ? " (queued)" : ""}${(session.attempts ?? 1) > 1 ? ` (attempt ${session.attempts})` : ""}`;
+  return `- ${session.id} "${shortTitle}" ${SUPER_STATUS_LABEL[session.status]}${suffix}`;
+}
+
 export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
   if (sessions.length === 0) {
     return (
@@ -2936,7 +3213,6 @@ export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
     `${SUPER_BOARD_MARKER} ${SUPER_BOARD_LABEL_EN} (host-injected live status, not a user message. ${counts.total} child session(s) in total: ` +
     `${counts.running} running, ${counts.awaiting} awaiting you, ${counts.done} completed, ` +
     `${counts.failed} failed, ${counts.cancelled} interrupted)`;
-  const lines = sessions.map((session) => describeSuperSessionLine(session));
   const omittedNote = (count: number): string => `… (${count} more child session(s) omitted for budget — confirm with the user before acting on them)`;
   const render = (kept: readonly string[], omitted: number): string =>
     [
@@ -2944,12 +3220,45 @@ export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
       ...kept,
       ...(omitted > 0 ? [omittedNote(omitted)] : []),
     ].join("\n") + SUPER_DIGEST_FOOTER;
+  const fits = (kept: readonly string[], omitted: number): boolean =>
+    render(kept, omitted).length <= SUPER_DIGEST_MAX_CHARS;
 
-  let kept = lines;
-  while (kept.length > 1 && render(kept, lines.length - kept.length).length > SUPER_DIGEST_MAX_CHARS) {
-    kept = kept.slice(0, -1);
+  // 活跃会话（preparing / running / awaiting_input）优先：它们才是主 Agent
+  // 此刻要管理（中断 / 回答）的目标。先尝试全量详情；放不下就整组降级成
+  // 精简行（保住 id），再不够才从尾部丢并如实计入 omitted。非活跃的历史
+  // 会话排在后面，预算不足时先折叠它们。
+  const active = sessions.filter((session) => !isTerminalSuperStatus(session.status));
+  const inactive = sessions.filter((session) => isTerminalSuperStatus(session.status));
+  let activeLines = active.map((session) => describeSuperSessionLine(session));
+  if (!fits(activeLines, inactive.length)) {
+    activeLines = active.map((session) => describeSuperSessionCompactLine(session));
   }
-  return render(kept, lines.length - kept.length);
+  let activeOmitted = 0;
+  while (
+    activeLines.length - activeOmitted > 0 &&
+    !fits(
+      activeLines.slice(0, activeLines.length - activeOmitted),
+      inactive.length + activeOmitted,
+    )
+  ) {
+    activeOmitted += 1;
+  }
+  const kept = activeLines.slice(0, activeLines.length - activeOmitted);
+  const inactiveLines = inactive.map((session) => describeSuperSessionLine(session));
+  let inactiveKept = 0;
+  while (
+    inactiveKept < inactiveLines.length &&
+    fits(
+      [...kept, ...inactiveLines.slice(0, inactiveKept + 1)],
+      activeOmitted + (inactiveLines.length - inactiveKept - 1),
+    )
+  ) {
+    inactiveKept += 1;
+  }
+  return render(
+    [...kept, ...inactiveLines.slice(0, inactiveKept)],
+    activeOmitted + (inactiveLines.length - inactiveKept),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -3593,6 +3902,14 @@ export interface SuperDirectiveAction {
   /** 原样动作名（retry / cancel / cleanup / answer / 未知）。 */
   action: string;
   sessionId: string;
+  /**
+   * 目标子会话的人可读标题（宿主在构造动作记录时用 super-session 记录回填）。
+   *
+   * 操作卡据此显示「标题（id）」而不是裸 id —— 用户第一眼就能看出针对的是
+   * 哪个子会话。取不到（记录已清理 / 围栏文本解析没有 session 上下文）时必须
+   * 留空，渲染侧优雅退回只显示 id，不要伪造占位符。
+   */
+  title?: string;
   /** `cleanup` 显式要求保留分支。 */
   keepBranch?: boolean;
   /** `answer` 动作携带的回答条数。 */

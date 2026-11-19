@@ -322,3 +322,81 @@ it("parks an unsaved draft per scope so a switch round trip does not lose it", (
   click("全局");
   expect(container.textContent).toContain("draft-global");
 });
+
+it("explains these servers are used by child sessions, not the main session", () => {
+  reply({ a: { command: "node" } });
+  expect(container.textContent).toContain("这些 MCP server 仅供 Super Agent 子会话使用，主会话不加载 MCP。");
+  expect(container.textContent).toContain("新建的子会话会通过共享代理使用这些 server");
+});
+
+it("does not read a main-session-blocked server as a failure without broker data", () => {
+  reply({ a: { command: "node" } });
+  statusReply({
+    discoveryState: "completed",
+    servers: {
+      a: {
+        status: "disconnected", toolCount: 0, promptCount: 0, tools: [], prompts: [],
+        blocked: true, contextTokens: 0,
+      },
+    },
+  });
+  const spans = [...container.querySelectorAll("span")];
+  // `blocked` alone means "main session never loads MCP" — never a red dot,
+  // and the label says so rather than implying the server is broken.
+  expect(spans.some((s) => s.className.includes("bg-destructive"))).toBe(false);
+  expect(spans.some((s) => s.className.includes("bg-muted-foreground"))).toBe(true);
+  expect(spans.some((s) => (s.getAttribute("title") ?? "").includes("主会话未加载 MCP"))).toBe(true);
+  expect(container.textContent).not.toContain("已屏蔽");
+});
+
+it("lights a child-connected server green and treats the broker as authoritative", () => {
+  reply({ a: { command: "node" } });
+  statusReply({
+    discoveryState: "completed",
+    servers: {
+      a: {
+        status: "connected", toolCount: 1, promptCount: 0,
+        tools: [{ name: "do_it" }], prompts: [], blocked: true,
+        childConnected: true, contextTokens: 2000,
+      },
+    },
+  });
+  const spans = [...container.querySelectorAll("span")];
+  expect(spans.some((s) => s.className.includes("bg-success"))).toBe(true);
+  expect(spans.some((s) => (s.getAttribute("title") ?? "").includes("已在子会话连接"))).toBe(true);
+  expect(spans.some((s) => (s.getAttribute("title") ?? "").includes("在子会话中占用约 2k tokens"))).toBe(true);
+});
+
+it("surfaces a real child-side failure in red with the child-session label", () => {
+  reply({ a: { command: "node" } });
+  statusReply({
+    discoveryState: "completed",
+    servers: {
+      a: {
+        status: "disconnected", toolCount: 0, promptCount: 0, tools: [], prompts: [],
+        blocked: true, childConnected: false, error: "spawn ENOENT", errorKind: "unknown", contextTokens: 0,
+      },
+    },
+  });
+  const spans = [...container.querySelectorAll("span")];
+  expect(spans.some((s) => s.className.includes("bg-destructive"))).toBe(true);
+  expect(spans.some((s) => (s.getAttribute("title") ?? "").includes("子会话连接失败"))).toBe(true);
+  clickTitle("详情");
+  expect(container.textContent).toContain("子会话连接失败：");
+  expect(container.textContent).toContain("spawn ENOENT");
+});
+
+it("explains in the detail page why no tools show up when only the main report exists", () => {
+  reply({ a: { command: "node" } });
+  statusReply({
+    discoveryState: "completed",
+    servers: {
+      a: {
+        status: "disconnected", toolCount: 0, promptCount: 0, tools: [], prompts: [],
+        blocked: true, contextTokens: 0,
+      },
+    },
+  });
+  clickTitle("详情");
+  expect(container.textContent).toContain("主会话不加载 MCP，新建子会话并连接后才会上报工具列表");
+});

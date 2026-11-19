@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
+import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, Sparkles, Trash2 } from "lucide-react";
 import type {
   AuthUiState,
   ThinkingModelRuleUi,
-  UiCliApprovalMode,
   UiCliLanguage,
-  UiDefaultMode,
   UiOsNotifications,
   UiThemeMode,
 } from "../../../shared/messages";
@@ -39,9 +37,9 @@ import {
   rovingTabKeyDown,
 } from "./ui";
 import { McpSection } from "./McpCard";
-import { ApprovalPolicySection } from "./ApprovalPolicyCard";
 import { MemorySection } from "./MemoryCard";
 import { AssetSection } from "./AssetCard";
+import { QqSettings } from "./QqSettings";
 
 /**
  * Unified settings modal — the single home for everything the gear opens:
@@ -49,13 +47,15 @@ import { AssetSection } from "./AssetCard";
  * MCP tools, memory and runtime/data. Every control writes the same VSCode
  * user settings.json the CLI/config reads, so Settings Sync carries it.
  * Replaces the old three-modal sprawl (AuthCard embedding 「扩展设置」 buttons
- * that swapped into McpCard / ApprovalPolicyCard with no way back).
+ * that swapped into other cards with no way back).
  *
  * Layout: fixed header (section title + back arrow while editing) → body =
- * nav rail (left on wide viewports, top tab strip when narrow, via the
- * @container on .auth-modal-wide) + scrolling content → fixed footer.
+ * nav rail (left sidebar on wide viewports; below a 560px container a
+ * single-row horizontally scrolling tab strip, so the content keeps the full
+ * width — the old stacked wrap stole ~312px of height at 360px viewports),
+ * via the @container on .auth-modal-wide) + scrolling content → fixed footer.
  */
-export type SettingsTab = "api" | "chat" | "appearance" | "policy" | "mcp" | "memory" | "assets" | "runtime";
+export type SettingsTab = "api" | "chat" | "appearance" | "mcp" | "memory" | "assets" | "qq" | "runtime";
 
 /** Editor-state header override a section reports to the shell (back arrow +
  * contextual title while a sub-editor is open). */
@@ -96,6 +96,11 @@ export function SettingsModal({
     // Each tab is an independent page — carrying the previous scroll offset
     // into it drops the user mid-list with the title out of view.
     if (contentRef.current) contentRef.current.scrollTop = 0;
+    // The selected tab must stay visible in the nav (narrow: horizontal
+    // scroll strip; the wide rail has its own overflow too) — a keyboard
+    // switch from the last visible tab would otherwise leave the selection
+    // offscreen. Optional call: jsdom does not implement scrollIntoView.
+    tabRefs.current[tab]?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [tab]);
 
   // 4.7: eight peer tabs read as a flat wall. Group them into four named
@@ -108,7 +113,6 @@ export function SettingsModal({
       tabs: [
         { id: "chat", icon: MessageSquare, label: t("对话") },
         { id: "appearance", icon: Palette, label: t("外观与交互") },
-        { id: "policy", icon: ShieldCheck, label: t("权限与审批") },
       ],
     },
     {
@@ -117,6 +121,7 @@ export function SettingsModal({
         { id: "mcp", icon: Server, label: t("MCP 与工具") },
         { id: "memory", icon: Brain, label: t("记忆与知识") },
         { id: "assets", icon: Sparkles, label: t("技能与命令") },
+        { id: "qq", icon: Globe, label: t("QQ 机器人") },
       ],
     },
     { label: t("系统"), tabs: [{ id: "runtime", icon: Database, label: t("运行与数据") }] },
@@ -144,7 +149,7 @@ export function SettingsModal({
       footer={
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           <HelpTip label={t("设置保存在哪里")} align="left">
-            {t("外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言、审批模式保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后生效。")}
+            {t("外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后由新子会话使用最新配置。")}
           </HelpTip>
           <Button
             variant="ghost"
@@ -157,7 +162,7 @@ export function SettingsModal({
             className="ml-auto"
             disabled={busy}
             icon={<RefreshCw className={ICON_INLINE} />}
-            title={t("重启内核，当前会话会自动恢复。语言、审批模式与 MCP 的改动在重启后生效。")}
+            title={t("重启内核，当前会话会自动恢复。语言改动在重启后生效；MCP 仅供子会话使用，重启后的新子会话会通过共享代理加载。")}
             onClick={() => {
               send({ type: "restartCli" });
               onDismiss();
@@ -168,7 +173,10 @@ export function SettingsModal({
         </div>
       }
     >
-      <div className="auth-modal-body flex min-h-0 flex-1 flex-col @min-[460px]:flex-row">
+      {/* Narrow container: the nav is a single-row horizontally scrolling tab
+       * strip (old stacked wrap ate ~312px of height at 360px viewports);
+       * wide container: the classic 172px left sidebar. */}
+      <div className="auth-modal-body flex min-h-0 flex-1 flex-col @min-[560px]:flex-row">
         <nav
           role="tablist"
           aria-label={t("设置分区")}
@@ -182,18 +190,20 @@ export function SettingsModal({
             }
             rovingTabKeyDown(ALL_TABS, tab, onTabChange, (id) => tabRefs.current[id]?.focus())(event);
           }}
-          className="flex min-h-0 flex-col gap-2 overflow-y-auto border-b border-border/60 p-2 @min-[460px]:w-[172px] @min-[460px]:shrink-0 @min-[460px]:gap-2.5 @min-[460px]:border-b-0 @min-[460px]:border-r"
+          className="flex min-h-0 flex-row items-center gap-1 overflow-x-auto border-b border-border/60 p-2 @min-[560px]:w-[172px] @min-[560px]:shrink-0 @min-[560px]:flex-col @min-[560px]:items-stretch @min-[560px]:gap-2.5 @min-[560px]:overflow-x-hidden @min-[560px]:overflow-y-auto @min-[560px]:border-b-0 @min-[560px]:border-r"
         >
           {TAB_GROUPS.map((group) => (
             <div
               key={group.label}
               role="group"
               aria-label={group.label}
-              className="flex flex-wrap items-center gap-1 @min-[460px]:flex-col @min-[460px]:items-stretch @min-[460px]:gap-0.5"
+              className="flex shrink-0 flex-nowrap items-center gap-1 @min-[560px]:flex-col @min-[560px]:items-stretch @min-[560px]:gap-0.5"
             >
+              {/* Group caption: narrow strip has no room for it (the row must
+               * stay one line tall) — semantics stay on the role="group" wrapper. */}
               <div
                 aria-hidden="true"
-                className="shrink-0 whitespace-nowrap rounded-md bg-accent/40 px-1.5 py-0.5 text-ui-micro font-semibold tracking-[0.08em] text-muted-foreground/70 @min-[460px]:rounded-none @min-[460px]:bg-transparent @min-[460px]:px-2.5 @min-[460px]:py-1.5"
+                className="hidden shrink-0 whitespace-nowrap rounded-md bg-accent/40 px-1.5 py-0.5 text-ui-micro font-semibold tracking-[0.08em] text-muted-foreground/70 @min-[560px]:block @min-[560px]:rounded-none @min-[560px]:bg-transparent @min-[560px]:px-2.5 @min-[560px]:py-1.5"
               >
                 {group.label}
               </div>
@@ -209,7 +219,7 @@ export function SettingsModal({
                     tabRefs.current[id] = el;
                   }}
                   data-autofocus={tab === id ? "true" : undefined}
-                  className="grow basis-[calc(50%_-_2px)] @min-[460px]:grow-0 @min-[460px]:basis-auto"
+                  className="shrink-0"
                 >
                   {label}
                 </TabButton>
@@ -222,21 +232,50 @@ export function SettingsModal({
           id="settings-panel"
           role="tabpanel"
           aria-label={tabTitle}
-          className="min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5"
+          className="min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5"
         >
           {tab === "api" && <ApiConfigSection auth={auth} busy={busy} onHeader={setSectionHeader} />}
           {tab === "chat" && <ChatSection />}
           {tab === "appearance" && <AppearanceSection />}
-          {tab === "policy" && (
-            <ApprovalPolicySection busy={busy} onHeader={setSectionHeader} defaults={<PermissionDefaults />} />
-          )}
           {tab === "mcp" && <McpTab busy={busy} onHeader={setSectionHeader} />}
           {tab === "memory" && <MemorySection busy={busy} onHeader={setSectionHeader} />}
           {tab === "assets" && <AssetSection busy={busy} onHeader={setSectionHeader} />}
+          {tab === "qq" && <QqSection />}
           {tab === "runtime" && <RuntimeSection />}
         </div>
       </div>
     </ModalShell>
+  );
+}
+
+/**
+ * 「QQ 机器人」页：把纯展示的 QqSettings 接到宿主通道上。
+ *
+ * 两条通道严格分离：普通设置 → `qqSettingsPatch`，连接/配对/解绑/扫码动作 →
+ * `qqConfigAction`。凭据不再手填（扫码成功后由宿主写入 SecretStorage）。
+ */
+function QqSection() {
+  const qqSettings = useChat((s) => s.qqSettings);
+  const qqStatus = useChat((s) => s.qqStatus);
+  const qqPendingUsers = useChat((s) => s.qqPendingUsers);
+  const qqLoginQr = useChat((s) => s.qqLoginQr);
+  const qqManagedStatus = useChat((s) => s.qqManagedStatus);
+  const send = useChat((s) => s.send);
+
+  return (
+    <QqSettings
+      value={qqSettings}
+      onChange={(patch) => send({ type: "qqSettingsPatch", patch })}
+      onTestConnection={() => send({ type: "qqConfigAction", action: "testConnection" })}
+      onUnbind={() => send({ type: "qqConfigAction", action: "unbind" })}
+      status={qqStatus ?? undefined}
+      pendingUsers={qqPendingUsers}
+      onUserAction={(openid, action) => send({ type: "qqUserAction", openid, action })}
+      onManagedSetup={(action) => send({ type: "qqManagedSetup", action })}
+      onQrAction={(action) => send({ type: "qqConfigAction", action })}
+      qqLoginQr={qqLoginQr}
+      qqManagedStatus={qqManagedStatus}
+    />
   );
 }
 
@@ -573,6 +612,35 @@ function ChatSection() {
           unit={t("个")}
           onCommit={(superAgentMaxConcurrent) => update({ superAgentMaxConcurrent })}
         />
+        <ChoiceRow
+          label={t("集成模式")}
+          description={t("子会话完成后，把它的改动并回当前分支的方式。")}
+          detail={t("自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的子会话生效。")}
+          value={settings.superAgentIntegration}
+          options={[
+            { value: "merge", label: t("自动合并") },
+            { value: "pr", label: t("创建 PR") },
+            { value: "manual", label: t("手动") },
+          ]}
+          onChange={(superAgentIntegration) => update({ superAgentIntegration })}
+        />
+        <NumberRow
+          label={t("工作目录上限")}
+          description={t("磁盘上最多保留几个已结束子会话的工作目录。")}
+          detail={t("默认 10，可设 0–100；填 0 表示不限。超出时按修改时间从旧到新回收，分支一律保留，有未提交改动的目录不会被回收。")}
+          value={settings.superAgentMaxWorktrees}
+          min={0}
+          max={100}
+          unit={t("个")}
+          onCommit={(superAgentMaxWorktrees) => update({ superAgentMaxWorktrees })}
+        />
+        <ToggleRow
+          label={t("保留工作目录")}
+          description={t("子会话完成后，是否保留它的工作目录。")}
+          detail={t("默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的子会话从不回收。开启后工作目录会留在磁盘上，可随时手动清理。")}
+          checked={settings.superAgentKeepWorktree}
+          onChange={(superAgentKeepWorktree) => update({ superAgentKeepWorktree })}
+        />
       </SettingsGroup>
       <SettingsGroup title={t("回合结束后")} hint={t("每轮结束可能多花一次模型调用")}>
         <div>
@@ -740,7 +808,6 @@ function AppearanceSection() {
         <div className="space-y-2 px-4 py-4">
           <ShortcutRow keys="Esc" label={t("停止生成（在审批卡上为拒绝）")} />
           <ShortcutRow keys="Y / N" label={t("审批允许 / 拒绝")} />
-          <ShortcutRow keys="Y / N / R" label={t("计划批准 / 拒绝 / 重新规划")} />
           <ShortcutRow keys="Alt+← / Alt+→" label={t("上一个 / 下一个会话")} />
           <ShortcutRow keys="Alt+N" label={t("新建会话")} />
           <ShortcutRow keys="/" label={t("聚焦输入框")} />
@@ -753,49 +820,6 @@ function AppearanceSection() {
           description={t("背景光晕的浓淡：0 为关闭，100 最亮。")}
           value={settings.auroraIntensity}
           onCommit={(auroraIntensity) => update({ auroraIntensity })}
-        />
-      </SettingsDisclosure>
-    </div>
-  );
-}
-
-/** Mode defaults shown above the approval-rule table. */
-function PermissionDefaults() {
-  const settings = useChat((s) => s.hostSettings);
-  const update = useChat((s) => s.updateHostSetting);
-  const approvalOptions: Array<{ value: UiCliApprovalMode; label: string }> = [
-    { value: "", label: t("跟随内核") },
-    { value: "default", label: t("标准") },
-    { value: "smart", label: t("智能") },
-    { value: "yolo", label: t("免确认") },
-    { value: "plan", label: t("规划") },
-  ];
-  const defaultModeOptions: Array<{ value: UiDefaultMode; label: string }> = [
-    { value: "smart", label: t("智能") },
-    { value: "default", label: t("标准") },
-    { value: "yolo", label: t("免确认") },
-    { value: "plan", label: t("规划") },
-  ];
-  return (
-    <div className="space-y-4">
-      <SettingsGroup title={t("默认模式")}>
-        <ChoiceRow
-          label={t("面板默认权限模式")}
-          description={t("新会话使用的权限模式。")}
-          detail={t("只影响新会话；当前会话可在输入框下方的模式菜单里切换。")}
-          value={settings.defaultMode}
-          options={defaultModeOptions}
-          onChange={(defaultMode) => update({ defaultMode })}
-        />
-      </SettingsGroup>
-      <SettingsDisclosure title={t("内核兼容")} hint={t("重启内核生效")}>
-        <ChoiceRow
-          label={t("内核默认审批模式")}
-          description={t("内核启动时使用的审批模式。")}
-          detail={t("与上面的面板默认模式互不影响；保存后重启内核生效。")}
-          value={settings.approvalMode}
-          options={approvalOptions}
-          onChange={(approvalMode) => update({ approvalMode })}
         />
       </SettingsDisclosure>
     </div>

@@ -28,8 +28,6 @@ const baseSettings: HostSettingsUi = {
   soundFeedback: true,
   osNotifications: "approvals",
   language: "",
-  defaultMode: "smart",
-  approvalMode: "",
   theme: "auto",
   auroraIntensity: 35,
   uiFontSize: "standard",
@@ -45,6 +43,9 @@ const baseSettings: HostSettingsUi = {
   costTable: [],
   thinkingModelRules: [],
   superAgentMaxConcurrent: 5,
+  superAgentIntegration: "merge",
+  superAgentMaxWorktrees: 10,
+  superAgentKeepWorktree: false,
 };
 
 beforeEach(() => {
@@ -82,15 +83,14 @@ it("sends preset changes to the host and applies them optimistically", () => {
   expect(sent).toMatchObject({ type: "setHostSettings", uiFontSize: "compact", uiDensity: "compact" });
 });
 
-it("sends sound and default-mode changes to the host", () => {
-  useChat.getState().updateHostSetting({ soundFeedback: false, defaultMode: "plan" });
+it("sends sound changes to the host", () => {
+  useChat.getState().updateHostSetting({ soundFeedback: false });
 
   expect(useChat.getState().hostSettings.soundFeedback).toBe(false);
-  expect(useChat.getState().hostSettings.defaultMode).toBe("plan");
   const sent = postMessage.mock.calls
-    .map((call) => call[0] as { type?: string; soundFeedback?: boolean; defaultMode?: string })
+    .map((call) => call[0] as { type?: string; soundFeedback?: boolean })
     .find((msg) => msg.type === "setHostSettings");
-  expect(sent).toMatchObject({ type: "setHostSettings", soundFeedback: false, defaultMode: "plan" });
+  expect(sent).toMatchObject({ type: "setHostSettings", soundFeedback: false });
 });
 
 it("mirrors theme and advanced settings from the host", () => {

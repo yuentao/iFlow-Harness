@@ -223,14 +223,6 @@ describe("切换控件的进行态", () => {
     { id: "m1", name: "Model One" },
     { id: "m2", name: "Model Two" },
   ];
-  const modes = {
-    currentModeId: "default",
-    availableModes: [
-      { id: "default", name: "Default" },
-      { id: "plan", name: "Plan" },
-    ],
-  };
-
   it("模型切换在飞时显示 Loader2 且禁用，回包后恢复", () => {
     render({ models, currentModelId: "m1" });
     expect(container.querySelector('button[title="模型"]')).toBeTruthy();
@@ -255,22 +247,7 @@ describe("切换控件的进行态", () => {
     expect(container.querySelector('button[title="切换中…"]')).toBeTruthy();
   });
 
-  it("模式切换在飞时显示 Loader2 且禁用，回包后恢复", () => {
-    render({ modes });
-    expect(container.querySelector('button[title="权限模式"]')).toBeTruthy();
-
-    mocked.pending = { kind: "mode", target: "plan" };
-    act(() => root.render(<Composer />));
-    const busy = container.querySelector<HTMLButtonElement>('button[title="切换中…"]');
-    expect(busy).toBeTruthy();
-    expect(busy!.disabled).toBe(true);
-    expect(busy!.querySelector(".animate-spin")).toBeTruthy();
-
-    mocked.pending = null;
-    act(() => root.render(<Composer />));
-    expect(container.querySelector('button[title="权限模式"]')).toBeTruthy();
   });
-});
 
 describe("停止请求的进行态", () => {
   it("点击停止后按钮显示「正在停止…」并禁用，状态回 idle 后恢复", () => {

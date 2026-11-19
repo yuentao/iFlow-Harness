@@ -29,7 +29,7 @@
  *
  *   and registers the returned class only when IFLOW_SUPER_TOOL=1.
  *
- * Why execute() only acknowledges:
+ * Why execute() only acknowledges (after validating):
  *   Dispatching a child session means spawning a separate CLI process, an
  *   ACP session and a git worktree — all of that lives in the HOST, not in
  *   the CLI. The CLI only has to make the tool call visible on the wire: the
@@ -40,6 +40,13 @@
  *   inside the CLI. The ack shape `{llmContent, returnDisplay}` is the same
  *   contract every other simple tool returns (verified against todo_write /
  *   list_directory / web_search).
+ *
+ *   The ack is only returned after `validateToolParams` passes. Invalid
+ *   parameters make `execute` throw `Invalid parameters: …`, which the tool
+ *   executor turns into `functionResponse.error` and an ACP `failed` status —
+ *   the model sees the concrete reason in the SAME turn and can correct the
+ *   call itself instead of being told "accepted" for a payload the host can
+ *   never dispatch.
  *
  * shouldConfirmExecute() returns false on purpose: the tool performs no I/O
  * and no side effect inside the CLI (the host owns the actual dispatch), so
@@ -60,9 +67,9 @@ const DISPLAY_NAME = "Super Agent";
 const DESCRIPTION =
   "Delegate work to one or more child sessions, or manage existing ones. Each child session runs in its own git " +
   "worktree on its own branch, so several children can change this project at once without stepping on each other. " +
-  "Pass EITHER `tasks` (each with a short `title`, a self-contained `task` brief, and optional `attachments` paths) " +
-  "to dispatch children, OR `actions` (each with an `action` of retry/cancel/answer/cleanup and a `sessionId`) to " +
-  "manage children already on the board. One call carries one kind: tasks OR actions, never both. " +
+  "Pass EITHER `tasks` (each with a self-contained `task` brief, an optional short `title`, and optional " +
+  "`attachments` paths) to dispatch children, OR `actions` (each with an `action` of retry/cancel/answer/cleanup " +
+  "and a `sessionId`) to manage children already on the board. One call carries one kind: tasks OR actions, never both. " +
   "The host performs the real work and reports results back to you; this call only returns an acknowledgement. " +
   "Prefer this tool over writing a `super-agent` / `super-agent-actions` fenced code block by hand.";
 
@@ -122,7 +129,8 @@ function create(bag) {
                     items: { type: T_STRING },
                   },
                 },
-                required: ["title", "task"],
+                // title 是可选的短标签（宿主缺失时回退到 task 首行），只强制 task。
+                required: ["task"],
               },
             },
             // 子会话管理动作与 `super-agent-actions` 围栏协议逐字段同形：宿主收到
@@ -170,44 +178,83 @@ function create(bag) {
       this.config = config;
     }
 
+    /**
+     * 严格校验工具参数。
+     *
+     * 返回 null = 合法；返回字符串 = 具体的非法原因（带索引与字段名），
+     * 由 {@link execute} 抛给模型，让它在同一轮里自行修正后重派。
+     *
+     * 规则（与宿主 shared/super-agent.ts 的载荷语义保持一致，但这里是**工具层
+     * 的第一道闸门**：参数不合法时 execute 直接报错，ACP 把工具调用标记为
+     * failed，模型立刻知道「这次没派出去」，而不是收到一个假的 ack 后继续
+     * 往下写）。
+     *
+     *  - tasks / actions 二选一，且被选中的那个必须是非空数组；
+     *  - 每个 task 必须是非数组对象；
+     *  - `task` 必须是非空字符串；
+     *  - `title` 可选，但存在时必须是字符串；
+     *  - `attachments` 可选，但存在时必须是字符串数组。
+     */
     validateToolParams(params) {
-      if (!params || typeof params !== "object") {
+      if (!params || typeof params !== "object" || Array.isArray(params)) {
+        return "parameters must be an object with either tasks or actions";
+      }
+      const hasTasksField = params.tasks !== undefined && params.tasks !== null;
+      const hasActionsField = params.actions !== undefined && params.actions !== null;
+      // 派发与管理二选一：两个都空（或都没给）时明确报错，避免模型传
+      // `{"tasks":[]}` 后静默什么都没发生。这里正是放宽 schema required 后的
+      // 兜底闸门。
+      if (!hasTasksField && !hasActionsField) {
         return "either tasks or actions must be a non-empty array";
       }
-      const hasTasks = Array.isArray(params.tasks) && params.tasks.length > 0;
-      const hasActions = Array.isArray(params.actions) && params.actions.length > 0;
-      // 派发与管理二选一：两个都空（或都没给）时明确报错，避免模型传 `{"tasks":[]}`
-      // 后静默什么都没发生。这里正是放宽 schema required 后的兜底闸门。
-      if (!hasTasks && !hasActions) {
-        return "either tasks or actions must be a non-empty array";
-      }
-      if (hasTasks) {
+      // 两个字段同时出现时不在这里额外禁止：宿主的载荷分流对它有既有语义
+      // （非空 actions 且没有非空 tasks 时按管理动作处理），loader 只负责
+      // 校验各自的结构。
+      if (hasTasksField) {
+        if (!Array.isArray(params.tasks)) return "tasks must be an array";
+        if (params.tasks.length === 0) return "tasks must be a non-empty array";
         for (let i = 0; i < params.tasks.length; i++) {
           const task = params.tasks[i];
-          if (!task || typeof task !== "object") return `tasks[${i}] must be an object`;
-          if (typeof task.title !== "string" || task.title.length === 0) {
-            return `tasks[${i}].title must be a non-empty string`;
+          if (!task || typeof task !== "object" || Array.isArray(task)) {
+            return `tasks[${i}] must be an object`;
           }
-          if (typeof task.task !== "string" || task.task.length === 0) {
+          if (typeof task.task !== "string" || task.task.trim().length === 0) {
             return `tasks[${i}].task must be a non-empty string`;
           }
-          if (task.attachments !== undefined && !Array.isArray(task.attachments)) {
-            return `tasks[${i}].attachments must be an array of strings`;
+          if (task.title !== undefined && typeof task.title !== "string") {
+            return `tasks[${i}].title must be a string`;
+          }
+          if (task.attachments !== undefined) {
+            if (!Array.isArray(task.attachments)) {
+              return `tasks[${i}].attachments must be an array of strings`;
+            }
+            for (let j = 0; j < task.attachments.length; j++) {
+              if (typeof task.attachments[j] !== "string") {
+                return `tasks[${i}].attachments[${j}] must be a string`;
+              }
+            }
           }
         }
       }
-      if (hasActions) {
+      if (hasActionsField) {
+        if (!Array.isArray(params.actions)) return "actions must be an array";
+        if (params.actions.length === 0) return "actions must be a non-empty array";
         const allowed = ["retry", "cancel", "answer", "cleanup"];
         for (let i = 0; i < params.actions.length; i++) {
           const action = params.actions[i];
-          if (!action || typeof action !== "object") return `actions[${i}] must be an object`;
-          if (!allowed.includes(action.action)) {
+          if (!action || typeof action !== "object" || Array.isArray(action)) {
+            return `actions[${i}] must be an object`;
+          }
+          if (typeof action.action !== "string" || !allowed.includes(action.action)) {
             return `actions[${i}].action must be one of ${allowed.join(", ")}`;
           }
-          if (typeof action.sessionId !== "string" || action.sessionId.length === 0) {
+          if (typeof action.sessionId !== "string" || action.sessionId.trim().length === 0) {
             return `actions[${i}].sessionId must be a non-empty string`;
           }
-          if (action.action === "answer" && (!action.answers || typeof action.answers !== "object" || Array.isArray(action.answers))) {
+          if (
+            action.action === "answer" &&
+            (!action.answers || typeof action.answers !== "object" || Array.isArray(action.answers))
+          ) {
             return `actions[${i}].answers must be an object for answer actions`;
           }
           if (action.keepBranch !== undefined && typeof action.keepBranch !== "boolean") {
@@ -239,7 +286,20 @@ function create(bag) {
       return Promise.resolve(false);
     }
 
-    async execute() {
+    /**
+     * 参数合法才 ack。
+     *
+     * 内核的执行器（bundle 实证 0.5.19：`_Se` 里 `await n.execute(e.args,l)`
+     * 没有前置 validate）直接调用 execute；抛错会被它 catch 成
+     * `functionResponse.response.error`，ACP 侧把工具调用标成 failed。
+     * 这正是模型自我修正需要的反馈通道：旧实现对任何参数都回 ack，模型
+     * 以为派发成功，宿主解析失败只能弹 toast，双方都停在错误里。
+     */
+    async execute(params) {
+      const invalid = this.validateToolParams(params);
+      if (invalid) {
+        throw new Error(`Invalid parameters: ${invalid}`);
+      }
       return { llmContent: ACK, returnDisplay: ACK };
     }
   }

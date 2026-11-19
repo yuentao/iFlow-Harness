@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, ExternalLink, Lock, Sparkles } from "lucide-react";
-import type { AuthUiState, ModelInfoUi, UiDefaultMode } from "../../../shared/messages";
+import type { AuthUiState, ModelInfoUi } from "../../../shared/messages";
 import { validateAuthForm } from "../../../shared/messages";
 import { matchProviderPreset, PROVIDER_PRESETS, type ProviderPreset } from "../../../shared/provider-presets";
 import { useChat } from "../store";
-import { modeDisplay, t } from "../i18n";
+import { t } from "../i18n";
 import { Button, Field, ICON_DISPLAY, ICON_INLINE, ModalShell, OptionCard, OptionGroup, SearchInput, TextInput, ToggleChip, fuzzyScore } from "./ui";
 import type { SettingsTab } from "./SettingsModal";
 import logo from "../assets/iflow.svg";
@@ -13,35 +13,22 @@ import logo from "../assets/iflow.svg";
  * First-run wizard. Deliberately NOT the settings modal: a new user gets one
  * decision per screen, a visible progress bar, and a single escape door.
  * The settings modal remains the long-term home for everything here (and the
- * deeper MCP / approval-policy / memory / appearance editors).
+ * deeper MCP / memory / appearance editors).
  *
  * UI-audit 4.8: welcome merged into the connect step (one header line instead
  * of three marketing cards) and the preferences step moved out entirely — theme
  * and font size now ship with sane defaults, and the done step links to
- * Settings → Appearance. Four steps: connect → model → mode → done.
+ * Settings → Appearance. Three steps: connect → model → done.
  */
 
-type Step = "connect" | "model" | "mode" | "done";
+type Step = "connect" | "model" | "done";
 
-const STEPS: Step[] = ["connect", "model", "mode", "done"];
+const STEPS: Step[] = ["connect", "model", "done"];
 
 const EMPTY_MODELS: ModelInfoUi[] = [];
 
 /** Search only earns a row once the catalog is long enough to need it. */
 const MODEL_SEARCH_MIN = 8;
-
-const MODE_FALLBACK: Array<{ id: string; name: string }> = [
-  { id: "smart", name: "" },
-  { id: "default", name: "" },
-  { id: "yolo", name: "" },
-  { id: "plan", name: "" },
-];
-
-const DEFAULT_MODES: readonly UiDefaultMode[] = ["default", "smart", "yolo", "plan"];
-
-function isDefaultMode(value: string): value is UiDefaultMode {
-  return (DEFAULT_MODES as readonly string[]).includes(value);
-}
 
 function stepTitle(step: Step): string {
   switch (step) {
@@ -49,8 +36,6 @@ function stepTitle(step: Step): string {
       return t("连接模型服务");
     case "model":
       return t("选择模型");
-    case "mode":
-      return t("权限模式");
     case "done":
       return t("完成");
   }
@@ -69,13 +54,8 @@ export function OnboardingWizard({
   const status = useChat((s) => s.state?.status ?? null);
   const errorMessage = useChat((s) => s.state?.errorMessage ?? null);
   const initializing = useChat((s) => s.state?.initializing ?? false);
-  const sessionId = useChat((s) => s.state?.sessionId ?? null);
-  const modes = useChat((s) => s.state?.modes ?? null);
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
   const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
-  const hostSettings = useChat((s) => s.hostSettings);
-  const updateHostSetting = useChat((s) => s.updateHostSetting);
-
   const [step, setStep] = useState<Step>("connect");
   const index = STEPS.indexOf(step);
 
@@ -159,19 +139,6 @@ export function OnboardingWizard({
     if (advance) setStep("model");
   }
 
-  // --- Mode step ------------------------------------------------------------
-  const modeOptions = modes?.availableModes?.length ? modes.availableModes : MODE_FALLBACK;
-
-  function chooseMode(id: string) {
-    if (isDefaultMode(id) && id !== hostSettings.defaultMode) {
-      updateHostSetting({ defaultMode: id });
-    }
-    if (sessionId && id !== modes?.currentModeId) {
-      useChat.getState().beginPending("mode", id);
-      send({ type: "setMode", modeId: id });
-    }
-  }
-
   // --- Model step -----------------------------------------------------------
   const [modelQuery, setModelQuery] = useState("");
   const visibleModels = useMemo(() => {
@@ -213,9 +180,6 @@ export function OnboardingWizard({
         saveCredentials();
         break;
       case "model":
-        setStep("mode");
-        break;
-      case "mode":
         setStep("done");
         break;
       case "done":
@@ -469,29 +433,6 @@ export function OnboardingWizard({
             </div>
           )}
 
-          {step === "mode" && (
-            <div className="space-y-2">
-              <p className="text-ui-label leading-relaxed text-muted-foreground">
-                {t("新会话默认用这个权限模式；点选后当前会话也会立即切换。之后可以在「设置 → 权限与审批」里细化规则。")}
-              </p>
-              <OptionGroup ariaLabel={t("默认权限模式")} className="space-y-1">
-                {modeOptions.map((mode) => {
-                  const display = modeDisplay(mode);
-                  return (
-                    <OptionCard
-                      key={mode.id}
-                      checked={mode.id === hostSettings.defaultMode}
-                      label={display.label}
-                      description={display.desc}
-                      className="w-full"
-                      onClick={() => chooseMode(mode.id)}
-                    />
-                  );
-                })}
-              </OptionGroup>
-            </div>
-          )}
-
           {step === "done" && (
             <div className="space-y-2">
               <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-3 text-center">
@@ -503,7 +444,6 @@ export function OnboardingWizard({
               </div>
               <div className="space-y-1 rounded-lg border border-border bg-surface/60 px-2.5 py-2 text-ui-caption">
                 <SummaryRow label={t("连接")} value={connectionLabel} />
-                <SummaryRow label={t("默认模式")} value={modeDisplay({ id: hostSettings.defaultMode, name: "" }).label} />
               </div>
               <div className="rounded-lg border border-dashed border-border px-2.5 py-2">
                 <div className="text-ui-caption font-semibold text-foreground">{t("继续配置")}</div>
@@ -513,7 +453,6 @@ export function OnboardingWizard({
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <Button onClick={() => finish("appearance")}>{t("外观与交互")}</Button>
                   <Button onClick={() => finish("mcp")}>{t("MCP 服务器")}</Button>
-                  <Button onClick={() => finish("policy")}>{t("权限与审批")}</Button>
                   <Button onClick={() => finish("memory")}>{t("记忆")}</Button>
                 </div>
               </div>

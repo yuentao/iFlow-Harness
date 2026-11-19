@@ -4,7 +4,7 @@ import os from "node:os";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AcpClient } from "../src/acp/client.js";
-import { buildAcpCommand } from "../src/acp/cli-locator.js";
+import { buildAcpCommand, MCP_SERVER_ALLOWLIST_FLAG, MCP_SERVER_ALLOWLIST_SENTINEL } from "../src/acp/cli-locator.js";
 import type { SessionNotification } from "../src/acp/protocol.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -244,6 +244,26 @@ describe("AcpClient (integration with mock ACP agent)", () => {
     // No extra roots → no flag at all (single-root workspaces unchanged).
     const plain = buildAcpCommand(mockAgent);
     expect(plain.args).not.toContain("--include-directories");
+  });
+
+  it("buildAcpCommand removes every MCP server only when asked (main session)", () => {
+    const scoped = buildAcpCommand(mockAgent, [], { disableMcpServers: true });
+    const i = scoped.args.indexOf(MCP_SERVER_ALLOWLIST_FLAG);
+    expect(i).toBeGreaterThan(-1);
+    // 哨兵名与任何真实服务器名永不相交 → CLI 侧解析出的服务器集合为空，
+    // 既不 spawn 也不注册任何 MCP 工具。
+    expect(scoped.args[i + 1]).toBe(MCP_SERVER_ALLOWLIST_SENTINEL);
+
+    // 默认（子会话路径）逐字节保持原样：没有该参数。
+    const plain = buildAcpCommand(mockAgent);
+    expect(plain.args).not.toContain(MCP_SERVER_ALLOWLIST_FLAG);
+    expect(JSON.stringify(plain.args)).not.toContain(MCP_SERVER_ALLOWLIST_SENTINEL);
+    // 与额外目录同用时也不互相干扰。
+    const both = buildAcpCommand(mockAgent, [path.join(here, "root-b")], {
+      disableMcpServers: true,
+    });
+    expect(both.args).toContain("--include-directories");
+    expect(both.args).toContain(MCP_SERVER_ALLOWLIST_FLAG);
   });
 
   it("rejects fs/write_text_file paths that escape the session dir (A1 guardrail)", async () => {

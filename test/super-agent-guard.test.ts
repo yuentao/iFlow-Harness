@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  classifyChildFileWrite,
   classifyChildShellCommand,
   classifyChildToolCall,
   extractShellCommand,
@@ -143,6 +144,25 @@ describe("子会话 shell 护栏 · 拒绝", () => {
       command: 'powershell -c "$env:FOO=1; npm ci"',
       context: { nodeModulesIsLink: true },
     },
+    {
+      // 取值型选项：第一个非选项词其实是 --prefix 的取值，子命令在它后面。
+      name: "npm --prefix <主仓> ci（选项取值不能被当成子命令）",
+      command: 'npm --prefix "J:\\git\\proj" ci',
+    },
+    {
+      name: "pnpm --dir <主仓> install",
+      command: 'pnpm --dir "J:\\git\\proj" install',
+    },
+    {
+      name: "yarn --cwd <主仓> install",
+      command: 'yarn --cwd "J:\\git\\proj" install',
+    },
+    {
+      // 反向：布尔选项不能把后面的子命令一起吞掉。
+      name: "npm --silent ci（布尔选项不遮挡子命令）",
+      command: "npm --silent ci",
+      context: { nodeModulesIsLink: true },
+    },
   ];
 
   for (const testCase of cases) {
@@ -179,6 +199,14 @@ describe("子会话 shell 护栏 · 放行", () => {
     {
       name: "回归：--prefix 指向自己的 worktree",
       command: `npm install --prefix "${WORKTREE}"`,
+    },
+    {
+      name: "回归：--prefix 指向自己的 worktree 且安装是子命令",
+      command: `npm --prefix "${WORKTREE}" ci`,
+    },
+    {
+      name: "回归：兄弟仓库路径以主仓根为前缀（J:\\git\\project-x vs J:\\git\\proj）不被误杀",
+      command: 'npm install --prefix "J:\\git\\project-x"',
     },
     { name: "删除非依赖目录", command: "rm -rf dist" },
     { name: "git clean（不涉及 node_modules）", command: "git clean -fdx" },
@@ -384,6 +412,18 @@ describe("子会话 shell 护栏 · 处置档位（severity）", () => {
     expect(result.severity).toBe("session");
   });
 
+  it("主仓根的真实子路径仍命中 → session 档", () => {
+    const result = classifyChildShellCommand('npm install --prefix "J:\\git\\proj\\sub"', ctx());
+    expect(result.decision).toBe("deny");
+    expect(result.severity).toBe("session");
+  });
+
+  it("兄弟仓库路径（主仓根为前缀子串）删除 node_modules 只判 tool 档，不误杀子会话", () => {
+    const result = classifyChildShellCommand('rm -rf "J:\\git\\project-x\\node_modules"', ctx());
+    expect(result.decision).toBe("deny");
+    expect(result.severity).toBe("tool");
+  });
+
   it("删自己 worktree 里的 node_modules → tool 档（不因此杀掉子会话）", () => {
     const result = classifyChildShellCommand("rm -rf node_modules", ctx());
     expect(result.decision).toBe("deny");
@@ -405,6 +445,99 @@ describe("子会话 shell 护栏 · 处置档位（severity）", () => {
       ctx({ nodeModulesIsLink: true }),
     );
     expect(result.severity).toBe("session");
+  });
+});
+
+describe("子会话 shell 护栏 · repo 档（主仓工作区）的破坏性 git 命令", () => {
+  /** repo 档上下文：cwd 就是主仓根，宿主显式标记 repoWorkspace。 */
+  function repoCtx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
+    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, ...overrides };
+  }
+
+  const denyCases: Array<{ name: string; command: string }> = [
+    { name: "git reset --hard", command: "git reset --hard" },
+    { name: "git reset --hard 到指定提交", command: "git reset --hard HEAD~3" },
+    { name: "git -C <主仓> reset --hard（全局选项带取值）", command: `git -C "${REPO}" reset --hard` },
+    { name: "git clean -fd", command: "git clean -fd" },
+    { name: "git clean -fdx", command: "git clean -fdx" },
+    { name: "git clean --force -d", command: "git clean --force -d" },
+    { name: "git checkout -- .", command: "git checkout -- ." },
+    { name: "git checkout .", command: "git checkout ." },
+    { name: "git checkout -f", command: "git checkout -f" },
+    { name: "git restore .", command: "git restore ." },
+    { name: "cmd /c 包装的 git reset --hard", command: 'cmd /c "git reset --hard"' },
+    { name: "powershell -c 包装的 git clean -fd", command: 'powershell -c "git clean -fd"' },
+  ];
+
+  for (const testCase of denyCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, repoCtx());
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toBeTruthy();
+      // session 档：预检路径据此终止子会话（命令一跑就不可逆）。
+      expect(result.severity).toBe("session");
+      expect(result.reason).toContain("MAIN repository workspace");
+    });
+  }
+
+  const allowCases: Array<{ name: string; command: string }> = [
+    { name: "git status", command: "git status" },
+    { name: "git diff --stat", command: "git diff --stat" },
+    { name: "git log --oneline -3", command: "git log --oneline -3" },
+    { name: "git add 单个文件", command: "git add a.txt" },
+    { name: "git merge --no-ff <分支>（repo 档的授权操作）", command: "git merge --no-ff iflow/super/fix-login-abcd1234" },
+    { name: "git clean -nd（dry-run 不删文件）", command: "git clean -nd" },
+    { name: "git checkout -b <新分支>", command: "git checkout -b feature/x" },
+    { name: "git restore --staged（只取消暂存）", command: "git restore --staged a.txt" },
+    { name: "提交信息里出现 reset --hard（只是文本）", command: 'git commit -m "revert: undo git reset --hard"' },
+  ];
+
+  for (const testCase of allowCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, repoCtx());
+      expect(result.decision).toBe("allow");
+      expect(result.reason).toBeUndefined();
+    });
+  }
+
+  it("worktree 档行为不变：同样的破坏性命令仍放行（毁掉的是自己的临时目录）", () => {
+    for (const command of ["git reset --hard", "git clean -fd", "git checkout -- ."]) {
+      const result = classifyChildShellCommand(command, ctx());
+      expect(result.decision).toBe("allow");
+    }
+  });
+
+  it("预检帧（tool_call_update in_progress）在 repo 档被拦下", () => {
+    const verdict = classifyChildToolCall(
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "run_shell_command",
+        kind: "execute",
+        status: "in_progress",
+        title: "git clean -fd",
+        args: { command: "git clean -fd" },
+      },
+      repoCtx(),
+    );
+    expect(verdict?.decision).toBe("deny");
+    expect(verdict?.severity).toBe("session");
+  });
+
+  it("预检帧在 worktree 档不受影响", () => {
+    const verdict = classifyChildToolCall(
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "run_shell_command",
+        kind: "execute",
+        status: "in_progress",
+        title: "git reset --hard",
+        args: { command: "git reset --hard" },
+      },
+      ctx(),
+    );
+    expect(verdict?.decision).toBe("allow");
   });
 });
 
@@ -464,5 +597,179 @@ describe("子会话 shell 护栏 · 审批选项", () => {
 
   it("非 shell 工具没有 allow_always 时退到任意允许项", () => {
     expect(pickChildPermissionOption([options[0]!], false)?.optionId).toBe("once");
+  });
+});
+
+describe("子会话 shell 护栏 · repo 档合并子会话的任务书硬边界", () => {
+  function repoCtx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
+    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, ...overrides };
+  }
+
+  // 越界动作在「即将执行」的那一帧就终止整个合并子会话 —— 推送 / 改写历史
+  // / 删分支 / 切分支 / stash 都是不可逆或会脱离合并现场的。
+  const sessionDenyCases: Array<{ name: string; command: string }> = [
+    { name: "git push", command: "git push" },
+    { name: "git push origin main", command: "git push origin main" },
+    { name: "git rebase", command: "git rebase" },
+    { name: "git rebase -i HEAD~3", command: "git rebase -i HEAD~3" },
+    { name: "git branch -d 来源分支", command: "git branch -d iflow/super/fix-login-abcd1234" },
+    { name: "git branch -D 来源分支", command: "git branch -D iflow/super/fix-login-abcd1234" },
+    { name: "git checkout 切到别的分支", command: "git checkout main" },
+    { name: "git switch 切分支", command: "git switch main" },
+    { name: "git stash", command: "git stash" },
+    { name: "git stash pop", command: "git stash pop" },
+    { name: "cmd /c 包装的 git push", command: 'cmd /c "git push origin main"' },
+    { name: "git -C 全局选项后的 push", command: `git -C "${REPO}" push` },
+  ];
+
+  for (const testCase of sessionDenyCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, repoCtx());
+      expect(result.decision).toBe("deny");
+      expect(result.severity).toBe("session");
+      expect(result.reason).toContain("merge-only boundary");
+    });
+  }
+
+  // 会把用户其它改动卷进合并提交的命令按 tool 档处理：审批路径拒单次，
+  // 预检路径刻意不终止（否则把仓库留在 MERGE_HEAD 中间态）。
+  const toolDenyCases: Array<{ name: string; command: string }> = [
+    { name: "git add -A", command: "git add -A" },
+    { name: "git add .", command: "git add ." },
+    { name: "git add --all", command: "git add --all" },
+    { name: "git commit -a", command: "git commit -a" },
+    { name: "git commit -am", command: 'git commit -am "merge"' },
+  ];
+
+  for (const testCase of toolDenyCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, repoCtx());
+      expect(result.decision).toBe("deny");
+      expect(result.severity).toBe("tool");
+      expect(result.reason).toContain("stage the user's unrelated uncommitted changes");
+    });
+  }
+
+  // 正常合并的每一步都必须保持放行 —— 这是加固不能碰的红线。
+  const allowCases: Array<{ name: string; command: string }> = [
+    { name: "git status", command: "git status" },
+    { name: "git merge --no-ff <分支>", command: "git merge --no-ff iflow/super/fix-login-abcd1234" },
+    { name: "git merge --abort（安全阀）", command: "git merge --abort" },
+    { name: "git log --oneline -3", command: "git log --oneline -3" },
+    { name: "git diff", command: "git diff" },
+    { name: "git add 单个冲突文件", command: "git add src/auth.ts" },
+    { name: "git commit（无 -a）", command: 'git commit -m "merge branch"' },
+    { name: "git branch（只读列举）", command: "git branch" },
+    { name: "git checkout -b（建分支而非切分支）", command: "git checkout -b feature/x" },
+    { name: "git restore --staged", command: "git restore --staged a.txt" },
+  ];
+
+  for (const testCase of allowCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, repoCtx());
+      expect(result.decision).toBe("allow");
+    });
+  }
+
+  it("worktree 档完全不受合并边界约束（那些子会话允许 push / 建 PR）", () => {
+    for (const command of [
+      "git push",
+      "git rebase",
+      "git branch -D feature/x",
+      "git checkout main",
+      "git add -A",
+    ]) {
+      expect(classifyChildShellCommand(command, ctx()).decision).toBe("allow");
+    }
+  });
+
+  it("预检帧上的 push 同样在 repo 档被拦下", () => {
+    const verdict = classifyChildToolCall(
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "run_shell_command",
+        kind: "execute",
+        status: "in_progress",
+        title: "git push origin main",
+        args: { command: "git push origin main" },
+      },
+      repoCtx(),
+    );
+    expect(verdict?.decision).toBe("deny");
+    expect(verdict?.severity).toBe("session");
+  });
+});
+
+describe("子会话写工具护栏 · repo 档受保护路径预检", () => {
+  function repoCtx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
+    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, ...overrides };
+  }
+
+  function writeFrame(path: string, toolName = "write_file") {
+    return {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      toolName,
+      kind: toolName === "read_file" ? "read" : "edit",
+      status: "in_progress",
+      args: { file_path: path, content: "// changed" },
+    };
+  }
+
+  const protectedCases: Array<{ name: string; path: string; tool?: string }> = [
+    { name: "改写 .git/config", path: `${REPO}\\.git\\config` },
+    { name: "改写 .git/hooks/pre-push", path: `${REPO}/.git/hooks/pre-push` },
+    { name: "改写 .git/MERGE_HEAD", path: `${REPO}\\.git\\MERGE_HEAD` },
+    { name: "改写宿主子会话元数据", path: `${REPO}\\.iflow\\super\\worktrees\\x\\child.txt` },
+    { name: "相对路径指向 .git", path: ".git/config" },
+    { name: "replace 工具改写 .git", path: `${REPO}\\.git\\config`, tool: "replace" },
+    { name: "edit_block 工具改写宿主元数据", path: `${REPO}\\.iflow\\super\\archive.json`, tool: "edit_block" },
+  ];
+
+  for (const testCase of protectedCases) {
+    it(testCase.name, () => {
+      const verdict = classifyChildFileWrite(
+        writeFrame(testCase.path, testCase.tool),
+        repoCtx(),
+      );
+      expect(verdict?.decision).toBe("deny");
+      expect(verdict?.severity).toBe("session");
+      expect(verdict?.reason).toContain("protected repository metadata");
+    });
+  }
+
+  const allowedCases: Array<{ name: string; path: string }> = [
+    { name: "普通冲突源文件", path: `${REPO}\\src\\auth.ts` },
+    { name: ".gitignore 不是 .git 目录内文件", path: `${REPO}\\.gitignore` },
+    { name: ".github 工作流不是 .git 目录内文件", path: `${REPO}\\.github\\workflows\\ci.yml` },
+    { name: "兄弟仓库的 .git 不在主仓内", path: "J:\\git\\proj2\\.git\\config" },
+  ];
+
+  for (const testCase of allowedCases) {
+    it(testCase.name, () => {
+      expect(classifyChildFileWrite(writeFrame(testCase.path), repoCtx())).toBeNull();
+    });
+  }
+
+  it("非 repo 档不受此检查约束", () => {
+    expect(
+      classifyChildFileWrite(writeFrame(`${REPO}\\.git\\config`), ctx()),
+    ).toBeNull();
+  });
+
+  it("非写工具 / 非即将执行帧 / 取不到路径都不猜（放行）", () => {
+    expect(
+      classifyChildFileWrite(writeFrame(`${REPO}\\.git\\config`, "read_file"), repoCtx()),
+    ).toBeNull();
+    expect(
+      classifyChildFileWrite(
+        { ...writeFrame(`${REPO}\\.git\\config`), status: "completed" },
+        repoCtx(),
+      ),
+    ).toBeNull();
+    expect(
+      classifyChildFileWrite({ ...writeFrame(`${REPO}\\.git\\config`), args: {} }, repoCtx()),
+    ).toBeNull();
   });
 });

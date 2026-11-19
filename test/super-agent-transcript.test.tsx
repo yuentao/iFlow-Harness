@@ -430,6 +430,47 @@ describe("Super Agent 看板排序与折叠", () => {
     expect(document.body.textContent).toContain("已合并的任务");
   });
 
+  const nothingToMerge = (id: string, title: string, createdAt: number): SuperSessionUi =>
+    session({
+      id,
+      title,
+      status: "completed",
+      createdAt,
+      integration: { mode: "merge", state: "not_needed", at: createdAt + 10 },
+    });
+
+  it("没有产生任何提交的子会话折叠行说「无需合并」，绝不谎报成已合并", () => {
+    renderMany([
+      session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 2000 }),
+      nothingToMerge("super-empty", "没有改动的任务", 1000),
+    ]);
+    clickLabel("子会话看板");
+
+    const text = document.body.textContent ?? "";
+    // 元提交（not_needed）不是合并：标题与 chip 都必须如实。
+    expect(text).toContain("已完成、无需合并的 1 个子会话");
+    expect(text).toContain("无需合并");
+    expect(text).not.toContain("已完成并合并");
+    expect(text).not.toContain("已自动合并");
+  });
+
+  it("折叠分组混合时只给总数，两种结果分 chip 显示（只有 merged 才算已合并）", () => {
+    renderMany([
+      session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 3000 }),
+      merged("super-merged", "已合并的任务", 1000),
+      nothingToMerge("super-empty", "没有改动的任务", 2000),
+    ]);
+    clickLabel("子会话看板");
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("已完成的 2 个子会话");
+    expect(text).not.toContain("已完成并合并的 2 个子会话");
+    // 两个 chip 同时在场：一条真合并、一条无需合并。
+    const chips = [...document.body.querySelectorAll(".chip-fade")].map((el) => el.textContent);
+    expect(chips).toContain("已自动合并");
+    expect(chips).toContain("无需合并");
+  });
+
   it("一次只展开一行详情", () => {
     renderMany([
       session({ id: "super-a", title: "任务甲", status: "running", createdAt: 1000 }),
@@ -585,33 +626,78 @@ describe("内置 super-agent 工具调用卡片", () => {
   });
 
   it.each([
-    ["非法 JSON", '{"tasks":[oops]}', "这段任务信息没能完整读取"],
-    ["未收全的半截载荷", '{"tasks":[{"title":"半截任务","task":"还没写完"', "这段任务信息没能完整读取"],
-    ["参数还没到达", null, "正在编写任务书…"],
-  ])("tasks 解析失败或未完成时诚实降级：%s", (_name, input, expected) => {
+    ["非法 JSON", '{"tasks":[oops]}'],
+    ["未收全的半截载荷", '{"tasks":[{"title":"半截任务","task":"还没写完"'],
+  ])("tasks 解析失败时不再摊开原始 JSON，改为具体错误 + 未派发：%s", (_name, input) => {
     renderBlock(toolBlock({ input, status: "in_progress", output: "" }));
     const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
     expect(card).toBeTruthy();
     expect(card!.classList.contains("super-directive-card")).toBe(true);
-    expect(card!.textContent).toContain(expected);
-    expect(card!.textContent).toContain("执行中");
+    // 卡面只回答「哪儿错了、没派发」：具体原因进横幅。
+    expect(card!.textContent).toContain("委派指令格式错误：");
+    expect(card!.textContent).toContain("载荷不是合法 JSON");
+    expect(card!.textContent).toContain("未派发");
+    // 工具帧还在 executing，但载荷坏了不能读成「执行中」。
+    expect(card!.textContent).not.toContain("执行中");
+    expect(card!.querySelector('[data-testid="super-tool-call-invalid"]')).toBeTruthy();
     expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(0);
     expect(card!.textContent).not.toContain("工具操作");
     expect(card!.textContent).not.toContain("执行参数");
     expect(container.querySelector(".tool-card")).toBeNull();
-    // 失败态不折叠原文：那是卡上唯一有价值的内容，默认就摊开。
-    const raw = card!.querySelector('[data-testid="super-tool-call-raw"]');
-    if (input) {
-      expect(raw).toBeTruthy();
-      expect(raw!.textContent).toContain(String(input));
-      expect(
-        [...card!.querySelectorAll("button")].some((button) =>
-          button.textContent?.includes("查看原始参数"),
-        ),
-      ).toBe(false);
-    } else {
-      expect(raw).toBeNull();
-    }
+    // 原始 JSON 正文不再渲染（连字段名都不该出现）——只留「复制原始参数」入口。
+    expect(card!.querySelector('[data-testid="super-tool-call-raw"]')).toBeNull();
+    expect(card!.querySelector("pre")).toBeNull();
+    expect(card!.textContent).not.toContain('"tasks"');
+    expect(card!.querySelector('button[aria-label="复制原始参数"]')).toBeTruthy();
+  });
+
+  it("参数还没到达时仍是 pending 占位，不误报格式错误", () => {
+    renderBlock(toolBlock({ input: null, status: "in_progress", output: "" }));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("正在编写任务书…");
+    expect(card!.textContent).toContain("执行中");
+    expect(card!.textContent).not.toContain("委派指令格式错误");
+    expect(card!.textContent).not.toContain("未派发");
+    expect(card!.querySelector('[data-testid="super-tool-call-raw"]')).toBeNull();
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(0);
+  });
+
+  it("宿主写回的 superTasksError 直接渲染成字段级原因（不回解有损 input）", () => {
+    renderBlock(
+      toolBlock({
+        // input 已被展示串截断（回解必然失败），宿主诊断才是真源。
+        input: '{"tasks":[{"title":"半截',
+        superTasksError: "载荷格式错误：tasks[0].task 必须是字符串",
+        status: "completed",
+      }),
+    );
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("委派指令格式错误：tasks[0].task 必须是字符串");
+    expect(card!.textContent).toContain("未派发");
+    // 工具帧 completed 也不能挂绿色「已完成」——载荷坏了就是没派出去。
+    expect(card!.textContent).not.toContain("已完成");
+    expect(card!.querySelector('[data-testid="super-tool-call-raw"]')).toBeNull();
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(0);
+  });
+
+  it("混合载荷：合法任务照常渲染，被丢弃条目给 warning 而不是绿色完成", () => {
+    renderBlock(
+      toolBlock({
+        status: "completed",
+        superTasks: [{ title: "保留的任务", task: "做点事", attachmentCount: 0 }],
+        superTasksError: "已忽略 1 个格式错误的任务条目（tasks[0].task 必须是字符串）",
+      }),
+    );
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("保留的任务");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
+    expect(card!.textContent).toContain("委派指令格式错误：已忽略 1 个格式错误的任务条目");
+    expect(card!.textContent).toContain("部分未派发");
+    expect(card!.textContent).not.toContain("已完成");
+    expect(card!.querySelector('[data-testid="super-tool-call-partial"]')).toBeTruthy();
   });
 
   it("宿主解析出的 superTasks 直接渲染成任务列表（input 有损也不怕）", () => {
@@ -636,7 +722,7 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.textContent).toContain("第二行说明");
     expect(card!.textContent).toContain("附件 2");
     expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
-    expect(card!.textContent).not.toContain("这段任务信息没能完整读取");
+    expect(card!.textContent).not.toContain("委派指令格式错误");
     expect(card!.querySelector('[data-testid="super-tool-call-raw"]')).toBeNull();
   });
 
@@ -650,7 +736,7 @@ describe("内置 super-agent 工具调用卡片", () => {
     );
     const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
     expect(card).toBeTruthy();
-    expect(card!.textContent).not.toContain("这段任务信息没能完整读取");
+    expect(card!.textContent).not.toContain("委派指令格式错误");
     expect(card!.textContent).not.toContain("正在编写任务书…");
     expect(card!.textContent).toContain("任务：只读审查 AGENTS.md 与 src/panel/panel.ts");
     expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
@@ -673,7 +759,7 @@ describe("内置 super-agent 工具调用卡片", () => {
     const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
     expect(card).toBeTruthy();
     expect(card!.textContent).toContain("附件 1");
-    expect(card!.textContent).not.toContain("这段任务信息没能完整读取");
+    expect(card!.textContent).not.toContain("委派指令格式错误");
     expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
   });
 
@@ -708,7 +794,10 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.textContent).toContain("super-a1");
     expect(card!.textContent).toContain("保留分支");
     expect(card!.textContent).toContain("2 个回答");
-    expect(card!.textContent).toContain("已完成");
+    // 工具帧 completed 只表示内核回了 ack，不代表动作真的生效。宿主还没
+    // 回填 superActionResult 时显示中性的「已执行」，不再挂绿色「已完成」；
+    // 真实成功/失败由回填后的结果 chip 与摘要呈现。
+    expect(card!.textContent).toContain("已执行");
     expect(card!.textContent).not.toContain("执行参数");
     expect(card!.querySelectorAll("li")).toHaveLength(4);
     // 委派卡没有接管这条工具帧；管理动作也不是「委派产生子会话」，不挂飞入起点。
@@ -742,19 +831,25 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(container.querySelector(".tool-card")).toBeNull();
   });
 
-  it("空 actions / 坏 JSON 诚实降级，不假装有动作", () => {
+  it("空 actions / 坏 JSON 诚实降级，只给原因不摊开原始 JSON", () => {
     renderBlock(toolBlock({ toolName: "super-agent-actions", input: '{"actions":[]}' }));
     let card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
     expect(card).toBeTruthy();
     expect(card!.getAttribute("role")).toBe("status");
     expect(card!.querySelector('[data-testid="super-actions-tool-call-invalid"]')).toBeTruthy();
-    expect(card!.querySelector('[data-testid="super-actions-tool-call-raw"]')!.textContent).toContain('{"actions":[]}');
+    expect(card!.textContent).toContain("委派指令格式错误：里面没有操作列表");
+    expect(card!.querySelector('[data-testid="super-actions-tool-call-raw"]')).toBeNull();
+    expect(card!.querySelector("pre")).toBeNull();
+    expect(card!.textContent).not.toContain('"actions"');
     expect(card!.textContent).not.toContain("个动作");
     expect(card!.querySelectorAll("li")).toHaveLength(0);
 
     renderBlock(toolBlock({ toolName: "super-agent-actions", input: '{"actions":[oops}' }));
     card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
     expect(card!.querySelector('[data-testid="super-actions-tool-call-invalid"]')).toBeTruthy();
+    expect(card!.textContent).toContain("委派指令格式错误：内容格式不对，读不出来");
+    expect(card!.querySelector('[data-testid="super-actions-tool-call-raw"]')).toBeNull();
+    expect(card!.querySelector("pre")).toBeNull();
     expect(card!.textContent).not.toContain("个动作");
 
     renderBlock(toolBlock({ toolName: "super-agent-actions", input: null }));

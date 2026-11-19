@@ -28,6 +28,8 @@ import {
   X,
 } from "lucide-react";
 import type { Block } from "../../../shared/messages";
+import { findQqTaskForSuperSession } from "../../../shared/qq-task";
+import { maskQqOpenId } from "../../../shared/qq-access";
 import type {
   SuperIntegrationState,
   SuperIsolation,
@@ -114,7 +116,7 @@ const STATUS_VISUAL: Record<SuperStatus, { tone: StatusTone; icon: ReactNode }> 
   awaiting_input: { tone: "warning", icon: <CircleHelp className="size-3 shrink-0" aria-hidden="true" /> },
   completed: { tone: "success", icon: <Check className="size-3 shrink-0" aria-hidden="true" /> },
   failed: { tone: "danger", icon: <X className="size-3 shrink-0" aria-hidden="true" /> },
-  cancelled: { tone: "muted", icon: <Square className="size-3 shrink-0" aria-hidden="true" /> },
+  cancelled: { tone: "danger", icon: <Square className="size-3 shrink-0" aria-hidden="true" /> },
 };
 
 /** 排队中：等一个并发名额，还没开始 —— 灰色时钟，与「准备中」的沙漏区分。 */
@@ -142,6 +144,50 @@ function statusVisual(session: SuperSessionUi): {
   const visual =
     session.queued && session.status === "preparing" ? QUEUED_VISUAL : STATUS_VISUAL[session.status];
   return { tone: visual.tone, label: statusLabel(session), icon: visual.icon };
+}
+
+/**
+ * 「已中断」标题旁的来源小字：精确区分用户 / 智能体 / 系统三类中断。
+ * 仅当状态确为已中断且宿主带上了来源时显示 —— 历史归档无来源时宿主按
+ * system 兜底，所以老记录也会如实标注为「由系统中断」，不会留白。
+ */
+function interruptedByLabel(session: SuperSessionUi): string | null {
+  if (session.status !== "cancelled" || !session.interruptedBy) return null;
+  switch (session.interruptedBy) {
+    case "user":
+      return t("由用户中断");
+    case "agent":
+      return t("由智能体中断");
+    case "system":
+      return t("由系统中断");
+  }
+}
+
+/**
+ * QQ 远程任务的元信息 tag，挂在对应子会话 title 后面。
+ *
+ * 数据来自 store 的 `qqTasks` 投影，靠 `findQqTaskForSuperSession` 关联到当前
+ * 子会话。只有「远程发起的子会话」才渲染：关联不到（普通本地子会话、或投影
+ * 还没到）就返回 null，绝不留空壳。渠道 = 私聊 / 群聊，发起人 = 脱敏 openid。
+ */
+function QqTaskTags({ session }: { session: SuperSessionUi }) {
+  const tasks = useChat((s) => s.state?.qqTasks);
+  const qqTask = tasks ? findQqTaskForSuperSession(tasks, session) : undefined;
+  if (!qqTask) return null;
+  return (
+    <>
+      {/* Every other chip in the row/header yields at ≤380px; these two were
+          the only shrink-0 chip pair left, squeezing the title and status on
+          narrow screens. The full channel/sender still lives in the QQ task
+          panel, so hiding them here loses nothing. */}
+      <Chip tone="muted" className="shrink-0 @max-[380px]:hidden">
+        {t("渠道：{0}", qqTask.chatType === "private" ? t("私聊") : t("群聊"))}
+      </Chip>
+      <Chip tone="muted" className="shrink-0 @max-[380px]:hidden">
+        {t("发起人：{0}", maskQqOpenId(qqTask.senderId))}
+      </Chip>
+    </>
+  );
 }
 
 /** Integration result → text tone. Rendered as inline text rather than a
@@ -485,6 +531,19 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+/**
+ * 子会话的耗时文字，折叠行与实时弹窗共用这一处口径。
+ *
+ * startedAt 不存在（排队中 / 准备中还没启动）时，唯一可用的时刻是派发时刻
+ * createdAt。旧实现把它当成「已运行」的起点，于是等并发名额的时间被算进了
+ * 运行耗时。现在这段等待明确标成「排队 Ns」，和真正启动后的耗时区分开。
+ */
+function elapsedText(session: SuperSessionUi, now: number): string {
+  const at = session.endedAt ?? now;
+  if (session.startedAt !== undefined) return formatElapsed(at - session.startedAt);
+  return t("排队 {0}", formatElapsed(at - session.createdAt));
+}
+
 /** Compact token count: 1234 → 1.2K, 1234567 → 1.2M. */
 function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0";
@@ -736,6 +795,37 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
     },
     [retryAction, send],
   );
+  // 中断的 host 回包是异步的（杀进程 → dispose → 落终态），从点确认到状态
+  // 翻转之间有空窗；和 retry 同款纪律：点击即把 id 标成「中断中」，状态一变
+  // 就收尾，回包丢失用短超时解锁 —— 避免用户以为没生效又点一次（那正是
+  // 「中断没生效」BUG 的现场之一）。
+  const CANCEL_PENDING_TIMEOUT_MS = 15_000;
+  const cancelStarts = useRef<Map<string, SuperStatus>>(new Map());
+  const dropCancelStart = useCallback((id: string) => {
+    cancelStarts.current.delete(id);
+  }, []);
+  const cancelSettled = useCallback((session: SuperSessionUi | undefined) => {
+    if (!session) return true; // 行已被清理
+    const start = cancelStarts.current.get(session.id);
+    if (!start) return true;
+    // 中断会把状态从活跃翻成 cancelled（终态）；状态一变即视为 host 已受理。
+    return session.status !== start;
+  }, []);
+  const cancelAction = useSuperActionPending(
+    sessions,
+    CANCEL_PENDING_TIMEOUT_MS,
+    cancelSettled,
+    dropCancelStart,
+  );
+  const markCancelPending = useCallback(
+    (items: readonly SuperSessionUi[]) => {
+      for (const session of items) {
+        cancelStarts.current.set(session.id, session.status);
+        cancelAction.begin(session.id);
+      }
+    },
+    [cancelAction],
+  );
   // Interrupts kill a live process, so both the per-row and the board-wide
   // action go through a confirm dialog like merge / cleanup do. The board-wide
   // variant snapshots the active count at open time — recomputing it while the
@@ -770,6 +860,28 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   // Board order + folding: children that still need attention come first,
   // done-and-merged ones are folded away (pure logic, shared/super-agent.ts).
   const { visible, folded } = useMemo(() => groupSuperSessionsForBoard(list), [list]);
+  // Folded children hold TWO different integration outcomes: `merged` (their
+  // changes really landed) and `not_needed` (they produced no commit at all —
+  // see `isSuperSessionSettled`). The collapsed row used to lump both under
+  // 「已完成并合并」, which reads as “your changes landed” for a child that never
+  // made any. Split the counts so the header only claims a merge when one
+  // actually happened.
+  // `needsAction` (shared/super-agent.ts) is written in a dozen host paths but
+  // used to be read NOWHERE in the webview: a skipped child that must be merged
+  // by hand looked identical to one that was interrupted and needs nothing.
+  // Count it separately so the folded header cannot mislabel it as "no merge
+  // needed" if the folding rule is ever widened to include such children.
+  const foldedOutcomes = useMemo(() => {
+    let merged = 0;
+    let nothingToMerge = 0;
+    let needsAttention = 0;
+    for (const session of folded) {
+      if (session.integration?.state === "merged") merged += 1;
+      else if (session.integration?.state === "not_needed") nothingToMerge += 1;
+      if (session.integration?.needsAction === true) needsAttention += 1;
+    }
+    return { merged, nothingToMerge, needsAttention };
+  }, [folded]);
   // Non-terminal children (the interrupt-all gate + the elapsed timer). The
   // per-state COUNTS come from the shared summarizer — computing them here
   // with a status filter is how “2 个进行中” ended up double-counting the
@@ -921,14 +1033,15 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
     setOpenRow(null);
   }, [counts.awaiting]);
 
-  // Every child finished AND merged → nothing left to manage (failed,
-  // cancelled and unmerged rows keep the board open). Fold back to one line.
-  const allMerged = visible.length === 0 && folded.length > 0;
+  // Every child settled (merged, or nothing to merge) → nothing left to
+  // manage (failed, cancelled and unmerged rows keep the board open). Fold
+  // back to one line.
+  const allSettled = visible.length === 0 && folded.length > 0;
   useEffect(() => {
-    if (!allMerged) return;
+    if (!allSettled) return;
     setExpanded(false);
     setOpenRow(null);
-  }, [allMerged]);
+  }, [allSettled]);
 
   // Popup dismissal (the panel is a dropdown, not a persistent panel): Esc and
   // any click outside the control + panel fold it back to the header control.
@@ -1052,8 +1165,8 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             {counts.awaiting > 0 && (
               <Chip
                 tone="warning"
-                title={t("{0} 个待处理", counts.awaiting)}
-                ariaLabel={t("{0} 个待处理", counts.awaiting)}
+                title={t("{0} 个等你回答", counts.awaiting)}
+                ariaLabel={t("{0} 个等你回答", counts.awaiting)}
               >
                 <CircleHelp className="size-2.5" aria-hidden="true" />
                 <span className="tabular-nums">{counts.awaiting}</span>
@@ -1062,8 +1175,8 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             {counts.failed > 0 && (
               <Chip
                 tone="danger"
-                title={t("{0} 个未成功", counts.failed)}
-                ariaLabel={t("{0} 个未成功", counts.failed)}
+                title={t("{0} 个失败", counts.failed)}
+                ariaLabel={t("{0} 个失败", counts.failed)}
                 className="@max-[380px]:hidden"
               >
                 <X className="size-2.5" aria-hidden="true" />
@@ -1126,6 +1239,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   >
                     {session.title}
                   </span>
+                  <QqTaskTags session={session} />
                 </div>
                 <SuperPendingArea session={session} />
               </div>
@@ -1173,7 +1287,10 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
               <div className="ml-auto flex shrink-0 items-center gap-1">
                 {active.length > 0 && (
                   <Button
-                    variant="canvas"
+                    /* Batch interrupt kills every live child process. A neutral
+                       canvas button understated that — it must wear danger,
+                       same as the per-row interrupt icon and the red confirm. */
+                    variant="danger"
                     size="sm"
                     icon={<Square className={ICON_INLINE} />}
                     aria-label={t("全部中断")}
@@ -1198,6 +1315,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   cleanupPending={cleanupPending.has(session.id)}
                   mergePending={mergeAction.pending.has(session.id)}
                   retryPending={retryAction.pending.has(session.id)}
+                  cancelPending={cancelAction.pending.has(session.id)}
                   onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
                   onMerge={() => setConfirmMerge(session)}
                   onRetry={() => beginRetry(session)}
@@ -1205,9 +1323,12 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   onCancel={() => setConfirmCancel(session)}
                 />
               ))}
-              {/* Finished + already merged children collapse into ONE history row:
-                  their changes are in the working tree, so there is nothing left
-                  to act on — they only get in the way of the live ones. */}
+              {/* Settled children (already merged, or nothing to merge) collapse
+                  into ONE history row: nothing left to act on — they only get
+                  in the way of the live ones. The header splits the outcomes so
+                  「无需合并」 is never shown as 「已合并」, and surfaces a
+                  needsAction warning if the folding rule ever admits such a
+                  child (today isSuperSessionSettled keeps it visible). */}
               {folded.length > 0 && (
                 <div className="shrink-0">
                   <DisclosureButton
@@ -1218,8 +1339,20 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                     onClick={() => setShowFolded((v) => !v)}
                   >
                     {showFolded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
-                    <span className="shrink-0">{t("已完成并合并的 {0} 个子会话", folded.length)}</span>
-                    <Chip tone="success">{t("已自动合并")}</Chip>
+                    <span className="shrink-0">
+                      {foldedOutcomes.needsAttention > 0
+                        ? t("已完成、需人工合并的 {0} 个子会话", folded.length)
+                        : foldedOutcomes.nothingToMerge === 0
+                          ? t("已完成并合并的 {0} 个子会话", folded.length)
+                          : foldedOutcomes.merged === 0
+                            ? t("已完成、无需合并的 {0} 个子会话", folded.length)
+                            : t("已完成的 {0} 个子会话", folded.length)}
+                    </span>
+                    {foldedOutcomes.needsAttention > 0 && (
+                      <Chip tone="warning">{t("{0} 个需人工合并", foldedOutcomes.needsAttention)}</Chip>
+                    )}
+                    {foldedOutcomes.merged > 0 && <Chip tone="success">{t("已自动合并")}</Chip>}
+                    {foldedOutcomes.nothingToMerge > 0 && <Chip tone="muted">{t("无需合并")}</Chip>}
                   </DisclosureButton>
                   {showFolded && (
                     <div className="divide-y divide-border/40 border-t border-border/40">
@@ -1232,6 +1365,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                           cleanupPending={cleanupPending.has(session.id)}
                           mergePending={mergeAction.pending.has(session.id)}
                           retryPending={retryAction.pending.has(session.id)}
+                          cancelPending={cancelAction.pending.has(session.id)}
                           onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
                           onMerge={() => setConfirmMerge(session)}
                           onRetry={() => beginRetry(session)}
@@ -1307,12 +1441,22 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             "让智能体把分支 {0} 合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。",
             confirmMerge.isolation.branch ?? "",
           )}
-          confirmLabel={t("让智能体合并分支")}
-          onConfirm={() => {
-            beginMerge(confirmMerge.id, confirmMerge.integration?.at);
-            send({ type: "superAgent", action: "merge", sessionId: confirmMerge.id });
-            setConfirmMerge(null);
-          }}
+          /* Merging is a forward-progress action, not a destructive delete.
+             ConfirmDialog's default single confirm button is destructive red —
+             the same as interrupt / cleanup — which reads as “this will destroy
+             something”. Use the primary variant instead so the three actions
+             carry three different meanings. */
+          actions={[
+            {
+              label: t("让智能体合并分支"),
+              variant: "primary",
+              onClick: () => {
+                beginMerge(confirmMerge.id, confirmMerge.integration?.at);
+                send({ type: "superAgent", action: "merge", sessionId: confirmMerge.id });
+                setConfirmMerge(null);
+              },
+            },
+          ]}
           onCancel={() => setConfirmMerge(null)}
         />
       )}
@@ -1325,6 +1469,8 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           )}
           confirmLabel={t("中断")}
           onConfirm={() => {
+            // 乐观反馈：点确认即标记该行「中断中」，不等 host 异步回包。
+            markCancelPending([confirmCancel]);
             send({ type: "superAgent", action: "cancel", sessionId: confirmCancel.id });
             setConfirmCancel(null);
           }}
@@ -1340,6 +1486,8 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           )}
           confirmLabel={t("全部中断")}
           onConfirm={() => {
+            // 同样乐观标记全部活跃行，避免批量中断时整屏仍停在「运行中」。
+            markCancelPending(active);
             send({ type: "superAgent", action: "cancelAll" });
             setConfirmCancelAll(null);
           }}
@@ -1394,6 +1542,27 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   );
 }
 
+/** 卡片短描述的单行上限（含省略号）。看板行只有几十像素高，绝不铺开长文本。 */
+const CARD_DESCRIPTION_MAX = 96;
+
+/**
+ * 子会话卡片上的短任务描述。
+ *
+ * 用户要的是「委派时那种一句话短描述」，而不是实时 agent 输出的长文本。
+ * 委派记录里 `task` 是完整任务书（可能是文字墙），`title` 是它的一句话概括；
+ * 任务书的首句有效正文正是委派时写下的短描述。取它、单行截断，避免在卡片上
+ * 铺开 `progress`（助手输出尾快照）那种几十行日志。完整实时进度仍可从行内
+ * 「查看实时进度」按钮打开独立弹窗查看。
+ */
+export function shortSuperSessionDescription(session: SuperSessionUi): string {
+  const lines = (session.task ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const first = lines
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !/^(#{1,6}\s|【[^】]+】$)/.test(line));
+  const text = first || session.title || "";
+  return text.length > CARD_DESCRIPTION_MAX ? `${text.slice(0, CARD_DESCRIPTION_MAX - 1)}…` : text;
+}
+
 /**
  * One child session row.
  *
@@ -1415,6 +1584,7 @@ function SuperSessionRow({
   cleanupPending,
   mergePending,
   retryPending,
+  cancelPending,
   onToggle,
   onMerge,
   onRetry,
@@ -1432,6 +1602,8 @@ function SuperSessionRow({
   mergePending: boolean;
   /** True from the retry click until the host accepts it (status/attempt). */
   retryPending: boolean;
+  /** True from the cancel confirm click until the host flips the row terminal. */
+  cancelPending: boolean;
   onToggle: () => void;
   onMerge: () => void;
   onRetry: () => void;
@@ -1444,23 +1616,28 @@ function SuperSessionRow({
   // (a merge target is `completed` — without this it would still read
   // 「已完成」 while the merge child runs). Merge outranks retry only because
   // the two cannot coexist on one row in practice.
-  const busyChip = cleanupPending
-    ? t("清理中")
-    : mergePending
-      ? t("合并中")
-      : retryPending
-        ? t("重试中")
-        : null;
-  const chip = busyChip
+  // The TONE follows the action's meaning, not a single blue for all: interrupt
+  // and cleanup destroy work (danger — same as the row's interrupt IconButton
+  // and the red confirm dialog), while merge and retry push forward (primary).
+  // A blue 「中断中」 reads as “doing useful work” right as a process is killed.
+  const busy = cancelPending
+    ? { tone: "danger" as StatusTone, label: t("中断中") }
+    : cleanupPending
+      ? { tone: "danger" as StatusTone, label: t("清理中") }
+      : mergePending
+        ? { tone: "primary" as StatusTone, label: t("合并中") }
+        : retryPending
+          ? { tone: "primary" as StatusTone, label: t("重试中") }
+          : null;
+  const chip = busy
     ? {
-        tone: "primary" as StatusTone,
-        label: busyChip,
+        tone: busy.tone,
+        label: busy.label,
         icon: <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />,
       }
     : statusVisual(session);
-  const started = session.startedAt ?? session.createdAt;
-  const ended = session.endedAt ?? now;
-  const preview = session.progress ?? session.summary;
+  const interruptSourceLabel = interruptedByLabel(session);
+  const description = shortSuperSessionDescription(session);
   // A restored child ran in a PREVIOUS extension lifetime: its CLI process
   // is gone, so there is no live transcript to show and nothing to retry.
   // What survives is the record — the branch and its worktree — so the merge
@@ -1534,8 +1711,14 @@ function SuperSessionRow({
           <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
             {session.title}
           </span>
+          {interruptSourceLabel && (
+            <span className="shrink-0 text-ui-micro text-muted-foreground">
+              {interruptSourceLabel}
+            </span>
+          )}
+          <QqTaskTags session={session} />
           <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground">
-            {formatElapsed(ended - started)}
+            {elapsedText(session, now)}
           </span>
           <ChevronDown
             className={`${ICON_INLINE} shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
@@ -1546,11 +1729,18 @@ function SuperSessionRow({
             the detail: the process keeps writing files meanwhile. */}
         {isActive(session) && (
           <IconButton
-            icon={<Square className={ICON_INLINE} />}
-            label={t("中断这个子会话")}
+            icon={
+              cancelPending ? (
+                <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
+              ) : (
+                <Square className={ICON_INLINE} />
+              )
+            }
+            label={cancelPending ? t("中断中") : t("中断这个子会话")}
             size="sm"
             tone="danger"
             hoverSurface="row"
+            disabled={cancelPending}
             onClick={onCancel}
           />
         )}
@@ -1564,11 +1754,7 @@ function SuperSessionRow({
           {/* 阶段轨只在展开后出现一次：折叠行只报状态，展开区不再重复状态 chip。 */}
           <SuperTimeline session={session} labeled />
 
-          {preview && (
-            <div className="whitespace-pre-wrap break-words text-ui-caption text-muted-foreground">
-              {preview}
-            </div>
-          )}
+          <SuperTaskDescription task={session.task} short={description} />
 
           {session.error && (
             <div className="break-words rounded-sm border border-destructive/30 bg-destructive/10 px-2 py-1 text-ui-caption text-destructive">
@@ -1619,6 +1805,14 @@ function SuperSessionRow({
               <span className={`shrink-0 font-medium ${INTEGRATION_TEXT[session.integration.state]}`}>
                 {t(superIntegrationLabel(session.integration))}
               </span>
+              {/* needsAction is the single most consequential fact on this row:
+                  a skipped child with needsAction=true must be merged by hand,
+                  while one with false (e.g. interrupted) needs nothing. The
+                  shared `superIntegrationLabel` says 「未自动合并」 for both, so
+                  a separate warning chip is the only way to tell them apart. */}
+              {session.integration.needsAction === true && (
+                <Chip tone="warning" className="shrink-0">{t("需人工合并")}</Chip>
+              )}
               {session.integration.url ? (
                 <span className="min-w-0 truncate font-mono text-muted-foreground" title={session.integration.url}>
                   · {session.integration.url}
@@ -1687,8 +1881,8 @@ function SuperSessionRow({
                    user the request went out. Same `aria-disabled` discipline
                    as merge / cleanup (keeps title + aria-label readable). */
                 aria-disabled={retryPending || undefined}
-                aria-label={retryPending ? t("重试中") : t("重试这个子会话：沿用原来的工作目录，已有的改动会保留")}
-                title={retryPending ? t("重试中") : t("重试这个子会话：沿用原来的工作目录，已有的改动会保留")}
+                aria-label={retryPending ? t("重试中") : t("重试这个子会话：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）")}
+                title={retryPending ? t("重试中") : t("重试这个子会话：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）")}
                 className={retryPending ? "cursor-not-allowed opacity-40" : undefined}
                 onClick={() => {
                   if (retryPending) return;
@@ -1800,8 +1994,7 @@ function SuperSessionLive({
   // transcript, so live activity keeps the newest tool call in view.
   const liveStick = useRef(true);
   const chip = statusVisual(session);
-  const started = session.startedAt ?? session.createdAt;
-  const ended = session.endedAt ?? now;
+  const interruptSourceLabel = interruptedByLabel(session);
 
   useEffect(() => {
     const el = liveRef.current;
@@ -1832,8 +2025,13 @@ function SuperSessionLive({
             {chip.icon}
             {chip.label}
           </Chip>
+          {interruptSourceLabel && (
+            <span className="text-ui-micro text-muted-foreground">{interruptSourceLabel}</span>
+          )}
           <span className="text-ui-caption tabular-nums text-muted-foreground">
-            {t("已运行 {0}", formatElapsed(ended - started))}
+            {session.startedAt === undefined
+              ? elapsedText(session, now)
+              : t("已运行 {0}", elapsedText(session, now))}
           </span>
           {session.model && <Chip tone="muted">{session.model}</Chip>}
           <span className="ml-auto text-ui-micro text-muted-foreground">{t("实时输出")}</span>
@@ -1893,9 +2091,9 @@ function SuperSessionLive({
  * The child session's pending question.
  *
  * Approvals never reach this component: child sessions always run in
- * no-confirmation mode, and the host answers their `request_permission` /
- * plan-exit requests itself. `ask_user_question` is the only thing that truly
- * needs a human.
+ * no-confirmation mode, and the host answers their `request_permission`
+ * requests itself (a stale plan-exit is auto-approved too). `ask_user_question`
+ * is the only thing that truly needs a human.
  *
  * The questions themselves are rendered by `QuestionBody` — the SAME
  * component the main session's question card uses. The board used to carry
@@ -1920,7 +2118,17 @@ function SuperPendingArea({ session }: { session: SuperSessionUi }) {
 
   return (
     <div className="mx-2 mt-1.5 rounded-sm border border-warning/40 bg-warning/10 px-2 py-1.5">
-      <div className="text-ui-caption font-medium text-warning">{t("子会话需要你回答")}</div>
+      {/* Immediately after respond() the two buttons just grey out — with no
+          acknowledgement the card looks broken until the host round-trips.
+          Flip the header to an optimistic "submitted" state (and announce it)
+          so the click always has a visible, accessible receipt. */}
+      <div
+        className={`text-ui-caption font-medium ${sent ? "text-info" : "text-warning"}`}
+        role="status"
+        aria-live="polite"
+      >
+        {sent ? t("已提交，等待子会话继续") : t("子会话需要你回答")}
+      </div>
       <div className="mt-1 text-ui-micro text-muted-foreground">
         {t("子会话在等你的回答；不回答会在倒计时结束后按「未回答」继续。")}
       </div>
@@ -1960,6 +2168,44 @@ function SuperPendingArea({ session }: { session: SuperSessionUi }) {
           {t("不回答并继续")}
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * 子会话卡片上的完整任务描述（就地展开 / 收起）。
+ *
+ * 看板行的短描述由 `shortSuperSessionDescription` 单行截断（95 字），但完整
+ * 任务书在 `session.task` 里一字未丢。这里让用户在卡片普通流内就地展开全文——
+ * 不弹 modal、不开 portal，展开只把卡片撑高；折叠态仍是一行短描述，保持看板紧凑。
+ * 只有「完整正文比短描述更长」时才给出展开入口，短任务不显示多余的按钮。
+ */
+function SuperTaskDescription({ task, short }: { task: string; short: string }) {
+  const [open, setOpen] = useState(false);
+  const full = (task ?? "").trim();
+  // 既无短描述也无正文时不占位（对应旧的 `description && ...` 守卫）。
+  if (!short && !full) return null;
+  const expandable = full.length > short.length;
+  return (
+    <div className="min-w-0 text-ui-caption text-muted-foreground">
+      <span
+        className={`block break-words ${open ? "max-h-64 overflow-y-auto whitespace-pre-wrap" : "truncate"}`}
+        title={open ? undefined : short}
+      >
+        {open ? full : short}
+      </span>
+      {expandable && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="mt-0.5 px-0"
+          aria-expanded={open}
+          aria-label={open ? t("收起任务说明") : t("展开任务说明")}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? t("收起全文") : t("展开全文")}
+        </Button>
+      )}
     </div>
   );
 }
