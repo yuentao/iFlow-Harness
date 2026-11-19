@@ -2531,6 +2531,14 @@ interface ChatStore {
    */
   superTranscripts: Record<string, Block[]>;
   /**
+   * 新建会话时 host 检测到跨历史会话 Super Agent 残留，请求 webview 弹出
+   * 二次确认框。整条消息（含组装好的 title/message/按钮文案）原样存下，
+   * webview 只渲染不改写。null = 当前没有待确认请求。
+   */
+  superResidueConfirm: Extract<HostToWebview, { type: "superResidueConfirm" }> | null;
+  /** 回答残留清空确认框：清空展示态并只回传一次 respondSuperResidueConfirm。 */
+  respondSuperResidueConfirm: (confirmed: boolean) => void;
+  /**
    * QQ 远程任务设置快照（Wave3-C）。独立于 `state`：`snapshot` / `blockPatch`
    * 只换转录与会话元数据，绝不覆盖它。默认值由 `pickQqSettingsUi` 归一，
    * 因此首帧就能渲染完整表单（凭据只有「已配置」布尔）。
@@ -2631,6 +2639,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   qqLoginQr: null,
   qqManagedStatus: null,
   superTranscripts: {},
+  superResidueConfirm: null,
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
   modelMetadata: { state: "idle" },
@@ -2740,6 +2749,12 @@ export const useChat = create<ChatStore>((set, get) => ({
         const capped = evictBlockPayloads(next, EVICT_KEEP_BLOCKS);
         return { superTranscripts: { ...s.superTranscripts, [msg.sessionId]: capped } };
       });
+      return;
+    }
+    if (msg.type === "superResidueConfirm") {
+      // 宿主组装好的文案（含警示）原样存入，SuperResidueConfirmDialog 读取它
+      // 弹出阻断式确认框；answer 后由 respondSuperResidueConfirm 清空。
+      set({ superResidueConfirm: msg });
       return;
     }
     if (msg.type === "qqSettings") {
@@ -2876,6 +2891,15 @@ export const useChat = create<ChatStore>((set, get) => ({
     // commits silently drops unknown message kinds (e.g. a pre-P-1 webview
     // ignoring blockPatch) — the exact "blocks disappear" bug. Surface it.
     console.warn(`[iflow] unknown host message: ${(msg as { type?: string }).type}`);
+  },
+  respondSuperResidueConfirm: (confirmed) => {
+    const request = get().superResidueConfirm;
+    if (!request) return;
+    // Clear synchronously BEFORE sending: a second click / Esc-on-backdrop
+    // racing the re-render must not post a second answer. The host also
+    // de-dupes by requestId, but the webview never relies on that.
+    set({ superResidueConfirm: null });
+    get().send({ type: "respondSuperResidueConfirm", requestId: request.requestId, confirmed });
   },
   beginPending: (kind, target) => {
     if (pendingTimer) clearTimeout(pendingTimer);
