@@ -3583,10 +3583,14 @@ export function superReportLabel(state: SuperReportState): string {
  */
 export function buildSuperReportPrompt(
   entries: SuperReportEntry[],
-  options?: { pendingCount?: number },
+  options?: { pendingCount?: number; finalOverride?: boolean },
 ): string {
   if (entries.length === 0) return "";
   const pendingCount = Math.max(0, options?.pendingCount ?? 0);
+  // QQ 迟到补发把 pendingCount>0 的汇报轮也标成 final 时，提示词必须同步改成
+  // 「本次给最终汇报」，否则模型照 pendingNote 压制最终正文、标记与提示词矛盾。
+  // 仅该路径显式传 true；普通汇报轮（包括非 QQ 的 super-agent）逐字节不变。
+  const promptPendingCount = options?.finalOverride === true ? 0 : pendingCount;
   const lines = entries.map(({ session, report }) => {
     const human = report.humanAction ? `\n   needs user action: ${report.humanAction}` : "";
     const integration = session.integration
@@ -3606,8 +3610,8 @@ export function buildSuperReportPrompt(
   // 还有子会话在跑：这一轮不是收尾 —— 主会话要先把已经结束的结果消化掉，
   // 后续完成的孩子会由宿主继续汇报。
   const pendingNote =
-    pendingCount > 0
-      ? `${pendingCount} other child session(s) are still running; the host will keep reporting as they finish — process this batch first (dispatch review / follow-up work to child sessions as usual), do not wait for them, and do not give the user a final complete report yet.`
+    promptPendingCount > 0
+      ? `${promptPendingCount} other child session(s) are still running; the host will keep reporting as they finish — process this batch first (dispatch review / follow-up work to child sessions as usual), do not wait for them, and do not give the user a final complete report yet.`
       : null;
   // 全部是「被中断」时不能照常催它继续：那是用户主动停的（看板中断 / 面板
   // 关闭），自动把任务重跑一遍会像是没听话。

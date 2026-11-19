@@ -1009,6 +1009,15 @@ const QQ_MAIN_IDLE_POLL_MS = 300;
 const QQ_FINAL_RESCUE_MS = 120_000;
 const QQ_FINAL_HARD_RESCUE_MS = 600_000;
 const QQ_FINAL_RESCUE_POLL_MS = 10_000;
+/**
+ * 硬上限补发遇到「本会话汇报轮正在投递 / 排队」时最多让出的轮询拍数。
+ *
+ * 让真实最终汇报（finalReport 收尾投递）优先收尾：抢在它前面补发会把兜底
+ * 文案当结论写死，并让随后迟到的真实正文被丢弃（2026-11-19 用户实测）。
+ * 只让出有限拍数，超过仍未收尾就强制补发 —— 保留「真正卡死」时的兜底，
+ * 绝不永久推迟。
+ */
+const QQ_FINAL_RESCUE_MAX_DEFERS = 6;
 
 /**
  * 注入轮结束时判定 delegated 的宽限期（R3）：子会话登记可能与回合收尾差错一拍，
@@ -1201,6 +1210,19 @@ export class ChatPanel implements vscode.Disposable {
    * 不参与正常 final 回执；awaiter 清空时一并清理。
    */
   private readonly qqFinalRescueText = new Map<string, string>();
+  /**
+   * 每个归属主会话最近一次子会话汇报正文（report.summary 清洗后）作为补发兜底。
+   *
+   * 与 `qqFinalRescueText` 分离：后者会被非 final 的进度汇报轮正文覆盖，硬上限
+   * 补发时可能为空；这条只在汇报入队时写入，保证补发即便缓存正文为空也能回
+   * 真实汇报正文而不是一句占位文案（2026-11-19 补发抢跑 bug）。
+   */
+  private readonly qqReportFallbackText = new Map<string, string>();
+  /**
+   * 每个 awaiter 因「在途汇报轮」让出的补发拍数（taskId → 次数）。达到
+   * `QQ_FINAL_RESCUE_MAX_DEFERS` 后强制补发，避免真正卡死时永久等待。
+   */
+  private readonly qqFinalRescueDefers = new Map<string, number>();
   /** 迟到补发的轮询定时器（仅在有 awaiter 时存活）。 */
   private qqFinalRescueTimer: ReturnType<typeof setInterval> | null = null;
   /** 注入轮 delegated 判定的宽限期；测试可注入更小值。 */
@@ -2091,6 +2113,8 @@ export class ChatPanel implements vscode.Disposable {
     this.qqMainFinalAwaiters.clear();
     this.qqMainFinalAwaiterSince.clear();
     this.qqFinalRescueText.clear();
+    this.qqReportFallbackText.clear();
+    this.qqFinalRescueDefers.clear();
     this.qqTaskBySuperSession.clear();
     // Final flush: a turn interrupted by window close / extension reload has
     // no later persist point (completion never runs) — write the tail now so
@@ -9237,10 +9261,17 @@ export class ChatPanel implements vscode.Disposable {
     // 汇报归属会话：pendingCount 与 QQ awaiter 归属都用它，避免从 entries[0]
     // 推断时因异步归属回填而与 awaiter 漂移（R2）。
     const reportOwner = this.currentMainSessionId();
+    // 迟到补发判定必须早于提示词生成：pendingCount>0 却被放宽为 final 的回合，
+    // 提示词也要同步改成「本次给最终汇报」，否则模型照常压制最终正文，标记与
+    // 提示词自相矛盾（2026-11-19 补发抢跑 bug）。
+    const rescueDue = this.qqFinalRescueDue(reportOwner);
     let text = "";
     let pendingCount: number | undefined;
     if (manager && typeof manager.reportPromptWithPending === "function") {
-      const prompt = manager.reportPromptWithPending(batch, { pendingOwner: reportOwner });
+      const prompt = manager.reportPromptWithPending(batch, {
+        pendingOwner: reportOwner,
+        finalOverride: rescueDue,
+      });
       text = prompt.text;
       pendingCount = prompt.pendingCount;
     } else {
@@ -9262,7 +9293,6 @@ export class ChatPanel implements vscode.Disposable {
     // R2 迟到补发：若该会话的 QQ awaiter 已等过阈值，而 pendingCount 因别的
     // 非终态子会话（复核子会话等）长期 >0，就别让 final 永远=false —— 以本轮
     // 文本作为最终回执（空文本再由 deliverQqMainFinalAnswer 兜底）。
-    const rescueDue = this.qqFinalRescueDue(reportOwner);
     if (rescueDue && pendingCount !== 0) {
       this.log.warn(`QQ 最终回执迟到补发：汇报轮 pendingCount=${pendingCount}，仍按 final 投递`);
     }
@@ -9381,6 +9411,9 @@ export class ChatPanel implements vscode.Disposable {
         const cleanFallback = sanitizeQqReportFallback(item.fallbackText);
         if (cleanFallback && owner && this.qqFinalRescueOwnerPending(owner)) {
           this.qqFinalRescueText.set(owner, cleanFallback);
+          // 独立缓存：不会被下面非 final 进度轮的 reportTurnText 覆盖，硬上限
+          // 补发时即使缓存正文为空也能回真实汇报正文（2026-11-19 补发抢跑 bug）。
+          this.qqReportFallbackText.set(owner, cleanFallback);
         }
         const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
           delegateOnBusy: false,
@@ -10865,6 +10898,8 @@ export class ChatPanel implements vscode.Disposable {
               this.qqMainFinalAwaiterSince.set(taskId, Date.now());
               // 新一轮开始：清掉上一轮遗留的补发缓存，避免迟到补发误用旧结论。
               this.qqFinalRescueText.delete(sessionIdBefore);
+              this.qqReportFallbackText.delete(sessionIdBefore);
+              this.qqFinalRescueDefers.delete(taskId);
               this.ensureQqFinalRescueTimer();
             }
             superIdsBefore = new Set(
@@ -10954,6 +10989,7 @@ export class ChatPanel implements vscode.Disposable {
       if (!delegated) {
         this.qqMainFinalAwaiters.delete(taskId);
         this.qqMainFinalAwaiterSince.delete(taskId);
+        this.qqFinalRescueDefers.delete(taskId);
       }
       if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
       this.qqInjectAborts.delete(taskId);
@@ -11001,6 +11037,7 @@ export class ChatPanel implements vscode.Disposable {
     for (const taskId of taskIds) {
       this.qqMainFinalAwaiters.delete(taskId);
       this.qqMainFinalAwaiterSince.delete(taskId);
+      this.qqFinalRescueDefers.delete(taskId);
       try {
         await this.qq?.service.completeMainFinalAnswer({ taskId, text, stopReason });
       } catch (error) {
@@ -11010,6 +11047,7 @@ export class ChatPanel implements vscode.Disposable {
     // 该会话已无 awaiter：清掉补发缓存，避免下一条任务误用上一轮的旧结论。
     if (![...this.qqMainFinalAwaiters.values()].includes(sessionId)) {
       this.qqFinalRescueText.delete(sessionId);
+      this.qqReportFallbackText.delete(sessionId);
     }
     if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
   }
@@ -11053,6 +11091,11 @@ export class ChatPanel implements vscode.Disposable {
    *  - 硬上限：已超 qqFinalHardRescueMs，即便还有子会话卡在非终态也补发
    *    （复核子会话卡在等输入时不能让发起者永远等下去）。
    * 只补发到点的那一个 taskId（onlyTaskIds 过滤），不误伤同会话刚开始的其它 awaiter。
+   *
+   * 2026-11-19 补发抢跑修复：到点时若本会话的汇报轮正在投递（`superReportRunning`）
+   * 或还排在队列里，先让出有限拍数，让 finalReport 收尾投递真实最终正文；抢在它
+   * 前面补发会把兜底文案写死、并让随后迟到的真实正文被丢弃。让路有上限（见
+   * `QQ_FINAL_RESCUE_MAX_DEFERS`），真正卡死时仍强制补发，绝不永久推迟。
    */
   private rescueStaleQqFinalAwaiters(): void {
     if (this.disposed || this.qqMainFinalAwaiters.size === 0) return;
@@ -11068,6 +11111,21 @@ export class ChatPanel implements vscode.Disposable {
         age >= this.qqFinalHardRescueMs ||
         (age >= this.qqFinalRescueMs && activeChildren === 0);
       if (!due) continue;
+      // 汇报轮在途 / 排队时先让路：真实最终汇报马上就会由 finalReport 收尾投递。
+      const reportInFlight =
+        this.superReportRunning ||
+        this.pendingSuperReportPrompts.some((item) => item.mainSessionId === owner);
+      if (reportInFlight) {
+        const defers = (this.qqFinalRescueDefers.get(taskId) ?? 0) + 1;
+        if (defers <= QQ_FINAL_RESCUE_MAX_DEFERS) {
+          this.qqFinalRescueDefers.set(taskId, defers);
+          continue;
+        }
+        this.log.warn(
+          `QQ 主会话最终答复补发：task=${taskId} 已让出 ${defers - 1} 拍，汇报轮仍未收尾，强制补发`,
+        );
+      }
+      this.qqFinalRescueDefers.delete(taskId);
       this.log.warn(
         `QQ 主会话最终答复迟到补发：task=${taskId} waited=${age}ms activeChildren=${activeChildren}`,
       );
@@ -11076,6 +11134,7 @@ export class ChatPanel implements vscode.Disposable {
         this.qqFinalRescueText.get(owner) ?? "",
         "end_turn",
         new Set([taskId]),
+        this.qqReportFallbackText.get(owner),
       );
     }
     if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
@@ -11091,7 +11150,9 @@ export class ChatPanel implements vscode.Disposable {
    * 再接锚块之后的新 text 块。system 状态行由 reducer 的合并边界挡开，不会混入。
    *
    * `anchorLost` 供调用方区分「本轮确实没有正文」（text=""）与「转录被清空/重排，
-   * 按数量切片也不安全」（anchorLost=true，最终回执必须放弃，绝不猜上一轮内容）。
+   * 按 id 切片不安全」（anchorLost=true）。此时返回的 text 是按 `fallbackCount`
+   * （回合开始时的可见块数）切片的结果；配合汇报正文兜底（finalFallbackText）
+   * 仍能给出真实结论，绝不再静默放弃（2026-11-19 补发抢跑 bug）。
    */
   private extractQqTurnTextFromAnchor(
     anchorId: string | undefined,
@@ -11271,6 +11332,8 @@ export class ChatPanel implements vscode.Disposable {
     this.qqMainFinalAwaiters.clear();
     this.qqMainFinalAwaiterSince.clear();
     this.qqFinalRescueText.clear();
+    this.qqReportFallbackText.clear();
+    this.qqFinalRescueDefers.clear();
     this.qqTaskBySuperSession.clear();
     this.stopQqFinalRescueTimer();
     if (activeTaskId !== null) {
@@ -11292,6 +11355,7 @@ export class ChatPanel implements vscode.Disposable {
     const isActiveTurn = this.qqInjectedTaskId === taskId;
     const wasAwaitingFinal = this.qqMainFinalAwaiters.delete(taskId);
     if (wasAwaitingFinal) this.qqMainFinalAwaiterSince.delete(taskId);
+    this.qqFinalRescueDefers.delete(taskId);
     if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
     if (!controller && !isActiveTurn && !wasAwaitingFinal) return false;
     controller?.abort();
@@ -13867,10 +13931,12 @@ export class ChatPanel implements vscode.Disposable {
       // slice 会整段漏掉（2026-11-19 空摘要回归）。
       let finalReportAnchorId: string | undefined;
       let finalReportAnchorLen = 0;
+      let finalReportFallbackCount = 0;
       if (finalReport) {
         const visible = this.store.getState().blocks.filter(
           (block) => block.kind === "text" && !block.system,
         );
+        finalReportFallbackCount = visible.length;
         const anchor = visible[visible.length - 1];
         finalReportAnchorId = anchor?.id;
         finalReportAnchorLen = anchor?.kind === "text" ? anchor.text.length : 0;
@@ -13888,22 +13954,22 @@ export class ChatPanel implements vscode.Disposable {
       this.store.promptCompleted(result.stopReason, result.usage);
       // QQ 最终回执：pendingCount=0 的汇报汇总轮收尾后，把本轮 assistant 文本
       // 作为等待中的 QQ 任务的真正答复回传（fire-and-forget，不挡回合收尾）。
-      // 锚点失效（转录被清空/重排）时保守放弃，绝不把上一轮文本当成本轮结论。
+      // 锚点失效（转录被清空/重排）时按「回合开始时的块数」切片取本轮新增文本；
+      // 切片为空则由 finalFallbackText（子会话汇报正文）接管 —— 绝不静默放弃，
+      // 那会让 awaiter 一直挂到空缓存补发、最终只发一句占位文案。
       if (finalReport && result.stopReason !== "cancelled") {
-        const { text: answer, anchorLost } = this.extractQqTurnTextFromAnchor(
+        const { text: answer } = this.extractQqTurnTextFromAnchor(
           finalReportAnchorId,
           finalReportAnchorLen,
-          0,
+          finalReportFallbackCount,
         );
-        if (!anchorLost) {
-          void this.deliverQqMainFinalAnswer(
-            promptSessionId,
-            answer,
-            result.stopReason,
-            undefined,
-            finalFallbackText,
-          );
-        }
+        void this.deliverQqMainFinalAnswer(
+          promptSessionId,
+          answer,
+          result.stopReason,
+          undefined,
+          finalFallbackText,
+        );
       }
       // 回合收尾：复核动作围栏 —— 回合都结束了还停在未闭合围栏上，说明这个
       // 动作块永远不会被执行。旧实现对此完全静默（零日志、零 toast）。

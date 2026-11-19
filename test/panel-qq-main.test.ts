@@ -18,6 +18,8 @@ import type { QqTask } from "../shared/qq-task.js";
 import type { QqTaskUi } from "../shared/messages.js";
 import { beginUserPrompt } from "../shared/session-state.js";
 import { initialSessionState } from "../shared/messages.js";
+import { buildSuperReportPrompt } from "../shared/super-agent.js";
+import type { SuperReport, SuperSessionUi } from "../shared/super-agent.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -122,6 +124,18 @@ type PanelInternals = {
   qqMainFinalAwaiters: Map<string, string>;
   qqMainFinalAwaiterSince: Map<string, number>;
   qqFinalRescueText: Map<string, string>;
+  qqReportFallbackText: Map<string, string>;
+  qqFinalRescueMs: number;
+  qqFinalHardRescueMs: number;
+  superReportRunning: boolean;
+  superAgent: {
+    list: () => Array<{ id: string; mainSessionId?: string | null; status: string }>;
+    reportPromptWithPending?: (
+      entries: Array<{ session: SuperSessionUi; report: SuperReport }>,
+      options?: { pendingOwner?: string | null; finalOverride?: boolean },
+    ) => { text: string; pendingCount: number };
+  } | null;
+  queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
   qqDelegationGraceMs: number;
   rescueStaleQqFinalAwaiters: () => void;
   qq?: {
@@ -1132,5 +1146,118 @@ describe("汇总轮正文锚点回归（QQ 空摘要 bug）", () => {
     expect(sent).not.toContain("上一轮旧正文");
     expect(sent).not.toContain("超流体任务已完成，但未产生可转发的正文摘要。");
     expect(String(anchor["text"])).toBe("上一轮旧正文");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 回归：10 分钟硬上限补发抢跑（摘要变兜底 / 主会话最终汇报丢失）
+// ---------------------------------------------------------------------------
+
+describe("QQ 硬上限补发抢跑回归", () => {
+  let panel: ChatPanel;
+  let p: PanelInternals;
+  let storageDir: string;
+  let iflowHome: string;
+
+  const child = (overrides: Partial<SuperSessionUi> = {}): SuperSessionUi => ({
+    id: "super-done",
+    title: "修好登录跳转",
+    task: "修好 src/auth.ts",
+    status: "completed",
+    isolation: { kind: "git_worktree", path: "/tmp/wt", branch: "iflow/super/a", baseRef: "abc" },
+    createdAt: 1000,
+    updatedAt: 1000,
+    reports: [],
+    mainSessionId: "main-session",
+    ...overrides,
+  });
+  const REPORT: SuperReport = { state: "ready", summary: "登录跳转已修好", at: 2000 };
+
+  beforeEach(async () => {
+    iflowHome = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-rescue-home-"));
+    process.env.IFLOW_HOME = iflowHome;
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-rescue-storage-"));
+    setConfigOverrides({ checkpoints: false, autoTitle: false, autoMemoryCapture: false });
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as PanelInternals;
+    const state = p.store.getState();
+    state.sessionId = "main-session";
+    state.status = "idle";
+    state.initializing = false;
+    state.replaying = false;
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    delete process.env.IFLOW_HOME;
+    fs.rmSync(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
+
+  it("补发缓存正文为空时用汇报兜底正文（第 5 参），不再只发占位文案", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete as never } };
+    p.qqMainFinalAwaiters.set(TASK.taskId, "main-session");
+    p.qqMainFinalAwaiterSince.set(TASK.taskId, Date.now() - 1_000_000);
+    p.qqFinalHardRescueMs = 1;
+    // qqFinalRescueText 故意不设 —— 正是抢跑时的空缓存现场。
+    p.qqReportFallbackText.set("main-session", "子会话真实汇报：安装段已换成内网镜像并验证通过");
+
+    p.rescueStaleQqFinalAwaiters();
+    await tick();
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledWith({
+      taskId: TASK.taskId,
+      text: "子会话真实汇报：安装段已换成内网镜像并验证通过",
+      stopReason: "end_turn",
+    });
+    expect(p.qqMainFinalAwaiters.has(TASK.taskId)).toBe(false);
+  });
+
+  it("finalOverride 仅覆盖轮生效：普通汇报轮仍压制最终正文", () => {
+    const entries = [{ session: child(), report: REPORT }];
+
+    // 非 QQ 普通轮（未传 finalOverride）：pendingCount>0 照旧压制最终汇报。
+    const normal = buildSuperReportPrompt(entries, { pendingCount: 1 });
+    expect(normal).toContain("1 other child session(s) are still running");
+    expect(normal).toContain("do not give the user a final complete report yet");
+    expect(normal).not.toContain("give the user one complete report");
+
+    // QQ 迟到补发覆盖：同一 pendingCount 下解除压制，产出最终汇报指令。
+    const overridden = buildSuperReportPrompt(entries, { pendingCount: 1, finalOverride: true });
+    expect(overridden).not.toContain("do not give the user a final complete report yet");
+    expect(overridden).toContain("give the user one complete report");
+  });
+
+  it("rescueDue+pendingCount>0 时面板透传 finalOverride=true 并把该轮标为 final", () => {
+    const done = child();
+    let captured: { finalOverride?: boolean } | undefined;
+    p.superAgent = {
+      list: () => [done],
+      reportPromptWithPending: (entries, options) => {
+        captured = options;
+        return {
+          text: buildSuperReportPrompt(entries, {
+            pendingCount: 1,
+            finalOverride: options?.finalOverride,
+          }),
+          pendingCount: 1,
+        };
+      },
+    };
+    p.qqMainFinalAwaiters.set(TASK.taskId, "main-session");
+    p.qqMainFinalAwaiterSince.set(TASK.taskId, Date.now() - 100_000);
+    p.qqFinalRescueMs = 1;
+
+    p.queueSuperReport([{ session: done, report: REPORT }]);
+
+    expect(captured?.finalOverride).toBe(true);
+    const item = p.pendingSuperReportPrompts.find((i) => i.mainSessionId === "main-session");
+    expect(item?.final).toBe(true);
+    expect(item?.text).toContain("give the user one complete report");
+    expect(item?.text).not.toContain("do not give the user a final complete report yet");
   });
 });
