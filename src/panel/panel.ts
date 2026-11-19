@@ -9882,6 +9882,18 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Route a Super Agent action from the board. */
   private async handleSuperAgentAction(msg: Extract<WebviewToHost, { type: "superAgent" }>): Promise<void> {
+    // 接管期间本机侧不执行任何看板动作。webview 已把看板与待答条整体 inert，
+    // 但那是 UI 层的门 —— portal 出来的浮层、旧快照里残留的按钮、以及任何
+    // 绕开 UI 的通道都能把消息发到这里。远端正在推进的流程不能被本机的
+    // 中断 / 合并 / 清理打断，所以宿主侧必须有这道硬门；拒绝时如实提示原因
+    // （不是静默丢弃，否则用户会以为点了没反应）。
+    if (this.qqTakeoverActive) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("远程接管中，本机的超流体操作已冻结"),
+      );
+      return;
+    }
     const manager = this.getSuperAgent();
     if (!manager) return;
     switch (msg.action) {

@@ -174,6 +174,32 @@ describe("ChatPanel 远程接续开关", () => {
     expect(p.postToWebview).toHaveBeenCalledWith({ type: "qqTakeoverState", active: false });
   });
 
+  it("接管期间本机看板动作被宿主拒绝，关闭接管后恢复", async () => {
+    const cleanup = vi.fn(async (_id: string) => ({ ok: true }));
+    p.superAgent = { list: () => [], cleanup };
+    const toast = vi.spyOn(p.store, "sendToast");
+
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+    await p.handleWebviewMessage({
+      type: "superAgent",
+      action: "cleanup",
+      sessionId: "super-1",
+    });
+
+    // UI 层的 inert 之外，宿主也必须拒绝：不执行任何 manager 调用，且给出原因。
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("warning", "远程接管中，本机的超流体操作已冻结");
+
+    // 关闭接管后同一动作恢复执行（门是接管态的，不是永久封禁）。
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "stop" });
+    await p.handleWebviewMessage({
+      type: "superAgent",
+      action: "cleanup",
+      sessionId: "super-1",
+    });
+    expect(cleanup).toHaveBeenCalledWith("super-1", { keepBranch: undefined });
+  });
+
   it("start 后 QQ 注入照常执行（不再暂停）", async () => {
     await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
     // 让注入走到「等空闲」阶段就超时返回，以证明它没有被远程接续门短路。

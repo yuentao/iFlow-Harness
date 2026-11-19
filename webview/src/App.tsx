@@ -919,13 +919,15 @@ export function App() {
                         header never carries an empty control. */}
           {/* 接管态冻结子会话看板控件：inert 同时拦鼠标与键盘（含看板内的
               中断/合并/清理等所有操作按钮），pointer-events-none/opacity-40
-              与顶栏其它禁用控件同一视觉。展开的浮层 portal 到 body，不属于
-              顶栏，其操作由宿主侧接管冻结兜底。 */}
+              与顶栏其它禁用控件同一视觉。展开的浮层与折叠时的待答条都
+              portal 到 document.body，**不在**这棵 inert 子树内 —— 它们由
+              `frozen` 传进 SuperAgentBoard，由组件自己给 portal 出来的两个
+              表面加 inert（见 SuperAgentBoard 里的 frozen 注释）。 */}
           <div
             inert={remoteTakeover || undefined}
             className={`flex shrink-0 items-center${remoteTakeover ? " pointer-events-none opacity-40" : ""}`}
           >
-            <SuperAgentBoard panelRef={setSuperPanelNode} />
+            <SuperAgentBoard panelRef={setSuperPanelNode} frozen={remoteTakeover} />
           </div>
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <IconButton

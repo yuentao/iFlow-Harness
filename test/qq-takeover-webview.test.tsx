@@ -14,7 +14,14 @@ import { Composer } from "../webview/src/components/Composer";
 import { ApprovalCard } from "../webview/src/components/ApprovalCard";
 import { QuestionCard } from "../webview/src/components/QuestionCard";
 import { MessageList } from "../webview/src/components/MessageList";
-import { initialSessionState, type PendingApprovalUi, type PendingQuestionsUi, type SessionState } from "../shared/messages";
+import { SuperAgentBoard } from "../webview/src/components/SuperAgentBoard";
+import {
+  initialSessionState,
+  type PendingApprovalUi,
+  type PendingQuestionsUi,
+  type SessionState,
+  type SuperSessionUi,
+} from "../shared/messages";
 
 const mocked = vi.hoisted(() => ({
   send: vi.fn(),
@@ -226,6 +233,92 @@ describe("远程接管的卡片冻结", () => {
     expect(decision.length).toBe(2);
     expect(decision.every((b) => b.disabled)).toBe(true);
     expect(mocked.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("看板 portal 表面在接管态被冻结", () => {
+  const settled: SuperSessionUi = {
+    id: "sa-1",
+    title: "已完成的子会话",
+    task: "补单测",
+    status: "completed",
+    isolation: { kind: "git_worktree", path: "/tmp/wt", branch: "iflow/super/a", baseRef: "abc" },
+    createdAt: 1000,
+    updatedAt: 1000,
+    reports: [],
+  };
+
+  function boardPanel(): HTMLElement | null {
+    return document.body.querySelector<HTMLElement>('[role="region"][aria-label="超流体"]');
+  }
+
+  function boardControl(): HTMLButtonElement | null {
+    return container.querySelector<HTMLButtonElement>('button[aria-label="超流体看板"]');
+  }
+
+  it("接管态：展开的看板浮层带 inert（它 portal 到 body，顶栏 inert 管不到）", () => {
+    const state = makeState();
+    state.superSessions = [settled];
+    mocked.state = state;
+    mocked.takeover = false;
+    act(() => root.render(<SuperAgentBoard frozen={mocked.takeover} />));
+    act(() => boardControl()!.click());
+
+    const open = boardPanel();
+    expect(open).toBeTruthy();
+    expect(open!.hasAttribute("inert")).toBe(false);
+    expect(open!.className).not.toContain("opacity-40");
+
+    // 远程接管：同一块浮层必须被冻结（鼠标与键盘都拦），并给出冻结视觉。
+    mocked.takeover = true;
+    act(() => root.render(<SuperAgentBoard frozen={mocked.takeover} />));
+    const frozen = boardPanel();
+    expect(frozen).toBeTruthy();
+    expect(frozen!.hasAttribute("inert")).toBe(true);
+    expect(frozen!.className).toContain("opacity-40");
+    // 点浮层里的动作不会发消息（inert 之外，按钮自身也没有被点到的路径）。
+    expect(mocked.send).not.toHaveBeenCalled();
+  });
+
+  it("接管态：折叠态的待答条同样被冻结", () => {
+    const state = makeState();
+    const asking: SuperSessionUi = {
+      ...settled,
+      id: "sa-ask",
+      title: "要覆盖哪些范围",
+      status: "awaiting_input",
+      pending: {
+        kind: "question",
+        requestId: "req-1",
+        deadline: Date.now() + 240_000,
+        timeoutMs: 300_000,
+        questions: [
+          {
+            header: "范围",
+            question: "要覆盖哪些范围？",
+            multiSelect: false,
+            options: [{ label: "只覆盖用量估算", description: "范围小、跑得快" }],
+          },
+        ],
+      },
+    };
+    state.superSessions = [asking];
+    mocked.state = state;
+    // 有待答子会话时看板会自行展开；手动收起后待答条 portal 到 body。
+    mocked.takeover = false;
+    act(() => root.render(<SuperAgentBoard frozen={mocked.takeover} />));
+    act(() => boardControl()!.click());
+
+    const strip = () =>
+      document.body.querySelector<HTMLElement>('[role="region"][aria-label="超流体待答问题"]');
+    expect(strip()).toBeTruthy();
+    expect(strip()!.hasAttribute("inert")).toBe(false);
+
+    mocked.takeover = true;
+    act(() => root.render(<SuperAgentBoard frozen={mocked.takeover} />));
+    expect(strip()).toBeTruthy();
+    expect(strip()!.hasAttribute("inert")).toBe(true);
+    expect(strip()!.className).toContain("opacity-40");
   });
 });
 
