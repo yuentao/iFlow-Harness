@@ -469,9 +469,9 @@ describe("主会话路由 · 停止与重启", () => {
 
 describe("主会话路由 · 最终回执归属", () => {
   /** 走完入站 + 注入，并让注入轮以 delegated=true 收尾。 */
-  async function delegatedTask(): Promise<Fixture> {
+  async function delegatedTask(msgOverrides: Partial<InboundMessage> = {}): Promise<Fixture> {
     const f = makeService();
-    await f.service.handleInboundMessage(inbound());
+    await f.service.handleInboundMessage(inbound(msgOverrides));
     await waitFor(() => f.injections.length === 1);
     await f.injections[0]!.input.onInjected();
     f.injections[0]!.resolve({
@@ -497,6 +497,26 @@ describe("主会话路由 · 最终回执归属", () => {
     expect(f.delivered.some((item) => item.text.includes("已派超流体去做"))).toBe(false);
     // 但用户能收到一条明确的「已受理、正在处理」进度，不碰幂等锚点。
     expect(f.delivered.some((item) => item.text.includes("已受理，正在处理"))).toBe(true);
+  });
+
+  it("受理回执显示用户消息标题而非裸任务 id", async () => {
+    const f = await delegatedTask({ text: "/qq task 修复登录页白屏" });
+    const task = onlyTask(f);
+    const accepted = f.delivered.find((item) => item.text.includes("已受理，正在处理"));
+    expect(accepted).toBeTruthy();
+    // 标题来自用户消息，裸 id（末 6 位）不再出现在受理回执里。
+    expect(accepted?.text).toContain("修复登录页白屏");
+    expect(accepted?.text).not.toContain(task.taskId.slice(-6));
+  });
+
+  it("取不到可读标题时受理回执退化为中性文案，不回显裸 id 也不留空引号", async () => {
+    // 纯 Markdown 标题符（无正文）没有可读内容：qqTaskTitle 返回空串。
+    const f = await delegatedTask({ text: "/qq task #\n##\n###" });
+    const task = onlyTask(f);
+    const accepted = f.delivered.find((item) => item.text.includes("已受理，正在处理"));
+    expect(accepted).toBeTruthy();
+    expect(accepted?.text).toBe("任务已受理，正在处理，完成后会把最终结果发回这里。");
+    expect(accepted?.text).not.toContain(task.taskId.slice(-6));
   });
 
   it("汇总轮真正答复单次回传，且只投递一次（非占位文本）", async () => {
