@@ -24,6 +24,8 @@ import { QuestionBody, type QuestionAnswerMap } from "./QuestionBody";
  */
 export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
   const send = useChat((s) => s.send);
+  // 远程接续冻结：独立于 streaming 的全局态，接管期间不得回答问题。
+  const remoteTakeover = useChat((s) => s.remoteTakeover);
   const [answered, setAnswered] = useState(false);
   const titleId = useId();
   const descId = useId();
@@ -33,13 +35,13 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
   const [answers, setAnswers] = useState<QuestionAnswerMap>({});
 
   const submit = () => {
-    if (answered) return;
+    if (answered || remoteTakeover) return;
     setAnswered(true);
     send({ type: "answerQuestions", id: pending.id, answers });
   };
 
   const dismiss = () => {
-    if (answered) return;
+    if (answered || remoteTakeover) return;
     setAnswered(true);
     send({ type: "answerQuestions", id: pending.id, answers: {} });
   };
@@ -89,7 +91,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
       >
         <QuestionBody
           questions={pending.questions}
-          disabled={answered}
+          disabled={answered || remoteTakeover}
           onAnswersChange={setAnswers}
           onSubmit={submit}
         />
@@ -101,14 +103,14 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         <Button
           variant="primary"
           size="sm"
-          disabled={answered}
+          disabled={answered || remoteTakeover}
           aria-label={t("提交回答")}
           icon={<Check className={ICON_INLINE} />}
           onClick={submit}
         >
           {t("提交回答")}
         </Button>
-        <Button variant="secondary" size="sm" disabled={answered} aria-label={t("不回答并继续")} onClick={dismiss}>
+        <Button variant="secondary" size="sm" disabled={answered || remoteTakeover} aria-label={t("不回答并继续")} onClick={dismiss}>
           {t("不回答并继续")}
         </Button>
       </div>

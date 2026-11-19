@@ -15,10 +15,12 @@ import {
   ListOrdered,
   Loader2,
   Paperclip,
+  Radio,
   SendHorizontal,
   Sparkles,
   Square,
   SquareTerminal,
+  Unplug,
   Wand2,
   X,
 } from "lucide-react";
@@ -295,6 +297,10 @@ export function Composer() {
   const needsSetup = useChat((s) => s.state?.auth.needsSetup ?? false);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
+  /** 远程接续按钮只在机器人已启用时渲染；状态来自设置页的 qqSettings 快照。 */
+  const qqEnabled = useChat((s) => s.qqSettings?.enabled ?? false);
+  /** host 权威的远程接续内存态：true 时冻结本地全部干预，转录仍只读可滚动。 */
+  const remoteTakeover = useChat((s) => s.remoteTakeover ?? false);
   const commands = useChat((s) => s.state?.commands ?? EMPTY_COMMANDS);
   const skills = useChat((s) => s.state?.skills ?? EMPTY_SKILLS);
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
@@ -328,7 +334,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   // text as a child session instead of stopping. One semantic: while a real
   // turn runs, Stop is there.
   const streaming = status === "streaming";
-  const canStop = streaming && !replaying && !initializing;
+  const canStop = streaming && !replaying && !initializing && !remoteTakeover;
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
   /** Non-image attachments (chips only — paths ride the sendPrompt message,
@@ -760,12 +766,15 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   // block sending entirely. `streaming` / `canStop` are computed up top so the
   // ESC handler and the Stop button share one rule.
   const hasPendingInteraction = Boolean(pendingApproval || pendingQuestions);
-  const controlsLocked = streaming || replaying || initializing || pending !== null || hasPendingInteraction;
+  // 远程接续是独立于 streaming 的全局冻结态（陷阱 #12：审批/提问卡刻意不受
+  // streaming 门控，所以冻结必须另走一条）——覆盖模型/资料下拉、附件、enhance、
+  // 发送与停止，但不碰 MessageList，转录仍可只读滚动观察远程在做什么。
+  const controlsLocked = streaming || replaying || initializing || pending !== null || hasPendingInteraction || remoteTakeover;
   // 模型下拉额外跟随活跃子会话；发送 / enhance / 附件仍只看 controlsLocked。
   const modelLocked = controlsLocked || superActive;
-  const sendBlocked = replaying || initializing || pending !== null || needsSetup;
+  const sendBlocked = replaying || initializing || pending !== null || needsSetup || remoteTakeover;
   /** Enter/发送 while a real turn streams → the host spawns a child session. */
-  const delegateMode = streaming && !replaying && !initializing;
+  const delegateMode = streaming && !replaying && !initializing && !remoteTakeover;
   /** Optimistic switch in flight (`store.pending`, cleared by the confirming
    * snapshot or its 10s failsafe): the trigger shows a spinner instead of its
    * idle icon — the lock alone looked like a dead control. */
@@ -1756,6 +1765,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         <textarea
           ref={taRef}
           value={text}
+          readOnly={remoteTakeover}
           placeholder={delegateMode ? t("派发为子会话（Enter）") : t("向 iFlow 提问…")}
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-3 text-ui-body leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
@@ -2063,6 +2073,20 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5">
+            {/* 远程接续开关：仅机器人已启用时显示。刻意不受 controlsLocked /
+                remoteTakeover 门控 —— 它是解冻的唯一出口，冻结自己会造成死锁。 */}
+            {qqEnabled && (
+              <Button
+                variant="canvas"
+                icon={remoteTakeover ? <Unplug className={ICON_INLINE} /> : <Radio className={ICON_INLINE} />}
+                className={remoteTakeover ? "text-primary" : ""}
+                aria-label={remoteTakeover ? t("关闭接续") : t("远程接续")}
+                title={remoteTakeover ? t("关闭远程接续，恢复本地操作") : t("开启后本地输入与审批将被冻结")}
+                onClick={() => send({ type: "qqTakeover", action: remoteTakeover ? "stop" : "start" })}
+              >
+                <span className="@max-[340px]:hidden">{remoteTakeover ? t("关闭接续") : t("远程接续")}</span>
+              </Button>
+            )}
             {/* UI-audit 4.6: the wand only appears once there is something to
                 enhance (or a rewrite to undo) — an always-present disabled
                 button just widened the row. */}

@@ -361,5 +361,6 @@
   "重新认证，计划审批已跳过": "Re-authenticating; plan approval skipped",
   "错误：{0}": "Error: {0}",
   "还没有配置 API Key，无法联网检索模型数据。请先在设置里填写 API Key 并保存。": "No API key is configured, so model data cannot be fetched online. Enter an API key in Settings and save.",
-  "还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。": "No API endpoint is configured, so the model list cannot be refreshed. Enter an API endpoint in Settings and save."
+  "还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。": "No API endpoint is configured, so the model list cannot be refreshed. Enter an API endpoint in Settings and save.",
+  "远程接管中…": "Remote takeover in progress…"
 }
