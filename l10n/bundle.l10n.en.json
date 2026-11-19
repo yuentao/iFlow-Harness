@@ -13,6 +13,7 @@
   "生成中": "generating",
   "正在规划": "planning",
   "正在压缩": "compressing",
+  "正在恢复会话…": "Restoring session…",
   "初始化中": "Initializing",
   "出错": "error",
   "等待审批": "waiting for approval",

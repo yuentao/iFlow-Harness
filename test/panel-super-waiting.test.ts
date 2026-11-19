@@ -490,6 +490,18 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
       expect(p.statusBar.text).toContain("等待你处理");
     });
 
+    it("恢复期间（replaying + streaming）：状态栏显示正在恢复会话，不再谎称生成中", () => {
+      const state: SessionState = {
+        ...p.store.getState(),
+        status: "streaming",
+        replaying: true,
+        superWaiting: false,
+      };
+      p.updateStatusBar(state);
+      expect(p.statusBar.text).toContain("恢复");
+      expect(p.statusBar.text).not.toContain("生成中");
+    });
+
     it("syncSuperWaitingState 把 held/pendingCount 与 waiting 同源写进 store", () => {
       p.pendingSuperReportPrompts = [
         { mainSessionId: "sw-session", text: "A" },

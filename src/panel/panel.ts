@@ -1462,6 +1462,13 @@ export class ChatPanel implements vscode.Disposable {
    */
   private sweepInFlight = false;
   /**
+   * 后台残留清扫的延时（ms）。恢复会话时 CLI 正在跑 session/new、
+   * loadSession 与 MCP 发现，此刻三类 sweep 一起读盘 / 跑 git 会争抢 I/O，
+   * 拖慢恢复（2026-11-19 用户实测）。延时到恢复窗口之后再触发，值 0 供测试
+   * 立即触发验证「清扫挂住也不阻塞恢复」。
+   */
+  private superSweepDelayMs = 3_000;
+  /**
    * 已经把汇报交给宿主的子会话 id。
    *
    * 子会话进入终态（completed / failed / cancelled）之后，宿主还要等它把汇报
@@ -1866,9 +1873,15 @@ export class ChatPanel implements vscode.Disposable {
         text = `$(sync~spin) iFlow${model}`;
         break;
       case "streaming": {
-        const label = state.compressing
-          ? vscode.l10n.t("正在压缩")
-          : vscode.l10n.t("生成中");
+        // beginReplay 也会把 status 置成 "streaming"，但那是恢复转录而不是
+        // 模型在生成：转圈配「生成中」会让用户以为卡在生成（webview 同一
+        // 时刻显示的是「正在恢复会话…」）。replaying 优先于 compressing 与
+        // 生成中，文案与 webview 的 restore 态保持一致。
+        const label = state.replaying
+          ? vscode.l10n.t("正在恢复会话…")
+          : state.compressing
+            ? vscode.l10n.t("正在压缩")
+            : vscode.l10n.t("生成中");
         text = `$(sync~spin) iFlow: ${label}${model}`;
         break;
       }
@@ -7775,45 +7788,55 @@ export class ChatPanel implements vscode.Disposable {
         .getConfiguration("iflow")
         .get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
     );
+    // 同步占位：延时窗口内反复恢复 / 新建会话也只排一份 sweep。manager 的
+    // 同步抛错仍在调用点按原语义冒泡（由上层 catch 兜住），不推迟到定时器里。
     this.sweepInFlight = true;
-    void Promise.resolve()
-      // 用一个已 resolve 的 promise 起链：manager 的同步抛错也落进 catch，
-      // 不会在调用点炸出去打断恢复。
-      .then(async () => {
-        // 三类残留同在 `.iflow/super/` 下：worktrees（既有清扫）、attachments、
-        // dirs（降级目录）。并排跑，任何一类失败都落进下面的 catch，不影响会话。
-        // 每一项都经 Promise.resolve().then() 包一层：即便某个 manager 方法同步
-        // 抛错（stub 未实现 / 未来改动），也只是该项变成 rejected，不会在数组
-        // 求值时打断其余项的 handler 绑定 —— 否则先返回的 rejected promise 会
-        // 变成 unhandled rejection（Vitest Errors 1）。
-        const [swept] = await Promise.all([
-          Promise.resolve().then(() => manager.sweepStaleWorktrees({ maxKeep })),
-          Promise.resolve().then(() => manager.sweepStaleSuperAttachmentDirs()),
-          Promise.resolve().then(() => manager.sweepStaleSuperDirs()),
-        ]);
-        return swept;
-      })
-      .then((swept) => {
-        if (this.disposed) return;
-        if (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0) {
-          this.log.info(
-            `super agent: 残留清扫（后台）— 删除 ${swept.removed} 个，保留 ${swept.kept} 个，疑似残留 ${swept.orphans.length} 个（需人工确认）`,
-          );
-        }
-      })
-      .catch((error: unknown) => {
-        // 背景清扫失败不是会话故障：可观测（日志 + 提示），但绝不冒泡。
-        this.log.warn(`super agent: 后台残留清扫失败（不影响会话）：${errorMessage(error)}`);
-        if (!this.disposed) {
-          this.store.sendToast(
-            "warning",
-            vscode.l10n.t("后台清理残留工作目录失败（不影响会话）：{0}", errorMessage(error)),
-          );
-        }
-      })
-      .finally(() => {
+    const timer = setTimeout(() => {
+      if (this.disposed) {
         this.sweepInFlight = false;
-      });
+        return;
+      }
+      void Promise.resolve()
+        // 用一个已 resolve 的 promise 起链：manager 的同步抛错也落进 catch，
+        // 不会在定时器回调里炸出去变成 unhandled rejection。
+        .then(async () => {
+          // 三类残留同在 `.iflow/super/` 下：worktrees（既有清扫）、attachments、
+          // dirs（降级目录）。并排跑，任何一类失败都落进下面的 catch，不影响会话。
+          // 每一项都经 Promise.resolve().then() 包一层：即便某个 manager 方法同步
+          // 抛错（stub 未实现 / 未来改动），也只是该项变成 rejected，不会在数组
+          // 求值时打断其余项的 handler 绑定 —— 否则先返回的 rejected promise 会
+          // 变成 unhandled rejection（Vitest Errors 1）。
+          const [swept] = await Promise.all([
+            Promise.resolve().then(() => manager.sweepStaleWorktrees({ maxKeep })),
+            Promise.resolve().then(() => manager.sweepStaleSuperAttachmentDirs()),
+            Promise.resolve().then(() => manager.sweepStaleSuperDirs()),
+          ]);
+          return swept;
+        })
+        .then((swept) => {
+          if (this.disposed) return;
+          if (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0) {
+            this.log.info(
+              `super agent: 残留清扫（后台）— 删除 ${swept.removed} 个，保留 ${swept.kept} 个，疑似残留 ${swept.orphans.length} 个（需人工确认）`,
+            );
+          }
+        })
+        .catch((error: unknown) => {
+          // 背景清扫失败不是会话故障：可观测（日志 + 提示），但绝不冒泡。
+          this.log.warn(`super agent: 后台残留清扫失败（不影响会话）：${errorMessage(error)}`);
+          if (!this.disposed) {
+            this.store.sendToast(
+              "warning",
+              vscode.l10n.t("后台清理残留工作目录失败（不影响会话）：{0}", errorMessage(error)),
+            );
+          }
+        })
+        .finally(() => {
+          this.sweepInFlight = false;
+        });
+    }, this.superSweepDelayMs);
+    // 定时器本身不该把扩展宿主 / 测试进程吊住。
+    timer.unref?.();
   }
 
   /**
@@ -12099,7 +12122,10 @@ export class ChatPanel implements vscode.Disposable {
             return false;
           }));
         if (!restored) {
-          await this.startNewSession();
+          // 启动自动新建：跳过子会话残留检测（confirmAndPurgeSuperResidue 里
+          // countResidue 要读全工作区目录，冷启动和恢复窗口里同步 await 会明显
+          // 拖慢面板）。残留确认框只在用户显式点「新建会话」时出现。
+          await this.startNewSession({ bypassSuperWait: true });
         }
         // History list in the background: prune dead entries + push the
         // switcher list without touching activeSessionId. Fire-and-forget —
