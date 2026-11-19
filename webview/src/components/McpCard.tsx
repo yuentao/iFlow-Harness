@@ -4,7 +4,7 @@ import { useChat } from "../store";
 import { entriesToServers, sameMcpServers, serversToEntries, type McpEntry } from "./mcp-servers";
 import { MCP_CATALOG, buildCatalogConfig, catalogFieldLabel } from "../../../shared/mcp-catalog";
 import { t } from "../i18n";
-import { ActionRow, Button, Chip, ConfirmDialog, Dropdown, Field, FieldLabel, Hint, ICON_INLINE, IconButton, SecondaryRow, Segmented, SettingsGroup, TextArea, TextInput, ToolbarRow } from "./ui";
+import { ActionRow, Button, Chip, ConfirmDialog, Dropdown, Field, Hint, ICON_INLINE, IconButton, SecondaryRow, Segmented, SettingsGroup, SettingsRow, TextArea, TextInput, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 import type { McpScope, McpStatusUi, McpServerStatusView, McpToolView, McpPromptView } from "../../../shared/messages";
 
@@ -937,8 +937,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             </SettingsGroup>
 
             <SettingsGroup title={t("传输与运行")} hint={transport}>
-                <div className="flex flex-wrap items-center gap-2 px-4 py-3">
-                  <span className="shrink-0 text-ui-label text-muted-foreground">{t("传输类型")}</span>
+                <SettingsRow label={t("传输类型")} wide className="flex-wrap items-center">
                   <Segmented
                     ariaLabel={t("传输类型")}
                     value={transport}
@@ -952,7 +951,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       title: kind,
                     }))}
                   />
-                </div>
+                </SettingsRow>
             {isStdio ? (
               <>
                 <Field required className="min-w-0 px-4 py-3" label={t("命令")}>
@@ -967,8 +966,23 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }}
                   />
                 </Field>
-                <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
-                  <FieldLabel>{t("参数")}</FieldLabel>
+                <SettingsRow
+                  label={t("参数")}
+                  stacked
+                  wide
+                  action={
+                    <Button
+                      variant="secondary"
+                      icon={<Plus className={ICON_INLINE} />}
+                      onClick={() => {
+                        setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithArgAdded(parseConfig(en.json) ?? {}) } : en)) ?? null);
+                        setSavedFlash(false);
+                      }}
+                    >
+                      {t("添加参数")}
+                    </Button>
+                  }
+                >
                   {args.length > 0 && (
                     <div className="min-w-0 overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {args.map((arg, ai) => (
@@ -998,19 +1012,24 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       ))}
                     </div>
                   )}
-                  <Button
-                    variant="secondary"
-                    icon={<Plus className={ICON_INLINE} />}
-                    onClick={() => {
-                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithArgAdded(parseConfig(en.json) ?? {}) } : en)) ?? null);
-                      setSavedFlash(false);
-                    }}
-                  >
-                    {t("添加参数")}
-                  </Button>
-                </div>
-                <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
-                  <FieldLabel>{t("环境变量")}</FieldLabel>
+                </SettingsRow>
+                <SettingsRow
+                  label={t("环境变量")}
+                  stacked
+                  wide
+                  action={
+                    <Button
+                      variant="secondary"
+                      icon={<Plus className={ICON_INLINE} />}
+                      onClick={() => {
+                        setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairAdded(parseConfig(en.json) ?? {}, "env") } : en)) ?? null);
+                        setSavedFlash(false);
+                      }}
+                    >
+                      {t("添加变量")}
+                    </Button>
+                  }
+                >
                   {envRows.length > 0 && (
                     <div className="min-w-0 overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {envRows.map(([keyName, keyValue], ri) => (
@@ -1040,17 +1059,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       ))}
                     </div>
                   )}
-                  <Button
-                    variant="secondary"
-                    icon={<Plus className={ICON_INLINE} />}
-                    onClick={() => {
-                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairAdded(parseConfig(en.json) ?? {}, "env") } : en)) ?? null);
-                      setSavedFlash(false);
-                    }}
-                  >
-                    {t("添加变量")}
-                  </Button>
-                </div>
+                </SettingsRow>
               </>
             ) : (
               <>
@@ -1066,8 +1075,23 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }}
                   />
                 </Field>
-                <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
-                  <FieldLabel>{t("请求头")}</FieldLabel>
+                <SettingsRow
+                  label={t("请求头")}
+                  stacked
+                  wide
+                  action={
+                    <Button
+                      variant="secondary"
+                      icon={<Plus className={ICON_INLINE} />}
+                      onClick={() => {
+                        setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairAdded(parseConfig(en.json) ?? {}, "headers") } : en)) ?? null);
+                        setSavedFlash(false);
+                      }}
+                    >
+                      {t("添加 header")}
+                    </Button>
+                  }
+                >
                   {headerRows.length > 0 && (
                     <div className="min-w-0 overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {headerRows.map(([keyName, keyValue], ri) => (
@@ -1097,17 +1121,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       ))}
                     </div>
                   )}
-                  <Button
-                    variant="secondary"
-                    icon={<Plus className={ICON_INLINE} />}
-                    onClick={() => {
-                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairAdded(parseConfig(en.json) ?? {}, "headers") } : en)) ?? null);
-                      setSavedFlash(false);
-                    }}
-                  >
-                    {t("添加 header")}
-                  </Button>
-                </div>
+                </SettingsRow>
                             </>
                           )}
                           {extraKeys.length > 0 && (
