@@ -39,6 +39,7 @@ import {
   isTerminalStatus,
   makeIdempotencyKey,
   qqTaskStatusLabel,
+  qqTaskTitle,
   shortTaskId,
   transitionQqTask,
   validateQqTaskRequest,
@@ -1828,9 +1829,13 @@ export class QqService {
         await this.persist(waiting);
         // 明确的进度回执（不是最终结果）：用户据此知道任务已被受理并正在处理；
         // 走节流/指纹去重通道，不碰幂等锚点，绝不与稍后的最终答复冲突。
+        // 受理回执用用户消息的简短标题代替裸 task id（形如 ncmcb9 对用户毫无
+        // 意义）。取不到可读标题时退化为不带 id 的中性文案 —— 绝不回显裸 id。
+        const title = qqTaskTitle(task.payload.prompt);
+        const subject = title ? `「${title}」` : "";
         await this.deliverProgressLike(
           waiting,
-          `任务 ${shortTaskId(taskId)} 已受理，正在处理，完成后会把最终结果发回这里。`,
+          `任务${subject}已受理，正在处理，完成后会把最终结果发回这里。`,
           "main-accepted",
         );
         return;
