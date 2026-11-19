@@ -446,7 +446,9 @@ describe("formatQqTaskSummary", () => {
 
   it("包含关键字段且不含 Markdown 标题 / 表格", () => {
     const text = formatQqTaskSummary(task, "standard");
-    expect(text).toContain(shortTaskId(task.taskId));
+    // 首行是展示位：用可读标题代替裸短 id。
+    expect(text.split("\n")[0]).toBe("QQ 任务 整理登录模块");
+    expect(text).not.toContain(`QQ 任务 ${shortTaskId(task.taskId)}`);
     expect(text).toContain("成功 (succeeded)");
     expect(text).toContain("耗时");
     expect(text).toContain("1 分 30 秒");
@@ -514,6 +516,21 @@ describe("formatQqTaskSummary", () => {
     expect(text).toContain("取消  停止原因：cancelled");
     // 自相矛盾的「状态 已取消」紧跟「失败 agent_canceled」是旧行为。
     expect(text).not.toContain("失败  agent_canceled");
+  });
+
+  it("首行用人类可读标题（去 Markdown 标记），末尾命令仍用完整 id", () => {
+    const titled = makeTask({ payload: { prompt: "## 重构  登录模块", attachments: [], contexts: [] } });
+    const text = formatQqTaskSummary(titled, "standard");
+    expect(text.split("\n")[0]).toBe("QQ 任务 重构 登录模块");
+    expect(text).toContain(`/qq status ${titled.taskId}`);
+    expect(text).toContain(`/qq log ${titled.taskId}`);
+  });
+
+  it("取不到可读标题时首行退化为短 id，不出现空标题", () => {
+    const untitled = makeTask({ payload: { prompt: "  \n ##  \n  ", attachments: [], contexts: [] } });
+    const text = formatQqTaskSummary(untitled, "summary");
+    expect(text.split("\n")[0]).toBe(`QQ 任务 ${shortTaskId(untitled.taskId)}`);
+    expect(text.split("\n")[0]).not.toBe("QQ 任务 ");
   });
 });
 
