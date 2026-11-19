@@ -725,9 +725,10 @@ export function FileRef({ path, line, toolCallId }: { path: string; line?: numbe
  * in dense rows, so arming now opens a real dialog. Rendered through a
  * portal to document.body — the settings modal's acrylic layers create
  * containing blocks that would trap a plain `fixed` descendant.
- * ModalShell semantics: ESC / backdrop / X all cancel. Initial focus sits on
- * 取消 (data-autofocus) so an accidental Enter never fires the destructive
- * action.
+ * ModalShell semantics: 仅显式按钮关闭，遮罩 / ESC / X 都不关闭
+ * (dismissible = false)——危险确认框必须由用户显式选「确认 / 取消」，避免
+ * 误触遮罩或 ESC 被当成静默取消。Initial focus sits on 取消 (data-autofocus)
+ * so an accidental Enter never fires the destructive action.
  */
 export function ConfirmDialog({
   title,
@@ -741,6 +742,8 @@ export function ConfirmDialog({
    * conversation / both). Cancel keeps data-autofocus so an accidental Enter
    * never fires a destructive action. */
   actions,
+  /** 默认 false：确认框只通过显式按钮关闭，遮罩 / ESC / X 一律不取消。 */
+  dismissible = false,
 }: {
   title: string;
   message: string;
@@ -757,9 +760,10 @@ export function ConfirmDialog({
     variant?: "default" | "primary" | "danger";
     onClick: () => void;
   }[];
+  dismissible?: boolean;
 }) {
   return createPortal(
-    <ModalShell title={title} onClose={onCancel} ariaLabel={title} role="alertdialog">
+    <ModalShell title={title} onClose={onCancel} ariaLabel={title} role="alertdialog" dismissible={dismissible}>
       <div className="px-4 py-3 text-ui-label leading-relaxed text-foreground/90">{message}</div>
       {/* The action row wraps instead of squeezing: a long confirm label
           (e.g. 「让智能体合并分支」) used to be clipped mid-word, which left

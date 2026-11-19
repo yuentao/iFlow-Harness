@@ -13,7 +13,8 @@ import { Button, ICON_INLINE, ModalShell, OptionCard, OptionGroup } from "./ui";
  * - 停留在当前会话 → host reloads the SAME session under the new credentials
  *   (the recommended side, so it carries the primary outline + light fill)
  * - 开启新会话     → host clears the transcript and starts fresh
- * - X / Escape / backdrop / 取消 → the ENTIRE switch is cancelled.
+ * - 取消 → the ENTIRE switch is cancelled (X / Escape / backdrop do not close
+ *   this dialog; only the two choices and 取消 are exits).
  * No countdown: this dialog blocks no agent, so it waits for the user
  * indefinitely (the host resolves it as cancelled on panel teardown).
  */
@@ -41,6 +42,7 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
       ariaLabel={t("切换配置")}
       title={t("切换配置")}
               icon={<ArrowLeftRight className={`${ICON_INLINE} shrink-0 text-primary`} />}      onClose={() => answer(null)}
+      dismissible={false}
       initialFocus="first"
     >
       <div className="space-y-3 px-3 py-3">
