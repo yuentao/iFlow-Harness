@@ -85,6 +85,14 @@ function textarea(): HTMLTextAreaElement {
   return container.querySelector("textarea")!;
 }
 
+function suggestionBar(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('[aria-label="iFlow 猜的下一步，点一下填进输入框"]');
+}
+
+function suggestionLoadingPill(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('[aria-label="正在想下一步建议…"]');
+}
+
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   class Observer {
@@ -152,6 +160,49 @@ describe("接管态输入框收缩", () => {
       b.textContent?.includes("发送"),
     );
     expect(sendBtn).not.toBeNull();
+  });
+
+  it("非接管态：建议条完整显示，未收起", () => {
+    mocked.state.nextStepSuggestions = ["检查登录逻辑", "补充单元测试"];
+    renderComposer();
+    const bar = suggestionBar()!;
+    expect(bar).not.toBeNull();
+    expect(bar.className).toContain("mb-2");
+    expect(bar.className).not.toContain("max-h-0");
+    expect(bar.className).not.toContain("opacity-0");
+  });
+
+  it("接管态：建议条以 CSS 过渡收起（max-h-0 / opacity-0 / mb-0），DOM 保留", () => {
+    mocked.state.nextStepSuggestions = ["检查登录逻辑", "补充单元测试"];
+    mocked.takeover = true;
+    renderComposer();
+    const bar = suggestionBar()!;
+    expect(bar).not.toBeNull();
+    expect(bar.className).toContain("transition-all");
+    expect(bar.className).toContain("duration-200");
+    expect(bar.className).toContain("max-h-0");
+    expect(bar.className).toContain("overflow-hidden");
+    expect(bar.className).toContain("py-0");
+    expect(bar.className).toContain("opacity-0");
+    expect(bar.className).toContain("pointer-events-none");
+    expect(bar.className).toContain("mb-0");
+    expect(bar.className).not.toContain("mb-2");
+    // 建议 chip 仍在 DOM（仅被 CSS 收起，未卸载）
+    expect(bar.textContent).toContain("检查登录逻辑");
+  });
+
+  it("接管态：「正在想下一步建议…」加载提示条一并收起", () => {
+    mocked.state.nextStepLoading = true;
+    mocked.takeover = true;
+    renderComposer();
+    const pill = suggestionLoadingPill()!;
+    expect(pill).not.toBeNull();
+    expect(pill.className).toContain("max-h-0");
+    expect(pill.className).toContain("opacity-0");
+    expect(pill.className).toContain("pointer-events-none");
+    expect(pill.className).toContain("mb-0");
+    expect(pill.className).not.toContain("mb-2");
+    expect(pill.className).not.toContain("py-1");
   });
 
   it("接管态：关闭接续按钮始终可见可点，点击发 qqTakeover stop", () => {
