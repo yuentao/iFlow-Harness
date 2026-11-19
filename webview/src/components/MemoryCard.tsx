@@ -498,9 +498,6 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           <Button variant="primary" icon={<Save className={ICON_INLINE} />} disabled={busy || saving} onClick={saveEdit}>
             {saving ? t("保存中…") : t("保存")}
           </Button>
-          <Button variant="secondary" onClick={back}>
-            {t("取消")}
-          </Button>
           <span className="text-ui-caption text-muted-foreground">
             {t("{0} 字符 · ≈{1} tokens", editing.content.length, fmtTokens(Math.ceil(editing.content.length / 4)))}
           </span>
