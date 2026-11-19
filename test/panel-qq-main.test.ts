@@ -1338,7 +1338,7 @@ describe("QQ 硬上限补发抢跑回归", () => {
     expect(overridden).toContain("give the user one complete report");
   });
 
-  it("rescueDue+pendingCount>0 时面板透传 finalOverride=true 并把该轮标为 final", () => {
+  it("rescueDue+pendingCount>0 时面板透传 finalOverride=true，但**不**把该轮标为 final", () => {
     const done = child();
     let captured: { finalOverride?: boolean } | undefined;
     p.superAgent = {
@@ -1360,10 +1360,16 @@ describe("QQ 硬上限补发抢跑回归", () => {
 
     p.queueSuperReport([{ session: done, report: REPORT }]);
 
+    // 提示词被放宽：模型这一轮就给结论（不再被 pendingCount 压制）。
     expect(captured?.finalOverride).toBe(true);
     const item = p.pendingSuperReportPrompts.find((i) => i.mainSessionId === "main-session");
-    expect(item?.final).toBe(true);
+    // 但这一轮**不是** final：等待过久 ≠ 定终局（2026-11-19 修复）。
+    // 标成 final 会让 QQ 先收到一条空正文兜底（22 字占位）、任务被写成终态、
+    // awaiter 被摘掉，随后迟到的真实长正文再也投不出去。
+    expect(item?.final).toBe(false);
     expect(item?.text).toContain("give the user one complete report");
     expect(item?.text).not.toContain("do not give the user a final complete report yet");
+    // awaiter 仍在：真·最终汇报轮（pendingCount=0）到达时才定终局。
+    expect(p.qqMainFinalAwaiters.has(TASK.taskId)).toBe(true);
   });
 });

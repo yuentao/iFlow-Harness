@@ -998,24 +998,35 @@ const QQ_MAIN_IDLE_POLL_MS = 300;
 /**
  * QQ 最终答复「迟到补发」阈值（R2）。
  *
- * 汇报轮的 final 标记由 pendingCount===0 决定；当同会话里还有别的非终态子会话
- * （典型是主 Agent 派出的复核子会话）时 pendingCount 长期 >0，汇总轮会被判成
- * 非 final，QQ 于是永远停在「已受理」。这里给等最终答复的 awaiter 两道兜底：
- *  - 软阈值：awaiter 已等超过 QQ_FINAL_RESCUE_MS 且本会话已无活跃子会话 → 补发；
- *  - 硬上限：即使还有子会话卡在非终态，等超过 QQ_FINAL_HARD_RESCUE_MS 也补发
- *    （宁可给一条如实兜底，也不让 QQ 永久停在已受理）。
+ * **等待过久 ≠ 可以定终局**（2026-11-19 修复）：补发机制的目的是「别让 QQ
+ * 永久停在已受理」，而不是「等够久就替主 Agent 把结论写死」。因此：
+ *  - 软阈值（QQ_FINAL_RESCUE_MS）：awaiter 已等超过该阈值**且本会话已无活跃
+ *    子会话** → 可以定终局（真的不会再有更正文了，走补发收尾）；
+ *  - 硬上限（QQ_FINAL_HARD_RESCUE_MS）：到点时**若仍有活跃子会话**，绝不写
+ *    终局、绝不写 resultDeliveredAt —— 只降级成一条「仍在进行中」的进度
+ *    措辞，并保留 awaiter，让真正的最终汇报轮还有机会投递完整正文。
+ * 汇报轮的 final 标记只由 pendingCount===0 决定：rescueDue 只用来放宽提示词
+ * （让模型这一轮就给结论），不消费 awaiter、不定终局（见
+ * {@link ChatPanel.settleSuperReportsIfReady}）。
  * 轮询间隔远小于阈值，仅为让补发在阈值到点后尽快发生。
  */
 const QQ_FINAL_RESCUE_MS = 120_000;
 const QQ_FINAL_HARD_RESCUE_MS = 600_000;
 const QQ_FINAL_RESCUE_POLL_MS = 10_000;
 /**
+ * 硬上限降级成「仍在进行中」进度措辞时的最小间隔。
+ *
+ * 补发轮询每 10s 拍一次；进度措辞没有新信息量（子会话还在跑），连发只会
+ * 刷屏并挤占 QQ 的被动回复窗口。同一任务在这个间隔内只提醒一次。
+ */
+const QQ_FINAL_RESCUE_PROGRESS_MIN_INTERVAL_MS = 120_000;
+/**
  * 硬上限补发遇到「本会话汇报轮正在投递 / 排队」时最多让出的轮询拍数。
  *
  * 让真实最终汇报（finalReport 收尾投递）优先收尾：抢在它前面补发会把兜底
  * 文案当结论写死，并让随后迟到的真实正文被丢弃（2026-11-19 用户实测）。
- * 只让出有限拍数，超过仍未收尾就强制补发 —— 保留「真正卡死」时的兜底，
- * 绝不永久推迟。
+ * 只让出有限拍数，超过仍未收尾就强制处理 —— 保留「真正卡死」时的兜底，
+ * 绝不永久推迟。强制处理同样受「子会话仍在跑就不定终局」约束。
  */
 const QQ_FINAL_RESCUE_MAX_DEFERS = 6;
 
@@ -1032,6 +1043,30 @@ const QQ_DELEGATION_GRACE_MS = 120;
  * 既保留结论又不会把整段子会话转录灌给外部渠道。
  */
 const QQ_REPORT_FALLBACK_MAX_CHARS = 1_500;
+
+/**
+ * 一次 QQ 正文投递的**来源**（归档事件 `task_answer_delivered` 的 source）。
+ *
+ *  - `final-report`：pendingCount=0 的汇报汇总轮产出的最终正文（真·最终答复）；
+ *  - `rescue`：迟到补发（等太久且已无活跃子会话）投递的收尾正文；
+ *  - `intermediate`：中间正文 / 降级进度措辞（任务**没有**被定终局）。
+ *
+ * 有了它，事后能查清「QQ 收到的是哪一段、当时走的是哪条通道」。
+ */
+export type QqAnswerDeliverySource = "final-report" | "rescue" | "intermediate";
+
+/**
+ * 正文指纹（FNV-1a 32bit，十六进制）：归档事件里记一段正文的指纹，
+ * 便于事后核对「QQ 收到的就是这一段」，又不把整段正文写进事件日志。
+ */
+function qqTextFingerprint(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
 
 /**
  * 把子会话汇报正文（`report.summary`）清洗成可安全转发给 QQ 的纯文本。
@@ -1220,9 +1255,17 @@ export class ChatPanel implements vscode.Disposable {
   private readonly qqReportFallbackText = new Map<string, string>();
   /**
    * 每个 awaiter 因「在途汇报轮」让出的补发拍数（taskId → 次数）。达到
-   * `QQ_FINAL_RESCUE_MAX_DEFERS` 后强制补发，避免真正卡死时永久等待。
+   * `QQ_FINAL_RESCUE_MAX_DEFERS` 后强制处理，避免真正卡死时永久等待。
    */
   private readonly qqFinalRescueDefers = new Map<string, number>();
+  /**
+   * 每个 awaiter 最近一次「仍在进行中」进度措辞的发送时刻（taskId → ts）。
+   *
+   * 硬上限到点但子会话仍在跑时，补发降级成进度提醒而不是定终局；轮询每 10s
+   * 一次，没有新信息量的提醒要节流，否则会刷屏并挤占 QQ 的被动回复窗口。
+   * 与 awaiter 同生命周期：投递 / 撤销 / 停通道时清理。
+   */
+  private readonly qqFinalRescueProgressAt = new Map<string, number>();
   /** 迟到补发的轮询定时器（仅在有 awaiter 时存活）。 */
   private qqFinalRescueTimer: ReturnType<typeof setInterval> | null = null;
   /** 注入轮 delegated 判定的宽限期；测试可注入更小值。 */
@@ -2125,6 +2168,7 @@ export class ChatPanel implements vscode.Disposable {
     this.qqFinalRescueText.clear();
     this.qqReportFallbackText.clear();
     this.qqFinalRescueDefers.clear();
+    this.qqFinalRescueProgressAt.clear();
     this.qqTaskBySuperSession.clear();
     this.qqTaskFinalText.clear();
     // Final flush: a turn interrupted by window close / extension reload has
@@ -9301,11 +9345,39 @@ export class ChatPanel implements vscode.Disposable {
     this.log.info(`super agent: queued report for ${batch.length} settled child session(s)`);
     // pendingCount=0 即「所有子会话都已结束」的汇总轮 —— 主 Agent 在这一轮
     // 给出最终完整汇报，是 QQ 最终回执应当采用的那一轮文本。
-    // R2 迟到补发：若该会话的 QQ awaiter 已等过阈值，而 pendingCount 因别的
-    // 非终态子会话（复核子会话等）长期 >0，就别让 final 永远=false —— 以本轮
-    // 文本作为最终回执（空文本再由 deliverQqMainFinalAnswer 兜底）。
-    if (rescueDue && pendingCount !== 0) {
-      this.log.warn(`QQ 最终回执迟到补发：汇报轮 pendingCount=${pendingCount}，仍按 final 投递`);
+    //
+    // **等待过久 ≠ 可以定终局**（2026-11-19 修复）：旧实现在 rescueDue 时把
+    // 这一轮也标成 final，于是「awaiter 等过了阈值」被直接等价成「可以定终局」
+    // —— 子会话明明还在跑，QQ 却先收到一条空正文兜底（22 字占位），任务被写成
+    // 终态、awaiter 被摘掉，随后迟到的真实长正文再也投不出去（用户实测：QQ
+    // 端只收到 22 字占位）。
+    //
+    // 现在：rescueDue 只用来**放宽提示词**（finalOverride=true，让模型这一轮
+    // 就给结论），final 仍严格由 pendingCount===0 决定。放宽后的这一轮按
+    // 「进度轮」处理 —— 正文经 deliverQqMainIntermediateText 转发，不写终态、
+    // 不摘 awaiter；真正的最终汇报轮（pendingCount=0）到达时，那一轮的完整正文
+    // 才会作为最终答复投递（逐字送达）。
+    const rescuedRound = rescueDue && pendingCount !== 0;
+    if (rescuedRound) {
+      const activeChildren = this.qqActiveChildrenCount(reportOwner);
+      const waited = this.qqFinalRescueWaitedMs(reportOwner);
+      const taskIds = [...this.qqMainFinalAwaiters.entries()]
+        .filter(([, owner]) => owner === reportOwner)
+        .map(([taskId]) => taskId);
+      this.log.warn(
+        `QQ 迟到补发：汇报轮 pendingCount=${pendingCount} activeChildren=${activeChildren} —— 仅放宽提示词（要结论），不定终局、不摘 awaiter`,
+      );
+      // 逐 task 记一条让路事件：事后能查清「哪个 QQ 任务等太久被放宽了」。
+      for (const taskId of taskIds) {
+        void this.appendQqArchiveEvent("task_final_rescue_deferred", taskId, {
+          owner: reportOwner,
+          reason: "report-round-relaxed",
+          waited,
+          activeChildren,
+          pendingCount,
+          defers: 0,
+        });
+      }
     }
     // 子会话汇报正文：二次转述（主 Agent 汇总轮）确为空时，兜底回给用户看的是
     // 子会话实际做了什么，而不是一句占位文案。取本批终态汇报的 summary（失败 /
@@ -9339,7 +9411,9 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingSuperReportPrompts.push({
       mainSessionId: reportOwner,
       text,
-      final: pendingCount === 0 || rescueDue,
+      // 只有「所有子会话都已结束」的汇总轮才是 final：迟到补发（rescueDue）
+      // 只放宽提示词，绝不把这一轮变成定终局的最终回执（2026-11-19 修复）。
+      final: pendingCount === 0,
       fallbackText,
     });
     this.ensureSuperHeartbeat();
@@ -10940,6 +11014,7 @@ export class ChatPanel implements vscode.Disposable {
               this.qqFinalRescueText.delete(sessionIdBefore);
               this.qqReportFallbackText.delete(sessionIdBefore);
               this.qqFinalRescueDefers.delete(taskId);
+              this.qqFinalRescueProgressAt.delete(taskId);
               this.qqTaskFinalText.delete(taskId);
               this.ensureQqFinalRescueTimer();
             }
@@ -11031,6 +11106,7 @@ export class ChatPanel implements vscode.Disposable {
         this.qqMainFinalAwaiters.delete(taskId);
         this.qqMainFinalAwaiterSince.delete(taskId);
         this.qqFinalRescueDefers.delete(taskId);
+        this.qqFinalRescueProgressAt.delete(taskId);
         this.qqTaskFinalText.delete(taskId);
       }
       if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
@@ -11058,6 +11134,7 @@ export class ChatPanel implements vscode.Disposable {
     stopReason: string,
     onlyTaskIds?: ReadonlySet<string>,
     fallbackText?: string,
+    source: QqAnswerDeliverySource = "final-report",
   ): Promise<void> {
     if (this.disposed || !sessionId) return;
     const honestFallback = vscode.l10n.t(
@@ -11092,12 +11169,22 @@ export class ChatPanel implements vscode.Disposable {
       this.qqMainFinalAwaiters.delete(taskId);
       this.qqMainFinalAwaiterSince.delete(taskId);
       this.qqFinalRescueDefers.delete(taskId);
+      this.qqFinalRescueProgressAt.delete(taskId);
       this.qqTaskFinalText.delete(taskId);
       try {
         await this.qq?.service.completeMainFinalAnswer({ taskId, text: answer, stopReason });
       } catch (error) {
         this.log.warn(`QQ 主会话最终答复回传失败：${errorMessage(error)}`);
+        continue;
       }
+      // 可观测：QQ 收到的到底是哪一段、走的哪条通道 —— 归档一条投递事件。
+      void this.appendQqArchiveEvent("task_answer_delivered", taskId, {
+        owner: sessionId,
+        source,
+        chars: answer.length,
+        fingerprint: qqTextFingerprint(answer),
+        stopReason,
+      });
     }
     // 该会话已无 awaiter：清掉补发缓存，避免下一条任务误用上一轮的旧结论。
     if (![...this.qqMainFinalAwaiters.values()].includes(sessionId)) {
@@ -11112,7 +11199,14 @@ export class ChatPanel implements vscode.Disposable {
     return [...this.qqMainFinalAwaiters.values()].includes(owner);
   }
 
-  /** 该归属会话是否存在已等过软阈值的 QQ awaiter（R2 汇报轮 final 放宽的依据）。 */
+  /**
+   * 该归属会话是否存在已等过软阈值的 QQ awaiter（R2 汇报轮**放宽提示词**的依据）。
+   *
+   * 注意口径：它只回答「这个会话的 QQ 发起者等太久了，该让模型这一轮就给结论」，
+   * **不**回答「可以定终局了」—— 定终局只发生在真的没有活跃子会话时（见
+   * {@link rescueStaleQqFinalAwaiters}）。等待过久绝不等价于定终局
+   * （2026-11-19 修复）。
+   */
   private qqFinalRescueDue(owner: string | null): boolean {
     if (!owner) return false;
     const now = Date.now();
@@ -11122,6 +11216,72 @@ export class ChatPanel implements vscode.Disposable {
       if (now - since >= this.qqFinalRescueMs) return true;
     }
     return false;
+  }
+
+  /**
+   * 某个归属主会话当前**仍在跑**（非终态）的子会话数量。
+   *
+   * 补发判定与软阈值口径必须一致：只有「没有子会话在跑」才谈得上定终局；
+   * 仍有子会话在跑时，任何补发都只能降级成进度措辞（2026-11-19 修复）。
+   */
+  private qqActiveChildrenCount(owner: string | null): number {
+    if (!owner) return 0;
+    const live = this.getSuperAgent()?.list() ?? [];
+    return live.filter(
+      (session) =>
+        (session.mainSessionId ?? owner) === owner && !isTerminalSuperStatus(session.status),
+    ).length;
+  }
+
+  /** 某个归属会话的 QQ awaiter 已经等了多久（取最久的那一个）。 */
+  private qqFinalRescueWaitedMs(owner: string | null): number {
+    if (!owner) return 0;
+    const now = Date.now();
+    let waited = 0;
+    for (const [taskId, taskOwner] of this.qqMainFinalAwaiters.entries()) {
+      if (taskOwner !== owner) continue;
+      const since = this.qqMainFinalAwaiterSince.get(taskId) ?? now;
+      waited = Math.max(waited, now - since);
+    }
+    return waited;
+  }
+
+  /**
+   * 写一条 QQ 归档事件（events.ndjson）。
+   *
+   * 可观测性要求：「QQ 收到的是这一段」事后要能查出来 —— 谁在什么时候因为
+   * 等太久而让路 / 降级成进度，最终那一段正文又是从哪条通道投出去的。
+   * 事件类型：
+   *  - `task_final_rescue_deferred`：补发被让路或降级（带 defers / waited /
+   *    activeChildren / reason）；
+   *  - `task_answer_delivered`：一次正文投递（带 source：final-report 汇报
+   *    汇总轮 / rescue 迟到补发 / intermediate 中间正文，以及 chars /
+   *    fingerprint 便于核对「就是这一段」）。
+   *
+   * 口径说明：`task_answer_delivered` 记的是**面板把这段正文交给了投递通道**
+   * 这一事实；通道侧的真实投递失败由服务自己的归档事件记录
+   * （`task_progress_undelivered` / `task_result_undelivered`），两者合起来
+   * 才是完整链路。
+   *
+   * 归档失败绝不影响主链路：只记日志，不抛错。
+   */
+  private async appendQqArchiveEvent(
+    type: string,
+    taskId?: string,
+    detail?: Record<string, unknown>,
+  ): Promise<void> {
+    const store = this.qq?.store;
+    if (!store || typeof store.appendEvent !== "function") return;
+    try {
+      await store.appendEvent({
+        type,
+        ts: Date.now(),
+        ...(taskId ? { taskId } : {}),
+        ...(detail ? { detail } : {}),
+      });
+    } catch (error) {
+      this.log.warn(`QQ 归档事件写入失败（${type}）：${errorMessage(error)}`);
+    }
   }
 
   /** 迟到补发定时器：仅在有 awaiter 时存活，避免无谓唤醒宿主。 */
@@ -11140,32 +11300,37 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * R2 迟到补发：等最终答复的 awaiter 若等得太久，强制以「最近一次汇报文本（或兜底）」
-   * 收尾，避免 QQ 永久停在「已受理」。
-   *  - 软阈值：已超 qqFinalRescueMs 且本会话已无活跃子会话（正常长任务的收尾窗口）；
-   *  - 硬上限：已超 qqFinalHardRescueMs，即便还有子会话卡在非终态也补发
-   *    （复核子会话卡在等输入时不能让发起者永远等下去）。
-   * 只补发到点的那一个 taskId（onlyTaskIds 过滤），不误伤同会话刚开始的其它 awaiter。
+   * R2 迟到补发：等最终答复的 awaiter 若等得太久，别让 QQ 永久停在「已受理」。
+   *
+   * **等待过久 ≠ 可以定终局**（2026-11-19 修复）：
+   *  - 软阈值：已超 qqFinalRescueMs **且本会话已无活跃子会话** → 真的不会再有
+   *    更正文了，此时才以「最近一次汇报文本（或兜底）」收尾；
+   *  - 硬上限：已超 qqFinalHardRescueMs 但**仍有活跃子会话** → 绝不写终局、
+   *    绝不写 resultDeliveredAt，只降级成一条如实的「仍在进行中」进度措辞，
+   *    awaiter 保留，等子会话终态后的真·最终汇报轮投递完整正文
+   *    （旧实现在这里直接补发，把等太久当成了可以定终局：QQ 只收到 22 字
+   *    占位，真实长正文再也投不出去）。
+   * 只处理到点的那一个 taskId（onlyTaskIds 过滤），不误伤同会话刚开始的其它 awaiter。
    *
    * 2026-11-19 补发抢跑修复：到点时若本会话的汇报轮正在投递（`superReportRunning`）
    * 或还排在队列里，先让出有限拍数，让 finalReport 收尾投递真实最终正文；抢在它
    * 前面补发会把兜底文案写死、并让随后迟到的真实正文被丢弃。让路有上限（见
-   * `QQ_FINAL_RESCUE_MAX_DEFERS`），真正卡死时仍强制补发，绝不永久推迟。
+   * `QQ_FINAL_RESCUE_MAX_DEFERS`），真正卡死时仍强制处理，绝不永久推迟。
+   * 让路与降级都写归档事件（`task_final_rescue_deferred`），事后可查。
    */
   private rescueStaleQqFinalAwaiters(): void {
     if (this.disposed || this.qqMainFinalAwaiters.size === 0) return;
     const now = Date.now();
-    const live = this.getSuperAgent()?.list() ?? [];
     for (const [taskId, owner] of [...this.qqMainFinalAwaiters.entries()]) {
       const since = this.qqMainFinalAwaiterSince.get(taskId) ?? now;
       const age = now - since;
-      const activeChildren = live.filter(
-        (s) => (s.mainSessionId ?? owner) === owner && !isTerminalSuperStatus(s.status),
-      ).length;
-      const due =
-        age >= this.qqFinalHardRescueMs ||
-        (age >= this.qqFinalRescueMs && activeChildren === 0);
-      if (!due) continue;
+      // 与软阈值、汇报轮放宽用的是同一口径（qqActiveChildrenCount）。
+      const activeChildren = this.qqActiveChildrenCount(owner);
+      // 软阈值：到点**且本会话已无活跃子会话** —— 真的不会再有更正文了，才谈得
+      // 上定终局。硬上限：到点但子会话仍在跑 —— 只能降级成进度措辞（见下）。
+      const softDue = age >= this.qqFinalRescueMs && activeChildren === 0;
+      const hardDue = age >= this.qqFinalHardRescueMs;
+      if (!softDue && !hardDue) continue;
       // 汇报轮在途 / 排队时先让路：真实最终汇报马上就会由 finalReport 收尾投递。
       const reportInFlight =
         this.superReportRunning ||
@@ -11174,13 +11339,44 @@ export class ChatPanel implements vscode.Disposable {
         const defers = (this.qqFinalRescueDefers.get(taskId) ?? 0) + 1;
         if (defers <= QQ_FINAL_RESCUE_MAX_DEFERS) {
           this.qqFinalRescueDefers.set(taskId, defers);
+          this.log.info(
+            `QQ 最终答复补发让路：task=${taskId} waited=${age}ms activeChildren=${activeChildren} defers=${defers}`,
+          );
+          void this.appendQqArchiveEvent("task_final_rescue_deferred", taskId, {
+            owner,
+            reason: "report-in-flight",
+            waited: age,
+            activeChildren,
+            defers,
+          });
           continue;
         }
         this.log.warn(
-          `QQ 主会话最终答复补发：task=${taskId} 已让出 ${defers - 1} 拍，汇报轮仍未收尾，强制补发`,
+          `QQ 主会话最终答复补发：task=${taskId} 已让出 ${defers - 1} 拍，汇报轮仍未收尾，强制处理`,
         );
       }
+      const deferCount = this.qqFinalRescueDefers.get(taskId) ?? 0;
       this.qqFinalRescueDefers.delete(taskId);
+      // **子会话仍在跑 → 绝不写终局**（2026-11-19 修复）：旧实现在硬上限这里
+      // 直接补发，把「等太久」当成了「可以定终局」—— QQ 收到的是一条空正文
+      // 兜底（22 字占位），任务被写成 succeeded、resultDeliveredAt 落盘，
+      // awaiter 被摘掉，随后迟到的真实长正文再也投不出去。
+      // 现在降级成「仍在进行中」的进度措辞：任务保持 injected，awaiter 保留，
+      // 等子会话终态后的真·最终汇报轮投递完整正文。
+      if (activeChildren > 0) {
+        this.log.warn(
+          `QQ 最终答复硬上限到点但仍有活跃子会话：task=${taskId} waited=${age}ms activeChildren=${activeChildren} —— 降级为进度措辞，不定终局`,
+        );
+        void this.appendQqArchiveEvent("task_final_rescue_deferred", taskId, {
+          owner,
+          reason: "children-running",
+          waited: age,
+          activeChildren,
+          defers: deferCount,
+        });
+        void this.deliverQqMainRescueProgress(owner, taskId, activeChildren, age);
+        continue;
+      }
       this.log.warn(
         `QQ 主会话最终答复迟到补发：task=${taskId} waited=${age}ms activeChildren=${activeChildren}`,
       );
@@ -11190,9 +11386,43 @@ export class ChatPanel implements vscode.Disposable {
         "end_turn",
         new Set([taskId]),
         this.qqReportFallbackText.get(owner),
+        "rescue",
       );
     }
     if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
+  }
+
+  /**
+   * 硬上限到点但子会话仍在跑时的**降级补发**：只发一条如实的「仍在进行中」
+   * 进度措辞。
+   *
+   * 绝不写终局：任务保持 `injected`（服务侧 deliverMainTurnText 本身就只接
+   * 非终态任务），不落 resultDeliveredAt，awaiter 保留 —— 子会话终态后的
+   * 真·最终汇报轮仍能把完整正文投出去。
+   *
+   * 措辞必须如实：说清「还有几个子会话没结束、结论会在它们结束后送达」，
+   * 绝不说「已完成」。同一任务在 `QQ_FINAL_RESCUE_PROGRESS_MIN_INTERVAL_MS`
+   * 内只提醒一次（没有新信息量，连发只会刷屏）。
+   */
+  private async deliverQqMainRescueProgress(
+    owner: string | null,
+    taskId: string,
+    activeChildren: number,
+    age: number,
+  ): Promise<void> {
+    if (this.disposed || !owner) return;
+    const now = Date.now();
+    const last = this.qqFinalRescueProgressAt.get(taskId);
+    if (last !== undefined && now - last < QQ_FINAL_RESCUE_PROGRESS_MIN_INTERVAL_MS) return;
+    this.qqFinalRescueProgressAt.set(taskId, now);
+    const text = vscode.l10n.t(
+      "任务仍在进行中：还有 {0} 个子会话未结束，最终结论会在它们全部完成后送达。",
+      String(activeChildren),
+    );
+    await this.deliverQqMainIntermediateText(owner, text, [taskId]);
+    this.log.info(
+      `QQ 最终答复降级补发（进行中）：task=${taskId} waited=${age}ms activeChildren=${activeChildren}`,
+    );
   }
 
   /**
@@ -11272,7 +11502,16 @@ export class ChatPanel implements vscode.Disposable {
         await service.deliverMainTurnText(taskId, text);
       } catch (error) {
         this.log.warn(`QQ 主会话中间正文回传失败：${errorMessage(error)}`);
+        continue;
       }
+      // 可观测：中间正文 / 降级进度措辞也走这条通道 —— 记 source=intermediate，
+      // 事后能分辨「QQ 收到的这段是最终答复还是进度」。
+      void this.appendQqArchiveEvent("task_answer_delivered", taskId, {
+        owner,
+        source: "intermediate",
+        chars: text.trim().length,
+        fingerprint: qqTextFingerprint(text.trim()),
+      });
     }
   }
 
@@ -11389,6 +11628,7 @@ export class ChatPanel implements vscode.Disposable {
     this.qqFinalRescueText.clear();
     this.qqReportFallbackText.clear();
     this.qqFinalRescueDefers.clear();
+    this.qqFinalRescueProgressAt.clear();
     this.qqTaskBySuperSession.clear();
     this.qqTaskFinalText.clear();
     this.stopQqFinalRescueTimer();
