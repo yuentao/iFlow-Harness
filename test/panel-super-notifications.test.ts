@@ -96,6 +96,7 @@ type PromptCall = {
 
 type PanelInternals = {
   superAgent: unknown;
+  qqTakeoverActive: boolean;
   ensureClient: () => Promise<unknown>;
   promptWithRetry: (
     client: unknown,
@@ -426,5 +427,35 @@ describe("Super Agent 完成提示：超流体 / 主会话汇报分档", () => {
     expect(events).toContain("childDone");
     expect(events).toContain("superReport");
     expect(events[0]).not.toBe(events[events.length - 1]);
+  });
+
+  // ── QQ 远程接管态：本机静音，只走 QQ 转发 ──────────────────────────────────
+
+  it("QQ 远程接管态：用户回合完成不弹本机通知 / 不响铃", async () => {
+    // 经过 announceCue 出口验证：接管时用户已离开本机，反馈只走 QQ 转发。
+    children = [child({ status: "running" })];
+    const { notify, sound } = spyCues();
+    p.qqTakeoverActive = true;
+
+    const started = p.sendPrompt("继续推进剩下的部分");
+    const call = await waitForPrompt();
+    call.resolve({ stopReason: "end_turn" });
+    await started;
+
+    expect(notify).not.toHaveBeenCalled();
+    expect(sound).not.toHaveBeenCalled();
+  });
+
+  it("QQ 远程接管态：子会话 running → completed 不弹本机通知 / 不响铃", () => {
+    const { notify, sound } = spyCues();
+    p.qqTakeoverActive = true;
+    children = [child({ status: "running" })];
+    p.syncSuperWaitingState();
+
+    children = [child({ status: "completed", summary: "做完了" })];
+    p.syncSuperWaitingState();
+
+    expect(notify).not.toHaveBeenCalled();
+    expect(sound).not.toHaveBeenCalled();
   });
 });
