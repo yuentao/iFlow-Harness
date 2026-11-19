@@ -212,7 +212,17 @@ export async function deliverViaQqBotAdapter(
   const result: SendResult = await adapter.send(out);
   if (result.ok) return { ok: true };
   // retryable 原样透传：4xx 类确定性拒绝不该被服务的重试循环再烧一遍窗口。
-  return { ok: false, retryable: result.retryable };
+  //
+  // error 也必须原样透传（**绝不在这里丢掉**）：它是平台给出的真实拒绝原因
+  // （含业务错误码，例如「QQBot: 业务错误 40054（主动消息额度已用尽）」）。
+  // 丢掉它，上层就只剩一句「未能送达」—— 面板与 `health().detail` 看不到原因、
+  // 任务记录里没有错误码、归档事件里也没有留痕，「静默丢弃」就无法追查。
+  const error = typeof result.error === "string" ? result.error.trim() : "";
+  return {
+    ok: false,
+    retryable: result.retryable,
+    ...(error ? { error } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

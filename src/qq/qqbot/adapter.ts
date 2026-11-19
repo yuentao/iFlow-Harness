@@ -307,6 +307,18 @@ export class QqBotAdapter implements ChannelAdapter {
   private lastError: string | undefined;
   /** lastError 来源：send 类错误在下次成功发送时清除，连接类错误等连接成功才清。 */
   private lastErrorSource: "send" | "connection" | undefined;
+  /**
+   * 最近一次**被平台拒绝**的出站消息原因（含业务错误码，例如
+   * 「QQBot: 业务错误 40054（主动消息额度已用尽）」）。
+   *
+   * 与 `lastError` 的区别：`lastError` 表达「通道当前不健康」，一次成功发送
+   * 就会清掉；而这里表达「平台最近拒绝过我们，原因是什么」—— 主动消息额度
+   * 用尽、被动回复窗口过期、频率限制这些**必须留着看**，否则被回退通道救
+   * 回来的那一次成功会把原因一并抹掉，用户与运维都无从得知额度已经见底。
+   *
+   * 脱敏后再存（token / appSecret 绝不进这里）。
+   */
+  private lastSendRejection: string | undefined;
   /** 缺 msgId 而被丢弃的入站事件数（可观测；health.detail 会带出）。 */
   private droppedInbound = 0;
   /**
@@ -1013,6 +1025,9 @@ export class QqBotAdapter implements ChannelAdapter {
         const error = `QQBot: 业务错误 ${failure.code}（${failure.message}）`;
         // 发送失败也属于「最近错误」：health().detail 必须能看出发不出去。
         this.noteError("send", error);
+        // 另外留一份「最近被平台拒绝的原因」：它带业务错误码（如 40054
+        // 主动消息额度已用尽），即使随后被另一条通道救回来也不该被抹掉。
+        this.lastSendRejection = this.redact(error);
         return {
           ok: false,
           error,
@@ -1026,6 +1041,8 @@ export class QqBotAdapter implements ChannelAdapter {
         if (typeof id === "string" || typeof id === "number") messageId = String(id);
       }
       // 一次成功发送证明链路已恢复：只清 send 类错误，连接类错误等连接成功。
+      // 注意：**不动** lastSendRejection —— 它记的是「平台最近拒绝过我们、
+      // 原因是什么」，与「通道当前是否健康」是两件事。
       if (this.lastErrorSource === "send") {
         this.lastError = undefined;
         this.lastErrorSource = undefined;
@@ -1038,6 +1055,8 @@ export class QqBotAdapter implements ChannelAdapter {
       const retryable = status === undefined ? true : !isPermanentHttpStatus(status);
       const text = errorText(error);
       this.noteError("send", `发送失败：${text}`);
+      // 同上：被拒原因留着（含 HTTP 状态码的拒绝文案），成功后也不清除。
+      this.lastSendRejection = this.redact(text);
       // 网络/服务端异常交给上层重试；错误文本不含凭据。
       return { ok: false, error: text, retryable };
     }
@@ -1078,13 +1097,20 @@ export class QqBotAdapter implements ChannelAdapter {
   /**
    * 连接态快照；detail 只含状态描述与脱敏后的最近错误，不含 token。
    *
-   * 组成：连接态 + 最近错误（send/断线/op=9/心跳超时）+ 断线丢消息提示 +
-   * 缺 msgId 丢弃计数 —— 前两项满足「health 永不含最近错误」的修复，后两项
-   * 让静默丢失变成可观测状态，绝不宣称已恢复。
+   * 组成：连接态 + 最近错误（send/断线/op=9/心跳超时）+ **最近发送被拒**（带
+   * 平台业务错误码，成功发送后仍保留）+ 断线丢消息提示 + 缺 msgId 丢弃计数
+   * —— 前三项让「发不出去」始终可查（含额度用尽 40054 这类拒绝原因），
+   * 后两项让静默丢失变成可观测状态，绝不宣称已恢复。
    */
   async health(): Promise<ChannelHealth> {
     const parts: string[] = [this.connected ? "qqbot websocket" : "disconnected"];
     if (this.lastError) parts.push(this.redact(this.lastError));
+    // 最近一次被平台拒绝的原因（含业务错误码）：与「通道当前是否健康」是两
+    // 件事 —— 主动消息额度用尽（40054）/ 被动回复过期 / 频率限制这些信息，
+    // 即便被另一条通道救回来也不该被抹掉，否则用户与运维都看不出额度见底。
+    if (this.lastSendRejection) {
+      parts.push(`最近发送被拒：${this.lastSendRejection}`);
+    }
     // 判死原因单独带标签（可能与 lastError 同一句，成对出现也无害）。
     const deathReason = this.lastDeathReason ? this.redact(this.lastDeathReason) : undefined;
     if (deathReason) {
