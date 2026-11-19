@@ -119,6 +119,14 @@ function sendButton(): HTMLButtonElement | null {
   ) ?? null;
 }
 
+/** ConfirmDialog portals to document.body, outside the composer container. */
+function dialogButton(label: string): HTMLButtonElement | null {
+  const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]');
+  return Array.from(dialog?.querySelectorAll<HTMLButtonElement>("button") ?? []).find(
+    (b) => b.textContent?.trim() === label,
+  ) ?? null;
+}
+
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   class Observer {
@@ -158,7 +166,7 @@ describe("远程接续按钮", () => {
     expect(takeoverButton()?.getAttribute("aria-label")).toBe("远程接续");
   });
 
-  it("点击发 qqTakeover start；接管态下切成关闭接续并发 stop", () => {
+  it("点击发 qqTakeover start；接管态下点关闭接续弹确认，确认后发 stop", () => {
     renderComposer();
     act(() => takeoverButton()!.click());
     expect(mocked.send).toHaveBeenCalledWith({ type: "qqTakeover", action: "start" });
@@ -168,7 +176,21 @@ describe("远程接续按钮", () => {
     const button = takeoverButton()!;
     expect(button.getAttribute("aria-label")).toBe("关闭接续");
     act(() => button.click());
+    // 二次确认：点击本身不发 stop
+    expect(mocked.send).toHaveBeenCalledTimes(1);
+    expect(dialogButton("确认关闭")).not.toBeNull();
+    act(() => dialogButton("确认关闭")!.click());
     expect(mocked.send).toHaveBeenCalledWith({ type: "qqTakeover", action: "stop" });
+  });
+
+  it("接管态关闭接续点取消：不发 stop，保持接管态", () => {
+    mocked.takeover = true;
+    renderComposer();
+    act(() => takeoverButton()!.click());
+    expect(dialogButton("取消")).not.toBeNull();
+    act(() => dialogButton("取消")!.click());
+    expect(mocked.send).not.toHaveBeenCalled();
+    expect(takeoverButton()?.getAttribute("aria-label")).toBe("关闭接续");
   });
 
   it("接管时输入框 readOnly、发送禁用，但开关自身仍可点击关闭（无死锁）", () => {

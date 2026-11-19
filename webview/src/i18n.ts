@@ -1205,6 +1205,9 @@ const en: Record<string, string> = {
   "关闭接续": "Disconnect",
   "开启后本地输入与审批将被冻结": "Local input and approvals will be frozen",
   "关闭远程接续，恢复本地操作": "Disconnect remote and resume local control",
+  "确认关闭远程接续？": "Disconnect remote takeover?",
+  "关闭后将恢复本地操作，远程用户将无法继续控制本会话。": "Local control will resume, and the remote user will no longer be able to control this session.",
+  "确认关闭": "Confirm disconnect",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

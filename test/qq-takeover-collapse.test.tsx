@@ -81,6 +81,17 @@ function takeoverButton(): HTMLButtonElement | null {
   );
 }
 
+/** ConfirmDialog portals to document.body, not into the composer container. */
+function dialog(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[role="alertdialog"]');
+}
+
+function dialogButton(label: string): HTMLButtonElement | null {
+  return Array.from(dialog()?.querySelectorAll<HTMLButtonElement>("button") ?? []).find(
+    (b) => b.textContent?.trim() === label,
+  ) ?? null;
+}
+
 function textarea(): HTMLTextAreaElement {
   return container.querySelector("textarea")!;
 }
@@ -205,7 +216,7 @@ describe("接管态输入框收缩", () => {
     expect(pill.className).not.toContain("py-1");
   });
 
-  it("接管态：关闭接续按钮始终可见可点，点击发 qqTakeover stop", () => {
+  it("接管态：关闭接续按钮危险配色、无方框、可见可点", () => {
     mocked.takeover = true;
     renderComposer();
     const button = takeoverButton()!;
@@ -213,8 +224,51 @@ describe("接管态输入框收缩", () => {
     expect(button.getAttribute("aria-label")).toBe("关闭接续");
     expect(button.disabled).toBe(false);
     expect(button.className).not.toContain("opacity-0");
+    // 危险色语义：复用 kit 的 danger variant（destructive token），非 self-made 色值
+    expect(button.className).toContain("text-destructive");
+    // 接管态去掉外层方框：卡片圆角/边框/底色/阴影一概不出现
+    const card = textarea().parentElement!;
+    expect(card.className).not.toContain("rounded-lg");
+    expect(card.className).not.toContain("bg-editor");
+    expect(card.className).not.toContain("shadow-card");
+  });
+
+  it("非接管态：关闭/远程按钮保持中性，卡片方框完整", () => {
+    renderComposer();
+    const button = takeoverButton()!;
+    expect(button.getAttribute("aria-label")).toBe("远程接续");
+    expect(button.className).not.toContain("text-destructive");
+    const card = textarea().parentElement!;
+    expect(card.className).toContain("rounded-lg");
+    expect(card.className).toContain("border-border");
+    expect(card.className).toContain("bg-editor");
+    expect(card.className).toContain("shadow-card");
+  });
+
+  it("接管态：点关闭接续先弹二次确认，确认后才发 stop", () => {
+    mocked.takeover = true;
+    renderComposer();
+    const button = takeoverButton()!;
     act(() => button.click());
+    // 仅弹确认框，尚未发 stop
+    expect(mocked.send).not.toHaveBeenCalled();
+    expect(dialog()).not.toBeNull();
+    expect(dialog()?.getAttribute("aria-label")).toBe("确认关闭远程接续？");
+    // 确认后真正停止接续
+    act(() => dialogButton("确认关闭")!.click());
     expect(mocked.send).toHaveBeenCalledWith({ type: "qqTakeover", action: "stop" });
+    expect(dialog()).toBeNull();
+  });
+
+  it("接管态：点取消不发 stop、对话框关闭且仍处于接管态", () => {
+    mocked.takeover = true;
+    renderComposer();
+    act(() => takeoverButton()!.click());
+    expect(dialog()).not.toBeNull();
+    act(() => dialogButton("取消")!.click());
+    expect(mocked.send).not.toHaveBeenCalled();
+    expect(dialog()).toBeNull();
+    expect(takeoverButton()?.getAttribute("aria-label")).toBe("关闭接续");
   });
 
   it("从接管态切回：布局与交互完全恢复", () => {
