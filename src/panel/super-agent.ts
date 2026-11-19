@@ -97,6 +97,7 @@ import {
   type SuperEvent,
   type SuperIntegration,
   type SuperIntegrationMode,
+  type SuperInterruptSource,
   type SuperPending,
   type SuperReport,
   type SuperSessionUi,
@@ -955,7 +956,7 @@ export class SuperAgentManager {
    * cancel 了一个早已结束的子会话，主会话看不到生效，于是又发一次）。
    * 只有「目标根本不存在」才是真的没生效。
    */
-  async cancel(id: string): Promise<SuperCancelOutcome> {
+  async cancel(id: string, source: SuperInterruptSource = "system"): Promise<SuperCancelOutcome> {
     const session = this.sessions.get(id);
     if (!session) {
       // 历史归档子会话的进程早随扩展退出，中断意图天然达成（幂等）—— 按
@@ -981,7 +982,7 @@ export class SuperAgentManager {
     // 先落「已中断」再杀进程：终止进程会触发 AcpClient 的 onExit，而管理层把
     // 内核退出一律记成 failed —— 终态粘性会让随后的 cancelled 被丢弃，手动
     // 停止就显示成失败。先把终态占住，onExit 的失败事件会被幂等地忽略。
-    this.apply(id, { type: "cancelled", at: Date.now() });
+    this.apply(id, { type: "cancelled", at: Date.now(), source });
     const client = this.clients.get(id);
     if (client && session.cliSessionId) {
       try {
@@ -999,11 +1000,11 @@ export class SuperAgentManager {
   }
 
   /** 中断全部子会话，返回被中断的数量。 */
-  async cancelAll(): Promise<number> {
+  async cancelAll(source: SuperInterruptSource = "system"): Promise<number> {
     const ids = [...this.sessions.values()]
       .filter((s) => !isTerminalSuperStatus(s.status))
       .map((s) => s.id);
-    for (const id of ids) await this.cancel(id);
+    for (const id of ids) await this.cancel(id, source);
     return ids.length;
   }
 
@@ -1038,7 +1039,7 @@ export class SuperAgentManager {
         // 先落「已中断」再杀进程：dispose 会触发 onExit，管理层把它记成
         // failed；终态粘性会让随后的 cancelled 被丢弃。
         this.interrupted.set(id, session.attempts ?? 1);
-        this.apply(id, { type: "cancelled", at: Date.now() });
+        this.apply(id, { type: "cancelled", at: Date.now(), source: "system" });
       }
       await this.disposeClient(id);
       // 附件副本是这个子会话的临时拷贝：记录都没了，它只剩占盘。
@@ -1483,7 +1484,7 @@ export class SuperAgentManager {
       if (!isTerminalSuperStatus(session.status)) {
         // 面板正在关闭 —— 这一轮同样不许落改动、不许自动合并。
         this.interrupted.set(id, session.attempts ?? 1);
-        this.apply(id, { type: "cancelled", at: Date.now() });
+        this.apply(id, { type: "cancelled", at: Date.now(), source: "system" });
       }
       await this.disposeClient(id);
       // worktree 保留（里面可能有未合并的工作），附件副本是纯拷贝 → 删掉。
@@ -1859,7 +1860,7 @@ export class SuperAgentManager {
       // 「已中断，改动保留在分支（未合并）」。
       const blocked = this.settleBlockReason(id, attempt);
       if (response.stopReason === "cancelled") {
-        this.apply(id, { type: "cancelled", at });
+        this.apply(id, { type: "cancelled", at, source: "system" });
         // 回合被取消：子会话可能已经在 worktree 里改了东西 —— 那些改动留在
         // 分支上，**没有**被合并。如实记下来，别让看板装作「什么都没发生」。
         this.recordInterrupted(id, blocked ?? "cancelled");

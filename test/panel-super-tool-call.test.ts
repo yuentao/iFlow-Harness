@@ -247,7 +247,7 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
 
     await waitFor(() => manager.cancel.mock.calls.length > 0);
-    expect(manager.cancel).toHaveBeenCalledWith("super-x");
+    expect(manager.cancel).toHaveBeenCalledWith("super-x", "agent");
   });
 
   it("super-agent 工具收到纯 actions 载荷：走动作链路，不派发、不 warn", async () => {
@@ -264,7 +264,7 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
 
     await waitFor(() => manager.cancel.mock.calls.length > 0);
-    expect(manager.cancel).toHaveBeenCalledWith("super-merged");
+    expect(manager.cancel).toHaveBeenCalledWith("super-merged", "agent");
     expect(manager.spawn).not.toHaveBeenCalled();
     expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(0);
   });
@@ -280,7 +280,7 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
 
     await waitFor(() => manager.cancel.mock.calls.length > 0);
-    expect(manager.cancel).toHaveBeenCalledWith("super-ns");
+    expect(manager.cancel).toHaveBeenCalledWith("super-ns", "agent");
     expect(manager.spawn).not.toHaveBeenCalled();
   });
 

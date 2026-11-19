@@ -769,6 +769,25 @@ describe("super agent · 状态机", () => {
     expect(applySuperEvent(session(), { type: "cancelled", at: 1 }).status).toBe("cancelled");
   });
 
+  it("cancelled 事件把来源写入 interruptedBy，无来源时缺省 system", () => {
+    for (const source of ["user", "agent", "system"] as const) {
+      const next = applySuperEvent(session(), { type: "cancelled", at: 1, source });
+      expect(next.status).toBe("cancelled");
+      expect(next.interruptedBy).toBe(source);
+    }
+    expect(applySuperEvent(session(), { type: "cancelled", at: 1 }).interruptedBy).toBe("system");
+  });
+
+  it("中断来源随归档往返，历史无字段时恢复为 system", () => {
+    const cancelled = applySuperEvent(session(), { type: "cancelled", at: 1, source: "agent" });
+    expect(toPersistedSuperSession(cancelled).interruptedBy).toBe("agent");
+    expect(fromPersistedSuperSession(toPersistedSuperSession(cancelled)).interruptedBy).toBe("agent");
+    // 老归档没有这条字段：恢复时如实归为系统中断，不留空。
+    const legacy = toPersistedSuperSession(cancelled);
+    delete legacy.interruptedBy;
+    expect(fromPersistedSuperSession(legacy).interruptedBy).toBe("system");
+  });
+
   it("终态判定", () => {
     expect(isTerminalSuperStatus("completed")).toBe(true);
     expect(isTerminalSuperStatus("failed")).toBe(true);

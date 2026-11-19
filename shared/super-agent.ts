@@ -492,6 +492,14 @@ function normalizeRestoredTodos(todos: SuperTodoUi[] | undefined): SuperTodoUi[]
   );
 }
 
+/**
+ * 谁中断了这个子会话。三类是刻意区分的：用户（看板上主动喊停）、智能体
+ * （主会话动作 / QQ 远程任务触发）、系统（宿主生命周期收口：面板关闭、会话
+ * 删除、护栏拦截、内核回合取消、重启恢复归一）。看板在「已中断」标题旁据此
+ * 标注，避免把「系统杀掉的」误读成「用户喊停的」。
+ */
+export type SuperInterruptSource = "user" | "agent" | "system";
+
 export interface SuperSessionUi {
   id: string;
   /** 人类可读标题（模型给的或用户给的）。 */
@@ -525,6 +533,8 @@ export interface SuperSessionUi {
   summary?: string;
   /** 失败原因。 */
   error?: string;
+  /** 中断来源（仅 `status === "cancelled"` 有意义）：看板在标题旁据此标注「由谁中断」。 */
+  interruptedBy?: SuperInterruptSource;
   /** 正在等待的应答。 */
   pending?: SuperPending;
   /** 子会话的 token 开销（回合结束后结算，见 SuperTokenUsage）。 */
@@ -568,7 +578,7 @@ export type SuperEvent =
   | { type: "input_resolved"; at: number }
   | { type: "report"; report: SuperReport; at: number }
   | { type: "failed"; error: string; at: number }
-  | { type: "cancelled"; at: number };
+  | { type: "cancelled"; at: number; source?: SuperInterruptSource };
 
 /** Report 状态 → 子会话状态。 */
 function statusForReport(state: SuperReportState): SuperStatus {
@@ -686,6 +696,7 @@ export function applySuperEvent(session: SuperSessionUi, event: SuperEvent): Sup
       return {
         ...session,
         status: "cancelled",
+        interruptedBy: event.source ?? "system",
         endedAt: event.at,
         updatedAt: event.at,
         pending: undefined,
@@ -775,6 +786,8 @@ export interface PersistedSuperSession {
   endedAt?: number;
   summary?: string;
   error?: string;
+  /** 中断来源（status==="cancelled" 时随归档落盘，重启恢复后仍能在标题旁标注）。 */
+  interruptedBy?: SuperInterruptSource;
   tokens?: SuperTokenUsage;
   integration?: SuperIntegration;
   reports: SuperReport[];
@@ -837,6 +850,7 @@ export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuper
     endedAt: session.endedAt,
     summary: session.summary,
     error: session.error,
+    interruptedBy: session.interruptedBy,
     tokens: session.tokens,
     integration: session.integration,
     reports: session.reports,
@@ -924,6 +938,7 @@ export function fromPersistedSuperSession(
     endedAt: record.endedAt ?? (terminal ? undefined : record.updatedAt),
     summary: record.summary,
     error: record.error,
+    interruptedBy: record.interruptedBy ?? "system",
     tokens: record.tokens,
     integration: record.integration,
     reports: record.reports,

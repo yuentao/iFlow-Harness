@@ -116,7 +116,7 @@ const STATUS_VISUAL: Record<SuperStatus, { tone: StatusTone; icon: ReactNode }> 
   awaiting_input: { tone: "warning", icon: <CircleHelp className="size-3 shrink-0" aria-hidden="true" /> },
   completed: { tone: "success", icon: <Check className="size-3 shrink-0" aria-hidden="true" /> },
   failed: { tone: "danger", icon: <X className="size-3 shrink-0" aria-hidden="true" /> },
-  cancelled: { tone: "muted", icon: <Square className="size-3 shrink-0" aria-hidden="true" /> },
+  cancelled: { tone: "danger", icon: <Square className="size-3 shrink-0" aria-hidden="true" /> },
 };
 
 /** 排队中：等一个并发名额，还没开始 —— 灰色时钟，与「准备中」的沙漏区分。 */
@@ -144,6 +144,23 @@ function statusVisual(session: SuperSessionUi): {
   const visual =
     session.queued && session.status === "preparing" ? QUEUED_VISUAL : STATUS_VISUAL[session.status];
   return { tone: visual.tone, label: statusLabel(session), icon: visual.icon };
+}
+
+/**
+ * 「已中断」标题旁的来源小字：精确区分用户 / 智能体 / 系统三类中断。
+ * 仅当状态确为已中断且宿主带上了来源时显示 —— 历史归档无来源时宿主按
+ * system 兜底，所以老记录也会如实标注为「由系统中断」，不会留白。
+ */
+function interruptedByLabel(session: SuperSessionUi): string | null {
+  if (session.status !== "cancelled" || !session.interruptedBy) return null;
+  switch (session.interruptedBy) {
+    case "user":
+      return t("由用户中断");
+    case "agent":
+      return t("由智能体中断");
+    case "system":
+      return t("由系统中断");
+  }
 }
 
 /**
@@ -1619,6 +1636,7 @@ function SuperSessionRow({
         icon: <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />,
       }
     : statusVisual(session);
+  const interruptSourceLabel = interruptedByLabel(session);
   const description = shortSuperSessionDescription(session);
   // A restored child ran in a PREVIOUS extension lifetime: its CLI process
   // is gone, so there is no live transcript to show and nothing to retry.
@@ -1693,6 +1711,11 @@ function SuperSessionRow({
           <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
             {session.title}
           </span>
+          {interruptSourceLabel && (
+            <span className="shrink-0 text-ui-micro text-muted-foreground">
+              {interruptSourceLabel}
+            </span>
+          )}
           <QqTaskTags session={session} />
           <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground">
             {elapsedText(session, now)}
@@ -1975,6 +1998,7 @@ function SuperSessionLive({
   // transcript, so live activity keeps the newest tool call in view.
   const liveStick = useRef(true);
   const chip = statusVisual(session);
+  const interruptSourceLabel = interruptedByLabel(session);
 
   useEffect(() => {
     const el = liveRef.current;
@@ -2005,6 +2029,9 @@ function SuperSessionLive({
             {chip.icon}
             {chip.label}
           </Chip>
+          {interruptSourceLabel && (
+            <span className="text-ui-micro text-muted-foreground">{interruptSourceLabel}</span>
+          )}
           <span className="text-ui-caption tabular-nums text-muted-foreground">
             {session.startedAt === undefined
               ? elapsedText(session, now)

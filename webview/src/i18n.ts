@@ -25,6 +25,9 @@ const en: Record<string, string> = {
   "准备中": "Preparing",
   "等你回答": "Waiting for you",
   "已中断": "Interrupted",
+  "由用户中断": "Interrupted by user",
+  "由智能体中断": "Interrupted by agent",
+  "由系统中断": "Interrupted by system",
   "不弹审批": "No approval prompts",
   "子会话里的工具调用（包括运行命令）会直接执行，不会先征求你的同意":
     "Tool calls in a child session — shell commands included — run directly, without asking you first",

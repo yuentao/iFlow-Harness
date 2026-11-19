@@ -1712,3 +1712,47 @@ describe("Super Agent 看板入口运行态炫光", () => {
     expect(block).not.toMatch(/text-\[\d+px\]|rounded-\[\d+px\]/);
   });
 });
+
+describe("Super Agent 看板 · 已中断状态危险色与中断来源", () => {
+  function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  it("已中断状态用危险色（与失败同级），折叠行 chip 带 text-destructive", () => {
+    render([session({ status: "cancelled", interruptedBy: "user" })]);
+    expand();
+    const statusChip = rowTrigger().querySelector<HTMLElement>(".text-destructive");
+    expect(statusChip).toBeTruthy();
+    expect(statusChip!.textContent).toContain("已中断");
+  });
+
+  it.each([
+    ["user", "由用户中断"],
+    ["agent", "由智能体中断"],
+    ["system", "由系统中断"],
+  ] as const)("interruptedBy=%s 时标题旁显示「%s」", (source, label) => {
+    render([session({ status: "cancelled", interruptedBy: source })]);
+    expand();
+    expect(rowTrigger().textContent).toContain(label);
+  });
+
+  it("非已中断状态不显示中断来源小字", () => {
+    render([session({ status: "running", interruptedBy: "user" })]);
+    expand();
+    expect(rowTrigger().textContent).not.toContain("由用户中断");
+  });
+
+  it("已中断但无来源（理论缺省）时不显示任何来源小字", () => {
+    render([session({ status: "cancelled" })]);
+    expand();
+    const text = rowTrigger().textContent ?? "";
+    expect(text).toContain("已中断");
+    expect(text).not.toContain("由用户中断");
+    expect(text).not.toContain("由智能体中断");
+    expect(text).not.toContain("由系统中断");
+  });
+});
