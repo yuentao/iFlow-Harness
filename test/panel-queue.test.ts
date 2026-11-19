@@ -99,6 +99,28 @@ async function flush(): Promise<void> {
 }
 
 /**
+ * 跨平台清理临时存储目录。
+ *
+ * Linux CI 上 checkpoint 的异步落盘可能在 rmSync 递归删除的途中重建
+ * `checkpoints/<session>`，即使 rmSync 自带 maxRetries 也会抛 ENOTEMPTY
+ * （PR #8 的真实失败）。这里重试「整棵目录的删除」，让那次在飞写入先落定；
+ * 只对瞬态 errno 重试，真正的权限/磁盘错误照常抛出，不掩盖问题。
+ */
+async function rmStorageDir(dir: string): Promise<void> {
+  const transient = new Set(["ENOTEMPTY", "EEXIST", "EBUSY", "EPERM"]);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? "";
+      if (!transient.has(code) || attempt >= 9) throw err;
+      await new Promise((r) => setTimeout(r, 25 * (attempt + 1)));
+    }
+  }
+}
+
+/**
  * 主会话车道 / Super Agent 派发接线。
  *
  * Enter while streaming 不再入本地队列（shared/queue.ts 的入队路径已下线）：
@@ -145,7 +167,7 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rmStorageDir(storageDir);
   });
 
   const send = (text: string): Promise<void> => p.handleWebviewMessage({ type: "sendPrompt", text });
@@ -611,7 +633,7 @@ describe("ChatPanel 停止生成", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rmStorageDir(storageDir);
   });
 
   it("请求还没发出时按停止：这一轮不会被发出去，按 cancelled 收尾", async () => {

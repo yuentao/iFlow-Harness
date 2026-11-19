@@ -265,7 +265,9 @@ describe("超流体实时进度面板", () => {
     expect(dialog!.getAttribute("aria-label")).toBe("超流体实时进度");
     expect(dialog!.textContent).toContain(USER_TASK);
 
-    const close = document.querySelector<HTMLButtonElement>('[role="dialog"] [aria-label="收起"]');
+    // ModalShell 的关闭按钮统一为 t("关闭")（ui.tsx）；「收起」是看板折叠
+    // 控件的标签，不是弹框关闭按钮 —— 这里按产品的真实语义查找。
+    const close = document.querySelector<HTMLButtonElement>('[role="dialog"] [aria-label="关闭"]');
     expect(close).toBeTruthy();
     act(() => close!.click());
 

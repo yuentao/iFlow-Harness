@@ -150,14 +150,31 @@ describe("P1-1 needsAction 可见性", () => {
       }),
     ]);
     expand();
-    // Only one row's detail is open at a time — check each in turn.
+    // 「需人工合并」刻意出现在两处：折叠行的警示 chip（collapsedIntegrationIssue，
+    // 让人一眼看出哪条要人工处理，切换展开行也不会抹掉）+ 展开详情里的 needsAction
+    // chip。所以断言必须限定在「当前展开行」内，不能用整个 body 的文本 —— 旧断言
+    // 把上一行折叠态的警示 chip 误当成「旧行详情没收起」。
+    const detailOf = (title: string): HTMLElement => {
+      const row = rowButton(title);
+      const wrap = row.closest<HTMLElement>("div.shrink-0");
+      expect(wrap).toBeTruthy();
+      const detail = wrap!.lastElementChild as HTMLElement | null;
+      expect(detail).toBeTruthy();
+      expect(detail).not.toBe(row.parentElement); // 必须取到展开详情，不是折叠行本身
+      return detail!;
+    };
     act(() => rowButton("改动重叠需人工").click());
-    expect(document.body.textContent).toContain("未自动合并");
-    expect(document.body.textContent).toContain("需人工合并");
+    expect(detailOf("改动重叠需人工").textContent).toContain("未自动合并");
+    expect(detailOf("改动重叠需人工").textContent).toContain("需人工合并");
 
     act(() => rowButton("中断不用管").click());
-    expect(document.body.textContent).toContain("未自动合并");
-    expect(document.body.textContent).not.toContain("需人工合并");
+    // 一次只展开一行（产品由 openRow 单选状态保证）：旧行详情确实已收起。
+    expect(rowButton("改动重叠需人工").getAttribute("aria-expanded")).toBe("false");
+    expect(rowButton("中断不用管").getAttribute("aria-expanded")).toBe("true");
+    expect(detailOf("中断不用管").textContent).toContain("未自动合并");
+    expect(detailOf("中断不用管").textContent).not.toContain("需人工合并");
+    // 折叠行上的警示 chip 仍留在那一行（刻意设计，不随展开态消失）。
+    expect(rowButton("改动重叠需人工").closest("div.shrink-0")!.textContent).toContain("需人工合并");
   });
 
   it("折叠分组里 needsAction 会话被单独计数，标题显示警示 chip", () => {
@@ -358,8 +375,13 @@ describe("P2-4 QQ 元信息 chip 窄屏收缩", () => {
     );
     expect(channel).toBeTruthy();
     expect(sender).toBeTruthy();
-    expect(channel!.className).toContain("@max-[380px]:hidden");
-    expect(sender!.className).toContain("@max-[380px]:hidden");
+    // 这两个 chip 只出现在 portal 到 document.body 的浮层里，没有 @container
+    // 祖先，所以刻意用视口查询 max-[380px]:hidden（不是 @max-[380px]:hidden）。
+    // 两条断言缺一不可：只写 toContain 的话两种写法都会通过，守不住回归。
+    expect(channel!.className).toContain("max-[380px]:hidden");
+    expect(channel!.className).not.toContain("@max-[380px]:hidden");
+    expect(sender!.className).toContain("max-[380px]:hidden");
+    expect(sender!.className).not.toContain("@max-[380px]:hidden");
     expect(channel!.className).toContain("shrink-0");
   });
 });
