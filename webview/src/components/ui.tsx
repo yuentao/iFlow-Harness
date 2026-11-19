@@ -201,29 +201,25 @@ export function ModalShell({
       <div className={`auth-modal acrylic-pop${wide ? " auth-modal-wide @container" : ""}${className ? ` ${className}` : ""}`}>
         <div className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           {onBack ? (
-            <button
-              type="button"
-              className="press -ml-1 shrink-0 rounded p-0.5 text-muted-foreground transition-colors duration-200 hover:text-foreground"
-              title={t("返回列表")}
-              aria-label={t("返回列表")}
+            <IconButton
+              icon={<ArrowLeft className={ICON_INLINE} />}
+              label={t("返回列表")}
+              size="sm"
+              className="-ml-1"
               onClick={onBack}
-            >
-              <ArrowLeft className={ICON_INLINE} />
-            </button>
+            />
           ) : (
             icon
           )}
           <span className="min-w-0 truncate text-ui-title font-semibold">{title}</span>
           {dismissible && (
-            <button
-              type="button"
-              className="press ml-auto shrink-0 rounded p-0.5 text-muted-foreground transition-colors duration-200 hover:text-foreground"
-              title={t("收起")}
-              aria-label={t("收起")}
+            <IconButton
+              icon={<X className={ICON_INLINE} />}
+              label={t("关闭")}
+              size="sm"
+              className="ml-auto"
               onClick={onClose}
-            >
-              <X className={ICON_INLINE} />
-            </button>
+            />
           )}
         </div>
         {children}
@@ -290,7 +286,7 @@ export function CountdownBar({
   const warning = remainingMs <= 60_000;
   if (quietLabel && !warning) {
     return (
-      <p className={`px-3 pb-2 text-ui-caption leading-snug text-muted-foreground/70 ${className}`}>
+      <p className={`px-3 pb-2 text-ui-caption leading-snug text-muted-foreground ${className}`}>
         {t("约 {0} 分钟后{1}", Math.ceil(remainingMs / 60_000), quietLabel)}
       </p>
     );
@@ -658,7 +654,7 @@ export function Segmented<T extends string>({
           onKeyDown={onKeyDown}
           className={
             option.value === value
-              ? "press rounded-md whitespace-nowrap bg-primary/18 px-2 py-0.5 text-ui-label font-semibold text-primary disabled:pointer-events-none disabled:opacity-40"
+              ? "press rounded-md whitespace-nowrap bg-primary/10 px-2 py-0.5 text-ui-label font-semibold text-foreground disabled:pointer-events-none disabled:opacity-40"
               : "press rounded-md whitespace-nowrap px-2 py-0.5 text-ui-label text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           }
           onClick={() => onChange(option.value)}
@@ -769,41 +765,26 @@ export function ConfirmDialog({
           (e.g. 「让智能体合并分支」) used to be clipped mid-word, which left
           the user reading 「让智能体合…」 — a truncated instruction. */}
       <div className="flex flex-wrap items-center justify-end gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2">
-        <button
-          data-autofocus
-          type="button"
-          className="press inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-md border border-border bg-editor px-3 text-ui-caption font-medium text-foreground transition-colors hover:bg-accent"
-          onClick={onCancel}
-        >
+        <Button size="sm" variant="secondary" data-autofocus onClick={onCancel}>
           {cancelLabel ?? t("取消")}
-        </button>
+        </Button>
         {actions
           ? actions.map((a) => (
-              <button
+              <Button
                 key={a.label}
-                type="button"
+                size="sm"
+                variant={a.variant === "primary" ? "primary-soft" : a.variant === "danger" ? "outline-danger" : "secondary"}
                 title={a.title}
                 disabled={a.disabled}
-                className={`press inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-md border px-3 text-ui-caption font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                  a.variant === "primary"
-                    ? "border-primary/50 bg-primary/15 text-primary hover:bg-primary/25"
-                    : a.variant === "danger"
-                      ? "border-destructive/50 bg-destructive/10 text-destructive hover:bg-destructive/20"
-                      : "border-border bg-editor text-foreground hover:bg-accent"
-                }`}
                 onClick={a.onClick}
               >
                 {a.label}
-              </button>
+              </Button>
             ))
           : (
-            <button
-              type="button"
-              className="press inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-md border border-destructive/50 bg-destructive/10 px-3 text-ui-caption font-semibold text-destructive transition-colors hover:bg-destructive/20"
-              onClick={onConfirm}
-            >
+            <Button size="sm" variant="outline-danger" onClick={onConfirm}>
               {confirmLabel ?? t("删除")}
-            </button>
+            </Button>
           )}
       </div>
     </ModalShell>,
