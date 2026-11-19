@@ -61,7 +61,22 @@ const KIND_ACTION: Record<string, string> = {
  * buttons must NOT be gated on streaming state — the agent is blocked waiting
  * for this answer.
  */
-export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
+export function ApprovalCard({
+  approval,
+  active = true,
+}: {
+  approval: PendingApprovalUi;
+  /**
+   * Whether this card is the one the user can actually see and act on.
+   * PendingCards passes `false` for cards covered by a newer arrival in the
+   * stack. `inert` (the stack's own guard) only removes a subtree from focus,
+   * hit-testing and the accessibility tree — it does NOT stop a listener on
+   * `window`, so a buried card would still approve/deny on a global Y/N that
+   * the user aimed at the visible card. The shortcut is therefore gated here,
+   * on explicit data, not on DOM position probing.
+   */
+  active?: boolean;
+}) {
   const send = useChat((s) => s.send);
   // 远程接续冻结：与 streaming 无关的全局态（陷阱 #12），接管期间任何审批
   // 决策都不得落地；卡片本身仍渲染，用户可只读查看远程在做什么。
@@ -108,6 +123,9 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   const denyOptionId = rejectOption?.optionId ?? null;
 
   useEffect(() => {
+    // A covered card must not own the keyboard: its Y/N would answer a
+    // decision the user cannot see (the top card is what they are reading).
+    if (!active) return;
     const handler = (e: KeyboardEvent) => {
       if (answered || remoteTakeover || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
       // A modal above this card (settings / confirm) owns the keyboard; the
@@ -138,7 +156,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [answered, remoteTakeover, allowOption?.optionId, denyOptionId, approval.id, send]);
+  }, [active, answered, remoteTakeover, allowOption?.optionId, denyOptionId, approval.id, send]);
 
   const actionVerb = KIND_ACTION[approval.toolKind.toLowerCase()] ?? "执行";
   const actionTarget = primary?.path || approval.toolName;

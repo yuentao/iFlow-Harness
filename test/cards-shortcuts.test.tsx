@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApprovalCard } from "../webview/src/components/ApprovalCard";
+import { PendingCards } from "../webview/src/components/PendingCards";
 import { QuestionCard } from "../webview/src/components/QuestionCard";
 import type { PendingApprovalUi, PendingQuestionsUi } from "../shared/messages";
 
@@ -145,6 +146,69 @@ it("ignores shortcuts originating from a select element", () => {
   });
   expect(send).not.toHaveBeenCalled();
   select.remove();
+});
+
+/**
+ * Safety regression: the pending overlay stacks cards and marks the buried
+ * ones `inert`, but `inert` only removes a subtree from focus / hit-testing /
+ * the accessibility tree — a `keydown` listener on `window` still fires. A
+ * covered approval card therefore used to approve a decision the user could
+ * not see, just because they pressed Y for the card on top.
+ */
+it("does not approve from a covered card: only the top card answers Y", () => {
+  act(() =>
+    root.render(
+      <>
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-under" }} active={false} />
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-top" }} />
+      </>,
+    ),
+  );
+  key("y");
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-top",
+    optionId: "allow-1",
+  });
+});
+
+it("does not deny from a covered card either: N only answers the top card", () => {
+  act(() =>
+    root.render(
+      <>
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-under" }} active={false} />
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-top" }} />
+      </>,
+    ),
+  );
+  key("n");
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-top",
+    optionId: "reject-1",
+  });
+});
+
+it("keeps a buried approval in the real stack from answering Y", () => {
+  // Approval arrives first, then a question arrives on top of it: the
+  // approval is now the covered card (`inert` in the DOM) and must be silent.
+  act(() => root.render(<PendingCards pendingApproval={APPROVAL} pendingQuestions={null} />));
+  act(() => root.render(<PendingCards pendingApproval={APPROVAL} pendingQuestions={QUESTIONS} />));
+  key("y");
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("keeps the top-most approval in the real stack answering Y", () => {
+  act(() => root.render(<PendingCards pendingApproval={null} pendingQuestions={QUESTIONS} />));
+  act(() => root.render(<PendingCards pendingApproval={APPROVAL} pendingQuestions={QUESTIONS} />));
+  key("y");
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-1",
+    optionId: "allow-1",
+  });
 });
 
 it("states the approval shortcut hint once, matching how Esc actually resolves", () => {
