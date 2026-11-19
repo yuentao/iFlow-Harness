@@ -252,6 +252,14 @@ describe("formatQqQuestionNotice", () => {
     expect(text).toContain("2. 要多大？");
     expect(text).toContain("所有问题的答案");
   });
+
+  it("传入标题时首行用标题展示，但 /qq answer 命令参数仍是短 id", () => {
+    const text = formatQqQuestionNotice("abc123", [question()], 240_000, "修一下登录问题");
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("任务「修一下登录问题」需要你回答：");
+    expect(lines[0]).not.toContain("abc123");
+    expect(text).toContain("/qq answer abc123");
+  });
 });
 
 // ---------------------------------------------------------------------------

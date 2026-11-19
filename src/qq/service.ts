@@ -164,8 +164,12 @@ export function formatQqQuestionNotice(
   shortId: string,
   questions: readonly QqRemoteQuestion[],
   timeoutMs: number,
+  title?: string,
 ): string {
-  const lines = [`任务 ${shortId} 需要你回答：`, ""];
+  // 首行是展示位：有可读标题时用标题，否则退回短 id（向后兼容）。
+  // 末尾的 /qq answer 命令参数位必须继续用 shortId，否则命令失效。
+  const label = title && title.trim() ? `「${title}」` : ` ${shortId} `;
+  const lines = [`任务${label}需要你回答：`, ""];
   questions.forEach((question, index) => {
     lines.push(`${index + 1}. ${question.question || question.header}`);
     if (question.options && question.options.length > 0) {
@@ -709,6 +713,21 @@ function previewPrompt(text: string): string {
   const flat = text.replace(/\s+/gu, " ").trim();
   if (flat.length <= QQ_PROMPT_PREVIEW_CHARS) return flat;
   return `${flat.slice(0, QQ_PROMPT_PREVIEW_CHARS - 1)}…`;
+}
+
+/**
+ * QQ 面向用户通知里的任务展示标题。
+ *
+ * 复用 {@link qqTaskTitle} 从用户原始消息派生可读标题（不重写提取逻辑），
+ * 再经 {@link previewPrompt} 压成单行、受 80 字上限约束（纯文本纪律）。
+ * 取不到可读标题时退化为短 id —— 绝不让用户看到「任务「」」这种空引号，
+ * 也不凭空造一个与任务无关的标题。
+ *
+ * 只用于**展示位**：命令参数（`/qq approve|deny|answer|discard|status|log`
+ * 的编号）必须继续用 {@link shortTaskId}，否则命令失效。
+ */
+function taskDisplayTitle(task: QqTask): string {
+  return previewPrompt(qqTaskTitle(task.payload.prompt)) || shortTaskId(task.taskId);
 }
 
 /** 附件引用：优先 URL，其次平台 fileId，最后原文件名。 */
@@ -1431,7 +1450,7 @@ export class QqService {
     const existingId = this.idempotency.get(key);
     if (existingId) {
       const existing = this.tasks.get(existingId);
-      const label = existing ? shortTaskId(existing.taskId) : shortTaskId(existingId);
+      const label = existing ? taskDisplayTitle(existing) : shortTaskId(existingId);
       await this.deliver(msg, `已受理任务 ${label}，不会重复执行。`);
       return;
     }
@@ -1523,7 +1542,7 @@ export class QqService {
         const position = this.mainQueuePosition(task.taskId);
         await this.deliver(
           msg,
-          `任务 ${shortTaskId(task.taskId)} 已排队（第 ${position} 位），主会话空闲后开始执行。`,
+          `任务 ${taskDisplayTitle(task)} 已排队（第 ${position} 位），主会话空闲后开始执行。`,
           msg.msgId,
           `qq-queued:${task.taskId}`,
         );
@@ -1532,7 +1551,7 @@ export class QqService {
       }
 
       // 历史归档 child 任务的收尾回执（真实部署不再产生 child 任务）。
-      await this.deliver(msg, `已受理任务 ${shortTaskId(task.taskId)}，排队中。`, msg.msgId);
+      await this.deliver(msg, `已受理任务 ${taskDisplayTitle(task)}，排队中。`, msg.msgId);
       this.enqueue(task.taskId);
     } catch (error) {
       // 建任务链路上任何一步写盘失败都必须回滚预留键，否则这条 msgId 永久
@@ -1790,7 +1809,7 @@ export class QqService {
           { pending: undefined },
         );
         await this.appendEvent("task_canceled", cleared.taskId, { channel: "main" });
-        await this.deliverTask(cleared, `已取消任务 ${shortTaskId(cleared.taskId)}。`);
+        await this.deliverTask(cleared, `已取消任务 ${taskDisplayTitle(cleared)}。`);
         return;
       }
       if (!result.injected) {
@@ -2108,7 +2127,7 @@ export class QqService {
     await this.appendEvent("task_failed", updated.taskId, { code, message });
     const ok = await this.deliverTaskTextWithRetry(
       updated,
-      `任务 ${shortTaskId(updated.taskId)} 失败：${message}`,
+      `任务 ${taskDisplayTitle(updated)} 失败：${message}`,
     );
     if (ok) return;
     const undelivered: QqTask = {
@@ -2143,7 +2162,7 @@ export class QqService {
     if (this.pendingApprovals.has(taskId)) {
       await this.deliverTask(
         task,
-        `任务 ${shortTaskId(taskId)} 已有待审批请求，本次请求按拒绝处理。`,
+        `任务 ${taskDisplayTitle(task)} 已有待审批请求，本次请求按拒绝处理。`,
       );
       return "deny";
     }
@@ -2192,7 +2211,7 @@ export class QqService {
       await this.deliverTaskNotice(
         waiting,
         [
-          `任务 ${shortTaskId(taskId)} 请求审批${detail}`,
+          `任务 ${taskDisplayTitle(waiting)} 请求审批${detail}`,
           `回复 /qq approve ${shortTaskId(taskId)} ${code} 批准，`,
           `/qq deny ${shortTaskId(taskId)} 拒绝（${QQ_APPROVAL_TIMEOUT_MINUTES} 分钟内有效）。`,
         ].join("\n"),
@@ -2251,7 +2270,7 @@ export class QqService {
     const updated = await this.commitStatus(cleared, "running", { pending: undefined });
     await this.deliverTaskNotice(
       updated,
-      `任务 ${shortTaskId(taskId)} 审批超时（${QQ_APPROVAL_TIMEOUT_MINUTES} 分钟），已按拒绝处理。`,
+      `任务 ${taskDisplayTitle(updated)} 审批超时（${QQ_APPROVAL_TIMEOUT_MINUTES} 分钟），已按拒绝处理。`,
       `approval-result:${taskId}:${code}:timeout`,
     );
   }
@@ -2411,7 +2430,7 @@ export class QqService {
 
     await this.deliverTaskNotice(
       waiting,
-      formatQqQuestionNotice(shortTaskId(taskId), questions, this.questionTimeoutMs),
+      formatQqQuestionNotice(shortTaskId(taskId), questions, this.questionTimeoutMs, taskDisplayTitle(waiting)),
       `answer-request:${taskId}:${++this.deliverySeqCounter}`,
     );
   }
@@ -2464,7 +2483,7 @@ export class QqService {
     const updated = await this.clearPendingAndResume(taskId, task);
     await this.deliverTaskNotice(
       updated,
-      `任务 ${shortTaskId(taskId)} 的提问已超时（${Math.max(1, Math.round(this.questionTimeoutMs / 60_000))} 分钟），已按未回答继续。`,
+      `任务 ${taskDisplayTitle(updated)} 的提问已超时（${Math.max(1, Math.round(this.questionTimeoutMs / 60_000))} 分钟），已按未回答继续。`,
       `answer-result:${taskId}:timeout:${++this.deliverySeqCounter}`,
     );
   }
@@ -2526,14 +2545,14 @@ export class QqService {
   ): Promise<void> {
     const entry = this.pendingApprovals.get(task.taskId);
     if (!entry) {
-      await this.deliverTask(task, `任务 ${shortTaskId(task.taskId)} 当前没有等待审批的请求。`);
+      await this.deliverTask(task, `任务 ${taskDisplayTitle(task)} 当前没有等待审批的请求。`);
       return;
     }
     // 验证码 + 身份双校验：群里围观者看到验证码也不能替发起者批准。
     if (!this.isApprovalActor(actorOpenid, entry)) {
       await this.deliverTask(
         task,
-        `任务 ${shortTaskId(task.taskId)} 的审批只能由发起者或管理员处理。`,
+        `任务 ${taskDisplayTitle(task)} 的审批只能由发起者或管理员处理。`,
       );
       return;
     }
@@ -2549,7 +2568,7 @@ export class QqService {
       const updated = await this.clearPendingAndResume(task.taskId, task);
       await this.deliverTaskNotice(
         updated,
-        `任务 ${shortTaskId(task.taskId)} 已批准。`,
+        `任务 ${taskDisplayTitle(updated)} 已批准。`,
         `approval-result:${task.taskId}:${entry.code}:approved`,
       );
       return;
@@ -2567,7 +2586,7 @@ export class QqService {
     const updated = await this.clearPendingAndResume(task.taskId, task);
     await this.deliverTaskNotice(
       updated,
-      `验证码错误次数过多，任务 ${shortTaskId(task.taskId)} 已按拒绝处理。`,
+      `验证码错误次数过多，任务 ${taskDisplayTitle(updated)} 已按拒绝处理。`,
       `approval-result:${task.taskId}:${entry.code}:denied`,
     );
   }
@@ -2575,13 +2594,13 @@ export class QqService {
   private async denyTask(task: QqTask, actorOpenid?: string): Promise<void> {
     const entry = this.pendingApprovals.get(task.taskId);
     if (!entry) {
-      await this.deliverTask(task, `任务 ${shortTaskId(task.taskId)} 当前没有等待审批的请求。`);
+      await this.deliverTask(task, `任务 ${taskDisplayTitle(task)} 当前没有等待审批的请求。`);
       return;
     }
     if (!this.isApprovalActor(actorOpenid, entry)) {
       await this.deliverTask(
         task,
-        `任务 ${shortTaskId(task.taskId)} 的审批只能由发起者或管理员处理。`,
+        `任务 ${taskDisplayTitle(task)} 的审批只能由发起者或管理员处理。`,
       );
       return;
     }
@@ -2589,7 +2608,7 @@ export class QqService {
     const updated = await this.clearPendingAndResume(task.taskId, task);
     await this.deliverTaskNotice(
       updated,
-      `任务 ${shortTaskId(task.taskId)} 已拒绝。`,
+      `任务 ${taskDisplayTitle(updated)} 已拒绝。`,
       `approval-result:${task.taskId}:${entry.code}:denied`,
     );
   }
@@ -2599,7 +2618,7 @@ export class QqService {
     if (!pending) {
       await this.deliverTask(
         task,
-        `任务 ${shortTaskId(task.taskId)} 当前没有等待回答的问题。`,
+        `任务 ${taskDisplayTitle(task)} 当前没有等待回答的问题。`,
       );
       return;
     }
@@ -2624,8 +2643,8 @@ export class QqService {
     await this.deliverTaskNotice(
       updated,
       delivered
-        ? `任务 ${shortTaskId(task.taskId)} 的回答已提交给 agent。`
-        : `任务 ${shortTaskId(task.taskId)} 的提问已结束，但回答未能送达 agent（提问可能已超时）。`,
+        ? `任务 ${taskDisplayTitle(updated)} 的回答已提交给 agent。`
+        : `任务 ${taskDisplayTitle(updated)} 的提问已结束，但回答未能送达 agent（提问可能已超时）。`,
       `answer-result:${task.taskId}:${++this.deliverySeqCounter}`,
     );
   }
@@ -2646,7 +2665,7 @@ export class QqService {
     if (isTerminalStatus(current.status)) {
       await this.deliverTask(
         current,
-        `任务 ${shortTaskId(current.taskId)} 已结束（${qqTaskStatusLabel(current.status)}）。`,
+        `任务 ${taskDisplayTitle(current)} 已结束（${qqTaskStatusLabel(current.status)}）。`,
       );
       return;
     }
@@ -2706,7 +2725,7 @@ export class QqService {
       });
       await this.deliverTask(
         failed,
-        `任务 ${shortTaskId(failed.taskId)} 取消失败（${failures.join("；")}）。` +
+        `任务 ${taskDisplayTitle(failed)} 取消失败（${failures.join("；")}）。` +
           "任务可能仍在运行，请重试 /qq stop。",
       );
       return;
@@ -2723,8 +2742,8 @@ export class QqService {
     await this.deliverTask(
       updated,
       wasQueued
-        ? `已取消排队中的任务 ${shortTaskId(updated.taskId)}。`
-        : `已请求停止任务 ${shortTaskId(updated.taskId)}。`,
+        ? `已取消排队中的任务 ${taskDisplayTitle(updated)}。`
+        : `已请求停止任务 ${taskDisplayTitle(updated)}。`,
     );
   }
 
@@ -2734,7 +2753,7 @@ export class QqService {
     if (!superSessionId) {
       await this.deliverTask(
         current,
-        `任务 ${shortTaskId(current.taskId)} 没有可合并的分支。`,
+        `任务 ${taskDisplayTitle(current)} 没有可合并的分支。`,
       );
       return;
     }
@@ -2747,13 +2766,13 @@ export class QqService {
     if (result.ok) {
       await this.deliverTask(
         current,
-        `任务 ${shortTaskId(current.taskId)} 已合并：${result.detail}`,
+        `任务 ${taskDisplayTitle(current)} 已合并：${result.detail}`,
       );
       return;
     }
     await this.deliverTask(
       current,
-      `任务 ${shortTaskId(current.taskId)} 合并失败：${result.detail}`,
+      `任务 ${taskDisplayTitle(current)} 合并失败：${result.detail}`,
     );
   }
 
@@ -2772,7 +2791,9 @@ export class QqService {
    */
   private async discardTask(task: QqTask, force: boolean = false): Promise<void> {
     const current = this.tasks.get(task.taskId) ?? task;
-    const label = shortTaskId(current.taskId);
+    // 展示位用可读标题；命令参数位（/qq discard <短id> --force）必须用短 id。
+    const label = taskDisplayTitle(current);
+    const shortId = shortTaskId(current.taskId);
     // 幂等：已经丢弃过的任务再丢一次只回一句实话，不重写记录 —— 否则
     // 「子会话已不在」会被记成一条新的「丢弃失败」，把「已丢弃」盖脏。
     if (current.status === "discarded") {
@@ -2798,7 +2819,7 @@ export class QqService {
         "discard_refused",
         `任务 ${label} 尚未结束（${qqTaskStatusLabel(current.status)}），` +
           "不能直接丢弃。请先 /qq stop 停止它；如确需强制丢弃，请用 " +
-          `/qq discard ${label} --force（未提交的改动会丢失）。`,
+          `/qq discard ${shortId} --force（未提交的改动会丢失）。`,
       );
       return;
     }
@@ -2911,7 +2932,7 @@ export class QqService {
     if (!superSessionId) {
       await this.deliverProgressLike(
         current,
-        `任务 ${shortTaskId(current.taskId)} 尚未派发，没有结果可刷新。`,
+        `任务 ${taskDisplayTitle(current)} 尚未派发，没有结果可刷新。`,
         "undispatched",
       );
       return;
@@ -2920,7 +2941,7 @@ export class QqService {
     if (!outcome) {
       await this.deliverProgressLike(
         current,
-        `任务 ${shortTaskId(current.taskId)} 暂时读取不到结果。`,
+        `任务 ${taskDisplayTitle(current)} 暂时读取不到结果。`,
         "unreadable",
       );
       return;
@@ -2944,7 +2965,7 @@ export class QqService {
       // 正文不变 ⇔ 指纹不变，状态迁移但文本相同的情形也不会重发。
       await this.deliverProgressLike(
         current,
-        `任务 ${shortTaskId(current.taskId)} 尚未结束${statusNote}，结束后结果会自动送达；如需查询可回复 /qq status ${current.taskId}。`,
+        `任务 ${taskDisplayTitle(current)} 尚未结束${statusNote}，结束后结果会自动送达；如需查询可回复 /qq status ${current.taskId}。`,
         "progress",
       );
       return;
@@ -3296,9 +3317,9 @@ export class QqService {
   private formatDiff(task: QqTask): string {
     const changes = task.result?.changes ?? [];
     if (changes.length === 0) {
-      return `任务 ${shortTaskId(task.taskId)} 没有记录的改动。`;
+      return `任务 ${taskDisplayTitle(task)} 没有记录的改动。`;
     }
-    const lines = [`任务 ${shortTaskId(task.taskId)} 改动（${changes.length} 个文件）`];
+    const lines = [`任务 ${taskDisplayTitle(task)} 改动（${changes.length} 个文件）`];
     for (const change of changes.slice(0, 30)) {
       lines.push(`  +${change.additions} -${change.deletions}  ${change.path}`);
     }
@@ -3819,7 +3840,7 @@ export class QqService {
     task: QqTask,
     options: { neverRan?: boolean } = {},
   ): Promise<void> {
-    const label = shortTaskId(task.taskId);
+    const label = taskDisplayTitle(task);
     const text =
       options.neverRan === true
         ? `任务 ${label} 因扩展宿主重启**未执行**（排队消息不会保留），请重新发送。`

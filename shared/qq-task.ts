@@ -874,7 +874,10 @@ function indentBlock(text: string): string {
 export function formatQqTaskSummary(task: QqTask, detail: QqResultDetail): string {
   const lines: string[] = [];
   const result = task.result;
-  lines.push(`QQ 任务 ${shortTaskId(task.taskId)}`);
+  // 首行用人类可读的任务标题代替裸短 id（后者对用户毫无意义）；取不到标题
+  // 时退化为短 id，绝不出现「QQ 任务 」这种空标题。末尾的命令参数位保持
+  // 完整 taskId 不变（/qq status / /qq log 依赖它）。
+  lines.push(`QQ 任务 ${qqTaskTitle(task.payload.prompt) || shortTaskId(task.taskId)}`);
   lines.push(`状态  ${qqTaskStatusLabel(task.status)} (${task.status})`);
   lines.push(`耗时  ${formatDuration(task.updatedAt - task.createdAt)}`);
 

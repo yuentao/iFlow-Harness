@@ -491,6 +491,32 @@ describe("QqService — 审批桥", () => {
     expect(f.notes.some((line) => line.includes("等待审批"))).toBe(true);
   });
 
+  it("审批回执首行用任务标题，但 /qq approve|deny 命令参数保留短 id", async () => {
+    const f = makeService();
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      await input.onPermission({
+        sessionId: "s-title",
+        toolName: "run_shell_command",
+        summary: "运行测试",
+      });
+      return { superSessionId: "super-title" };
+    };
+
+    await f.service.handleInboundMessage(inbound({ msgId: "a-title" }));
+    await waitFor(() => lastTask(f).status === "waiting_approval");
+    const taskId = lastTask(f).taskId;
+    const message = f.delivered.find((item) => item.text.includes("/qq approve"))!;
+    const firstLine = message.text.split("\n")[0]!;
+
+    // 首行是展示位：用户消息「修一下这个问题」当标题，不再是裸短 id。
+    expect(firstLine).toContain("任务 修一下这个问题 请求审批");
+    expect(firstLine).not.toContain(`任务 ${shortTaskId(taskId)} 请求审批`);
+    // 关键回归：命令参数位必须仍是短 id，否则回复的命令无法定位任务。
+    expect(message.text).toContain(`/qq approve ${shortTaskId(taskId)} `);
+    expect(message.text).toContain(`/qq deny ${shortTaskId(taskId)} 拒绝`);
+  });
+
   it("错误验证码保留机会，连续三次错误按拒绝处理", async () => {
     const f = makeService();
     let decision: SuperPermissionDecision | undefined;
@@ -1402,10 +1428,15 @@ describe("QqService — 命令处理", () => {
     await f.service.start();
 
     await f.service.handleInboundMessage(inbound({ text: "/qq status abc1" }));
-    expect(f.delivered.at(-1)?.text).toContain("QQ 任务 abc123");
+    // 摘要首行展示可读标题，不再是裸短 id。
+    expect(f.delivered.at(-1)?.text).toContain("任务 T-seed-abc123");
+    expect(f.delivered.at(-1)?.text).not.toContain("QQ 任务 abc123");
 
     await f.service.handleInboundMessage(inbound({ text: "/qq status abc" }));
     expect(f.delivered.at(-1)?.text).toContain("命中 2 个任务");
+    // 歧义提示里的短 id 是用户辨识并输入更长编号的依据，必须保留。
+    expect(f.delivered.at(-1)?.text).toContain(shortTaskId("T-seed-abc123"));
+    expect(f.delivered.at(-1)?.text).toContain(shortTaskId("T-seed-abc456"));
 
     await f.service.handleInboundMessage(inbound({ text: "/qq status zzz" }));
     expect(f.delivered.at(-1)?.text).toContain("未找到任务");
@@ -2591,6 +2622,36 @@ describe("QqService — 主会话中间正文轮同步", () => {
     await f.service.deliverMainTurnText("mt-long", text);
     expect(f.delivered.length).toBeGreaterThan(1);
     expect(f.delivered.map((d) => d.text).join("")).toBe(text);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 展示位标题化回归：标题化只作用于展示位，命令参数 / 空标题 / 歧义键不动
+// ---------------------------------------------------------------------------
+
+describe("QqService — 通知展示位标题化", () => {
+  it("空标题时展示位退化为短 id，不出现空引号", async () => {
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-untitled",
+      seedTask("T-seed-untitled", "succeeded", {
+        payload: { prompt: "  \n ##  \n ", attachments: [], contexts: [] },
+        result: {
+          stopReason: "end_turn",
+          summary: "完成",
+          changes: [{ path: "src/a.ts", additions: 1, deletions: 0 }],
+          artifacts: [],
+        },
+      }),
+    );
+    const f = makeService({ store, now: () => 100 });
+    await f.service.start();
+
+    await f.service.handleInboundMessage(inbound({ text: "/qq diff titled" }));
+    const text = f.delivered.at(-1)?.text ?? "";
+    expect(text.split("\n")[0]).toBe(`任务 ${shortTaskId("T-seed-untitled")} 改动（1 个文件）`);
+    expect(text).not.toContain("任务「」");
+    expect(text).not.toContain("任务 改动");
   });
 });
 
