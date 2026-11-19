@@ -116,6 +116,16 @@ export interface QqDeliveryOutcome {
   ok: boolean;
   /** 适配器明确判定失败不值得重试（确定性拒绝）时才有值；缺省视为可重试。 */
   retryable?: boolean;
+  /**
+   * 平台拒绝的**原始文案**（含平台错误码，例如
+   * 「QQBot: 业务错误 40054（主动消息额度已用尽）」）。
+   *
+   * 为什么不能丢：这一层原先在 `src/panel/qqbot-host.ts` 被直接扔掉，导致
+   * ① 面板与 `health().detail` 看不到真实拒绝原因；② 任务记录里只有一句
+   * 「未能送达」，没有错误码；③ 用户无从判断是额度用尽、回复窗口过期还是
+   * 频率限制。透传后上层才谈得上「如实留痕」。
+   */
+  error?: string;
 }
 
 /** 发往 QQ 的文本消息。 */
@@ -465,6 +475,43 @@ export const QQ_MAIN_TURN_TEXT_MIN_CHARS = 2;
 /** 结果彻底没能送达 QQ 时记录在任务上的文案。 */
 export const QQ_RESULT_UNDELIVERED = "结果未能送达 QQ（被动回复与主动消息均失败）";
 /**
+ * 一次逻辑投递的**通道顺序**（QQ 出站有两条通道，两条都会失败）。
+ *
+ *  - **被动回复**：带 `msg_id`，绑定在用户那条消息上。同一 `msg_id` 的回复
+ *    条数有上限（常见口径 5 条），超限平台直接拒绝；回复窗口过期也会被拒。
+ *  - **主动消息**：不带 `msg_id`，机器人主动推送。需要额度，额度用尽会被
+ *    平台以业务错误码拒绝（实测错误码 40054「主动消息额度已用尽」）。
+ *
+ * 两条通道的失败原因互不相同，因此**任何投递都不能只有一条路**：先走哪条
+ * 由计划决定，但**失败必须回退到另一条** —— 绝不因为「乐观判断这条一定通」
+ * 就把用户仅剩的一条通道丢掉（长任务的最终答复曾因此被静默丢弃）。
+ */
+export type QqDeliveryPlan =
+  /** 先被动回复（短任务的默认：回复窗口还开着），失败回退主动消息。 */
+  | "passive-first"
+  /** 先主动消息（长任务的最终答复：被动窗口通常已关），失败回退被动回复。 */
+  | "active-first"
+  /**
+   * 只走主动消息。
+   *
+   * 仅用于「进程换了一茬」之后的补发（重启补发 / 中断通知）：adapter 的
+   * `replySeq` 是纯内存的，进程重启后从 1 重开，被动回复的 `(msg_id, seq)`
+   * 会与重启前用过的键撞上，被平台**静默去重** —— 接口回「成功」但用户
+   * 什么都没收到。这正是本轮要消灭的「静默丢弃」，所以这里宁可如实报失败，
+   * 也不冒险用一条会被静默吞掉的被动回复冒充送达。
+   */
+  | "active-only";
+/**
+ * 超长内容被压缩后单条消息的正文长度上限。
+ *
+ * 沿用**现有档位约定**：standard 档的摘要正文就是 1200 字符
+ * （`shared/qq-task.ts` 的 `STANDARD_SUMMARY_MAX_CHARS`），压缩版按同一
+ * 预算截断 —— 与用户在标准档看到的摘要长度一致，不新增任意数值。
+ */
+export const QQ_COMPRESSED_CHUNK_MAX_CHARS = 1_200;
+/** 超长内容被压缩后附带的指引：完整正文在 iFlow 面板里。 */
+export const QQ_PANEL_FULL_CONTENT_NOTICE = "（完整内容见 iFlow 面板）";
+/**
  * 运行中刷新的进度消息最小投递间隔（毫秒）。
  *
  * QQ 同一个 `msg_id` 的被动回复条数有上限（常见口径 5 条，见
@@ -583,6 +630,29 @@ export function qqDetailProfile(value: string | undefined): QqDetailProfile {
     if (profile) return profile;
   }
   return DEFAULT_DETAIL_PROFILE;
+}
+
+/**
+ * 把一片超长的正文压成「摘要 + 完整内容见面板」。
+ *
+ * 用途：平台把「整片太长」拒收时（两条通道都失败），用压缩版再兜底一次 ——
+ * 读者至少拿到结论与指引，完整正文仍在 iFlow 面板里（面板是内容的权威副本）。
+ *
+ * 压缩长度沿用**现有档位约定**：standard 档的摘要正文预算就是 1200 字符
+ * （`shared/qq-task.ts` 的 `STANDARD_SUMMARY_MAX_CHARS`），这里取它与该档位
+ * 分片预算的较小值 —— 不新增任意数值，也不改既有截断语义。
+ */
+export function compressQqChunk(chunk: string, profile: QqDetailProfile): string {
+  const budget = Math.max(
+    1,
+    Math.min(QQ_COMPRESSED_CHUNK_MAX_CHARS, Math.max(1, profile.chunkChars)),
+  );
+  const points = Array.from(chunk);
+  if (points.length <= budget) return chunk;
+  const head = points
+    .slice(0, Math.max(0, budget - QQ_PANEL_FULL_CONTENT_NOTICE.length))
+    .join("");
+  return `${head}${QQ_PANEL_FULL_CONTENT_NOTICE}`;
 }
 
 /**
@@ -1224,10 +1294,16 @@ export class QqService {
         continue;
       }
       try {
-        // 重启补发走主动消息：adapter 的 replySeq 是纯内存的，进程换了以后
-        // 从 1 重开，与重启前已用的 (msg_id, seq) 撞车会被平台静默去重
-        // —— 结果缺尾却写成「已送达」。主动消息不带 msg_id，天然绕开该去重键。
-        await this.deliverResult(task, { forceActive: true });
+        // 重启补发走主动消息（active-only）：adapter 的 replySeq 是纯内存的，
+        // 进程换了以后从 1 重开，与重启前已用的 (msg_id, seq) 撞车会被平台
+        // 静默去重 —— 结果缺尾却写成「已送达」。主动消息不带 msg_id，天然绕开
+        // 该去重键。
+        //
+        // 这一条**故意不回退**被动通道：重启后被动回复的 seq 会与重启前撞键，
+        // 回退过去大概率被平台静默吞掉（接口回「成功」而用户什么都没收到）
+        // —— 那正是本轮要消灭的「静默丢弃」。宁可如实记失败并让用户用
+        // /qq result 重新获取。
+        await this.deliverResult(task, { plan: "active-only" });
       } catch (error) {
         this.log(`QQ 任务 ${task.taskId} 重启补发终态结果失败：${errorText(error)}`);
       }
@@ -1878,9 +1954,18 @@ export class QqService {
    * 主会话渠道的最终答复回传：子会话汇报汇总轮结束后由宿主调用。
    *
    * 只收尾「已注入、仍在等最终答复」的主渠道任务；终态检查 + `resultDeliveredAt`
-   * 幂等锚点保证重复调用不会给 QQ 发第二条矛盾消息。长任务下被动回复的
-   * `(msg_id, msg_seq)` 窗口（adapter 的 REPLY_SEQ_TTL_MS）往往已关闭，复用它
-   * 会被平台静默去重，因此这里强制走主动消息，确保长任务的最终回执不被吞。
+   * 幂等锚点保证重复调用不会给 QQ 发第二条矛盾消息。
+   *
+   * 通道顺序：**主动消息优先，失败回退被动回复**（`active-first`）。
+   *
+   * 为什么先主动：长任务下被动回复的 `(msg_id, msg_seq)` 窗口（adapter 的
+   * REPLY_SEQ_TTL_MS）往往已关闭，复用它会被平台静默去重。
+   *
+   * 为什么还要留回退：旧实现是「强制走主动消息」—— 一旦机器人没有主动消息
+   * 额度（平台以业务错误码拒绝，实测 40054「主动消息额度已用尽」），用户的
+   * **最终答复就被静默丢弃**：没有第二条通道，面板与归档里也没有任何痕迹。
+   * 现在主动失败会立刻回退到被动回复（带 `msg_id`），两条都不成才如实记
+   * `deliveryError` + 归档事件 + 日志（含平台错误码）。
    */
   async completeMainFinalAnswer(input: {
     taskId: string;
@@ -1897,7 +1982,7 @@ export class QqService {
     const stopReason = (input.stopReason ?? "").trim() || "end_turn";
     await this.finalizeMainTask(current, summary, stopReason, {
       channel: "main",
-      forceActive: true,
+      plan: "active-first",
     });
   }
 
@@ -1937,7 +2022,7 @@ export class QqService {
       failed?: boolean;
       reason?: string;
       channel?: "main" | "child";
-      forceActive?: boolean;
+      plan?: QqDeliveryPlan;
     } = {},
   ): Promise<void> {
     const current = this.tasks.get(base.taskId) ?? base;
@@ -1980,7 +2065,7 @@ export class QqService {
       updated.taskId,
       { status, stopReason, channel: options.channel ?? "main" },
     );
-    await this.deliverResult(updated, options.forceActive === true ? { forceActive: true } : undefined);
+    await this.deliverResult(updated, options.plan ? { plan: options.plan } : undefined);
   }
 
   private async finalize(
@@ -2125,19 +2210,26 @@ export class QqService {
       pending: undefined,
     });
     await this.appendEvent("task_failed", updated.taskId, { code, message });
-    const ok = await this.deliverTaskTextWithRetry(
+    const outcome = await this.deliverTaskTextWithRetry(
       updated,
       `任务 ${taskDisplayTitle(updated)} 失败：${message}`,
     );
-    if (ok) return;
+    if (outcome.ok) return;
+    const reason = outcome.error
+      ? `${QQ_RESULT_UNDELIVERED}：${outcome.error}`
+      : QQ_RESULT_UNDELIVERED;
     const undelivered: QqTask = {
       ...(this.tasks.get(updated.taskId) ?? updated),
-      deliveryError: QQ_RESULT_UNDELIVERED,
+      deliveryError: reason,
     };
     await this.persist(undelivered);
     await this.appendEvent("task_result_undelivered", updated.taskId, {
-      error: QQ_RESULT_UNDELIVERED,
+      error: reason,
+      ...(outcome.error ? { platformError: outcome.error } : {}),
     });
+    this.log(
+      `QQ 任务 ${shortTaskId(updated.taskId)} 的失败通知未能送达 QQ${outcome.error ? `：${outcome.error}` : ""}`,
+    );
     this.notify(`QQ 任务 ${shortTaskId(updated.taskId)} 的失败通知未能送达 QQ`);
   }
 
@@ -3046,7 +3138,11 @@ export class QqService {
       const chunks = chunkQqText(text, profile.chunkChars);
       ok = chunks.length > 0;
       for (let i = 0; i < chunks.length; i += 1) {
-        if (!(await this.deliverTaskTextWithRetry(task, chunks[i]!, undefined, { passive: i === 0 }))) {
+        // 首片被动优先（回复窗口还开着）；续发片主动优先，但同样保留被动回退
+        // —— 主动额度也会用尽，不能把用户最后一条通道丢掉。
+        const plan: QqDeliveryPlan = i === 0 ? "passive-first" : "active-first";
+        const outcome = await this.deliverTaskTextWithRetry(task, chunks[i]!, undefined, { plan });
+        if (!outcome.ok) {
           ok = false;
           break;
         }
@@ -3574,11 +3670,18 @@ export class QqService {
     if (replyToMsgId) payload.replyToMsgId = replyToMsgId;
     if (dedupeKey) payload.dedupeKey = dedupeKey;
     try {
-      return await this.host.deliver(payload);
+      const outcome = await this.host.deliver(payload);
+      // 平台拒绝的原始文案（含错误码）必须原样带上来：上层要靠它留痕，
+      // 绝不在这里把拒绝原因吞成一句「发送失败」。
+      if (!outcome.ok && typeof outcome.error === "string" && outcome.error.trim()) {
+        this.log(`QQ 消息投递被拒：${outcome.error.trim()}`);
+      }
+      return outcome;
     } catch (error) {
-      this.log(`QQ 消息投递失败：${errorText(error)}`);
+      const message = errorText(error);
+      this.log(`QQ 消息投递失败：${message}`);
       // host 抛错无法判定确定性：按可重试处理（保守一侧）。
-      return { ok: false, retryable: true };
+      return { ok: false, retryable: true, error: message };
     }
   }
 
@@ -3618,12 +3721,18 @@ export class QqService {
   }
 
   /**
-   * 任务侧文本的投递：先走 QQ 的「被动回复」（带 `msg_id`），失败再退回
-   * 「主动消息」（不带 `msg_id`）。
+   * 任务侧文本的投递：按 {@link QqDeliveryPlan} 走通道，**失败必须回退到
+   * 另一条通道**。
    *
    * 为什么要两条路：QQ 的被动回复绑定在用户那条消息上，回复窗口有限；长任务
-   * 跑完时窗口往往已经关掉，只有主动消息还能送到。没有主动消息额度的机器人
-   * 会被平台拒绝 —— 那就如实返回 false，由调用方记录，绝不假装送达。
+   * 跑完时窗口往往已经关掉，只有主动消息还能送到。可反过来，主动消息要额度，
+   * 额度用尽平台会以业务错误码拒绝（实测 40054「主动消息额度已用尽」）。
+   * **两条通道都会失败**，所以任何投递都不能只有一条路 —— 旧实现给最终
+   * 答复强制走主动消息（`forceActive`），一旦主动额度用尽就把用户的最终
+   * 答复**静默丢弃**：既没有第二条通道可退，面板与归档里也没有任何痕迹。
+   *
+   * 现在的纪律：先走计划里的那条，失败立刻回退到另一条；两条都不成时把
+   * **平台错误码与文案**如实带回（`error`），由调用方留痕，绝不假装送达。
    *
    * 平台边界（口径来自 QQ 开放平台机器人消息 API 的社区/文档共识，**未实测
    * 核验**，具体数字以官方文档为准）：同一个 `msg_id` 的被动回复条数有限
@@ -3636,35 +3745,45 @@ export class QqService {
     task: QqTask,
     text: string,
     dedupeKey?: string,
-    options?: { passive?: boolean },
+    options?: { plan?: QqDeliveryPlan },
   ): Promise<QqDeliveryOutcome> {
-    // passive === false：跳过被动回复，直接走主动消息（不带 msg_id）。用于
-    // 「续发分片」与「重启后补发」—— 这两条路径上的 (msg_id, msg_seq) 可能
-    // 与进程重启前用过的键撞车，被平台静默去重；主动消息没有这个键。
-    if (options?.passive !== false && task.source.msgId) {
-      const passive = await this.deliverOutcome(
+    const plan = options?.plan ?? "passive-first";
+    // 被动回复必须带 msg_id；没有 msg_id 时这条通道根本不存在，直接跳过。
+    const canPassive =
+      typeof task.source.msgId === "string" && task.source.msgId.trim().length > 0;
+    const channels: Array<"passive" | "active"> =
+      plan === "active-only"
+        ? ["active"]
+        : plan === "active-first"
+          ? ["active", "passive"]
+          : ["passive", "active"];
+    const failures: string[] = [];
+    let lastRetryable: boolean | undefined;
+    let deterministic = false;
+    for (const channel of channels) {
+      if (channel === "passive" && !canPassive) continue;
+      const outcome = await this.deliverOutcome(
         { chatType: task.source.chatType, chatId: task.source.chatId },
         text,
-        task.source.msgId,
-        dedupeKey,
+        channel === "passive" ? task.source.msgId : undefined,
+        // dedupeKey 只对被动回复有意义（主动消息不带 msg_id，没有去重键）。
+        channel === "passive" ? dedupeKey : undefined,
       );
-      if (passive.ok) return passive;
-      const active = await this.deliverOutcome(
-        { chatType: task.source.chatType, chatId: task.source.chatId },
-        text,
-      );
-      // 主动消息也失败时把被动回复的 retryable 透传：被动回复是确定性拒绝
-      // 的话，重试整个 attempt 只会原样再失败一遍，调用方据此短路。
-      if (!active.ok && passive.retryable === false) {
-        return { ok: false, retryable: false };
-      }
-      return active;
+      if (outcome.ok) return outcome;
+      const label = channel === "passive" ? "被动回复" : "主动消息";
+      const reason = outcome.error && outcome.error.trim() ? outcome.error.trim() : "未知原因";
+      this.log(`QQ 任务 ${task.taskId}：${label}投递失败（${reason}）`);
+      failures.push(`${label}：${reason}`);
+      lastRetryable = outcome.retryable;
+      // 确定性拒绝（4xx / 参数不合法）：重试整个 attempt 只会得到同一份拒绝。
+      if (outcome.retryable === false) deterministic = true;
     }
-    // 没有 msg_id（或显式要求主动消息）就直接主动投递（dedupeKey 无处安放）。
-    return this.deliverOutcome(
-      { chatType: task.source.chatType, chatId: task.source.chatId },
-      text,
-    );
+    // 两条通道都失败：把每条通道的拒绝原因（含平台错误码）如实带回。
+    return {
+      ok: false,
+      retryable: deterministic ? false : lastRetryable,
+      error: failures.join("；"),
+    };
   }
 
   /**
@@ -3677,20 +3796,24 @@ export class QqService {
    *     「超时但其实已送达」的重试刷成第二条消息；
    *  2. 适配器明确判定 `retryable === false`（4xx / 参数不合法这类确定性
    *     拒绝）时直接短路，不再烧重试窗口 —— 重试只会得到同一份拒绝。
+   *
+   * 返回值带 `error`：两条通道都失败时把平台拒绝原因带回给调用方留痕。
    */
   private async deliverTaskTextWithRetry(
     task: QqTask,
     text: string,
     dedupeKey?: string,
-    options?: { passive?: boolean },
-  ): Promise<boolean> {
+    options?: { plan?: QqDeliveryPlan },
+  ): Promise<{ ok: boolean; error?: string }> {
     // 调用方没给 key 时，为这一条逻辑消息分配一个新的递增 key（同一逻辑消息
     // 的全部重试共用它，adapter 据此复用同一个 msg_seq）。
     const key = dedupeKey ?? `task:${task.taskId}:${++this.deliverySeqCounter}`;
+    let lastError: string | undefined;
     for (let attempt = 1; attempt <= QQ_DELIVERY_ATTEMPTS; attempt += 1) {
       const outcome = await this.deliverTaskText(task, text, key, options);
-      if (outcome.ok) return true;
-      if (outcome.retryable === false) return false;
+      if (outcome.ok) return { ok: true };
+      if (outcome.error) lastError = outcome.error;
+      if (outcome.retryable === false) break;
       if (attempt < QQ_DELIVERY_ATTEMPTS && this.deliveryRetryDelayMs > 0) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, this.deliveryRetryDelayMs * attempt);
@@ -3698,7 +3821,7 @@ export class QqService {
         });
       }
     }
-    return false;
+    return lastError ? { ok: false, error: lastError } : { ok: false };
   }
 
   /**
@@ -3716,7 +3839,7 @@ export class QqService {
    */
   private async deliverResult(
     task: QqTask,
-    options?: { forceActive?: boolean },
+    options?: { plan?: QqDeliveryPlan },
   ): Promise<QqTask> {
     if (task.resultDeliveredAt !== undefined) return task;
     // 纵深防御：只有终态任务才允许走回包。非终态任务没有可信的摘要与停止
@@ -3738,7 +3861,7 @@ export class QqService {
   /** 分片内容的稳定指纹（djb2，非加密用途）：识别「同一份结果的分片序列」。 */
   private async deliverResultLocked(
     task: QqTask,
-    options?: { forceActive?: boolean },
+    options?: { plan?: QqDeliveryPlan },
   ): Promise<QqTask> {
     const profile = qqDetailProfile(this.config.resultDetail);
     // 投递开始时给 result 拍指纹：收尾时只有内容没被改写，才允许把这次投递
@@ -3751,7 +3874,11 @@ export class QqService {
       task.result && task.result.summary.trim().length === 0
         ? `${base}\n摘要  ${QQ_EMPTY_SUMMARY_NOTICE}`
         : base;
-    const chunks = chunkQqText(text, profile.chunkChars);
+    // 分片：单片长度不得超过该档位的单条预算（超长兜底见 buildDeliveryChunks）。
+    // 每一片都是一条独立消息（首片按计划、续片主动优先），片数越多越可能
+    // 在中途被平台拒（额度用尽 / 频率限制）；被拒的那一片还有「压缩版」兜底
+    // （见下方循环），不会整片无声丢失。
+    const chunks = this.buildDeliveryChunks(text, profile);
     const fingerprint = fingerprintChunks(chunks);
     // 上一轮部分失败时已送达的片数：内容指纹一致才续发（跳过已确认送达的
     // 片，不把收到的几片重复推给用户）；结果文本或分片档位变了就从头重发
@@ -3764,20 +3891,41 @@ export class QqService {
 
     let ok = chunks.length > 0;
     let deliveredCount = skip;
+    /** 最后一次失败的原因（含平台错误码与文案），用于留痕。 */
+    let failureReason: string | undefined;
     for (let i = skip; i < chunks.length; i += 1) {
-      // 第一片（且非重启补发）走被动回复；续发分片一律主动消息。
-      //
-      // 为什么：adapter 的 `replySeq` 是纯内存的，进程重启后从 1 重开，续发
-      // 时算出的 seq 与重启前已用过的 (msg_id, seq) 撞车会被平台**静默去重**
-      // —— 结果缺尾却仍写成「已送达」。主动消息不带 msg_id，没有这个去重键，
-      // 续发片段因此不可能被吞。重启补发整份都走主动消息（同样原因）。
-      const passive = i === 0 && options?.forceActive !== true;
-      if (await this.deliverTaskTextWithRetry(task, chunks[i]!, undefined, { passive })) {
+      // 首片走计划里的通道（默认被动回复；长任务的最终答复是主动优先）；
+      // 续发分片一律**主动优先**，但同样保留被动回退 —— 主动额度也可能用尽，
+      // 绝不能因为「续发片历来只走主动」就把用户最后一条通道也丢掉。
+      const plan: QqDeliveryPlan = i === 0 ? (options?.plan ?? "passive-first") : "active-first";
+      const chunk = chunks[i]!;
+      const outcome = await this.deliverTaskTextWithRetry(task, chunk, undefined, { plan });
+      if (outcome.ok) {
         deliveredCount = i + 1;
-      } else {
-        ok = false;
-        break;
+        continue;
       }
+      // 两条通道都失败：这一片可能被平台按「太长」拒收。用**压缩版**再兜底
+      // 一次（「摘要 + 完整内容见面板」）—— 整片因为超长被拒时不该彻底丢失，
+      // 读者至少拿到结论，完整正文仍在 iFlow 面板里。
+      //
+      // 只在「该片确实过长」时才兜底：短片被拒（例如额度用尽）重发压缩版只会被
+      // 同样拒掉，白白多烧一次投递。
+      const compressed = compressQqChunk(chunk, profile);
+      if (compressed !== chunk) {
+        const fallback = await this.deliverTaskText(task, compressed, undefined, { plan });
+        if (fallback.ok) {
+          this.log(
+            `QQ 任务 ${shortTaskId(task.taskId)}：第 ${i + 1} 片原文未送达，已用压缩版兜底（${QQ_PANEL_FULL_CONTENT_NOTICE}）`,
+          );
+          deliveredCount = i + 1;
+          continue;
+        }
+        failureReason = outcome.error ?? fallback.error;
+      } else {
+        failureReason = outcome.error;
+      }
+      ok = false;
+      break;
     }
 
     const current = this.tasks.get(task.taskId) ?? task;
@@ -3795,6 +3943,11 @@ export class QqService {
       this.notify(`QQ 任务 ${shortTaskId(task.taskId)} ${QQ_RESULT_CHANGED_WHILE_DELIVERING}`);
       return stale;
     }
+    // 两条通道都失败时把平台错误码写进任务记录：**不能只剩一句「未能送达」**，
+    // 用户与运维都要知道是被额度用尽（40054）、回复窗口过期还是频率限制。
+    const undeliveredReason = failureReason
+      ? `${QQ_RESULT_UNDELIVERED}：${failureReason}`
+      : QQ_RESULT_UNDELIVERED;
     const patched: QqTask = ok
       ? {
           ...current,
@@ -3813,8 +3966,8 @@ export class QqService {
           // 「已送达」的中间态。
           deliveryError:
             deliveredCount > 0
-              ? `结果未能送达 QQ：已送达 ${deliveredCount}/${chunks.length} 片，剩余 ${chunks.length - deliveredCount} 片因主动消息不可用未送达。可回复 /qq result ${shortTaskId(task.taskId)} 重新获取（续发只补未送达的片，不重复已收内容）`
-              : QQ_RESULT_UNDELIVERED,
+              ? `结果未能送达 QQ：已送达 ${deliveredCount}/${chunks.length} 片，剩余 ${chunks.length - deliveredCount} 片因主动消息不可用未送达${failureReason ? `（${failureReason}）` : ""}。可回复 /qq result ${shortTaskId(task.taskId)} 重新获取（续发只补未送达的片，不重复已收内容）`
+              : undeliveredReason,
           // 锚点与错误一起写：只有确认送达的片才计数，绝不虚构送达状态。
           resultDeliveredChunks:
             deliveredCount > 0 ? { count: deliveredCount, fingerprint } : undefined,
@@ -3824,12 +3977,37 @@ export class QqService {
     if (ok) {
       await this.appendEvent("task_result_delivered", task.taskId);
     } else {
+      // 归档事件带平台错误码：这是「静默丢弃」变成「可追溯丢弃」的关键。
       await this.appendEvent("task_result_undelivered", task.taskId, {
         error: patched.deliveryError,
+        ...(failureReason ? { platformError: failureReason } : {}),
       });
+      // 宿主输出通道：平台错误码与文案原样留痕（面板与 health 之外的第三条
+      // 留痕路径 —— 排查时不用翻面板）。
+      this.log(
+        `QQ 任务 ${shortTaskId(task.taskId)} 结果未能送达 QQ` +
+          (failureReason ? `：${failureReason}` : ""),
+      );
       this.notify(`QQ 任务 ${shortTaskId(task.taskId)} ${QQ_RESULT_UNDELIVERED}`);
     }
     return patched;
+  }
+
+  /**
+   * 结果正文的分片：单片长度不得超过该档位的单条预算。
+   *
+   * `chunkQqText` 已经按保守上限（{@link QQ_CHUNK_MAX_CHARS} 码点 /
+   * {@link QQ_CHUNK_MAX_BYTES} 字节）切过片，正常情况下这里不会触发；它是
+   * 一道**兜底**：万一上限被放宽到超过平台真实长度，整片会被按「太长」拒收
+   * 而毫无兜底地丢掉。这里先压到档位预算再发。压缩长度沿用现有档位约定
+   * （standard 档摘要预算 1200 字符），**不改**既有分片语义。
+   */
+  private buildDeliveryChunks(text: string, profile: QqDetailProfile): string[] {
+    const chunks = chunkQqText(text, profile.chunkChars);
+    const budget = Math.max(1, profile.chunkChars);
+    return chunks.map((chunk) =>
+      Array.from(chunk).length > budget ? compressQqChunk(chunk, profile) : chunk,
+    );
   }
 
   /**
@@ -3846,13 +4024,21 @@ export class QqService {
         ? `任务 ${label} 因扩展宿主重启**未执行**（排队消息不会保留），请重新发送。`
         : `任务 ${label} 因扩展宿主重启而中断（未完成）。`;
     // 主动消息：这条通知只在「进程换了一茬」之后发，被动回复的 seq 会从 1
-    // 重开，与重启前的已受理回执撞键会被平台静默去重。
-    if (await this.deliverTaskTextWithRetry(task, text, undefined, { passive: false })) return;
-    const current = this.tasks.get(task.taskId) ?? task;
-    await this.persist({ ...current, deliveryError: QQ_RESULT_UNDELIVERED });
-    await this.appendEvent("task_result_undelivered", task.taskId, {
-      error: QQ_RESULT_UNDELIVERED,
+    // 重开，与重启前的已受理回执撞键会被平台静默去重（接口回「成功」但用户
+    // 什么都没收到）。因此这一条**不回退**到被动通道 —— 那正是本轮要消灭的
+    // 「静默丢弃」；宁可如实报失败。
+    const outcome = await this.deliverTaskTextWithRetry(task, text, undefined, {
+      plan: "active-only",
     });
+    if (outcome.ok) return;
+    const reason = outcome.error ? `${QQ_RESULT_UNDELIVERED}：${outcome.error}` : QQ_RESULT_UNDELIVERED;
+    const current = this.tasks.get(task.taskId) ?? task;
+    await this.persist({ ...current, deliveryError: reason });
+    await this.appendEvent("task_result_undelivered", task.taskId, {
+      error: reason,
+      ...(outcome.error ? { platformError: outcome.error } : {}),
+    });
+    this.log(`QQ 任务 ${shortTaskId(task.taskId)} 的中断通知未能送达 QQ${outcome.error ? `：${outcome.error}` : ""}`);
     this.notify(`QQ 任务 ${shortTaskId(task.taskId)} 的中断通知未能送达 QQ`);
   }
 }
