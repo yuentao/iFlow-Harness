@@ -1515,7 +1515,7 @@ export class ChatPanel implements vscode.Disposable {
    * 每条都带**归属主会话**：排队期间用户可能切了会话，A 的汇报不能投进
    * B 的对话（投错会话 = 串台）。
    */
-  private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean; fallbackText?: string }> = [];
+  private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean; fallbackText?: string; suppressQqProgress?: boolean }> = [];
   /**
    * 已经执行完、等着回执给主会话的子会话管理动作（先进先出）。
    *
@@ -9424,6 +9424,10 @@ export class ChatPanel implements vscode.Disposable {
       const prev = this.qqTaskFinalText.get(taskId);
       this.qqTaskFinalText.set(taskId, prev ? `${prev}\n${own}` : own);
     }
+    // 本批是否全是「被中断」的子会话（用户点取消 / 面板关闭）。这类通知是
+    // 宿主注入的纯 host-state，不是新结论 —— 一次取消会连带状态上报 + 动作
+    // 回执两条通知，各自的 assistant 转述若都转发到 QQ 就是重复投递。
+    const allDropped = batch.length > 0 && batch.every((entry) => entry.report.state === "dropped");
     this.pendingSuperReportPrompts.push({
       mainSessionId: reportOwner,
       text,
@@ -9431,6 +9435,7 @@ export class ChatPanel implements vscode.Disposable {
       // 只放宽提示词，绝不把这一轮变成定终局的最终回执（2026-11-19 修复）。
       final: pendingCount === 0,
       fallbackText,
+      suppressQqProgress: allDropped,
     });
     this.ensureSuperHeartbeat();
     // 用户按过停止时补一次常驻「继续处理」提示：此后才结束的子会话此前不会
@@ -9563,11 +9568,18 @@ export class ChatPanel implements vscode.Disposable {
         if (reportTurnText && owner && this.qqFinalRescueOwnerPending(owner)) {
           this.qqFinalRescueText.set(owner, reportTurnText);
         }
-        // 中间正文轮同步：非汇总的汇报轮正文只是进度，转发给该会话所有在等
-        // 最终答复的 QQ 任务。汇总轮（final=true）绝不在这里转发 —— 它的正文
-        // 由 sendPrompt 收尾时的 deliverQqMainFinalAnswer 作为最终结果投递，
-        // 两边同时发就是重复。
-        if (!item.final && reportTurnText) {
+        // 中间正文轮同步：非汇总汇报轮的 assistant 正文作为进度转给该会话所有
+        // 等最终答复的 QQ 任务。汇总轮（final=true）绝不在这里转发 —— 它的正文
+        // 由 sendPrompt 收尾的 deliverQqMainFinalAnswer 作为最终结果投递。
+        //
+        // 来源判别（2026-11-19 重复转发修复）：本批若全是「被中断」的子会话
+        // （用户点了取消 / 面板关闭），这条 [子会话状态上报] 是宿主注入的纯
+        // host-state 通知，主 Agent 对它的确认 / 复述不是给用户的新结论 ——
+        // 一次取消会连带 interrupted 状态上报 + cancel 动作回执两条通知，旧实现
+        // 把每条的 assistant 正文都当进度转发，QQ 上连续收到多条相近回复。
+        // 这类中断通知回合只缓存正文供迟到补发，不再直接投递；正常的「有子会话
+        // 完成」进度汇报仍照常转发（不削弱被节流中间正文补发等既有修复）。
+        if (!item.final && reportTurnText && item.suppressQqProgress !== true) {
           void this.deliverQqMainIntermediateText(owner, reportTurnText);
         }
         // 这一轮失败了（端点 / 内核报错）：别在心跳里连续喂下一批，留给用户
