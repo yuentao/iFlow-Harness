@@ -311,16 +311,6 @@ export function sanitizeQrLoginMessage(msg: QrLoginMessage): QrLoginMessage {
   return { ...msg, dataUrl: "", phase: "expired" };
 }
 
-/** 方便 panel 统一 post 的类型：扫码链路只会推这两种消息。 */
-export type QqBotWebviewMessage = QrLoginMessage | ManagedStatusMessage;
-
-/** 类型守卫（panel 里做收口用，避免 unknown 误投）。 */
-export function isQqBotWebviewMessage(value: unknown): value is QqBotWebviewMessage {
-  if (typeof value !== "object" || value === null) return false;
-  const type = (value as { type?: unknown }).type;
-  return type === "qqLoginQr" || type === "qqManagedStatus";
-}
-
 // ---------------------------------------------------------------------------
 // 内联 QR → PNG data URL（零新依赖）
 // ---------------------------------------------------------------------------

@@ -1990,14 +1990,6 @@ type DirectiveParse =
   | { ok: true; tasks: SuperTaskSpec[]; issues: string[] }
   | { ok: false; reason: string; issues: string[] };
 
-/**
- * 委派载荷的公共解析结果（公开入口的返回类型）。
- *
- * 与私有 {@link DirectiveParse} 同形 —— 公开入口刻意**不新增**语义，只是把
- * 同一份结果的类型暴露给外部调用方。
- */
-export type SuperTaskPayloadParse = DirectiveParse;
-
 /** 委派载荷的公共解析结果（`parseSuperDelegationPayload` 的返回类型）。 */
 export type SuperDelegationPayloadParse = DirectiveParse;
 
@@ -2025,17 +2017,6 @@ function validateDirectiveAttachments(raw: unknown): string | null {
     return `attachments[${i}] 必须是字符串或带 path 的对象`;
   }
   return null;
-}
-
-/**
- * 委派载荷的公共解析入口（已是 JSON 值）。
- *
- * 与内部正文解析使用同一份校验，只是省掉「文本 → 值」这一步：
- * 工具调用帧的 `args` 本来就是值，不必 JSON.stringify 再 JSON.parse 一趟
- * （那是热路径，每帧都跑）。
- */
-export function parseSuperTaskValue(value: unknown): SuperTaskPayloadParse {
-  return parseDirectiveValue(value);
 }
 
 /**
