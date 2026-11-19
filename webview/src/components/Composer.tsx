@@ -1718,7 +1718,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           the wait is visible instead of the row appearing from nowhere. */}
       {suggestionsLoading && (suggestions?.length ?? 0) === 0 && !suggestionsHidden && (
         <div
-          className="mb-2 flex items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-muted-foreground shadow-card"
+          className={`flex items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 ${
+            remoteTakeover ? "mb-0 max-h-0 overflow-hidden py-0 opacity-0 pointer-events-none" : "mb-2 py-1"
+          }`}
           aria-label={t("正在想下一步建议…")}
         >
           <Loader2 className="size-3 shrink-0 animate-spin" />
@@ -1732,7 +1734,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           the batch when the user actually sends) retires the row. */}
       {suggestions && suggestions.length > 0 && !suggestionsHidden && (
         <div
-          className="mb-2 flex flex-wrap items-center gap-1.5"
+          className={`flex flex-wrap items-center gap-1.5 transition-all duration-200 ${
+            remoteTakeover ? "mb-0 max-h-0 overflow-hidden py-0 opacity-0 pointer-events-none" : "mb-2"
+          }`}
           aria-label={t("iFlow 猜的下一步，点一下填进输入框")}
         >
           <span className="inline-flex shrink-0 items-center gap-1 text-ui-caption text-muted-foreground">
