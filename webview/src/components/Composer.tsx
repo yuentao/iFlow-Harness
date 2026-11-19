@@ -29,7 +29,7 @@ import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Button, CANVAS_CHIP, Dropdown, ICON_INLINE, IconButton, SearchInput, fuzzyScore } from "./ui";
+import { Button, CANVAS_CHIP, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, SearchInput, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -335,6 +335,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   // turn runs, Stop is there.
   const streaming = status === "streaming";
   const canStop = streaming && !replaying && !initializing && !remoteTakeover;
+  /** 接管态关闭接续的二次确认：确认后才真正发 stop，避免误触断掉远程会话。
+   *  ConfirmDialog 走 portal 到 body，不受本卡片 overflow-hidden / 冻结门控影响。 */
+  const [takeoverConfirmOpen, setTakeoverConfirmOpen] = useState(false);
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
   /** Non-image attachments (chips only — paths ride the sendPrompt message,
@@ -1765,7 +1768,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border bg-editor/60 shadow-card transition-all duration-300 focus-within:border-primary/50 focus-within:shadow-focus">
+      <div className={`flex min-h-0 flex-1 flex-col transition-all duration-300 ${
+        remoteTakeover ? "" : "rounded-lg border border-border bg-editor/60 shadow-card focus-within:border-primary/50 focus-within:shadow-focus"
+      }`}>
         <textarea
           ref={taRef}
           value={text}
@@ -2091,12 +2096,19 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 remoteTakeover 门控 —— 它是解冻的唯一出口，冻结自己会造成死锁。 */}
             {qqEnabled && (
               <Button
-                variant="canvas"
+                variant={remoteTakeover ? "danger" : "canvas"}
                 icon={remoteTakeover ? <Unplug className={ICON_INLINE} /> : <Radio className={ICON_INLINE} />}
-                className={remoteTakeover ? "text-primary" : ""}
                 aria-label={remoteTakeover ? t("关闭接续") : t("远程接续")}
                 title={remoteTakeover ? t("关闭远程接续，恢复本地操作") : t("开启后本地输入与审批将被冻结")}
-                onClick={() => send({ type: "qqTakeover", action: remoteTakeover ? "stop" : "start" })}
+                onClick={() => {
+                  if (remoteTakeover) {
+                    // 关闭接续是解冻的唯一出口：先二次确认，确认后才真正 stop，
+                    // 避免误触把远程会话断掉。start 路径无需确认。
+                    setTakeoverConfirmOpen(true);
+                  } else {
+                    send({ type: "qqTakeover", action: "start" });
+                  }
+                }}
               >
                 <span className="@max-[340px]:hidden">{remoteTakeover ? t("关闭接续") : t("远程接续")}</span>
               </Button>
@@ -2168,6 +2180,19 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           </div>
         </div>
       </div>
+      {takeoverConfirmOpen && (
+        <ConfirmDialog
+          title={t("确认关闭远程接续？")}
+          message={t("关闭后将恢复本地操作，远程用户将无法继续控制本会话。")}
+          confirmLabel={t("确认关闭")}
+          cancelLabel={t("取消")}
+          onCancel={() => setTakeoverConfirmOpen(false)}
+          onConfirm={() => {
+            setTakeoverConfirmOpen(false);
+            send({ type: "qqTakeover", action: "stop" });
+          }}
+        />
+      )}
     </div>
   );
 }
