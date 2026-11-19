@@ -517,6 +517,74 @@ function releasedIsolationLabel(isolation: SuperIsolation): string {
   return isolation.recycled ? t("工作目录已删除，分支保留") : t("工作目录和分支都已删除");
 }
 
+/**
+ * 单个「清理」确认文案 —— 按隔离类型如实说明宿主的实际行为。
+ *
+ * 真相来源是 `src/panel/super-agent.ts` 的 `cleanup()`，四种情况各不相同：
+ *  - `git_worktree`：工作目录里有未提交改动 → **拒绝清理**（目录不会删）；
+ *    分支上还有未合并提交 → 只删目录、保留分支；已合并或没有提交 → 目录与
+ *    分支一起删。旧文案写「未提交的改动会被一起删掉」，与「拒绝清理」相反。
+ *  - `directory`：非 git 仓库的降级隔离，直接删掉那个独立目录，没有分支。
+ *  - `repo`：合并子会话跑在主仓工作区，path 就是主仓根 —— 清理**只移除看板
+ *    记录**，绝不删主仓里的任何文件（旧文案会让人以为要删主仓）。
+ *  - 已释放（合并成功清理过 / 终态回收）：磁盘上早就没有目录与分支了，同样
+ *    只移除记录；重复清理是幂等的。
+ */
+function cleanupConfirmMessage(session: SuperSessionUi): string {
+  const isolation = session.isolation;
+  if (isolation.released) {
+    return t(
+      "移除超流体「{0}」的看板记录？它的工作目录与分支之前已经清理过，这次只删除记录。",
+      session.title,
+    );
+  }
+  switch (isolation.kind) {
+    case "repo":
+      return t(
+        "移除超流体「{0}」的看板记录？它直接跑在主工作区（没有独立工作目录与分支），清理不会删除主仓里的任何文件。",
+        session.title,
+      );
+    case "directory":
+      return t(
+        "删除超流体「{0}」的独立目录？它只有目录隔离、没有分支，目录里的全部内容会被删掉，无法恢复。",
+        session.title,
+      );
+    case "git_worktree":
+    default:
+      return t(
+        "删除超流体「{0}」的工作目录？工作目录里有未提交的改动时会被拒绝清理（请先提交或丢弃）；分支上还有未合并的提交时只删工作目录、保留分支，已合并或没有提交时分支一并删除。",
+        session.title,
+      );
+  }
+}
+
+/**
+ * 批量「清理已结束」确认文案 —— 与 {@link cleanupConfirmMessage} 同一口径。
+ *
+ * 批量入口只收仍占着磁盘目录的终态子会话（`holdsWorktree`），所以只会出现
+ * `git_worktree` 与 `directory` 两档；两者的真实行为不同，必须分开说清：
+ * 有未提交改动会被拒绝、分支是否保留由未合并提交决定、目录档没有分支。
+ */
+function bulkCleanupConfirmMessage(sessions: readonly SuperSessionUi[]): string {
+  const worktrees = sessions.filter((s) => s.isolation.kind === "git_worktree").length;
+  const directories = sessions.length - worktrees;
+  const clauses: string[] = [];
+  if (worktrees > 0) {
+    clauses.push(
+      t(
+        "删除 {0} 个 git 工作目录：有未提交的改动时会被拒绝清理；分支上还有未合并的提交时只删目录、保留分支，已合并或没有提交时分支一并删除",
+        worktrees,
+      ),
+    );
+  }
+  if (directories > 0) {
+    clauses.push(
+      t("删除 {0} 个只有目录隔离的独立目录：它们没有分支，目录内容会全部删除", directories),
+    );
+  }
+  return t("将清理 {0} 个超流体：{1}。", sessions.length, clauses.join("；"));
+}
+
 /** Stable empty transcript: returning a fresh `[]` from a zustand selector
  * would change identity on every render. */
 const EMPTY_TRANSCRIPT: Block[] = [];
@@ -611,7 +679,25 @@ function formatCostPrecise(usd: number): string {
  * is placed in viewport coordinates from the header's rect and re-measured
  * whenever the header moves or resizes.
  */
-export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement | null) => void }) {
+export function SuperAgentBoard({
+  panelRef,
+  frozen = false,
+}: {
+  panelRef?: (el: HTMLDivElement | null) => void;
+  /**
+   * 远程接管（QQ takeover）期间冻结看板的**可交互表面**。
+   *
+   * 折叠控件本身由 App 的 inert 子树包住，但展开的浮层与折叠时的待答条都
+   * `createPortal` 到 `document.body` —— 它们不在那棵子树里，App 的 inert
+   * 管不到。于是接管态下：顶栏里的控件看着是禁用的，portal 出来的浮层却仍
+   * 能点「中断 / 合并 / 清理」，甚至能回答子会话的提问，把远端正在推进的
+   * 流程打断。这里给两个 portal 表面加 inert（鼠标与键盘一起拦），并以
+   * opacity 标出冻结态；不额外加 `pointer-events-none` —— 那会让点击穿透到
+   * 浮层下面的转录区，误触到别的按钮。宿主侧还有第二层门（接管期间
+   * `handleSuperAgentAction` 直接拒绝），不靠 UI 单层保证。
+   */
+  frozen?: boolean;
+}) {
   const sessions = useChat((s) => s.state?.superSessions);
   const activeSessionId = useChat((s) => s.state?.activeSessionId ?? null);
   const send = useChat((s) => s.send);
@@ -635,12 +721,12 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   );
   const [confirmMerge, setConfirmMerge] = useState<SuperSessionUi | null>(null);
   const [confirmCleanup, setConfirmCleanup] = useState<SuperSessionUi | null>(null);
-  // Bulk cleanup snapshots the reclaimable ids at open time — recomputing while
-  // the dialog is open could silently drop a child that just turned terminal
-  // (or claim one that is still running) between the click and the confirm.
-  const [confirmCleanupAll, setConfirmCleanupAll] = useState<{ count: number; ids: string[] } | null>(
-    null,
-  );
+  // Bulk cleanup snapshots the reclaimable SESSIONS at open time — the confirm
+  // text has to name what is actually going to happen per isolation kind
+  // (git worktree vs. plain directory), and recomputing while the dialog is
+  // open could silently drop a child that just turned terminal (or claim one
+  // that is still running) between the click and the confirm.
+  const [confirmCleanupAll, setConfirmCleanupAll] = useState<SuperSessionUi[] | null>(null);
   // Cleanup is asynchronous on the host side (dispose client → delete the
   // worktree → git probes → emit). The confirm dialog closes immediately and
   // the row stays put until the host removes it, so without an optimistic flag
@@ -1224,8 +1310,11 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             ref={setPanelNode}
             role="region"
             aria-label={t("超流体待答问题")}
+            // 接管冻结：这条待答条 portal 在 body 末尾，不在 App 的 inert
+            // 子树里 —— 不在这里加 inert，远端接管时本机仍能替子会话作答。
+            inert={frozen || undefined}
             style={surfaceStyle(BOARD_STRIP_GAP)}
-            className={`stream-in fixed z-35 max-h-[40vh] overflow-y-auto rounded-lg border border-border/70 acrylic-frosted px-1 py-1${anchor ? "" : " invisible"}`}
+            className={`stream-in fixed z-35 max-h-[40vh] overflow-y-auto rounded-lg border border-border/70 acrylic-frosted px-1 py-1${anchor ? "" : " invisible"}${frozen ? " opacity-40" : ""}`}
           >
             {awaiting.map((session) => (
               <div key={session.id} className="shrink-0">
@@ -1263,8 +1352,11 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             ref={setPanelNode}
             role="region"
             aria-label={t("超流体")}
+            // 接管冻结（同待答条）：浮层 portal 在 body 末尾，App 的 inert
+            // 子树管不到它，必须在这里自己拦。
+            inert={frozen || undefined}
             style={surfaceStyle(BOARD_PANEL_GAP)}
-            className={`stream-in fixed z-35 overflow-hidden rounded-lg border border-border/70 acrylic-frosted${anchor ? "" : " invisible"}`}
+            className={`stream-in fixed z-35 overflow-hidden rounded-lg border border-border/70 acrylic-frosted${anchor ? "" : " invisible"}${frozen ? " opacity-40" : ""}`}
           >
             <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
               <span className="flex min-w-0 items-center gap-1.5 text-ui-label font-medium text-foreground">
@@ -1408,12 +1500,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                       variant="secondary"
                       size="sm"
                       icon={<Trash2 className={ICON_INLINE} />}
-                      onClick={() =>
-                        setConfirmCleanupAll({
-                          count: reclaimable.length,
-                          ids: reclaimable.map((s) => s.id),
-                        })
-                      }
+                      onClick={() => setConfirmCleanupAll(reclaimable)}
                     >
                       {t("清理已结束")}
                     </Button>
@@ -1497,10 +1584,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
       {confirmCleanup && (
         <ConfirmDialog
           title={t("清理超流体")}
-          message={t(
-            "删除超流体「{0}」的工作目录？分支上未合并的提交会保留；工作目录里尚未提交的改动会被一起删掉，无法恢复。",
-            confirmCleanup.title,
-          )}
+          message={cleanupConfirmMessage(confirmCleanup)}
           confirmLabel={t("清理")}
           onConfirm={() => {
             send({ type: "superAgent", action: "cleanup", sessionId: confirmCleanup.id });
@@ -1515,24 +1599,22 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
       {confirmCleanupAll !== null && (
         <ConfirmDialog
           title={t("清理已结束的超流体")}
-          message={t(
-            "将删除 {0} 个超流体的工作目录；它们的分支都会保留（未合并的提交不会丢），但工作目录里尚未提交的改动会被一起删掉，无法恢复。",
-            confirmCleanupAll.count,
-          )}
+          message={bulkCleanupConfirmMessage(confirmCleanupAll)}
           confirmLabel={t("清理已结束")}
           onConfirm={() => {
             // One batched request: the host cleans the whole set serially and
             // reports a single aggregate receipt. Sending one `cleanup` per
             // child made the transcript collect N identical toasts and left
             // the user unable to tell where the batch as a whole stood.
+            const ids = confirmCleanupAll.map((session) => session.id);
             send({
               type: "superAgent",
               action: "cleanupBatch",
-              sessionIds: confirmCleanupAll.ids,
+              sessionIds: ids,
             });
             // Mark every child busy at click time so each row shows its own
             // in-progress state while the host cleans them up asynchronously.
-            beginCleanup(confirmCleanupAll.ids);
+            beginCleanup(ids);
             setConfirmCleanupAll(null);
           }}
           onCancel={() => setConfirmCleanupAll(null)}

@@ -232,4 +232,19 @@ describe("接管态子会话看板冻结", () => {
     expect(wrapper!.className).toContain("pointer-events-none");
     expect(wrapper!.className).toContain("opacity-40");
   });
+
+  it("接管态：App 传给看板的 frozen 让 portal 出来的浮层也带 inert", () => {
+    renderState(true, { superSessions: [settledSuper] });
+    const control = buttonByLabel("超流体看板");
+    expect(control).toBeTruthy();
+    // jsdom 不实现 inert 的交互语义，点击仍会触发展开；这里验证的是
+    // App 把 remoteTakeover 传了下去，浮层自己带上了 inert。
+    act(() => control!.click());
+    const panelEl = document.body.querySelector<HTMLElement>(
+      '[role="region"][aria-label="超流体"]',
+    );
+    expect(panelEl).toBeTruthy();
+    expect(panelEl!.hasAttribute("inert")).toBe(true);
+    expect(panelEl!.className).toContain("opacity-40");
+  });
 });

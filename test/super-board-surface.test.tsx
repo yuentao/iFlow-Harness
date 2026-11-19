@@ -866,6 +866,49 @@ describe("Super Agent 看板清理动作", () => {
     const dialog = cleanupDialog();
     expect(dialog).toBeTruthy();
     expect(dialog!.textContent).toContain("删除超流体「修复登录跳转」的工作目录？");
+    // 宿主对未提交改动是**拒绝清理**，不是「一起删掉」——旧文案是硬伤。
+    expect(dialog!.textContent).toContain("有未提交的改动时会被拒绝清理");
+    expect(dialog!.textContent).not.toContain("会被一起删掉");
+  });
+
+  it("目录隔离的超流体：确认文案说清没有分支、目录内容全部删除", () => {
+    render([
+      session({
+        status: "completed",
+        startedAt: 2000,
+        endedAt: 4000,
+        isolation: { kind: "directory", path: "/tmp/dir" },
+      }),
+    ]);
+    expand();
+    act(() => rowTrigger().click());
+
+    act(() => cleanupButton().click());
+    const dialog = cleanupDialog();
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain("删除超流体「修复登录跳转」的独立目录？");
+    expect(dialog!.textContent).toContain("没有分支");
+    expect(dialog!.textContent).not.toContain("分支一并删除");
+  });
+
+  it("主仓工作区档（repo）：确认文案说清只移除记录、不删主仓任何文件", () => {
+    render([
+      session({
+        status: "completed",
+        startedAt: 2000,
+        endedAt: 4000,
+        isolation: { kind: "repo", path: "/repo/root" },
+      }),
+    ]);
+    expand();
+    act(() => rowTrigger().click());
+
+    act(() => cleanupButton().click());
+    const dialog = cleanupDialog();
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain("移除超流体「修复登录跳转」的看板记录？");
+    expect(dialog!.textContent).toContain("不会删除主仓里的任何文件");
+    expect(dialog!.textContent).not.toContain("删除超流体「修复登录跳转」的工作目录");
   });
 
   /** 确认框里的确认按钮（文案与操作同名，与「取消」区分）。 */
@@ -1186,8 +1229,13 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
 
     const dialog = bulkDialog();
     expect(dialog).toBeTruthy();
-    expect(dialog!.textContent).toContain("将删除 2 个超流体的工作目录");
-    expect(dialog!.textContent).toContain("它们的分支都会保留");
+    expect(dialog!.textContent).toContain("将清理 2 个超流体");
+    // 与宿主 cleanup() 的真实行为一致：未提交改动会被拒绝（不是被删），
+    // 只有未合并的提交才保留分支。
+    expect(dialog!.textContent).toContain("有未提交的改动时会被拒绝清理");
+    expect(dialog!.textContent).toContain("保留分支");
+    expect(dialog!.textContent).not.toContain("分支都会保留");
+    expect(dialog!.textContent).not.toContain("会被一起删掉");
 
     const confirm = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
       (b) => (b.textContent ?? "").trim() === "清理已结束",
@@ -1204,6 +1252,29 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
       sessionIds: ["super-a", "super-b"],
     });
     expect(bulkDialog()).toBeNull();
+  });
+
+  it("批量确认文案按隔离类型分开说明（worktree 说分支，目录说没有分支）", () => {
+    render([
+      session({ id: "super-a", title: "修复登录跳转", status: "completed", startedAt: 2000, endedAt: 4000 }),
+      session({
+        id: "super-b",
+        title: "补充单测",
+        status: "failed",
+        startedAt: 2000,
+        endedAt: 4000,
+        isolation: { kind: "directory", path: "/tmp/dir" },
+      }),
+    ]);
+    expand();
+
+    act(() => bulkButton()!.click());
+    const dialog = bulkDialog();
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain("删除 1 个 git 工作目录");
+    expect(dialog!.textContent).toContain("保留分支");
+    expect(dialog!.textContent).toContain("删除 1 个只有目录隔离的独立目录");
+    expect(dialog!.textContent).toContain("没有分支");
   });
 
   it("运行中的超流体不计入可回收，也不出现「清理已结束」按钮", () => {
