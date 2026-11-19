@@ -99,6 +99,28 @@ describe("super agent · 委派指令解析", () => {
     expect(scan.invalidBlocks).toHaveLength(1);
   });
 
+  it("缺 title → 判为非法块，原因指向 title 必填（不拿任务正文当标题）", () => {
+    const scan = extractSuperDirectives([
+      "```super-agent",
+      '{"tasks":[{"task":"项目根目录：任务：背景：整段描述"}]}',
+      "```",
+    ].join("\n"));
+    expect(scan.blocks).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(1);
+    expect(scan.invalidBlocks[0]?.reason).toContain("title 必填");
+    expect(scan.invalidBlocks[0]?.issues?.[0]).toContain("title 必填");
+  });
+
+  it("title 空白 → 拒绝；带 title 的条目照常派发", () => {
+    const scan = extractSuperDirectives([
+      "```super-agent",
+      '{"tasks":[{"title":"   ","task":"空白标题"},{"title":"有效","task":"做点事"}]}',
+      "```",
+    ].join("\n"));
+    expect(scan.blocks[0]).toEqual([{ title: "有效", task: "做点事" }]);
+    expect(scan.issues?.[0]).toContain("title 必填");
+  });
+
   it("task 写成字符串数组 → 非法块的原因指向 task 字段", () => {
     const scan = extractSuperDirectives([
       "```super-agent",
@@ -1894,8 +1916,8 @@ describe("super agent · 宿主与渲染共用块解析", () => {
     const body = '{"tasks":[{"task":"跑测试","owner":"x","title":"乙"},{"task":"读代码","owner":"y"}]}';
     expect(salvageSuperTasks(body)).toEqual([
       { title: "乙", task: "跑测试", attachments: [] },
-      // 缺 title 时用任务书首行兜底，绝不编造标题。
-      { title: "读代码", task: "读代码", attachments: [] },
+      // 缺 title 的展示兜底用明确占位，绝不拿任务正文顶到标题位。
+      { title: "未命名任务", task: "读代码", attachments: [] },
     ]);
   });
 

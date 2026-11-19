@@ -726,9 +726,9 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.querySelector('[data-testid="super-tool-call-raw"]')).toBeNull();
   });
 
-  it("复现载荷（模型漏了 title）不再谎报「未能完整解析」", () => {
-    // wire 实证的真实载荷：模型调内置 super-agent 工具时漏掉 title，宿主照常
-    // 派发（旧卡片却判成解析失败，把一次真的派发谎报成失败）。
+  it("模型漏 title 的载荷如实显示字段级错误（title 必填，不再回退 task 全文当标题）", () => {
+    // 实测载荷形态：模型调内置 super-agent 工具时漏掉 title。现在 title 必填，
+    // 宿主拒绝该条，卡片给出可诊断原因，绝不把整段任务描述顶到标题位。
     renderBlock(
       toolBlock({
         input: '{"tasks":[{"task":"任务：只读审查 AGENTS.md 与 src/panel/panel.ts"}]}',
@@ -736,10 +736,24 @@ describe("内置 super-agent 工具调用卡片", () => {
     );
     const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
     expect(card).toBeTruthy();
-    expect(card!.textContent).not.toContain("委派指令格式错误");
+    expect(card!.textContent).toContain("title 必填");
     expect(card!.textContent).not.toContain("正在编写任务书…");
-    expect(card!.textContent).toContain("任务：只读审查 AGENTS.md 与 src/panel/panel.ts");
-    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(0);
+  });
+
+  it("title 缺失的展示兜底：标题位显示「未命名任务」而不是正文", () => {
+    // 历史转录 / 手工快照里可能残留空标题条目 —— 渲染层兜底不能让正文顶到标题位。
+    renderBlock(
+      toolBlock({
+        superTasks: [
+          { title: "", task: "项目根目录：任务：背景：整段描述", attachmentCount: 0 },
+        ],
+      }),
+    );
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    const title = card!.querySelector('[data-testid="super-tool-call-task"] span');
+    expect(title?.textContent).toBe("未命名任务");
   });
 
   it("对象形态的 attachments 也能渲染（附件数照常显示）", () => {

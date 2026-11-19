@@ -3306,17 +3306,16 @@ describe("tool block lookup index (upsertToolBlock)", () => {
  * 单一真源 = **宿主实际派发了什么**。两个原因让卡片不能只回解 `input`：
  *  - `input` 是有损展示串（单个字符串值截断 300 字符、整串上限 4096 字符），
  *    长任务书会被从中间切断，回解必然失败；
- *  - 模型调内置 `super-agent` 工具时**有时漏掉 `title`**（wire 实证），派发器
- *    容忍（回退 task 首行、照常派发），卡片此前却判成解析失败 —— 把一次真的
- *    派发谎报成失败。
+ *  - 模型调内置 `super-agent` 工具时漏掉 title 的载荷现在被拒绝（title 必填），
+ *    宿主不派发、卡片给出字段级诊断 —— 不再回退 task 首行当标题。
  *
  * 宿主因此从**原始 args** 解析一次，把结构随快照下发（附件只给数量，本体不进
  * 快照 —— 陷阱 #27 纪律）。
  */
 describe("委派工具调用的任务结构（superTasks）", () => {
-  const dispatchArgs = { tasks: [{ task: "只读审查 src/panel/panel.ts" }] };
+  const dispatchArgs = { tasks: [{ title: "只读审查", task: "只读审查 src/panel/panel.ts" }] };
 
-  it("从原始 args 解析出任务（缺 title 也认，回退 task 首行）", () => {
+  it("从原始 args 解析出任务（title 必填，缺 title 的载荷不产生 superTasks）", () => {
     const state = initialSessionState();
     applySessionUpdate(
       state,
@@ -3334,11 +3333,30 @@ describe("委派工具调用的任务结构（superTasks）", () => {
     if (block?.kind !== "tool") return;
     expect(block.superTasks).toEqual([
       {
-        title: "只读审查 src/panel/panel.ts",
+        title: "只读审查",
         task: "只读审查 src/panel/panel.ts",
         attachmentCount: 0,
       },
     ]);
+  });
+
+  it("缺 title 的载荷：不产生 superTasks，给出 title 必填的诊断", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-super-bad",
+        toolName: "super-agent",
+        status: "pending",
+        args: { tasks: [{ task: "整段任务描述被当标题" }] },
+      }),
+    );
+    const block = state.blocks[0];
+    expect(block?.kind).toBe("tool");
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toBeUndefined();
+    expect(block.superTasksError).toContain("title 必填");
   });
 
   it("附件只给数量，附件本体不进快照", () => {
@@ -3394,7 +3412,7 @@ describe("委派工具调用的任务结构（superTasks）", () => {
     const block = state.blocks[0];
     if (block?.kind !== "tool") return;
     expect(block.superTasks).toHaveLength(1);
-    expect(block.superTasks?.[0]?.title).toBe("只读审查 src/panel/panel.ts");
+    expect(block.superTasks?.[0]?.title).toBe("只读审查");
   });
 
   it("非委派工具不带该字段（热路径不做多余解析）", () => {

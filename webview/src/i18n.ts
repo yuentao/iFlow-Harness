@@ -1125,6 +1125,7 @@ const en: Record<string, string> = {
   "openid": "openid",
   "操作": "Actions",
   "未命名": "Unnamed",
+  "未命名任务": "Untitled task",
   "编辑 {0}": "Edit {0}",
   "备注（可选）": "Note (optional)",
   "新{0}的备注": "Note for the new {0}",

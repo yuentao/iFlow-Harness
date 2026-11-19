@@ -44,6 +44,7 @@ import {
   parseJsonLoose,
   parseSuperDelegationPayload,
   splitSuperDirectiveSegments,
+  SUPER_UNTITLED_TASK,
   type SuperActionReceipt,
   type SuperDirectiveAction,
   type SuperDirectiveDisplay,
@@ -189,6 +190,16 @@ const TASK_PREVIEW_CHARS = 200;
 const TASK_PREVIEW_BLOCKS = 3;
 
 /**
+ * 标题位的最后一道防线：title 缺失 / 空白 / 占位符时显示明确占位，
+ * 绝不把整段任务描述顶到标题位（用户实测的 bug）。派发层已强制 title 必填，
+ * 这里兜住历史转录 / 损坏快照里可能残留的空标题条目。
+ */
+function taskTitleText(title: string | undefined): string {
+  if (!title || !title.trim()) return t(SUPER_UNTITLED_TASK);
+  return title;
+}
+
+/**
  * tasks 展示分支的**局部投影**。
  *
  * shared 侧会给「从坏载荷里容错拆出来的任务书」加一个可选的 `salvaged` 标记
@@ -267,7 +278,7 @@ function TaskCard({
       >
         {/* 标题层级比工具卡 label 高一档（16px vs 13px），长标题换行而不是挤出 chip。 */}
         <span className="block break-words text-ui-title font-semibold leading-snug text-foreground">
-          {task.title}
+          {taskTitleText(task.title)}
         </span>
       </DirectiveHeader>
       <div className="px-3 py-2">
@@ -789,7 +800,7 @@ function SuperToolTaskRow({
           <Chip tone="primary">{t("第 {0}/{1} 个任务", index + 1, total)}</Chip>
         )}
         <span className="min-w-0 flex-1 break-words text-ui-label font-semibold leading-snug text-foreground">
-          {task.title}
+          {taskTitleText(task.title)}
         </span>
         {task.attachments > 0 && (
           <Chip tone="muted">{t("附件 {0}", task.attachments)}</Chip>
