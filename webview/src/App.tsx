@@ -489,6 +489,10 @@ export function App() {
 
   const focusMode = useChat((s) => s.focusMode);
   const toggleFocusMode = useChat((s) => s.toggleFocusMode);
+  // 远程接管态：远端与本机共享同一会话，本机顶栏的会话/配置/视图变更一律
+  // 冻结，避免误操作打断远端流程（输入区、审批卡、提问卡另行冻结，关闭接续
+  // 的出口在 Composer）。这里订阅一次，下面各顶栏控件统一并入门控。
+  const remoteTakeover = useChat((s) => s.remoteTakeover ?? false);
   // Shared gating for the header actions and the Alt+←/→ / Alt+N shortcuts:
   // switching session / mode / model / profile mid-turn would desync the
   // in-flight ACP request, and a profile switch is itself an optimistic lock.
@@ -508,13 +512,14 @@ export function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() !== "f" || !e.altKey || !(e.ctrlKey || e.metaKey) || e.isComposing) return;
+      if (remoteTakeover) return;
       if (document.querySelector(".auth-backdrop")) return;
       e.preventDefault();
       toggleFocusMode();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [toggleFocusMode]);
+  }, [toggleFocusMode, remoteTakeover]);
 
   // Session navigation: Alt+←/→ cycles the non-archived history list,
   // Alt+N starts a new session. Editable targets are skipped (Alt+Arrow is
@@ -527,7 +532,7 @@ export function App() {
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
         return;
       }
-      if (locked || status === null || status === "connecting" || settingsTab !== null || onboardingOpen) return;
+      if (remoteTakeover || locked || status === null || status === "connecting" || settingsTab !== null || onboardingOpen) return;
       // ConfirmDialog / memory dialogs / profile-switch all mount ModalShell;
       // never change sessions behind an open modal.
       if (document.querySelector(".auth-backdrop")) return;
@@ -553,7 +558,7 @@ export function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [sessions, activeSessionId, locked, status, settingsTab, onboardingOpen, send, superWaiting, superHeld]);
+  }, [sessions, activeSessionId, locked, remoteTakeover, status, settingsTab, onboardingOpen, send, superWaiting, superHeld]);
 
   // P2-15: the activation ring alone went unnoticed (tooltips are mouse-only,
   // a11y audit #15). Each time Focus view turns on, a pill announces the mode
@@ -639,7 +644,7 @@ export function App() {
             <Dropdown
               menuClass="w-[20rem] max-w-[calc(100vw_-_24px)] max-h-[20rem] flex flex-col"
               wrapperClass="min-w-0 flex-1"
-              disabled={locked}
+              disabled={locked || remoteTakeover}
               onOpenChange={(open) => {
                 if (!open) {
                   setRenamingId(null);
@@ -655,7 +660,7 @@ export function App() {
                     open ? "bg-surface-2" : ""
                   }`}
                   title={t("历史会话（选择后恢复该会话上下文）")}
-                  disabled={locked}
+                  disabled={locked || remoteTakeover}
                 >
                   <span className="truncate text-foreground">{sessionLabel}</span>
                   <ChevronDown className="ml-auto size-3.5 shrink-0 opacity-60" />
@@ -912,7 +917,16 @@ export function App() {
                         and is positioned in viewport coordinates from the header's
                         rect. Renders nothing when no child sessions exist, so the
                         header never carries an empty control. */}
-          <SuperAgentBoard panelRef={setSuperPanelNode} />
+          {/* 接管态冻结子会话看板控件：inert 同时拦鼠标与键盘（含看板内的
+              中断/合并/清理等所有操作按钮），pointer-events-none/opacity-40
+              与顶栏其它禁用控件同一视觉。展开的浮层 portal 到 body，不属于
+              顶栏，其操作由宿主侧接管冻结兜底。 */}
+          <div
+            inert={remoteTakeover || undefined}
+            className={`flex shrink-0 items-center${remoteTakeover ? " pointer-events-none opacity-40" : ""}`}
+          >
+            <SuperAgentBoard panelRef={setSuperPanelNode} />
+          </div>
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <IconButton
               icon={<Focus className={ICON_TOOLBAR} />}
@@ -921,6 +935,7 @@ export function App() {
               aria-pressed={focusMode}
               tone={focusMode ? "primary" : "default"}
               className={focusMode ? "bg-accent/60 ring-1 ring-primary/30" : ""}
+              disabled={remoteTakeover}
               onClick={toggleFocusMode}
             />
             <IconButton
@@ -945,7 +960,7 @@ export function App() {
               // 新建后 `busy && !replaying` 仍会为 false。
               // superWaiting 且是「用户已停止、汇报被压住」时**不禁用** —— 那时
               // 没有汇报在飞，新建会话不会串台，而是用户停止后唯一的出路。
-              disabled={newSessionBusy || switching || (superWaiting && !superHeld) || (busy && !replaying)}
+              disabled={newSessionBusy || switching || (superWaiting && !superHeld) || (busy && !replaying) || remoteTakeover}
               onClick={() => {
                 // 进行中重复点击直接忽略：不发第二次请求（宿主侧也会 join 同一个 run）。
                 if (newSessionBusy) return;
@@ -959,13 +974,15 @@ export function App() {
             {/* Settings hub: profiles & credentials, MCP servers, approval
                 policies. The gear used to open a profile quick-switcher whose
                 list duplicated (and behaved differently from) the auth card's
-                — now it opens the unified settings modal directly. Never
-                disabled: browsing settings mid-turn is safe, and every
-                mutating control inside gates itself on `busy`. */}
+                — now it opens the unified settings modal directly. Browse is
+                normally allowed mid-turn (every mutating control inside gates
+                itself on `busy`); only remote takeover freezes the gear, since
+                changing API/MCP config mid-takeover would desync the peer. */}
             <IconButton
               icon={<Settings2 className={ICON_TOOLBAR} />}
               label={t("设置")}
               className={auth?.authenticated ? "" : "text-warning"}
+              disabled={remoteTakeover}
               onClick={() => setSettingsTab("api")}
             />
           </div>
