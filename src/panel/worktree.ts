@@ -1295,6 +1295,47 @@ export async function removeWorktree(
 }
 
 /**
+ * 列出本地所有 `iflow/super/` 命名空间下的分支（含未合并的）。
+ *
+ * 供「清空并新建」的全量清空使用：用户已明确授权连未合并 worktree 一并清掉，
+ * 因此不能只依赖 `git worktree list` —— 目录被手工删掉、worktree 元数据已
+ * prune、但分支还留着的孤儿也要清。只读操作，失败时返回空数组。
+ */
+export async function listSuperBranches(repoRoot: string): Promise<string[]> {
+  try {
+    const { stdout } = await git(repoRoot, [
+      "for-each-ref",
+      "--format=%(refname:short)",
+      `refs/heads/${SUPER_BRANCH_PREFIX}`,
+    ]);
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith(SUPER_BRANCH_PREFIX));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 强制删除一条本地分支（`-D`，不要求已合并）。返回是否删掉。
+ */
+export async function deleteSuperBranch(repoRoot: string, branch: string): Promise<boolean> {
+  if (!branch.startsWith(SUPER_BRANCH_PREFIX)) return false;
+  try {
+    await git(repoRoot, ["branch", "-D", branch]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `git worktree prune`：让 worktree 记账与磁盘现状一致（全量清空收尾用）。 */
+export async function pruneWorktrees(repoRoot: string): Promise<void> {
+  await git(repoRoot, ["worktree", "prune"]).catch(() => undefined);
+}
+
+/**
  * 把子会话的分支合并回当前分支。
  *
  * **只撤销我们自己的合并。** `git merge --abort` 撤销的是「当前仓库里进行中
