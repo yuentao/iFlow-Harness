@@ -2169,10 +2169,14 @@ describe("super agent · 删除主会话时清理它的子会话（H）", () => 
     expect(harness.manager.archivableSessions("main-1")).toEqual([]);
     // 归属集合也必须清掉：留着它，下一次落盘会把空归档重新写回磁盘。
     expect(harness.manager.archivableMainSessionIds()).not.toContain("main-1");
-    // worktree 与分支保留（删目录不可逆），返回给宿主记日志。
-    expect(result.worktrees).toHaveLength(1);
-    expect(result.worktrees[0]?.id).toBe(spawned.id);
-    expect(result.worktrees[0]?.branch).toBe(branch);
+    // worktree 与分支保留（删目录不可逆），返回给宿主记日志：活会话与归档
+    // 会话各一份 —— 归档的 worktree 也得上报，否则残留目录无人回收。
+    expect(result.worktrees).toHaveLength(2);
+    const liveWorktree = result.worktrees.find((w) => w.id === spawned.id);
+    expect(liveWorktree?.branch).toBe(branch);
+    const archivedWorktree = result.worktrees.find((w) => w.id === "super-old");
+    expect(archivedWorktree?.path).toBe("/tmp/super-old");
+    expect(archivedWorktree?.branch).toBe("iflow/super/super-old");
 
     await harness.manager.dispose();
   }, 30000);
