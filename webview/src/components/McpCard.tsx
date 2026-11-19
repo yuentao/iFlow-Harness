@@ -4,7 +4,7 @@ import { useChat } from "../store";
 import { entriesToServers, sameMcpServers, serversToEntries, type McpEntry } from "./mcp-servers";
 import { MCP_CATALOG, buildCatalogConfig, catalogFieldLabel } from "../../../shared/mcp-catalog";
 import { t } from "../i18n";
-import { ActionRow, Button, Chip, ConfirmDialog, Dropdown, Field, FieldLabel, Hint, ICON_INLINE, IconButton, SecondaryRow, Segmented, TextArea, TextInput, ToolbarRow } from "./ui";
+import { ActionRow, Button, Chip, ConfirmDialog, Dropdown, Field, FieldLabel, Hint, ICON_INLINE, IconButton, SecondaryRow, Segmented, SettingsGroup, TextArea, TextInput, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 import type { McpScope, McpStatusUi, McpServerStatusView, McpToolView, McpPromptView } from "../../../shared/messages";
 
@@ -808,6 +808,19 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       ≈{fmtTokens(view.contextTokens)} tokens
                     </span>
                   )}
+                  <IconButton
+                    icon={<Pencil className={ICON_INLINE} />}
+                    label={t("编辑")}
+                    size="sm"
+                    className="ml-auto"
+                    disabled={saving || !!loadError}
+                    onClick={() => {
+                      setEditing(detail);
+                      setDetail(null);
+                      setIsNew(false);
+                      setEditError(null);
+                    }}
+                  />
                 </div>
                 {view?.error && (
                   <div className="rounded-lg border border-destructive/50 bg-destructive/8 px-2 py-1.5 text-ui-label text-destructive" title={view.error}>
@@ -897,15 +910,9 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
         const headerRows = normalizePairs(config.headers);
         const extraKeys = Object.keys(config).filter((key) => !MCP_FORM_KEYS.has(key));
         return (
-          <div className="space-y-3">
-            <section className="overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
-              <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-3 py-1.5">
-                <h3 className="text-ui-label font-semibold uppercase tracking-wider text-muted-foreground">
-                  {t("服务器信息")}
-                </h3>
-              </div>
-              <div className="divide-y divide-border/50">
-                <Field required className="px-3 py-3" label={t("名称")}>
+          <div className="min-w-0 space-y-3">
+            <SettingsGroup title={t("服务器信息")}>
+                <Field required className="min-w-0 px-4 py-3" label={t("名称")}>
                   <TextInput
                     value={entry.name}
                     placeholder={t("如 chrome-devtools")}
@@ -916,7 +923,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }}
                   />
                 </Field>
-                <Field className="px-3 py-3" label={t("描述")}>
+                <Field className="min-w-0 px-4 py-3" label={t("描述")}>
                   <TextArea
                     className="min-h-16 leading-relaxed"
                     value={fieldOfConfig(config, "description")}
@@ -927,21 +934,11 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }}
                   />
                 </Field>
-              </div>
-            </section>
+            </SettingsGroup>
 
-            <section className="overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
-              <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-3 py-1.5">
-                <h3 className="text-ui-label font-semibold uppercase tracking-wider text-muted-foreground">
-                  {t("传输与运行")}
-                </h3>
-                <span className="ml-auto min-w-0 truncate font-mono text-ui-caption text-muted-foreground/75">
-                  {transport}
-                </span>
-              </div>
-              <div className="divide-y divide-border/50">
-                <div className="flex items-center gap-2 px-3 py-2">
-                  <span className="mr-1 text-ui-label text-muted-foreground">{t("传输类型")}</span>
+            <SettingsGroup title={t("传输与运行")} hint={transport}>
+                <div className="flex flex-wrap items-center gap-2 px-4 py-3">
+                  <span className="shrink-0 text-ui-label text-muted-foreground">{t("传输类型")}</span>
                   <Segmented
                     ariaLabel={t("传输类型")}
                     value={transport}
@@ -958,7 +955,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 </div>
             {isStdio ? (
               <>
-                <Field required className="px-3 py-3" label={t("命令")}>
+                <Field required className="min-w-0 px-4 py-3" label={t("命令")}>
                   <TextInput
                     mono
                     value={fieldOfConfig(config, "command")}
@@ -970,16 +967,16 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }}
                   />
                 </Field>
-                <div className="flex flex-col gap-2 px-3 py-3">
+                <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
                   <FieldLabel>{t("参数")}</FieldLabel>
                   {args.length > 0 && (
-                    <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
+                    <div className="min-w-0 overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {args.map((arg, ai) => (
-                        <div key={ai} className="flex items-center gap-2 px-2 py-1">
+                        <div key={ai} className="flex min-w-0 items-center gap-2 px-2 py-1">
                           <TextInput
                             mono
                             aria-label={t("参数 {0}", ai + 1)}
-                            className="flex-1 text-ui-label"
+                            className="min-w-0 flex-1 text-ui-label"
                             value={arg}
                             onChange={(e) => {
                               const v = e.target.value;
@@ -1012,16 +1009,16 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     {t("添加参数")}
                   </Button>
                 </div>
-                <div className="flex flex-col gap-2 px-3 py-3 pb-3">
+                <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
                   <FieldLabel>{t("环境变量")}</FieldLabel>
                   {envRows.length > 0 && (
-                    <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
+                    <div className="min-w-0 overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {envRows.map(([keyName, keyValue], ri) => (
-                        <div key={ri} className="flex items-center gap-2 px-2 py-1">
+                        <div key={ri} className="flex min-w-0 items-center gap-2 px-2 py-1">
                           <TextInput
                             mono
                             aria-label={t("环境变量 {0}", keyName)}
-                            className="flex-1 text-ui-label"
+                            className="min-w-0 flex-1 text-ui-label"
                             value={`${keyName}=${keyValue}`}
                             onChange={(e) => {
                               const v = e.target.value;
@@ -1057,7 +1054,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               </>
             ) : (
               <>
-                <Field required className="px-3 py-3" label={t("服务 URL")}>
+                <Field required className="min-w-0 px-4 py-3" label={t("服务 URL")}>
                   <TextInput
                     mono
                     value={fieldOfConfig(config, "url")}
@@ -1069,16 +1066,16 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }}
                   />
                 </Field>
-                <div className="flex flex-col gap-2 px-3 py-3 pb-3">
+                <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
                   <FieldLabel>{t("请求头")}</FieldLabel>
                   {headerRows.length > 0 && (
-                    <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
+                    <div className="min-w-0 overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {headerRows.map(([keyName, keyValue], ri) => (
-                        <div key={ri} className="flex items-center gap-2 px-2 py-1">
+                        <div key={ri} className="flex min-w-0 items-center gap-2 px-2 py-1">
                           <TextInput
                             mono
                             aria-label={t("请求头 {0}", keyName)}
-                            className="flex-1 text-ui-label"
+                            className="min-w-0 flex-1 text-ui-label"
                             value={`${keyName}=${keyValue}`}
                             onChange={(e) => {
                               const v = e.target.value;
@@ -1114,12 +1111,11 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                             </>
                           )}
                           {extraKeys.length > 0 && (
-                            <div className="truncate rounded-lg border border-border/70 bg-surface/40 px-2 py-1 text-ui-label leading-relaxed text-muted-foreground/85">
+                            <div className="min-w-0 truncate rounded-lg border border-border/70 bg-surface/40 px-2 py-1 text-ui-label leading-relaxed text-muted-foreground/85">
                               {t("这些字段会原样保留：{0}", extraKeys.join(", "))}
                             </div>
                           )}
-                            </div>
-                          </section>
+            </SettingsGroup>
             <ActionRow>
               <Button
                 variant="primary"
