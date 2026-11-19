@@ -413,7 +413,7 @@ export const QQ_APPROVAL_TIMEOUT_MS = QQ_APPROVAL_TIMEOUT_MINUTES * 60_000;
  * 远程任务提问提醒的应答窗口：与审批窗口同源（4 分钟），刻意短于子会话自身的
  * 提问超时（5 分钟）—— 这样 QQ 用户的答案能抢在内核按「未回答」继续之前送达。
  */
-export const QQ_ANSWER_TIMEOUT_MS = QQ_APPROVAL_TIMEOUT_MS;
+export const QQ_ANSWER_TIMEOUT_MS = QQ_APPROVAL_TIMEOUT_MINUTES * 60_000;
 /** 验证码最多尝试次数：第一次错误后仍保留 2 次机会。 */
 export const QQ_APPROVAL_MAX_ATTEMPTS = 3;
 /**

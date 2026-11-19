@@ -44,8 +44,6 @@ export const QQ_CONNECTION_FIELDS = [
   "enabled",
 ] as const;
 
-export type QqConnectionField = (typeof QQ_CONNECTION_FIELDS)[number];
-
 // ---------------------------------------------------------------------------
 // 服务重启判定
 // ---------------------------------------------------------------------------
