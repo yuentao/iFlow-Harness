@@ -364,6 +364,39 @@ describe("ui kit guard", () => {
     ];
     expect(names.filter((name) => !kit.includes(name))).toEqual([]);
   });
+
+  it("declares field focus rings by hand (Tailwind emits no shadow variant)", () => {
+    // Tailwind v4 parses `shadow-focus` as a shadow-COLOR modifier, so the
+    // `focus:shadow-focus` / `focus-within:shadow-focus-soft` classes on kit
+    // fields are empty in the built CSS. These unlayered escaped selectors are
+    // the only thing that makes keyboard focus visible; keep them present.
+    expect(kitCss.includes(".focus\\:shadow-focus:focus")).toBe(true);
+    expect(kitCss.includes(".focus-within\\:shadow-focus-soft:focus-within")).toBe(true);
+  });
+
+  it("uses one close label for every dismiss affordance", () => {
+    // ModalShell's X is a dismissal, not a collapse. The toast X already uses
+    // t("关闭") (Dismiss); a second Collapse-labelled X read as "Collapse" in
+    // English. t("收起") stays for real folding (SettingsDisclosure / board).
+    const kit = files.find((f) => f.rel === CONTROL_HOME)!.content;
+    const shell = kit.slice(kit.indexOf("export function ModalShell("), kit.indexOf("export function useCountdown("));
+    expect(shell).toContain('label={t("关闭")}');
+    expect(shell).not.toContain('t("收起")');
+  });
+
+  it("keeps dialog chrome on kit button primitives", () => {
+    // ModalShell's header cluster and ConfirmDialog's action row used to
+    // hand-roll buttons (18×18 glyph buttons, bespoke 24px action strings).
+    // They must use the kit's IconButton / Button so height, radius, focus
+    // ring and disabled state stay single-sourced.
+    const kit = files.find((f) => f.rel === CONTROL_HOME)!.content;
+    const modal = kit.slice(kit.indexOf("export function ModalShell("), kit.indexOf("export function useCountdown("));
+    const confirm = kit.slice(kit.indexOf("export function ConfirmDialog("), kit.indexOf("const MENU_VIEWPORT_MARGIN"));
+    expect(modal).not.toMatch(/<button\b/);
+    expect(confirm).not.toMatch(/<button\b/);
+    expect(confirm).toContain("data-autofocus");
+    expect(confirm).toContain("<Button");
+  });
 });
 
 /**
