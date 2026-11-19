@@ -164,7 +164,7 @@ describe("normalizeBrokerServers", () => {
 });
 
 describe("McpBroker · 共享 stdio 进程", () => {
-  it("两个并发子会话只让每个 server 启动一次，且两边都能拿到工具", async () => {
+  it("两个并发超流体只让每个 server 启动一次，且两边都能拿到工具", async () => {
     const dir = tempDir("iflow-mcp-broker-");
     const logFile = spawnLogFile(dir);
     const broker = await McpBroker.start({
@@ -371,7 +371,7 @@ describe("McpBroker · 远程上游", () => {
     return { server, url: `http://127.0.0.1:${address.port}/mcp`, inits: () => inits };
   }
 
-  it("http 上游：两个子会话共享一次 initialize，工具可见可调用", async () => {
+  it("http 上游：两个超流体共享一次 initialize，工具可见可调用", async () => {
     const upstream = await startHttpUpstream();
     const broker = await McpBroker.start({
       servers: { remote: { type: "http", url: upstream.url } },

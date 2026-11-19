@@ -402,7 +402,7 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     internals.refreshSuperWaitHeartbeat();
     const pill = toasts.at(-1);
     expect(pill?.level).toBe("info");
-    expect(pill?.message).toContain("正在等待 1 个子会话汇报");
+    expect(pill?.message).toContain("正在等待 1 个超流体汇报");
     expect(pill?.opts).toMatchObject({ persistent: true, displayOnly: true });
 
     // Progress frames keep arriving; the same fingerprint must not re-send
@@ -517,7 +517,7 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     await flush();
   });
 
-  it("普通回合（无子会话）也注入看板标记，作为主会话的角色信号", async () => {
+  it("普通回合（无超流体）也注入看板标记，作为主会话的角色信号", async () => {
     const turn = send("你好");
     await flush();
     // 系统提示用「有没有 [子会话看板]」区分主会话与子会话；空看板若返回空串，

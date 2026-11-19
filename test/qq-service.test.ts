@@ -1093,7 +1093,7 @@ describe("QqService — 回包可靠性缺口回归", () => {
     });
   });
 
-  it("执行体确认取消的子会话收成 canceled 终态（与 /qq stop 对齐，不再记 failed）", async () => {
+  it("执行体确认取消的超流体收成 canceled 终态（与 /qq stop 对齐，不再记 failed）", async () => {
     const f = makeService();
     f.host.dispatchTask = async (input) => {
       f.dispatches.push(input);
@@ -2578,7 +2578,7 @@ describe("QqService — 主会话中间正文轮同步", () => {
     seedInjected(f, "mt-ok");
 
     await f.service.deliverMainTurnText("mt-done", "已经完成的任务正文");
-    await f.service.deliverMainTurnText("mt-child", "子会话的正文");
+    await f.service.deliverMainTurnText("mt-child", "超流体的正文");
     await f.service.deliverMainTurnText("mt-ok", "  ");
     await f.service.deliverMainTurnText("mt-ok", "嗯");
     expect(f.delivered).toHaveLength(0);

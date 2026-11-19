@@ -112,7 +112,7 @@ const CHILD: SuperSessionUi = {
   reports: [],
 };
 
-describe("ChatPanel 子会话合并请求（派合并子会话，不再走主会话 prompt）", () => {
+describe("ChatPanel 超流体合并请求（派合并超流体，不再走主会话 prompt）", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let storageDir: string;
@@ -181,7 +181,7 @@ describe("ChatPanel 子会话合并请求（派合并子会话，不再走主会
     }
   }
 
-  it("自动触发合并请求：派合并子会话，主会话收不到这段提示词", async () => {
+  it("自动触发合并请求：派合并超流体，主会话收不到这段提示词", async () => {
     p.scheduleSuperMerge("super-1", "改动与本地未提交改动重叠");
     await waitForMerges(1);
 
@@ -215,7 +215,7 @@ describe("ChatPanel 子会话合并请求（派合并子会话，不再走主会
     expect(merges[0]?.source.id).toBe("super-1");
   });
 
-  it("requestSuperMerge 返回真实结果：派出成功 / 已有合并子会话未派发", async () => {
+  it("requestSuperMerge 返回真实结果：派出成功 / 已有合并超流体未派发", async () => {
     const request = (p as unknown as {
       requestSuperMerge: (id: string) => Promise<{ dispatched: boolean; reason?: string }>;
     }).requestSuperMerge.bind(p);
@@ -233,11 +233,11 @@ describe("ChatPanel 子会话合并请求（派合并子会话，不再走主会
     });
     const blocked = await request("super-1");
     expect(blocked.dispatched).toBe(false);
-    expect(blocked.reason).toContain("已有合并子会话");
+    expect(blocked.reason).toContain("已有合并超流体");
     expect(merges).toHaveLength(1);
   });
 
-  it("QQ 端口 merge 回传真实 detail：未派发时不谎报「已派出合并子会话」", async () => {
+  it("QQ 端口 merge 回传真实 detail：未派发时不谎报「已派出合并超流体」", async () => {
     Object.assign(p, {
       getSuperAgent: () => ({
         get: () => CHILD,
@@ -253,6 +253,6 @@ describe("ChatPanel 子会话合并请求（派合并子会话，不再走主会
     const result = await ports.merge("super-1");
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("未派出");
-    expect(result.detail).not.toContain("已派出合并子会话");
+    expect(result.detail).not.toContain("已派出合并超流体");
   });
 });

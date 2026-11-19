@@ -650,7 +650,7 @@ describe("回合末 timeout rows follow their toggle", () => {
  * 切换、模型下拉。切换会让在跑的子会话用错凭据/模型，或让汇报落到被替换的
  * 主会话；但主会话仍必须能发消息（Composer 发送按钮不受影响）。
  */
-describe("活跃子会话禁用会话/模型/凭据切换", () => {
+describe("活跃超流体禁用会话/模型/凭据切换", () => {
   function child(status: SuperStatus): SuperSessionUi {
     return {
       id: `child-${status}`,
@@ -755,7 +755,7 @@ describe("活跃子会话禁用会话/模型/凭据切换", () => {
   });
 
   for (const status of ["preparing", "running", "awaiting_input"] as const) {
-    it(`子会话 ${status}：历史下拉 / API 配置 / 模型下拉禁用，发送仍可用`, () => {
+    it(`超流体 ${status}：历史下拉 / API 配置 / 模型下拉禁用，发送仍可用`, () => {
       renderApp([child(status)]);
       expect(historyButton()).toBeTruthy();
       expect(historyButton()!.disabled).toBe(true);
@@ -770,7 +770,7 @@ describe("活跃子会话禁用会话/模型/凭据切换", () => {
     });
   }
 
-  it("子会话全部终态：三处恢复可用", () => {
+  it("超流体全部终态：三处恢复可用", () => {
     renderApp([child("completed"), child("failed"), child("cancelled")]);
     expect(historyButton()!.disabled).toBe(false);
     expect(modelButton()!.disabled).toBe(false);
@@ -803,7 +803,7 @@ describe("API 配置保存按钮的 busy 门控", () => {
     }
   });
 
-  const SAVE_REASON = "这是正在使用的配置。正在生成或有子会话在跑，暂时不能保存。";
+  const SAVE_REASON = "这是正在使用的配置。正在生成或有超流体在跑，暂时不能保存。";
   /** B 变成当前使用的配置（编辑它才会触发重新认证）。 */
   const ACTIVE_B_AUTH: AuthUiState = {
     ...MULTI_AUTH,

@@ -446,7 +446,7 @@ export const QQ_EMPTY_SUMMARY_NOTICE = "（执行体未返回摘要内容）";
  * 已保证传非空文案；这里是服务入口的防御性兜底（其它宿主 / 测试直接调用时生效）。
  * 与面板兜底文案逐字一致，避免两处漂移。
  */
-export const QQ_MAIN_FINAL_EMPTY_NOTICE = "子会话任务已完成，但未产生可转发的正文摘要。";
+export const QQ_MAIN_FINAL_EMPTY_NOTICE = "超流体任务已完成，但未产生可转发的正文摘要。";
 /**
  * 主会话「中间正文轮」同步的进度分支名。与 main-accepted 等分支各占一个
  * 节流 / 指纹槽位，互不挤占；同一分支的整轮正文按指纹永久去重。
@@ -2666,7 +2666,7 @@ export class QqService {
         await this.host.cancelTask(superSessionId);
       } catch (error) {
         const detail = errorText(error);
-        failures.push(`子会话取消失败：${detail}`);
+        failures.push(`超流体取消失败：${detail}`);
         this.log(`QQ 任务 ${current.taskId} 取消失败：${detail}`);
       }
     }

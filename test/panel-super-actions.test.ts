@@ -267,7 +267,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
     });
     // 状态推送链走 manager.cancel（其内 apply(cancelled)+emit），确认路由仍到它。
     expect(cancel).toHaveBeenCalledWith("super-1", "user");
-    expect(toasts).toEqual([{ level: "info", message: "已中断子会话" }]);
+    expect(toasts).toEqual([{ level: "info", message: "已中断超流体" }]);
   });
 
   it("看板单个中断（已终态）：如实提示「无需中断」，不是失败也不是静默", async () => {
@@ -277,12 +277,12 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
       status: "completed",
     });
     expect(cancel).toHaveBeenCalledWith("super-1", "user");
-    expect(toasts).toEqual([{ level: "info", message: "这个子会话已经结束了，不用再中断" }]);
+    expect(toasts).toEqual([{ level: "info", message: "这个超流体已经结束了，不用再中断" }]);
   });
 
   it("看板单个中断（目标不存在）：发出 warning 回执", async () => {
     const { toasts } = await runCancelAction({ ok: false, reason: "not-found" });
-    expect(toasts).toEqual([{ level: "warning", message: "该子会话不存在或已被清理" }]);
+    expect(toasts).toEqual([{ level: "warning", message: "该超流体不存在或已被清理" }]);
   });
 
   it("换会话重置扫描后，同一份回执不再被当成重复丢弃", async () => {

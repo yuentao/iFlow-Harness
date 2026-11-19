@@ -1035,7 +1035,7 @@ export interface SuperDirectiveScan {
 }
 
 /** 标题清洗：压空白、截断到 40 字（看板一行放得下）。 */
-export function normalizeSuperTitle(raw: string, fallback = "子会话"): string {
+export function normalizeSuperTitle(raw: string, fallback = "超流体"): string {
   const cleaned = raw.replace(/\s+/g, " ").trim();
   if (!cleaned) return fallback;
   return cleaned.length > 40 ? `${cleaned.slice(0, 39)}…` : cleaned;
@@ -2107,7 +2107,7 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
     const title = rawTitle && !isPlaceholderTask(rawTitle) ? rawTitle : "";
     const attachments = parseDirectiveAttachments(record.attachments);
     tasks.push({
-      title: normalizeSuperTitle(title, task.split("\n")[0] ?? "子会话"),
+      title: normalizeSuperTitle(title, task.split("\n")[0] ?? "超流体"),
       task,
       ...(attachments.length > 0 ? { attachments } : {}),
     });
@@ -2736,7 +2736,7 @@ function pairTaskBooks(
       }
     }
     if (titleIndex >= 0) usedTitle.add(titleIndex);
-    const fallback = task.split("\n")[0] ?? "子会话";
+    const fallback = task.split("\n")[0] ?? "超流体";
     const titleText = title && !isPlaceholderTask(title) ? title : fallback;
     books.push({ title: normalizeSuperTitle(titleText, fallback), task });
     ends.push(titleIndex >= 0 ? Math.max(field.end, fields[titleIndex]!.end) : field.end);

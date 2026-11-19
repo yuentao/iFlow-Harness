@@ -143,13 +143,13 @@ function clickRow(title: string): void {
   act(() => button!.click());
 }
 
-describe("Super Agent 子会话实时进度面板", () => {
+describe("超流体实时进度面板", () => {
   it("折叠时无行；展开看板只显示单行；再展开该行才出现「查看实时进度」", () => {
     render();
     expect(document.body.textContent).not.toContain("修复登录跳转");
     expect(document.body.textContent).not.toContain("查看实时进度");
 
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
     expect(document.body.textContent).toContain("修复登录跳转");
     expect(document.body.textContent).toContain("运行中");
     // P1: actions live in the row detail, not on the line.
@@ -159,9 +159,9 @@ describe("Super Agent 子会话实时进度面板", () => {
     expect(document.body.textContent).toContain("查看实时进度");
   });
 
-  it("打开面板时本地无转录 → 向宿主拉取该子会话的全量转录", () => {
+  it("打开面板时本地无转录 → 向宿主拉取该超流体的全量转录", () => {
     render();
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
     clickRow("修复登录跳转");
     clickText("查看实时进度");
 
@@ -177,7 +177,7 @@ describe("Super Agent 子会话实时进度面板", () => {
 
   it("有转录时渲染 user / tool / text 三类块（工具卡走真实 ToolCard）", () => {
     render({ "super-1": [USER_BLOCK, TOOL_BLOCK, TEXT_BLOCK] });
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
     clickRow("修复登录跳转");
     clickText("查看实时进度");
 
@@ -200,7 +200,7 @@ describe("Super Agent 子会话实时进度面板", () => {
         { kind: "thought", id: "b-thought", text: "先确认 redirect 的判断条件" },
       ],
     });
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
     clickRow("修复登录跳转");
     clickText("查看实时进度");
 
@@ -256,13 +256,13 @@ describe("Super Agent 子会话实时进度面板", () => {
 
   it("实时进度以弹框呈现，头部关闭后回到行内入口", () => {
     render({ "super-1": [USER_BLOCK] });
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
     clickRow("修复登录跳转");
     clickText("查看实时进度");
 
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog).toBeTruthy();
-    expect(dialog!.getAttribute("aria-label")).toBe("子会话实时进度");
+    expect(dialog!.getAttribute("aria-label")).toBe("超流体实时进度");
     expect(dialog!.textContent).toContain(USER_TASK);
 
     const close = document.querySelector<HTMLButtonElement>('[role="dialog"] [aria-label="收起"]');
@@ -276,10 +276,10 @@ describe("Super Agent 子会话实时进度面板", () => {
   });
 });
 
-describe("Super Agent 子会话合并入口", () => {
-  it("运行中的子会话不允许合并（按钮置灰，禁用原因由帮助按钮统一说明）", () => {
+describe("超流体合并入口", () => {
+  it("运行中的超流体不允许合并（按钮置灰，禁用原因由帮助按钮统一说明）", () => {
     render();
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
     clickRow("修复登录跳转");
 
     const button = [...document.body.querySelectorAll("button")].find(
@@ -290,15 +290,15 @@ describe("Super Agent 子会话合并入口", () => {
     // pointer-events，title（唯一写着原因的地方）就读不到了。
     expect((button as HTMLButtonElement).disabled).toBe(false);
     expect(button!.getAttribute("aria-disabled")).toBe("true");
-    expect(button!.getAttribute("title")).toContain("子会话还没结束，等它完成再合并");
+    expect(button!.getAttribute("title")).toContain("超流体还没结束，等它完成再合并");
     // 原因不再逐行重复：行首的状态 chip 已经说明子会话还在运行，
     // 完整规则统一收在看板头的帮助按钮里（见下一组用例）。
-    expect(document.body.textContent).not.toContain("子会话还没结束，等它完成再合并");
+    expect(document.body.textContent).not.toContain("超流体还没结束，等它完成再合并");
   });
 
   it("完成态点击后确认框说明由智能体自己合并，确认才发 action=merge", () => {
     render({}, { status: "completed" });
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
     clickRow("修复登录跳转");
     clickText("让智能体合并");
 
@@ -322,7 +322,7 @@ describe("Super Agent 子会话合并入口", () => {
   });
 });
 
-describe("Super Agent 子会话中断确认", () => {
+describe("超流体中断确认", () => {
   /** Click a button by its text inside the confirm dialog (portalled to body). */
   function clickTextInDialog(text: string, dialog: Element): void {
     const button = [...dialog.querySelectorAll("button")].find((b) => b.textContent === text);
@@ -332,13 +332,13 @@ describe("Super Agent 子会话中断确认", () => {
 
   it("行内中断先弹确认框，未确认前不发送 cancel", () => {
     render();
-    clickLabel("子会话看板");
-    clickLabel("中断这个子会话");
+    clickLabel("超流体看板");
+    clickLabel("中断这个超流体");
 
     expect(send).not.toHaveBeenCalled();
     const dialog = document.querySelector('[role="alertdialog"]');
     expect(dialog).toBeTruthy();
-    expect(dialog!.textContent).toContain("中断子会话「修复登录跳转」？");
+    expect(dialog!.textContent).toContain("中断超流体「修复登录跳转」？");
 
     clickTextInDialog("中断", dialog!);
     expect(send).toHaveBeenCalledWith({
@@ -351,8 +351,8 @@ describe("Super Agent 子会话中断确认", () => {
 
   it("取消中断只关闭确认框，不发送任何消息", () => {
     render();
-    clickLabel("子会话看板");
-    clickLabel("中断这个子会话");
+    clickLabel("超流体看板");
+    clickLabel("中断这个超流体");
 
     clickTextInDialog("取消", document.querySelector('[role="alertdialog"]')!);
 
@@ -363,13 +363,13 @@ describe("Super Agent 子会话中断确认", () => {
   it("全部中断先弹确认框，确认后才发送 cancelAll", () => {
     render();
     // 「全部中断」住在展开面板的头部（折叠控件只有开关本身），先展开看板。
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
     clickLabel("全部中断");
 
     expect(send).not.toHaveBeenCalled();
     const dialog = document.querySelector('[role="alertdialog"]');
     expect(dialog).toBeTruthy();
-    expect(dialog!.textContent).toContain("中断全部 1 个进行中的子会话？");
+    expect(dialog!.textContent).toContain("中断全部 1 个进行中的超流体？");
 
     clickTextInDialog("全部中断", dialog!);
     expect(send).toHaveBeenCalledWith({ type: "superAgent", action: "cancelAll" });
@@ -401,7 +401,7 @@ describe("Super Agent 看板排序与折叠", () => {
     act(() => root.render(<SuperAgentBoard />));
   }
 
-  it("进行中的子会话排在前面，改动没落地的排其后", () => {
+  it("进行中的超流体排在前面，改动没落地的排其后", () => {
     renderMany([
       notMerged("super-done", "待合并的任务", 1000),
       session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 2000 }),
@@ -415,18 +415,18 @@ describe("Super Agent 看板排序与折叠", () => {
     expect(text.indexOf("进行中的任务")).toBeLessThan(text.indexOf("待合并的任务"));
   });
 
-  it("已完成且已自动合并的子会话默认折叠，展开分组后才可见", () => {
+  it("已完成且已自动合并的超流体默认折叠，展开分组后才可见", () => {
     renderMany([
       session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 2000 }),
       merged("super-merged", "已合并的任务", 1000),
     ]);
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
 
     // Folded away: only a one-line history row, no card, no title.
-    expect(document.body.textContent).toContain("已完成并合并的 1 个子会话");
+    expect(document.body.textContent).toContain("已完成并合并的 1 个超流体");
     expect(document.body.textContent).not.toContain("已合并的任务");
 
-    clickLabel("展开已完成的子会话");
+    clickLabel("展开已完成的超流体");
     expect(document.body.textContent).toContain("已合并的任务");
   });
 
@@ -439,16 +439,16 @@ describe("Super Agent 看板排序与折叠", () => {
       integration: { mode: "merge", state: "not_needed", at: createdAt + 10 },
     });
 
-  it("没有产生任何提交的子会话折叠行说「无需合并」，绝不谎报成已合并", () => {
+  it("没有产生任何提交的超流体折叠行说「无需合并」，绝不谎报成已合并", () => {
     renderMany([
       session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 2000 }),
       nothingToMerge("super-empty", "没有改动的任务", 1000),
     ]);
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
 
     const text = document.body.textContent ?? "";
     // 元提交（not_needed）不是合并：标题与 chip 都必须如实。
-    expect(text).toContain("已完成、无需合并的 1 个子会话");
+    expect(text).toContain("已完成、无需合并的 1 个超流体");
     expect(text).toContain("无需合并");
     expect(text).not.toContain("已完成并合并");
     expect(text).not.toContain("已自动合并");
@@ -460,11 +460,11 @@ describe("Super Agent 看板排序与折叠", () => {
       merged("super-merged", "已合并的任务", 1000),
       nothingToMerge("super-empty", "没有改动的任务", 2000),
     ]);
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
 
     const text = document.body.textContent ?? "";
-    expect(text).toContain("已完成的 2 个子会话");
-    expect(text).not.toContain("已完成并合并的 2 个子会话");
+    expect(text).toContain("已完成的 2 个超流体");
+    expect(text).not.toContain("已完成并合并的 2 个超流体");
     // 两个 chip 同时在场：一条真合并、一条无需合并。
     const chips = [...document.body.querySelectorAll(".chip-fade")].map((el) => el.textContent);
     expect(chips).toContain("已自动合并");
@@ -476,7 +476,7 @@ describe("Super Agent 看板排序与折叠", () => {
       session({ id: "super-a", title: "任务甲", status: "running", createdAt: 1000 }),
       session({ id: "super-b", title: "任务乙", status: "running", createdAt: 2000 }),
     ]);
-    clickLabel("子会话看板");
+    clickLabel("超流体看板");
 
     const rowButton = (title: string) =>
       [...document.body.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes(title))!;
@@ -494,11 +494,11 @@ describe("Super Agent 看板排序与折叠", () => {
     expect(entryCount()).toBe(1);
   });
 
-  it("有子会话等待回答时自动展开；全部已完成且已合并后自动收起", () => {
+  it("有超流体等待回答时自动展开；全部已完成且已合并后自动收起", () => {
     // 折叠控件留在 header 里（只有浮层被 portal 出去），所以这里查挂载点。
     const boardExpanded = () =>
       container
-        .querySelector('button[aria-label="子会话看板"]')
+        .querySelector('button[aria-label="超流体看板"]')
         ?.getAttribute("aria-expanded");
 
     renderMany([
@@ -583,10 +583,10 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.firstElementChild!.className).toContain("bg-primary/60");
     // eyebrow + 高一级标题 + 状态 chip 都在独立卡内。
     expect(card!.textContent).toContain("委派指令");
-    expect(card!.textContent).toContain("子会话委派");
+    expect(card!.textContent).toContain("超流体委派");
     expect(card!.textContent).toContain("已完成");
     const title = [...card!.querySelectorAll("span")].find(
-      (span) => span.textContent === "子会话委派",
+      (span) => span.textContent === "超流体委派",
     );
     expect(title).toBeTruthy();
     expect(title!.className).toContain("text-ui-title");
@@ -772,7 +772,7 @@ describe("内置 super-agent 工具调用卡片", () => {
     ],
   });
 
-  it("super-agent 工具带 actions 载荷渲染成子会话操作卡，不再走通用工具卡", () => {
+  it("super-agent 工具带 actions 载荷渲染成超流体操作卡，不再走通用工具卡", () => {
     renderBlock(toolBlock({ input: ACTIONS_INPUT }));
     const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
     expect(card).toBeTruthy();
@@ -785,7 +785,7 @@ describe("内置 super-agent 工具调用卡片", () => {
       expect(card!.classList.contains(cls)).toBe(false);
     }
     // 标题、计数、状态 chip 与逐项动作都来自围栏动作卡同一套语言/组件。
-    expect(card!.textContent).toContain("子会话操作");
+    expect(card!.textContent).toContain("超流体操作");
     expect(card!.textContent).toContain("4 个动作");
     expect(card!.textContent).toContain("重试");
     expect(card!.textContent).toContain("中断");
@@ -824,7 +824,7 @@ describe("内置 super-agent 工具调用卡片", () => {
     renderBlock(toolBlock({ toolName: "super-agent-actions", input: ACTIONS_INPUT, status: "failed" }));
     const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
     expect(card).toBeTruthy();
-    expect(card!.textContent).toContain("子会话操作");
+    expect(card!.textContent).toContain("超流体操作");
     expect(card!.textContent).toContain("4 个动作");
     expect(card!.textContent).toContain("失败");
     expect(card!.className).toContain("super-directive-card");
@@ -854,7 +854,7 @@ describe("内置 super-agent 工具调用卡片", () => {
 
     renderBlock(toolBlock({ toolName: "super-agent-actions", input: null }));
     card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
-    expect(card!.textContent).toContain("正在编写子会话操作…");
+    expect(card!.textContent).toContain("正在编写超流体操作…");
     expect(card!.textContent).not.toContain("个动作");
 
     renderBlock(toolBlock({ toolName: "super-agent-guard", input: ACTIONS_INPUT }));

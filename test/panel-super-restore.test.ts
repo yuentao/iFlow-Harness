@@ -116,7 +116,7 @@ function record(overrides: Partial<PersistedSuperSession> = {}): PersistedSuperS
   };
 }
 
-describe("ChatPanel · 子会话归档的恢复接线", () => {
+describe("ChatPanel · 超流体归档的恢复接线", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let storageDir: string;
@@ -151,7 +151,7 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
-  it("恢复主会话时把它的子会话取回看板", async () => {
+  it("恢复主会话时把它的超流体取回看板", async () => {
     await writeSuperSessionArchive(storageDir, "main-1", [record()]);
 
     await p.restoreSuperSessions("main-1");
@@ -171,7 +171,7 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
     expect(restored?.restored).toBe(true);
   });
 
-  it("别的会话的子会话不会串到当前会话的看板上", async () => {
+  it("别的会话的超流体不会串到当前会话的看板上", async () => {
     await writeSuperSessionArchive(storageDir, "main-1", [record()]);
     await writeSuperSessionArchive(storageDir, "main-2", [record({ id: "super-other" })]);
 
@@ -222,7 +222,7 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
     expect(toasts[0]?.message).toContain(".corrupt");
   });
 
-  it("关键变更（恢复出来的子会话）立刻落盘，不等节流窗口", async () => {
+  it("关键变更（恢复出来的超流体）立刻落盘，不等节流窗口", async () => {
     const manager = p.getSuperAgent() as {
       restoreSessions: (mainSessionId: string, records: unknown[]) => void;
     };
@@ -287,7 +287,7 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
     expect(fs.statSync(file).mtimeMs).toBe(first);
   });
 
-  it("删除会话：终止其子会话、清掉它的待投递队列、归档删除且空转心跳停表", async () => {
+  it("删除会话：终止其超流体、清掉它的待投递队列、归档删除且空转心跳停表", async () => {
     // 管理器替身：记录删除归属，看板投影为空（子会话已被清掉）。
     const forgotten: string[] = [];
     const manager = {

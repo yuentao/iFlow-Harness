@@ -162,7 +162,7 @@ describe("Super Agent · 残留目录清理", () => {
     await mgr.dispose();
   });
 
-  it("活跃子会话正在用的附件目录即使过期也不清扫", async () => {
+  it("活跃超流体正在用的附件目录即使过期也不清扫", async () => {
     const now = Date.now();
     const attRoot = superIsolationDir(repoRoot, "attachments");
     const dir = path.join(attRoot, "live-child");
@@ -185,7 +185,7 @@ describe("Super Agent · 残留目录清理", () => {
     await mgr.dispose();
   });
 
-  it("删除主会话时清掉归档子会话的附件与 worktree", async () => {
+  it("删除主会话时清掉归档超流体的附件与 worktree", async () => {
     const mgr = makeManager(repoRoot);
     const attDir = path.join(superIsolationDir(repoRoot, "attachments"), "archived-child");
     fs.mkdirSync(attDir, { recursive: true });

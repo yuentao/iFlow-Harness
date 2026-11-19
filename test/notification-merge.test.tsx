@@ -364,7 +364,7 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
   it("yields a display-only wait pill on hover so the transcript underneath can be read", () => {
     // 2026-11-15 user report: the persistent 「正在等待 N 个子会话汇报」pill sits
     // on top of the transcript for the whole batch and hides the text beneath.
-    const WAIT = "正在等待 3 个子会话汇报（完成一个即汇报一个，会自动继续）";
+    const WAIT = "正在等待 3 个超流体汇报（完成一个即汇报一个，会自动继续）";
     render(streamingState("idle"), [
       { id: 21, level: "info", message: WAIT, displayOnly: true, persistent: true, toastId: 30 },
     ]);

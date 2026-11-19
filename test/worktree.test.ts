@@ -377,7 +377,7 @@ describe("worktree · 真实 git 仓库", () => {
     expect(git(repo, "branch", "--list", "iflow/super/clean")).not.toContain("iflow/super/clean");
   }, 30000);
 
-  it("合并子会话分支回主分支", async () => {
+  it("合并超流体分支回主分支", async () => {
     const repo = makeRepo();
     const target = targetPath("wt-merge");
     const probe = await probeGitRepo(repo);
@@ -656,7 +656,7 @@ describe("worktree · 自动合并的前置检查", () => {
   }, 30000);
 });
 
-describe("worktree · 宿主代子会话提交", () => {
+describe("worktree · 宿主代超流体提交", () => {
   it("把已跟踪改动与未跟踪文件一起提交，提交后工作区干净", async () => {
     const repo = makeRepo();
     const target = targetPath("wt-commit");

@@ -88,7 +88,7 @@ function render(sessions: SuperSessionUi[]): void {
 }
 
 function boardControl(): HTMLButtonElement {
-  const el = container.querySelector<HTMLButtonElement>('button[aria-label="子会话看板"]');
+  const el = container.querySelector<HTMLButtonElement>('button[aria-label="超流体看板"]');
   expect(el).toBeTruthy();
   return el!;
 }
@@ -142,7 +142,7 @@ describe("shortSuperSessionDescription", () => {
 // ---------------------------------------------------------------------------
 // 组件：展开的卡片只显示短描述，不铺开 progress
 // ---------------------------------------------------------------------------
-describe("子会话卡片主视图", () => {
+describe("超流体卡片主视图", () => {
   it("展开卡片显示委派短描述，不渲染长段实时输出", () => {
     render([session()]);
     act(() => boardControl().click()); // 展开看板
@@ -170,7 +170,7 @@ describe("子会话卡片主视图", () => {
 // ---------------------------------------------------------------------------
 // 组件：完整任务描述可就地展开 / 收起
 // ---------------------------------------------------------------------------
-describe("子会话卡片任务描述展开全文", () => {
+describe("超流体卡片任务描述展开全文", () => {
   // 首行 150 字（会被截到 95 + 省略号），第二 / 三段只存在于完整 task 里。
   const LONG_TASK = "甲".repeat(150) + "\n第二段任务说明：这是短描述之外的内容\n第三段收尾";
 

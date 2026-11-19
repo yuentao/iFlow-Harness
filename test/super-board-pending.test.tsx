@@ -174,7 +174,7 @@ function rowButton(title: string): HTMLButtonElement {
 
 /** 展开看板（幂等）：有子会话在等回答时看板会自动展开，再点一次反而会收起。 */
 function expandBoard(): void {
-  const toggle = buttonByLabel("子会话看板");
+  const toggle = buttonByLabel("超流体看板");
   if (toggle.getAttribute("aria-expanded") === "false") act(() => toggle.click());
 }
 
@@ -231,7 +231,7 @@ describe("看板提问区与主会话提问卡同源", () => {
     });
   });
 
-  it("「不回答并继续」按空答案回传（子会话继续跑）", () => {
+  it("「不回答并继续」按空答案回传（超流体继续跑）", () => {
     render([askingSession()]);
     act(() => buttonByText("不回答并继续").click());
     expect(send).toHaveBeenCalledWith({
@@ -315,7 +315,7 @@ describe("合并按钮的禁用原因", () => {
     ]);
     expandBoard();
     // 已合并的子会话折叠在历史分组里，先把它展开。
-    act(() => buttonByLabel("展开已完成的子会话").click());
+    act(() => buttonByLabel("展开已完成的超流体").click());
     act(() => rowButton("已合并的任务").click());
 
     const merge = [...document.body.querySelectorAll("button")].find((b) =>
@@ -325,11 +325,11 @@ describe("合并按钮的禁用原因", () => {
     // 不是 disabled：kit 的 disabled 样式会吞掉 pointer-events，title 就读不到了。
     expect(merge!.hasAttribute("disabled")).toBe(false);
     expect(merge!.getAttribute("aria-disabled")).toBe("true");
-    expect(merge!.getAttribute("title")).toContain("这个子会话的改动已经合并");
-    expect(merge!.getAttribute("aria-label")).toContain("这个子会话的改动已经合并");
+    expect(merge!.getAttribute("title")).toContain("这个超流体的改动已经合并");
+    expect(merge!.getAttribute("aria-label")).toContain("这个超流体的改动已经合并");
     // 原因不再逐行重复：规则统一收在看板头的帮助按钮里（见
     // test/super-board-surface.test.tsx 的「看板帮助说明」用例）。
-    expect(document.body.textContent).not.toContain("这个子会话的改动已经合并");
+    expect(document.body.textContent).not.toContain("这个超流体的改动已经合并");
 
     // 置灰状态下点了也不能派发合并。
     act(() => merge!.click());

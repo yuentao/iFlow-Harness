@@ -90,7 +90,7 @@ beforeEach(() => {
     if (this.hasAttribute(DELEGATION_ORIGIN_ATTR)) {
       return { left: 100, top: 200, width: 40, height: 20, right: 140, bottom: 220, x: 100, y: 200, toJSON: () => ({}) } as DOMRect;
     }
-    if (this.getAttribute("aria-label") === "子会话看板") {
+    if (this.getAttribute("aria-label") === "超流体看板") {
       return { left: 400, top: 10, width: 120, height: 28, right: 520, bottom: 38, x: 400, y: 10, toJSON: () => ({}) } as DOMRect;
     }
     return { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
@@ -135,13 +135,13 @@ function fly(): HTMLElement | null {
 }
 
 function boardControl(): HTMLButtonElement {
-  const el = container.querySelector<HTMLButtonElement>('button[aria-label="子会话看板"]');
+  const el = container.querySelector<HTMLButtonElement>('button[aria-label="超流体看板"]');
   expect(el).toBeTruthy();
   return el!;
 }
 
 describe("委派成功飞入看板", () => {
-  it("新子会话出现时飞一次：起点委派卡 → 终点看板控件，带 count 徽标", () => {
+  it("新超流体出现时飞一次：起点委派卡 → 终点看板控件，带 count 徽标", () => {
     render([]);
     addOriginCard();
     expect(fly()).toBeNull();
@@ -184,7 +184,7 @@ describe("委派成功飞入看板", () => {
     expect(fly()).toBeNull();
   });
 
-  it("restored 历史子会话不触发", () => {
+  it("restored 历史超流体不触发", () => {
     render([]);
     addOriginCard();
     setStore([session("old", { restored: true })]);

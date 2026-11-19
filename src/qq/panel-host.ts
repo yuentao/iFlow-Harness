@@ -169,7 +169,7 @@ export interface QqHostPorts {
 export const QQ_DEFAULT_SETTLE_TIMEOUT_MS = 2 * 60 * 60_000;
 
 /** 子会话没有返回摘要时的占位文案（不得编造内容）。 */
-export const QQ_MISSING_SUMMARY_TEXT = "（子会话未返回摘要）";
+export const QQ_MISSING_SUMMARY_TEXT = "（超流体未返回摘要）";
 
 /**
  * 等待子会话收尾超时。
@@ -183,7 +183,7 @@ export class QqSettleTimeoutError extends Error {
     readonly superSessionId: string,
     readonly timeoutMs: number,
   ) {
-    super(`等待子会话 ${superSessionId} 收尾超时（${timeoutMs}ms）`);
+    super(`等待超流体 ${superSessionId} 收尾超时（${timeoutMs}ms）`);
     this.name = "QqSettleTimeoutError";
   }
 }

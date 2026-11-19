@@ -324,7 +324,7 @@ afterAll(() => {
 });
 
 describe("super agent · 编排", () => {
-  it("派发的子会话在自己的 worktree 里跑，边界只含 worktree", async () => {
+  it("派发的超流体在自己的 worktree 里跑，边界只含 worktree", async () => {
     const repo = makeRepo();
     // 本用例验的是「隔离环境真的建出来了、它就是子会话的 cwd」，因此必须
     // 让 worktree 活过断言：正常完成后的默认收尾会**立刻**删掉工作目录
@@ -368,7 +368,7 @@ describe("super agent · 编排", () => {
     await until(() => Boolean(harness.clients[0]?.disposed));
   }, 30000);
 
-  it("子会话的 session/new 不带主会话 settings（子会话必须保留 task 工具）", async () => {
+  it("超流体的 session/new 不带主会话 settings（超流体必须保留 task 工具）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo);
     harness.manager.spawn({ title: "改登录", task: "修好 src/auth.ts" });
@@ -387,7 +387,7 @@ describe("super agent · 编排", () => {
     expect(request?.cwd).toBe(harness.sessions[0]?.isolation.path);
   }, 30000);
 
-  it("子会话被推到 yolo 模式（刻意完全自主，不因审批往返停顿）", async () => {
+  it("超流体被推到 yolo 模式（刻意完全自主，不因审批往返停顿）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -444,7 +444,7 @@ describe("super agent · 编排", () => {
     expect(response.outcome).toEqual({ outcome: "selected", optionId: "allow" });
   }, 30000);
 
-  it("兜底路径：命中依赖护栏的 shell 命令被拒绝，子会话继续跑、不产生待办", async () => {
+  it("兜底路径：命中依赖护栏的 shell 命令被拒绝，超流体继续跑、不产生待办", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -485,7 +485,7 @@ describe("super agent · 编排", () => {
     expect(response).toEqual({ approved: true });
   }, 30000);
 
-  it("子会话的提问落到它自己的 pending，用户应答后恢复", async () => {
+  it("超流体的提问落到它自己的 pending，用户应答后恢复", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -525,7 +525,7 @@ describe("super agent · 编排", () => {
     expect(harness.sessions[0]?.pending).toBeUndefined();
   }, 30000);
 
-  it("子会话开始等你回答时通知一次 onNeedInput（宿主据此弹系统通知）", async () => {
+  it("超流体开始等你回答时通知一次 onNeedInput（宿主据此弹系统通知）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -577,7 +577,7 @@ describe("super agent · 编排", () => {
     await pendingCall;
   }, 30000);
 
-  it("恢复出来的历史子会话收到 needs_input 也不通知", async () => {
+  it("恢复出来的历史超流体收到 needs_input 也不通知", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     harness.manager.restoreSessions("main-1", [
@@ -608,7 +608,7 @@ describe("super agent · 编排", () => {
     expect(harness.manager.get("super-old")?.status).toBe("cancelled");
   }, 30000);
 
-  it("任务说明连同工作目录一起交给子会话", async () => {
+  it("任务说明连同工作目录一起交给超流体", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo);
     harness.manager.spawn({ title: "改登录", task: "修好 src/auth.ts" });
@@ -620,7 +620,7 @@ describe("super agent · 编排", () => {
     expect(prompt).toContain("tool calls are never reviewed or approved");
   }, 30000);
 
-  it("子会话的实时操作（思考/工具/正文）进入自己的转录并增量推送，委派提示词不出现", async () => {
+  it("超流体的实时操作（思考/工具/正文）进入自己的转录并增量推送，委派提示词不出现", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     const session = harness.manager.spawn({ title: "改登录", task: "修好 src/auth.ts" });
@@ -682,7 +682,7 @@ describe("super agent · 编排", () => {
     expect(session?.integration).toBeUndefined();
   }, 30000);
 
-  it("子会话完成后上报主会话（ready），中间进展不上报", async () => {
+  it("超流体完成后上报主会话（ready），中间进展不上报", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo);
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -694,7 +694,7 @@ describe("super agent · 编排", () => {
     expect(states).not.toContain("progress");
   }, 30000);
 
-  it("子会话失败时上报 failed 并记录原因", async () => {
+  it("超流体失败时上报 failed 并记录原因", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "throw");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -714,7 +714,7 @@ describe("super agent · 编排", () => {
     expect(harness.reports.at(-1)?.report.summary).toContain("内核拒绝了这次请求");
   }, 30000);
 
-  it("中断子会话 → cancelled 并终止进程（内核退出不算失败）", async () => {
+  it("中断超流体 → cancelled 并终止进程（内核退出不算失败）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     const session = harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -727,7 +727,7 @@ describe("super agent · 编排", () => {
     expect(harness.reports.filter((entry) => entry.report.state === "failed")).toHaveLength(0);
   }, 30000);
 
-  it("中断已终态的子会话是幂等重复（不算未生效）；目标不存在才是不生效", async () => {
+  it("中断已终态的超流体是幂等重复（不算未生效）；目标不存在才是不生效", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     const session = harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -745,7 +745,7 @@ describe("super agent · 编排", () => {
     expect(missing).toEqual({ ok: false, reason: "not-found" });
   }, 30000);
 
-  it("中断已归档的历史子会话：按幂等已终态回报，不误报 not-found", async () => {
+  it("中断已归档的历史超流体：按幂等已终态回报，不误报 not-found", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     harness.manager.restoreSessions("main-1", [
@@ -823,7 +823,7 @@ describe("super agent · 编排", () => {
     expect(existsSync(kept[0]?.path ?? "")).toBe(true);
   }, 30000);
 
-  it("清理子会话时保留有未合并提交的分支", async () => {
+  it("清理超流体时保留有未合并提交的分支", async () => {
     const repo = makeRepo();
     // manual 模式：不做自动集成。keepWorktree=true 让工作目录活到测试自己
     // 往里提交为止（默认已完成即回收目录、只保留分支，本用例要验的是清理
@@ -913,7 +913,7 @@ describe("super agent · 自动集成", () => {
     ).toBe(true);
   }, 30000);
 
-  it("子会话没提交时宿主代提交，再正常自动合并", async () => {
+  it("超流体没提交时宿主代提交，再正常自动合并", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "edit", "merge");
     harness.manager.spawn({ title: "写文件", task: "把文件写出来但不提交" });
@@ -924,7 +924,7 @@ describe("super agent · 自动集成", () => {
     // 宿主补的提交让自动合并真的把文件带回了主工作区。
     expect(existsSync(path.join(repo, "partial.txt"))).toBe(true);
     expect(
-      session.reports.some((report) => report.summary.includes("宿主已代子会话提交")),
+      session.reports.some((report) => report.summary.includes("宿主已代超流体提交")),
     ).toBe(true);
   }, 30000);
 
@@ -952,7 +952,7 @@ describe("super agent · 自动集成", () => {
     expect(harness.reports.at(-1)?.report.state).toBe("ready");
   }, 30000);
 
-  it("主工作区的改动与子会话改动重叠时跳过，并列出重叠文件", async () => {
+  it("主工作区的改动与超流体改动重叠时跳过，并列出重叠文件", async () => {
     const repo = makeRepo();
     writeFileSync(path.join(repo, "a.txt"), "local edit\n", "utf8");
 
@@ -1014,7 +1014,7 @@ describe("super agent · 自动集成", () => {
     expect(existsSync(path.join(repo, "child.txt"))).toBe(true);
   }, 30000);
 
-  it("合并子会话合入后，worktree 里还有未提交改动时保留目录与分支（绝不丢数据）", async () => {
+  it("合并超流体合入后，worktree 里还有未提交改动时保留目录与分支（绝不丢数据）", async () => {
     const repo = makeRepo();
     // 第一个子会话在 worktree 里提交；第二个是合并子会话（主仓工作区档）。
     // keepWorktree=true：默认完成后会回收目录，而本用例要往目录里写 leftover。
@@ -1091,7 +1091,7 @@ describe("super agent · 自动集成", () => {
     expect(existsSync(path.join(repo, "child.txt"))).toBe(false);
   }, 30000);
 
-  it("子会话没有产生提交时如实标注无需合并（不需要用户动手）", async () => {
+  it("超流体没有产生提交时如实标注无需合并（不需要用户动手）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "complete", "merge");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -1106,7 +1106,7 @@ describe("super agent · 自动集成", () => {
     expect(harness.needMerges).toHaveLength(0);
   }, 30000);
 
-  it("合并子会话的结果由只读 git 检测写入 integration：没并入就如实说仍保留", async () => {
+  it("合并超流体的结果由只读 git 检测写入 integration：没并入就如实说仍保留", async () => {
     const repo = makeRepo();
     // 合并子会话什么都不做（只汇报自己干了活）—— 宿主不能信它的自述。
     const harness = makeManager(repo, ["commit", "merge-noop"], "manual");
@@ -1133,7 +1133,7 @@ describe("super agent · 自动集成", () => {
     expect(existsSync(path.join(repo, "child.txt"))).toBe(false);
   }, 30000);
 
-  it("合并子会话真的合入后：integration 记为已合并，改动回到主工作区", async () => {
+  it("合并超流体真的合入后：integration 记为已合并，改动回到主工作区", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, ["commit", "merge"], "manual");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -1163,8 +1163,8 @@ describe("super agent · 自动集成", () => {
   }, 30000);
 });
 
-describe("super agent · 合并子会话（主仓工作区档）", () => {
-  it("合并子会话跑在主仓工作区：cwd / allowedRoots / includeDirectories 都是主仓根", async () => {
+describe("super agent · 合并超流体（主仓工作区档）", () => {
+  it("合并超流体跑在主仓工作区：cwd / allowedRoots / includeDirectories 都是主仓根", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, ["commit", "merge-noop"], "manual");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -1199,7 +1199,7 @@ describe("super agent · 合并子会话（主仓工作区档）", () => {
     expect(mergeSession?.isolation.branch).toBeUndefined();
   }, 30000);
 
-  it("repo 档预检拦截破坏性 git 命令：终止合并子会话并留下可见原因", async () => {
+  it("repo 档预检拦截破坏性 git 命令：终止合并超流体并留下可见原因", async () => {
     const repo = makeRepo();
     // 合并子会话停在 prompt 里，测试在「命令即将执行」的帧上注入破坏性命令。
     const harness = makeManager(repo, ["commit", "hang"], "manual");
@@ -1238,7 +1238,7 @@ describe("super agent · 合并子会话（主仓工作区档）", () => {
     expect(client.disposed).toBe(true);
   }, 30000);
 
-  it("清理合并子会话只移除记录，绝不删主仓工作区", async () => {
+  it("清理合并超流体只移除记录，绝不删主仓工作区", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, ["commit", "merge-noop"], "manual");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -1263,7 +1263,7 @@ describe("super agent · 合并子会话（主仓工作区档）", () => {
     expect(harness.manager.get(merge!.id)).toBeUndefined();
   }, 30000);
 
-  it("同一时刻只能有一个合并子会话（主仓工作区没有版本隔离）", async () => {
+  it("同一时刻只能有一个合并超流体（主仓工作区没有版本隔离）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, ["commit", "hang", "merge-noop"], "manual");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -1289,7 +1289,7 @@ describe("super agent · 合并子会话（主仓工作区档）", () => {
     await harness.manager.cancel(first!.id);
   }, 30000);
 
-  it("合并子会话的提示词写死边界：不许 git add -A / commit -a / stash", async () => {
+  it("合并超流体的提示词写死边界：不许 git add -A / commit -a / stash", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, ["commit", "merge-noop"], "manual");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -1369,10 +1369,10 @@ describe("super agent · 任务提示词", () => {
       "干活",
       { kind: "directory", path: "/tmp/dir" },
       undefined,
-      { attempt: 2, error: "子会话内核退出（code=1）", summary: "已改了一半" },
+      { attempt: 2, error: "超流体内核退出（code=1）", summary: "已改了一半" },
     );
     expect(text).toContain("This is a retry (attempt 2)");
-    expect(text).toContain("子会话内核退出");
+    expect(text).toContain("超流体内核退出");
     expect(text).toContain("inspect the current state first");
     expect(text).toContain("已改了一半");
   });
@@ -1424,7 +1424,7 @@ describe("super agent · 意外中断后重试", () => {
     expect(prompt).toContain("child exploded");
   }, 30000);
 
-  it("被中断（cancelled）的子会话也可以重试", async () => {
+  it("被中断（cancelled）的超流体也可以重试", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, ["hang", "complete"], "manual");
     const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -1437,7 +1437,7 @@ describe("super agent · 意外中断后重试", () => {
     expect(harness.sessions[0]?.attempts).toBe(2);
   }, 30000);
 
-  it("已完成的子会话不能重试", async () => {
+  it("已完成的超流体不能重试", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "complete", "manual");
     const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -1473,7 +1473,7 @@ describe("super agent · 意外中断后重试", () => {
     expect(existsSync(second.isolation.path)).toBe(true);
   }, 30000);
 
-  it("排队中的子会话被取消后不会再被启动", async () => {
+  it("排队中的超流体被取消后不会再被启动", async () => {
     const repo = makeRepo();
     const limit = 2;
     const harness = makeManager(repo, "hang", "merge", "main-1", limit);
@@ -1551,7 +1551,7 @@ describe("super agent · 附件", () => {
     expect(existsSync(copyPath)).toBe(false);
   }, 30000);
 
-  it("粘贴的图片既落盘也作为图片块送给子会话", async () => {
+  it("粘贴的图片既落盘也作为图片块送给超流体", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     const data = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]).toString("base64");
@@ -1572,7 +1572,7 @@ describe("super agent · 附件", () => {
     await harness.manager.cancel(harness.sessions[0]!.id);
   }, 30000);
 
-  it("源文件不存在时如实写入提示词，不影响子会话运行", async () => {
+  it("源文件不存在时如实写入提示词，不影响超流体运行", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "complete");
     harness.manager.spawn({
@@ -1589,7 +1589,7 @@ describe("super agent · 附件", () => {
 });
 
 describe("super agent · 归属与归档", () => {
-  it("派发的子会话归属当前主会话", async () => {
+  it("派发的超流体归属当前主会话", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "complete", "merge", "main-7");
     harness.manager.spawn({ title: "改登录", task: "修好它" });
@@ -1602,7 +1602,7 @@ describe("super agent · 归属与归档", () => {
   // 汇报是投给**某个**主会话的：提示词里的 pendingCount（「还有 N 个在跑」）
   // 必须只数同一归属下的子会话 —— 混进别人家的孩子，模型会以为自己也该
   // 等那些不存在于它上下文里的孩子。
-  it("汇报提示词里的 pendingCount 只算同一归属主会话的子会话", async () => {
+  it("汇报提示词里的 pendingCount 只算同一归属主会话的超流体", async () => {
     const repo = makeRepo();
     let owner: string | null = "main-A";
     // 三个孩子：A 的一个跑完、A 的一个还在跑、B 的一个还在跑。
@@ -1630,7 +1630,7 @@ describe("super agent · 归属与归档", () => {
     await harness.manager.dispose();
   }, 60000);
 
-  it("归档只含该主会话名下的子会话（别的会话的不混进来）", async () => {
+  it("归档只含该主会话名下的超流体（别的会话的不混进来）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "complete", "merge", "main-1");
     harness.manager.spawn({ title: "A 的任务", task: "干活" });
@@ -1643,7 +1643,7 @@ describe("super agent · 归属与归档", () => {
     expect(harness.manager.archivableSessions("main-2")).toEqual([]);
   }, 30000);
 
-  it("恢复历史子会话后它回到看板上", () => {
+  it("恢复历史超流体后它回到看板上", () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "complete", "merge", "main-1");
     harness.manager.restoreSessions("main-1", [
@@ -1666,7 +1666,7 @@ describe("super agent · 归属与归档", () => {
     expect(harness.sessions[0]?.restored).toBe(true);
   });
 
-  it("历史子会话只在它自己的主会话下出现", () => {
+  it("历史超流体只在它自己的主会话下出现", () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "complete", "merge", "main-1");
     harness.manager.restoreSessions("main-1", [
@@ -1689,7 +1689,7 @@ describe("super agent · 归属与归档", () => {
     expect(harness.manager.list("main-1")).toHaveLength(1);
   });
 
-  it("活着的子会话一直可见（不分主会话）—— 用户得能中断它们", async () => {
+  it("活着的超流体一直可见（不分主会话）—— 用户得能中断它们", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang", "merge", "main-1");
     harness.manager.spawn({ title: "还在跑", task: "干活" });
@@ -1701,7 +1701,7 @@ describe("super agent · 归属与归档", () => {
     await harness.manager.cancel(harness.sessions[0]!.id);
   }, 30000);
 
-  it("历史子会话不能被重试（没有进程可以重启），但可以查到", () => {
+  it("历史超流体不能被重试（没有进程可以重启），但可以查到", () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "complete", "merge", "main-1");
     harness.manager.restoreSessions("main-1", [
@@ -1778,7 +1778,7 @@ describe("super agent · 归属与归档", () => {
     expect(harness.manager.archivableMainSessionIds().sort()).toEqual(["main-1", "main-2"]);
   });
 
-  it("子会话被清理后，那个会话的归档写成空数组（不会又冒出旧记录）", async () => {
+  it("超流体被清理后，那个会话的归档写成空数组（不会又冒出旧记录）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "complete", "merge", "main-1");
     harness.manager.spawn({ title: "改登录", task: "修好它" });
@@ -1797,7 +1797,7 @@ describe("super agent · 归属与归档", () => {
 });
 
 describe("super agent · 收尾守卫（用户中断后不许落改动）", () => {
-  it("准备阶段被中断的子会话：不代提交、不自动合并，分支与工作目录保留", async () => {
+  it("准备阶段被中断的超流体：不代提交、不自动合并，分支与工作目录保留", async () => {
     const repo = makeRepo();
     // gate-session：内核会话还没建好就挂起 —— 测试在这个窗口里中断它。
     const harness = makeManager(repo, "gate-session", "merge");
@@ -1841,7 +1841,7 @@ describe("super agent · 收尾守卫（用户中断后不许落改动）", () =
     expect(session.isolation.released).toBeFalsy();
   }, 30000);
 
-  it("中断后子会话仍跑完，也不会把它的改动带进主分支", async () => {
+  it("中断后超流体仍跑完，也不会把它的改动带进主分支", async () => {
     const repo = makeRepo();
     // hang-text：子会话先吐一段文字再挂着；取消后内核仍会 resolve。
     const harness = makeManager(repo, "hang-text", "merge");
@@ -1859,7 +1859,7 @@ describe("super agent · 收尾守卫（用户中断后不许落改动）", () =
 });
 
 describe("super agent · 并发额度按活着的 CLI 进程算", () => {
-  it("回合已结束但进程还活着的子会话继续占着槽位（不超发）", async () => {
+  it("回合已结束但进程还活着的超流体继续占着槽位（不超发）", async () => {
     const repo = makeRepo();
     // 上限 1。第一个子会话回合结束，但进程回收被挂住 —— 进程还活着。
     const harness = makeManager(repo, "commit-gated-dispose", "manual", "main-1", 1);
@@ -1881,7 +1881,7 @@ describe("super agent · 并发额度按活着的 CLI 进程算", () => {
   }, 30000);
 });
 
-describe("super agent · 子会话输出文本有上限", () => {
+describe("super agent · 超流体输出文本有上限", () => {
   it("超出上限时只保留尾部，并标注前文被截断", () => {
     const text = `HEAD${"x".repeat(100)}TAIL`;
     const capped = capTail(text, 20);
@@ -1903,7 +1903,7 @@ describe("super agent · 子会话输出文本有上限", () => {
   });
 });
 
-describe("super agent · 子会话 todolist 投影", () => {
+describe("super agent · 超流体 todolist 投影", () => {
   /** 起一个正在跑的子会话（hang），并等 prompt 真正发出后再注入 plan 更新。 */
   async function running(): Promise<{ harness: Harness; id: string }> {
     const repo = makeRepo();
@@ -1973,7 +1973,7 @@ describe("super agent · 子会话 todolist 投影", () => {
     expect(todos[2]).not.toHaveProperty("priority");
   }, 30000);
 
-  it("忽略带 agentId 的 plan：嵌套子代理的 todo 不能混进本子会话", async () => {
+  it("忽略带 agentId 的 plan：嵌套子代理的 todo 不能混进本超流体", async () => {
     const { harness } = await running();
     const client = harness.clients[0]!;
     const entries = [{ content: "别人的步骤", status: "in_progress" }];
@@ -1997,7 +1997,7 @@ describe("super agent · 子会话 todolist 投影", () => {
 });
 
 describe("super agent · 清理的硬闸门", () => {
-  it("运行中的子会话拒绝清理：不杀进程、不删目录、记录还在", async () => {
+  it("运行中的超流体拒绝清理：不杀进程、不删目录、记录还在", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -2149,8 +2149,8 @@ function archivedChild(id: string, mainSessionId: string): SuperSessionUi {
   };
 }
 
-describe("super agent · 删除主会话时清理它的子会话（H）", () => {
-  it("forgetMainSession 终止活子会话、清掉记录与归档归属，worktree 保留", async () => {
+describe("super agent · 删除主会话时清理它的超流体（H）", () => {
+  it("forgetMainSession 终止活超流体、清掉记录与归档归属，worktree 保留", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang", "manual", "main-1", 2, { keepWorktree: true });
     const spawned = harness.manager.spawn({ title: "跑着的", task: "长任务" });
@@ -2181,7 +2181,7 @@ describe("super agent · 删除主会话时清理它的子会话（H）", () => 
     await harness.manager.dispose();
   }, 30000);
 
-  it("只清目标会话：别的会话名下的子会话不受影响", async () => {
+  it("只清目标会话：别的会话名下的超流体不受影响", async () => {
     const repo = makeRepo();
     let owner = "main-1";
     const harness = makeManager(repo, "hang", "manual", () => owner);
@@ -2202,7 +2202,7 @@ describe("super agent · 删除主会话时清理它的子会话（H）", () => 
   }, 30000);
 });
 
-describe("super agent · 宿主侧子会话转录的资源上限（I）", () => {
+describe("super agent · 宿主侧超流体转录的资源上限（I）", () => {
   it("超过保留窗口的旧工具输出被释放，最新块仍完整", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
@@ -2360,7 +2360,7 @@ describe("super agent · 编排修复回归", () => {
     await harness.manager.cancel(session.id);
   }, 30000);
 
-  it("超过 5MB 的图片不内联为视觉块（避免撑爆 ACP 帧），但仍落盘给子会话", async () => {
+  it("超过 5MB 的图片不内联为视觉块（避免撑爆 ACP 帧），但仍落盘给超流体", async () => {
     expect(MAX_INLINE_IMAGE_BYTES).toBe(5 * 1024 * 1024);
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");

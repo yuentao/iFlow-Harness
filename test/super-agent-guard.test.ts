@@ -37,7 +37,7 @@ function ctxWithScripts(
   });
 }
 
-describe("子会话 shell 护栏 · 拒绝", () => {
+describe("超流体 shell 护栏 · 拒绝", () => {
   const cases: Array<{
     name: string;
     command: string;
@@ -101,7 +101,7 @@ describe("子会话 shell 护栏 · 拒绝", () => {
       command: "cd ..\\..\\..\\..; npm install",
     },
     {
-      name: "子会话本身就跑在主仓工作区（合并子会话）",
+      name: "超流体本身就跑在主仓工作区（合并超流体）",
       command: "npm ci",
       context: { cwd: REPO },
     },
@@ -174,7 +174,7 @@ describe("子会话 shell 护栏 · 拒绝", () => {
   }
 });
 
-describe("子会话 shell 护栏 · 放行", () => {
+describe("超流体 shell 护栏 · 放行", () => {
   const cases: Array<{
     name: string;
     command: string;
@@ -237,7 +237,7 @@ describe("子会话 shell 护栏 · 放行", () => {
   }
 });
 
-describe("子会话 shell 护栏 · Node 内联脚本与脚本文件", () => {
+describe("超流体 shell 护栏 · Node 内联脚本与脚本文件", () => {
   // 命令藏在 JS 里：命令文本里根本没有包管理器词，按词切分看不见。
   const inlineDenyCases: Array<{ name: string; command: string }> = [
     {
@@ -359,7 +359,7 @@ describe("子会话 shell 护栏 · Node 内联脚本与脚本文件", () => {
   });
 });
 
-describe("子会话 shell 护栏 · 嵌套壳解包", () => {
+describe("超流体 shell 护栏 · 嵌套壳解包", () => {
   it('cmd /c "npm ci"（联接存在）→ 拒绝', () => {
     const result = classifyChildShellCommand('cmd /c "npm ci"', ctx({ nodeModulesIsLink: true }));
     expect(result.decision).toBe("deny");
@@ -392,8 +392,8 @@ describe("子会话 shell 护栏 · 嵌套壳解包", () => {
   });
 });
 
-describe("子会话 shell 护栏 · 处置档位（severity）", () => {
-  it("创建 node_modules 链接 → session 档（预检路径据此终止子会话）", () => {
+describe("超流体 shell 护栏 · 处置档位（severity）", () => {
+  it("创建 node_modules 链接 → session 档（预检路径据此终止超流体）", () => {
     const result = classifyChildShellCommand(
       'mklink /J node_modules "J:\\git\\proj\\node_modules"',
       ctx(),
@@ -418,13 +418,13 @@ describe("子会话 shell 护栏 · 处置档位（severity）", () => {
     expect(result.severity).toBe("session");
   });
 
-  it("兄弟仓库路径（主仓根为前缀子串）删除 node_modules 只判 tool 档，不误杀子会话", () => {
+  it("兄弟仓库路径（主仓根为前缀子串）删除 node_modules 只判 tool 档，不误杀超流体", () => {
     const result = classifyChildShellCommand('rm -rf "J:\\git\\project-x\\node_modules"', ctx());
     expect(result.decision).toBe("deny");
     expect(result.severity).toBe("tool");
   });
 
-  it("删自己 worktree 里的 node_modules → tool 档（不因此杀掉子会话）", () => {
+  it("删自己 worktree 里的 node_modules → tool 档（不因此杀掉超流体）", () => {
     const result = classifyChildShellCommand("rm -rf node_modules", ctx());
     expect(result.decision).toBe("deny");
     expect(result.severity).toBe("tool");
@@ -448,7 +448,7 @@ describe("子会话 shell 护栏 · 处置档位（severity）", () => {
   });
 });
 
-describe("子会话 shell 护栏 · repo 档（主仓工作区）的破坏性 git 命令", () => {
+describe("超流体 shell 护栏 · repo 档（主仓工作区）的破坏性 git 命令", () => {
   /** repo 档上下文：cwd 就是主仓根，宿主显式标记 repoWorkspace。 */
   function repoCtx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
     return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, ...overrides };
@@ -541,7 +541,7 @@ describe("子会话 shell 护栏 · repo 档（主仓工作区）的破坏性 gi
   });
 });
 
-describe("子会话 shell 护栏 · 工具识别与命令提取", () => {
+describe("超流体 shell 护栏 · 工具识别与命令提取", () => {
   it("run_shell_command 是 shell 工具", () => {
     expect(isShellToolCall({ toolName: "run_shell_command" })).toBe(true);
   });
@@ -576,7 +576,7 @@ describe("子会话 shell 护栏 · 工具识别与命令提取", () => {
   });
 });
 
-describe("子会话 shell 护栏 · 审批选项", () => {
+describe("超流体 shell 护栏 · 审批选项", () => {
   const options = [
     { optionId: "once", name: "允许一次", kind: "allow_once" },
     { optionId: "always", name: "始终允许", kind: "allow_always" },
@@ -600,7 +600,7 @@ describe("子会话 shell 护栏 · 审批选项", () => {
   });
 });
 
-describe("子会话 shell 护栏 · repo 档合并子会话的任务书硬边界", () => {
+describe("超流体 shell 护栏 · repo 档合并超流体的任务书硬边界", () => {
   function repoCtx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
     return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, ...overrides };
   }
@@ -671,7 +671,7 @@ describe("子会话 shell 护栏 · repo 档合并子会话的任务书硬边界
     });
   }
 
-  it("worktree 档完全不受合并边界约束（那些子会话允许 push / 建 PR）", () => {
+  it("worktree 档完全不受合并边界约束（那些超流体允许 push / 建 PR）", () => {
     for (const command of [
       "git push",
       "git rebase",
@@ -701,7 +701,7 @@ describe("子会话 shell 护栏 · repo 档合并子会话的任务书硬边界
   });
 });
 
-describe("子会话写工具护栏 · repo 档受保护路径预检", () => {
+describe("超流体写工具护栏 · repo 档受保护路径预检", () => {
   function repoCtx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
     return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, ...overrides };
   }
@@ -721,7 +721,7 @@ describe("子会话写工具护栏 · repo 档受保护路径预检", () => {
     { name: "改写 .git/config", path: `${REPO}\\.git\\config` },
     { name: "改写 .git/hooks/pre-push", path: `${REPO}/.git/hooks/pre-push` },
     { name: "改写 .git/MERGE_HEAD", path: `${REPO}\\.git\\MERGE_HEAD` },
-    { name: "改写宿主子会话元数据", path: `${REPO}\\.iflow\\super\\worktrees\\x\\child.txt` },
+    { name: "改写宿主超流体元数据", path: `${REPO}\\.iflow\\super\\worktrees\\x\\child.txt` },
     { name: "相对路径指向 .git", path: ".git/config" },
     { name: "replace 工具改写 .git", path: `${REPO}\\.git\\config`, tool: "replace" },
     { name: "edit_block 工具改写宿主元数据", path: `${REPO}\\.iflow\\super\\archive.json`, tool: "edit_block" },

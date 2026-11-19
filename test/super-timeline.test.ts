@@ -146,7 +146,7 @@ describe("deriveSuperTimeline · 只画真实节点", () => {
         integration: {
           mode: "merge",
           state: "not_needed",
-          detail: "无需合并：子会话没有产生任何提交",
+          detail: "无需合并：超流体没有产生任何提交",
           at: 5000,
         },
       }),
@@ -154,7 +154,7 @@ describe("deriveSuperTimeline · 只画真实节点", () => {
     const integration = nodes.at(-1);
     expect(integration?.label).toBe("无需合并");
     expect(integration?.tone).toBe("idle");
-    expect(integration?.detail).toBe("无需合并：子会话没有产生任何提交");
+    expect(integration?.detail).toBe("无需合并：超流体没有产生任何提交");
   });
 
   it("restored（重启后恢复的历史记录）：不因恢复而多造节点", () => {

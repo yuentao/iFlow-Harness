@@ -588,7 +588,7 @@ function createMockHost(): HostApi {
       // host is the frontend's dev surface, so browser iteration needs a
       // sample that exercises the split-card layout).
       text: [
-        "这三个任务书我拆给三个子会话并行做：",
+        "这三个任务书我拆给三个超流体并行做：",
         "",
         "```super-agent",
         JSON.stringify(
@@ -632,7 +632,7 @@ function createMockHost(): HostApi {
       // branch in SuperDirectiveCard (the 3-task block above only covers the
       // batch layout).
       text: [
-        "这一件只需要一个子会话：",
+        "这一件只需要一个超流体：",
         "",
         "```super-agent",
         JSON.stringify(
@@ -947,7 +947,7 @@ function createMockHost(): HostApi {
       updatedAt: Date.now() - 500_000,
       startedAt: Date.now() - 538_000,
       endedAt: Date.now() - 500_000,
-      error: "子会话内核退出（code=1）",
+      error: "超流体内核退出（code=1）",
       reports: [],
     },
   ];
@@ -2229,7 +2229,7 @@ function createMockHost(): HostApi {
           // in-progress state flash by unseen).
           demoBlocks.push({
             kind: "user",
-            text: "请把子会话的分支合并到当前分支（mock 请求，由智能体执行）",
+            text: "请把超流体的分支合并到当前分支（mock 请求，由智能体执行）",
           });
           broadcastDemo(mockStatus, null);
           const id = m.sessionId;
@@ -2244,7 +2244,7 @@ function createMockHost(): HostApi {
               };
               target.updatedAt = Date.now();
             }
-            demoBlocks.push({ kind: "text", text: "*（已让智能体合并子会话分支，mock）*" });
+            demoBlocks.push({ kind: "text", text: "*（已让智能体合并超流体分支，mock）*" });
             broadcastDemo(mockStatus, null);
           }, 1500);
           return;

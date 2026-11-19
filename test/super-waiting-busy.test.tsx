@@ -137,7 +137,7 @@ function newSessionButton(): HTMLButtonElement | undefined {
 }
 
 describe("顶栏忙碌 chip", () => {
-  it("等待子会话汇报时顶栏不再显示「生成中」chip", () => {
+  it("等待超流体汇报时顶栏不再显示「生成中」chip", () => {
     render(false);
     // idle 且没有在等子会话 → 顶栏没有任何状态 chip（既有行为）。
     expect(container.textContent).not.toContain("生成中");
@@ -158,7 +158,7 @@ describe("顶栏忙碌 chip", () => {
     const button = newSessionButton();
     expect(button).toBeTruthy();
     expect(button!.disabled).toBe(true);
-    expect(button!.getAttribute("title")).toContain("子会话");
+    expect(button!.getAttribute("title")).toContain("超流体");
   });
 });
 
@@ -192,7 +192,7 @@ function stopButton(): HTMLButtonElement | undefined {
 
 function delegateButton(): HTMLButtonElement | undefined {
   return [...container.querySelectorAll("button")].find(
-    (b) => b.getAttribute("title") === "派发为子会话 (Enter)",
+    (b) => b.getAttribute("title") === "派发为超流体 (Enter)",
   ) as HTMLButtonElement | undefined;
 }
 
@@ -246,7 +246,7 @@ describe("停止压住汇报后的「新会话」出路", () => {
 
     act(() => button!.click());
     // ConfirmDialog 挂在 ModalShell 的 createPortal(..., document.body) 里。
-    expect(document.body.textContent).toContain("还有 2 项子会话结果没处理");
+    expect(document.body.textContent).toContain("还有 2 项超流体结果没处理");
     expect(document.body.textContent).toContain("切回去才会继续处理");
     // 确认前不发 newSession。
     expect(send).not.toHaveBeenCalledWith({ type: "newSession" });
@@ -277,6 +277,6 @@ describe("停止压住汇报后的「新会话」出路", () => {
     renderState({ status: "idle", superWaiting: true, superHeld: false, superPendingCount: 0 });
     const button = newSessionButton();
     expect(button!.disabled).toBe(true);
-    expect(button!.getAttribute("title")).toContain("子会话");
+    expect(button!.getAttribute("title")).toContain("超流体");
   });
 });
