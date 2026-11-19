@@ -8611,7 +8611,7 @@ export class ChatPanel implements vscode.Disposable {
             break;
           }
           case "cancel": {
-            const outcome = await manager.cancel(action.sessionId);
+            const outcome = await manager.cancel(action.sessionId, "agent");
             receipt = {
               action: "cancel",
               sessionId: action.sessionId,
@@ -9560,7 +9560,7 @@ export class ChatPanel implements vscode.Disposable {
       }
       case "cancel": {
         if (!msg.sessionId) return;
-        const outcome = await manager.cancel(msg.sessionId);
+        const outcome = await manager.cancel(msg.sessionId, "user");
         // 与 cancelAll / cleanup / retry 一致，单个中断也要有可见回执。
         // 按 SuperCancelOutcome 的真实 reason 区分文案：幂等重复（已终态）
         // 不是失败，但要如实告诉用户「无需中断」，避免以为刚才那下没生效。
@@ -9574,7 +9574,7 @@ export class ChatPanel implements vscode.Disposable {
         break;
       }
       case "cancelAll": {
-        const count = await manager.cancelAll();
+        const count = await manager.cancelAll("user");
         this.store.sendToast("info", vscode.l10n.t("已中断 {0} 个子会话", count));
         break;
       }
@@ -10353,7 +10353,7 @@ export class ChatPanel implements vscode.Disposable {
         const manager = this.getSuperAgent();
         if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
         // 对已终态的子会话再取消是幂等重复，管理器自己会如实返回。
-        await manager.cancel(superSessionId);
+        await manager.cancel(superSessionId, "agent");
       },
 
       /**

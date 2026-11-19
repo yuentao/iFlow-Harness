@@ -213,7 +213,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
       ].join("\n"),
     });
     await waitFor(() => cancel.mock.calls.length > 0);
-    expect(cancel).toHaveBeenCalledWith("super-1");
+    expect(cancel).toHaveBeenCalledWith("super-1", "agent");
 
     // 回执是一次 hidden prompt（转录里不出现用户气泡）。
     await waitFor(
@@ -266,7 +266,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
       status: "cancelled",
     });
     // 状态推送链走 manager.cancel（其内 apply(cancelled)+emit），确认路由仍到它。
-    expect(cancel).toHaveBeenCalledWith("super-1");
+    expect(cancel).toHaveBeenCalledWith("super-1", "user");
     expect(toasts).toEqual([{ level: "info", message: "已中断子会话" }]);
   });
 
@@ -276,7 +276,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
       reason: "already-terminal",
       status: "completed",
     });
-    expect(cancel).toHaveBeenCalledWith("super-1");
+    expect(cancel).toHaveBeenCalledWith("super-1", "user");
     expect(toasts).toEqual([{ level: "info", message: "这个子会话已经结束了，不用再中断" }]);
   });
 
@@ -334,7 +334,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
 
     await p.runSuperActions([{ action: "cancel", sessionId: "super-wrong-id" }]);
 
-    expect(cancel).toHaveBeenCalledWith("super-wrong-id");
+    expect(cancel).toHaveBeenCalledWith("super-wrong-id", "agent");
     const visible = toasts.find(
       (toast) => toast.level === "warning" && toast.message.includes("super-wrong-id"),
     );
