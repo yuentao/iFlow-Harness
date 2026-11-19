@@ -344,7 +344,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
   });
 
-  it("pendingCount 长期>0 且 awaiter 等过阈值时，汇报轮仍被标为 final（R2 迟到补发）", async () => {
+  it("pendingCount 长期>0 且 awaiter 等过阈值时，汇报轮只放宽提示词、**不**标为 final（R2 迟到补发）", async () => {
     const done = child({ id: "super-done", status: "completed" });
     const stuck = child({ id: "super-stuck", status: "running" });
     manager.list = () => [done, stuck];
@@ -356,11 +356,17 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     p.queueSuperReport([{ session: done, report: READY_REPORT }]);
     await flush();
 
-    // pendingCount=1（stuck 子会话仍非终态），但 awaiter 迟到 → 该轮放宽为 final，
-    // 主会话这一轮的正文就能作为 QQ 真正最终答复投递（不再永远停在已受理）。
+    // pendingCount=1（stuck 子会话仍非终态）：**等待过久 ≠ 可以定终局**
+    // （2026-11-19 修复）。旧实现在这里把该轮标成 final，于是 QQ 先收到一条
+    // 空正文兜底（22 字占位）、任务被写成终态、awaiter 被摘掉，随后迟到的
+    // 真实长正文再也投不出去。
+    // 现在：rescueDue 只放宽提示词（让模型这一轮就给结论），这一轮仍是进度轮，
+    // awaiter 保留 —— 真·最终汇报轮（pendingCount=0）到达时才投递完整正文。
     const item = p.pendingSuperReportPrompts.find((i) => i.mainSessionId === "lane-session");
     expect(item).toBeTruthy();
-    expect(item!.final).toBe(true);
+    expect(item!.final).toBe(false);
+    // awaiter 没被消费：QQ 仍在等最终答复。
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(true);
   });
 
   it("无新汇报轮时，超时 awaiter 由迟到补发兜底并摘除（R2）", async () => {
