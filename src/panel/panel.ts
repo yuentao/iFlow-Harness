@@ -1017,6 +1017,56 @@ const QQ_FINAL_RESCUE_POLL_MS = 10_000;
  */
 const QQ_DELEGATION_GRACE_MS = 120;
 
+/**
+ * QQ 最终答复兜底用的子会话汇报正文上限。QQ 单条消息有字符预算（见
+ * `src/qq/service.ts` 的 `QQ_CHUNK_MAX_CHARS`），这里先截到远小于它的长度，
+ * 既保留结论又不会把整段子会话转录灌给外部渠道。
+ */
+const QQ_REPORT_FALLBACK_MAX_CHARS = 1_500;
+
+/**
+ * 把子会话汇报正文（`report.summary`）清洗成可安全转发给 QQ 的纯文本。
+ *
+ * 汇报是子会话自己写的自由文本，可能带 super-agent 委派围栏 / ACP 工具与角色
+ * 标签（协议标记）、本机绝对路径、token/密钥与长 id。发到外部渠道前一律去掉：
+ *  - 保留项目相对路径（用户要知道「改了哪些文件、验证了什么」），只抹本机绝对路径；
+ *  - 凭据与 id 用占位替代，避免把本机信息泄漏到聊天记录；
+ *  - 折叠空白并按上限截断。
+ * 空串代表这条正文不可用，调用方据此再退到如实占位文案。
+ */
+function sanitizeQqReportFallback(raw: string | undefined): string {
+  if (!raw || !raw.trim()) return "";
+  let text = raw;
+  // 协议标记：super-agent 委派围栏 / ACP 工具与角色标签 / 纯 JSON 信封行。
+  text = text.replace(/```(?:super-agent|json)\b[\s\S]*?```/gi, "");
+  text = text.replace(
+    /<\/?(?:tool_call|function_call|function|thinking|system|user|assistant)\b[^>]*>/gi,
+    "",
+  );
+  text = text.replace(/^\s*\{[^\n]*"(?:type|tool_call_id)"\s*:[^\n]*\}\s*$/gm, "");
+  // 凭据：常见 token 前缀直写，以及 key=value 形式。
+  text = text.replace(/\b(?:sk|gho|ghs|ghp|github_pat)-[A-Za-z0-9_-]{8,}/gi, "[已隐藏]");
+  text = text.replace(
+    /(["']?(?:api[_-]?key|app[_-]?secret|password|token|access[_-]?key)["']?\s*[:=]\s*)(["']?)([^"'\s,;&})]+)\2/gi,
+    "$1$2[已隐藏]$2",
+  );
+  // 本机绝对路径（Windows 盘符 / UNC / POSIX home/tmp），保留项目相对路径。
+  text = text.replace(/\b[A-Za-z]:[\\/][^\s,;)\]"']*/g, "[路径]");
+  text = text.replace(/\\\\[^\s\\/]+\\[^\s,;)\]"']*/g, "[路径]");
+  text = text.replace(/(?:^|[\s(])\/(?:home|Users|root|tmp|var)\/[^\s,;)\]"']*/g, " [路径]");
+  // 长 id / UUID（openid、session id、随机串）。
+  text = text.replace(
+    /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/gi,
+    "[ID]",
+  );
+  text = text.replace(/\b[0-9a-fA-F]{16,}\b/g, "[ID]");
+  text = text.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > QQ_REPORT_FALLBACK_MAX_CHARS
+    ? `${text.slice(0, QQ_REPORT_FALLBACK_MAX_CHARS - 1)}…`
+    : text;
+}
+
 export class DisposedError extends Error {
   constructor(message = "panel disposed") {
     super(message);
@@ -1390,7 +1440,7 @@ export class ChatPanel implements vscode.Disposable {
    * 每条都带**归属主会话**：排队期间用户可能切了会话，A 的汇报不能投进
    * B 的对话（投错会话 = 串台）。
    */
-  private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean }> = [];
+  private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean; fallbackText?: string }> = [];
   /**
    * 已经执行完、等着回执给主会话的子会话管理动作（先进先出）。
    *
@@ -9216,10 +9266,23 @@ export class ChatPanel implements vscode.Disposable {
     if (rescueDue && pendingCount !== 0) {
       this.log.warn(`QQ 最终回执迟到补发：汇报轮 pendingCount=${pendingCount}，仍按 final 投递`);
     }
+    // 子会话汇报正文：二次转述（主 Agent 汇总轮）确为空时，兜底回给用户看的是
+    // 子会话实际做了什么，而不是一句占位文案。取本批终态汇报的 summary（失败 /
+    // 中断的取 error 或「已中断」），清洗在消费端做（见 sanitizeQqReportFallback）。
+    const fallbackText = batch
+      .map((entry) => {
+        const summary = entry.report?.summary ?? entry.session.summary ?? "";
+        const error = entry.session.error ?? "";
+        return summary.trim() || error.trim() || (entry.report?.state === "dropped" ? "已中断" : "");
+      })
+      .filter((value) => value.length > 0)
+      .join("\n")
+      .trim();
     this.pendingSuperReportPrompts.push({
       mainSessionId: reportOwner,
       text,
       final: pendingCount === 0 || rescueDue,
+      fallbackText,
     });
     this.ensureSuperHeartbeat();
     // 用户按过停止时补一次常驻「继续处理」提示：此后才结束的子会话此前不会
@@ -9308,8 +9371,17 @@ export class ChatPanel implements vscode.Disposable {
         const visibleBefore = this.store.getState().blocks.filter(
           (block) => block.kind === "text" && !block.system,
         );
-        const reportAnchorId = visibleBefore[visibleBefore.length - 1]?.id;
+        const reportAnchor = visibleBefore[visibleBefore.length - 1];
+        const reportAnchorId = reportAnchor?.id;
+        const reportAnchorLen = reportAnchor?.kind === "text" ? reportAnchor.text.length : 0;
         const reportTextBefore = visibleBefore.length;
+        // 子会话汇报正文（report.summary）作为「二次转述确实为空」时的兜底：
+        // 先清洗（去协议标记 / 脱敏 / 截断），预置进 R2 缓存，并透传给 sendPrompt
+        // 的最终回执收尾。宿主本就持有这段正文，绝不只发一句占位文案。
+        const cleanFallback = sanitizeQqReportFallback(item.fallbackText);
+        if (cleanFallback && owner && this.qqFinalRescueOwnerPending(owner)) {
+          this.qqFinalRescueText.set(owner, cleanFallback);
+        }
         const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
           delegateOnBusy: false,
           hidden: true,
@@ -9319,6 +9391,8 @@ export class ChatPanel implements vscode.Disposable {
           // pendingCount=0 的汇总轮：收尾时把这一轮 assistant 文本作为 QQ
           // 任务的真正最终答复回传（中途进度汇报轮不带此标记）。
           finalReport: item.final === true,
+          // 汇总轮二次转述为空时，用子会话真实汇报正文兜底（见 deliverQqMainFinalAnswer）。
+          finalFallbackText: item.fallbackText,
         });
         if (!started) {
           // 回合没跑起来（主会话被别的回合占着）：这条汇报**留在队列里**，
@@ -9329,7 +9403,11 @@ export class ChatPanel implements vscode.Disposable {
         if (pos !== -1) this.pendingSuperReportPrompts.splice(pos, 1);
         // 本轮 assistant 正文：只含 agent 的 text 块（thought / tool / diff /
         // 子会话卡都不在其中），与最终结果取文本同口径。
-        const reportTurnText = this.captureQqReportTurnText(reportAnchorId, reportTextBefore);
+        const reportTurnText = this.captureQqReportTurnText(
+          reportAnchorId,
+          reportTextBefore,
+          reportAnchorLen,
+        );
         // R2：缓存本轮正文供迟到补发复用（只在该会话仍有 awaiter 时才有意义）。
         if (reportTurnText && owner && this.qqFinalRescueOwnerPending(owner)) {
           this.qqFinalRescueText.set(owner, reportTurnText);
@@ -10760,7 +10838,9 @@ export class ChatPanel implements vscode.Disposable {
           (block) => block.kind === "text" && !block.system,
         );
         const textCountBefore = visibleTextBefore.length;
-        const anchorId = visibleTextBefore[visibleTextBefore.length - 1]?.id;
+        const anchorBlock = visibleTextBefore[visibleTextBefore.length - 1];
+        const anchorId = anchorBlock?.id;
+        const anchorLen = anchorBlock?.kind === "text" ? anchorBlock.text.length : 0;
 
         let started = false;
         // 子会话基线：这一轮开始时该主会话已有的子会话 id。轮末若出现新 id，
@@ -10812,31 +10892,21 @@ export class ChatPanel implements vscode.Disposable {
               reason: "会话在本轮执行期间被切换，未能取回本轮结果。",
             };
           }
-          const visibleText = state.blocks.filter(
-            (block) => block.kind === "text" && !block.system,
+          const { text: resultText, anchorLost } = this.extractQqTurnTextFromAnchor(
+            anchorId,
+            anchorLen,
+            textCountBefore,
           );
-          let resultStart = 0;
-          if (anchorId !== undefined) {
-            const anchorIndex = visibleText.findIndex((block) => block.id === anchorId);
-            if (anchorIndex < 0) {
-              // 基线锚块消失（转录被清空/重排）：同样不能安全地按数量切片。
-              return {
-                injected: true,
-                text: "",
-                failed: true,
-                reason: "本轮转录基线已失效，未能取回本轮结果。",
-              };
-            }
-            resultStart = anchorIndex + 1;
-          } else {
-            // 没有锚块（历史数据无稳定 id）：退回数量口径，但 sessionId 已校验。
-            resultStart = textCountBefore;
+          if (anchorLost) {
+            // 基线锚块消失（转录被清空/重排）：同样不能安全地按数量切片。
+            return {
+              injected: true,
+              text: "",
+              failed: true,
+              reason: "本轮转录基线已失效，未能取回本轮结果。",
+            };
           }
-          const text = visibleText
-            .slice(resultStart)
-            .map((block) => (block.kind === "text" ? block.text : ""))
-            .join("\n")
-            .trim();
+          const text = resultText;
           const failed = state.status === "error";
           // 本轮是否派生了子会话（相对轮初基线出现新 id）。派生了就把本任务
           // 登记为「等最终答复」：这一轮文本只是占位，真正的答复将在子会话
@@ -10897,25 +10967,33 @@ export class ChatPanel implements vscode.Disposable {
    * 真正最终答复回传给对应的 QQ 任务。
    *
    * 按归属会话取所有登记过的任务（一轮汇总结论覆盖该主会话里正在等答案的
-   * QQ 任务）。空文本不再静默留账：改为回传一条如实兜底文案并摘除记账，
-   * 避免 QQ 永久停在「已受理」（R1）。单次投递 / 幂等由服务的 resultDeliveredAt
-   * 保证。onlyTaskIds 供 R2 迟到补发精确命中单个任务，避免误伤同会话其它 awaiter。
+   * QQ 任务）。空文本不再静默留账：先试宿主持有的子会话汇报正文
+   * （`fallbackText` = report.summary，清洗后），仍为空才回一条如实兜底文案并
+   * 摘除记账，避免 QQ 永久停在「已受理」（R1）。单次投递 / 幂等由服务的
+   * resultDeliveredAt 保证。onlyTaskIds 供 R2 迟到补发精确命中单个任务，
+   * 避免误伤同会话其它 awaiter。
    */
   private async deliverQqMainFinalAnswer(
     sessionId: string | null,
     rawText: string,
     stopReason: string,
     onlyTaskIds?: ReadonlySet<string>,
+    fallbackText?: string,
   ): Promise<void> {
     if (this.disposed || !sessionId) return;
     // R1：汇总轮可能只调了合并/复核动作而没有 assistant 正文。旧实现在这里
     // 静默 return 且不摘记账 —— QQ 永远停在「已受理」。改为如实兜底：摘除记账
     // 并回传一条明确文案（走 completeMainFinalAnswer 的 forceActive 主动消息，
     // 长任务下也真能发出），绝不伪造「已完成」之类内容。
+    //
+    // 2026-11-19：二次转述确为空时优先用宿主已持有的子会话汇报正文
+    // （report.summary），让用户看到子会话实际做了什么；只有连汇报正文也为空
+    // 才退回占位文案。清洗后文本必为非空，服务侧不会再追加一条占位通知。
     const text =
       rawText.trim().length > 0
         ? rawText.trim()
-        : vscode.l10n.t("超流体任务已完成，但未产生可转发的正文摘要。");
+        : sanitizeQqReportFallback(fallbackText) ||
+          vscode.l10n.t("超流体任务已完成，但未产生可转发的正文摘要。");
     const taskIds = [...this.qqMainFinalAwaiters.entries()]
       .filter(([, owner]) => owner === sessionId)
       .map(([taskId]) => taskId)
@@ -11003,21 +11081,51 @@ export class ChatPanel implements vscode.Disposable {
     if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
   }
 
-  /** 汇报回合收尾后提取「本轮新增」的 assistant 文本，供迟到补发复用。 */
-  private captureQqReportTurnText(anchorId: string | undefined, beforeCount: number): string {
+  /**
+   * 从「回合开始时末尾可见 text 块」（锚点）提取本轮新增的 assistant 正文。
+   *
+   * 流式 `appendTextToLast` 会把新 chunk 就地拼进最后一个 text 块并复用它的 id。
+   * hidden 汇报回合没有 user 块做边界，新正文必然被并进锚块；只按 id
+   * `slice(anchorIndex + 1)` 会整段丢掉，转发出空摘要（2026-11-19 回归）。因此
+   * 锚点除 id 外必须记录回合开始时的块内文本长度：先取锚块 `slice(旧长度)`，
+   * 再接锚块之后的新 text 块。system 状态行由 reducer 的合并边界挡开，不会混入。
+   *
+   * `anchorLost` 供调用方区分「本轮确实没有正文」（text=""）与「转录被清空/重排，
+   * 按数量切片也不安全」（anchorLost=true，最终回执必须放弃，绝不猜上一轮内容）。
+   */
+  private extractQqTurnTextFromAnchor(
+    anchorId: string | undefined,
+    anchorLen: number,
+    fallbackCount: number,
+  ): { text: string; anchorLost: boolean } {
     const visible = this.store.getState().blocks.filter(
       (block) => block.kind === "text" && !block.system,
     );
-    let start = beforeCount;
-    if (anchorId !== undefined) {
-      const idx = visible.findIndex((block) => block.id === anchorId);
-      start = idx >= 0 ? idx + 1 : beforeCount;
+    const countText = (): string =>
+      visible
+        .slice(fallbackCount)
+        .map((block) => (block.kind === "text" ? block.text : ""))
+        .join("\n")
+        .trim();
+    if (anchorId === undefined) return { text: countText(), anchorLost: false };
+    const anchorIndex = visible.findIndex((block) => block.id === anchorId);
+    if (anchorIndex < 0) return { text: countText(), anchorLost: true };
+    const parts: string[] = [];
+    const anchor = visible[anchorIndex]!;
+    if (anchor.kind === "text") parts.push(anchor.text.slice(anchorLen));
+    for (const block of visible.slice(anchorIndex + 1)) {
+      if (block.kind === "text") parts.push(block.text);
     }
-    return visible
-      .slice(start)
-      .map((block) => (block.kind === "text" ? block.text : ""))
-      .join("\n")
-      .trim();
+    return { text: parts.join("\n").trim(), anchorLost: false };
+  }
+
+  /** 汇报回合收尾后提取「本轮新增」的 assistant 文本，供迟到补发复用。 */
+  private captureQqReportTurnText(
+    anchorId: string | undefined,
+    beforeCount: number,
+    anchorLen = 0,
+  ): string {
+    return this.extractQqTurnTextFromAnchor(anchorId, anchorLen, beforeCount).text;
   }
 
   /**
@@ -13435,6 +13543,8 @@ export class ChatPanel implements vscode.Disposable {
       hidden?: boolean;
       reportTurn?: boolean;
       finalReport?: boolean;
+      /** 汇总轮二次转述为空时兜底回 QQ 的子会话汇报正文（由 drainSuperReports 透传）。 */
+      finalFallbackText?: string;
       origin?: "qq";
       displayText?: string;
       quietBusy?: boolean;
@@ -13445,6 +13555,7 @@ export class ChatPanel implements vscode.Disposable {
     const hidden = options?.hidden === true;
     const reportTurn = options?.reportTurn === true;
     const finalReport = reportTurn && options?.finalReport === true;
+    const finalFallbackText = options?.finalFallbackText;
     /** QQ 主会话注入回合：对话派生的回合末任务（下一步 / 记忆）必须跳过。 */
     const qqTurn = options?.origin === "qq";
     const trimmed = text.trim();
@@ -13751,13 +13862,18 @@ export class ChatPanel implements vscode.Disposable {
       }
       // 最终汇报轮的 assistant 文本锚点：与 injectQqMainTurn 同口径（可见
       // text 块、排除 system），轮末只取基线之后的文本，避免把上一轮内容
-      // 当成本轮结论回给 QQ。
+      // 当成本轮结论回给 QQ。除了 id 还要记下锚块**当前文本长度**：hidden
+      // 回合没有 user 块边界，流式正文会被并进这个块且 id 不变，只按 id
+      // slice 会整段漏掉（2026-11-19 空摘要回归）。
       let finalReportAnchorId: string | undefined;
+      let finalReportAnchorLen = 0;
       if (finalReport) {
         const visible = this.store.getState().blocks.filter(
           (block) => block.kind === "text" && !block.system,
         );
-        finalReportAnchorId = visible[visible.length - 1]?.id;
+        const anchor = visible[visible.length - 1];
+        finalReportAnchorId = anchor?.id;
+        finalReportAnchorLen = anchor?.kind === "text" ? anchor.text.length : 0;
       }
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
       // 本轮已结束：委派指令只在流式期间出现，之后不该再把旧附件带给新子会话。
@@ -13774,23 +13890,19 @@ export class ChatPanel implements vscode.Disposable {
       // 作为等待中的 QQ 任务的真正答复回传（fire-and-forget，不挡回合收尾）。
       // 锚点失效（转录被清空/重排）时保守放弃，绝不把上一轮文本当成本轮结论。
       if (finalReport && result.stopReason !== "cancelled") {
-        const visible = this.store.getState().blocks.filter(
-          (block) => block.kind === "text" && !block.system,
+        const { text: answer, anchorLost } = this.extractQqTurnTextFromAnchor(
+          finalReportAnchorId,
+          finalReportAnchorLen,
+          0,
         );
-        let start = 0;
-        let anchorLost = false;
-        if (finalReportAnchorId !== undefined) {
-          const anchorIndex = visible.findIndex((block) => block.id === finalReportAnchorId);
-          if (anchorIndex >= 0) start = anchorIndex + 1;
-          else anchorLost = true;
-        }
         if (!anchorLost) {
-          const answer = visible
-            .slice(start)
-            .map((block) => (block.kind === "text" ? block.text : ""))
-            .join("\n")
-            .trim();
-          void this.deliverQqMainFinalAnswer(promptSessionId, answer, result.stopReason);
+          void this.deliverQqMainFinalAnswer(
+            promptSessionId,
+            answer,
+            result.stopReason,
+            undefined,
+            finalFallbackText,
+          );
         }
       }
       // 回合收尾：复核动作围栏 —— 回合都结束了还停在未闭合围栏上，说明这个
