@@ -16,6 +16,7 @@ import {
   ChevronRight,
   CircleHelp,
   Clock,
+  ExternalLink,
   GitBranch,
   GitMerge,
   Hourglass,
@@ -109,6 +110,11 @@ function statusLabel(session: SuperSessionUi): string {
  *
  * 「准备中」与「等待你处理」曾经共用同一个 warning 色 —— 现在是
  * 沙漏/蓝 与 问号/琥珀，一眼可分：前者用户只能等，后者用户必须动手。
+ *
+ * 「已中断」刻意用静音色（muted），不是失败的同款 danger 红：shared 层把
+ * cancelled 单独计数、明确不计入 failed（见 summarizeSuperSessions / #2919），
+ * 染成红色会让人以为子会话出了故障。方块图标 +「已中断」文案仍是主编码，
+ * 颜色只是冗余，所以换成静音色不会丢信息，反而少一层误导。failed 继续 danger + X。
  */
 const STATUS_VISUAL: Record<SuperStatus, { tone: StatusTone; icon: ReactNode }> = {
   preparing: { tone: "info", icon: <Hourglass className="size-3 shrink-0" aria-hidden="true" /> },
@@ -116,7 +122,7 @@ const STATUS_VISUAL: Record<SuperStatus, { tone: StatusTone; icon: ReactNode }> 
   awaiting_input: { tone: "warning", icon: <CircleHelp className="size-3 shrink-0" aria-hidden="true" /> },
   completed: { tone: "success", icon: <Check className="size-3 shrink-0" aria-hidden="true" /> },
   failed: { tone: "danger", icon: <X className="size-3 shrink-0" aria-hidden="true" /> },
-  cancelled: { tone: "danger", icon: <Square className="size-3 shrink-0" aria-hidden="true" /> },
+  cancelled: { tone: "muted", icon: <Square className="size-3 shrink-0" aria-hidden="true" /> },
 };
 
 /** 排队中：等一个并发名额，还没开始 —— 灰色时钟，与「准备中」的沙漏区分。 */
@@ -179,11 +185,18 @@ function QqTaskTags({ session }: { session: SuperSessionUi }) {
       {/* Every other chip in the row/header yields at ≤380px; these two were
           the only shrink-0 chip pair left, squeezing the title and status on
           narrow screens. The full channel/sender still lives in the QQ task
-          panel, so hiding them here loses nothing. */}
-      <Chip tone="muted" className="shrink-0 @max-[380px]:hidden">
+          panel, so hiding them here loses nothing.
+
+          用视口媒体查询 `max-[380px]:hidden`，不是容器查询 `@max-[380px]:hidden`：
+          这对 chip 只出现在看板的两个 portal 浮层（折叠待答条 + 展开面板）里。
+          portal 挂到 document.body 后，App 根的 @container 不再是祖先、body 也
+          不是容器，容器查询会恒不匹配（注释声称的窄屏隐藏从未生效）。两个浮层
+          都是 fixed 贴视口、宽度=视口减固定 gutter，视口媒体查询才精确对应
+          「视口 ≤380px」的意图，也与顶栏控件在同一视口宽度一起收敛。 */}
+      <Chip tone="muted" className="shrink-0 max-[380px]:hidden">
         {t("渠道：{0}", qqTask.chatType === "private" ? t("私聊") : t("群聊"))}
       </Chip>
-      <Chip tone="muted" className="shrink-0 @max-[380px]:hidden">
+      <Chip tone="muted" className="shrink-0 max-[380px]:hidden">
         {t("发起人：{0}", maskQqOpenId(qqTask.senderId))}
       </Chip>
     </>
@@ -201,6 +214,32 @@ const INTEGRATION_TEXT: Record<SuperIntegrationState, string> = {
   skipped: "text-muted-foreground",
   not_needed: "text-muted-foreground",
 };
+
+/**
+ * 折叠行上的集成问题小 chip。
+ *
+ * 一个「已完成」的子会话并不等于改动落地了：conflict / failed / skipped 以及
+ * needsAction 的行，改动还留在分支上等人处理。折叠行只有几十像素，先前只报
+ * 「已完成」会把这种问题藏起来，必须展开才知道 —— 这里给一个一眼可见的小
+ * chip，完整说明（分支 / detail / PR 地址）仍在展开详情里，不重复。
+ *
+ * 优先级：needsAction 最需要人动手，先说「需人工合并」；否则 conflict 说
+ * 「冲突」；failed / skipped 统一说「未自动合并」（都表示改动没自动进主分支）。
+ * 只认终态：还在跑 / 等你回答的行，集成结果还没落定，不该提前打问题标签。
+ */
+function collapsedIntegrationIssue(
+  session: SuperSessionUi,
+): { label: string; tone: "danger" | "warning" | "muted" } | null {
+  if (!isTerminalSuperStatus(session.status)) return null;
+  const state = session.integration?.state;
+  const needsAction = session.integration?.needsAction === true;
+  if (state !== "conflict" && state !== "failed" && state !== "skipped" && !needsAction) {
+    return null;
+  }
+  if (needsAction) return { label: t("需人工合并"), tone: "warning" };
+  if (state === "conflict") return { label: t("冲突"), tone: "danger" };
+  return { label: t("未自动合并"), tone: "muted" };
+}
 
 /**
  * Short display name for a worktree branch.
@@ -1389,7 +1428,11 @@ export function SuperAgentBoard({
                     title={t("全部中断")}
                     onClick={() => setConfirmCancelAll(active.length)}
                   >
-                    <span className="@max-[380px]:hidden">{t("全部中断")}</span>
+                    {/* 这段文案在 portal 到 document.body 的面板里 —— 用视口
+                        媒体查询而不是容器查询：portal 后没有 @container 祖先，
+                        `@max-[380px]:hidden` 会恒不匹配，窄屏下文字永远不会收起、
+                        继续挤压标题。图标（aria-label「全部中断」）始终保留。 */}
+                    <span className="max-[380px]:hidden">{t("全部中断")}</span>
                   </Button>
                 )}
               </div>
@@ -1693,6 +1736,8 @@ function SuperSessionRow({
   onCancel: () => void;
 }) {
   const [showLive, setShowLive] = useState(false);
+  // pr_created 行的「打开 PR」按钮走宿主 openExternal（只放行 http(s)）。
+  const send = useChat((s) => s.send);
   // Busy states take the chip over: each one is a request the user just made
   // and is waiting on, so it must outrank the stale status it is replacing
   // (a merge target is `completed` — without this it would still read
@@ -1725,22 +1770,32 @@ function SuperSessionRow({
   // What survives is the record — the branch and its worktree — so the merge
   // and cleanup actions stay available.
   const historical = session.restored === true;
+  // 折叠行只报状态时也要能看出「改动没落地」：终态且集成有问题的行给一个小
+  // chip（需人工合并 / 冲突 / 未自动合并），完整说明仍只在展开详情里。
+  const integrationIssue = collapsedIntegrationIssue(session);
   // Why the merge action is unavailable right now. The RULE is stated once,
   // in the board header's help bubble; this string only feeds the button's
   // title / aria-label, so a greyed-out button still says why it is greyed
   // out for a screen reader and on hover.
+  const integrationState = session.integration?.state;
   const mergeBlocked =
     !session.isolation.branch ||
-    session.integration?.state === "merged" ||
+    integrationState === "merged" ||
+    integrationState === "not_needed" ||
+    integrationState === "pr_created" ||
     isActive(session);
   const mergeReason =
-    session.integration?.state === "merged"
+    integrationState === "merged"
       ? t("这个超流体的改动已经合并")
-      : !session.isolation.branch
-        ? t("这个超流体没有可合并的分支")
-        : isActive(session)
-          ? t("超流体还没结束，等它完成再合并")
-          : t("让一个超流体把这条分支合并到当前分支，冲突由它自己解决");
+      : integrationState === "not_needed"
+        ? t("这个超流体没有产生改动，不需要合并")
+        : integrationState === "pr_created"
+          ? t("改动已经提到 PR，请打开 PR 处理合并")
+          : !session.isolation.branch
+            ? t("这个超流体没有可合并的分支")
+            : isActive(session)
+              ? t("超流体还没结束，等它完成再合并")
+              : t("让一个超流体把这条分支合并到当前分支，冲突由它自己解决");
   // Cleanup deletes the worktree, so it must not race a live child: the
   // process would keep writing into a directory that no longer exists.
   // Same discipline as the merge action — the rule lives in the board
@@ -1790,9 +1845,23 @@ function SuperSessionRow({
             {chip.icon}
             <span className="text-ui-micro font-medium">{chip.label}</span>
           </span>
+          {/* 历史恢复记录（进程已随上次扩展退出）：原先「上次运行」只在展开
+              详情里，折叠时看不出这条是旧记录。状态后补一个静音 chip，窄屏可
+              收缩隐藏，不挤压标题。详见下方工具提示。 */}
+          {historical && (
+            <Chip tone="muted" className="shrink-0 max-[380px]:hidden">
+              {t("上次运行")}
+            </Chip>
+          )}
           <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
             {session.title}
           </span>
+          {/* 终态但改动没落地的行，折叠态就给出提示 —— 完整说明仍在展开详情。 */}
+          {integrationIssue && (
+            <Chip tone={integrationIssue.tone} className="shrink-0 max-[380px]:hidden">
+              {integrationIssue.label}
+            </Chip>
+          )}
           {interruptSourceLabel && (
             <span className="shrink-0 text-ui-micro text-muted-foreground">
               {interruptSourceLabel}
@@ -1923,7 +1992,8 @@ function SuperSessionRow({
                 )}
               </span>
             )}
-            {historical && <span>{t("上次运行")}</span>}
+            {/* 「上次运行」已上移到折叠行状态后的静音 chip（展开态也会渲染那一行），
+                这里不再重复，避免展开后读两遍。完整历史说明仍在 titleHint。 */}
             {(session.attempts ?? 1) > 1 && <span>{t("第 {0} 次尝试", session.attempts ?? 1)}</span>}
           </div>
 
@@ -2005,6 +2075,23 @@ function SuperSessionRow({
             >
               {mergePending ? t("合并中") : t("让智能体合并")}
             </Button>
+            {/* pr_created 的合并按钮已禁用（见 mergeBlocked），改动在 PR 里，
+                真正的下一步是打开 PR 处理 —— 给一个直达链接，而不是让用户面对
+                一个灰按钮无从下手。URL 只在宿主写入时才有，缺失就不渲染。 */}
+            {integrationState === "pr_created" && session.integration?.url && (
+              <Button
+                variant="canvas"
+                size="sm"
+                icon={<ExternalLink className={ICON_INLINE} />}
+                title={session.integration.url}
+                onClick={() => {
+                  const url = session.integration?.url;
+                  if (url) send({ type: "openExternal", uri: url });
+                }}
+              >
+                {t("打开 PR")}
+              </Button>
+            )}
             {!session.isolation.released && (
               <Button
                 variant="canvas"
