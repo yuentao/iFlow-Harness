@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Layers } from "lucide-react";
 import type { PendingApprovalUi, PendingQuestionsUi } from "../../../shared/messages";
 import { t } from "../i18n";
@@ -54,7 +54,6 @@ interface PendingEntry {
   key: string;
   /** Card heading, used for the counter's accessible name. */
   summary: string;
-  node: ReactNode;
 }
 
 /** Peek height of each covered card; also the cap on visible edges. */
@@ -84,7 +83,6 @@ export function PendingCards({
         kind: "approval",
         key: `approval:${pendingApproval.id}`,
         summary: t("iFlow 想执行一项操作"),
-        node: <ApprovalCard approval={pendingApproval} />,
       });
     }
     if (pendingQuestions) {
@@ -92,7 +90,6 @@ export function PendingCards({
         kind: "questions",
         key: `questions:${pendingQuestions.id}`,
         summary: t("iFlow 有问题想问你"),
-        node: <QuestionCard pending={pendingQuestions} />,
       });
     }
     return list;
@@ -316,7 +313,15 @@ export function PendingCards({
             inert={covered || undefined}
             aria-hidden={covered ? true : undefined}
           >
-            {entry.node}
+            {entry.kind === "approval" && pendingApproval && (
+              // `covered` is the stack's own notion of "buried under a newer
+              // card"; the shortcut listener keys off it explicitly because
+              // `inert` (set on the slot below) does not mute window handlers.
+              <ApprovalCard approval={pendingApproval} active={!covered} />
+            )}
+            {entry.kind === "questions" && pendingQuestions && (
+              <QuestionCard pending={pendingQuestions} active={!covered} />
+            )}
           </div>
         );
       })}

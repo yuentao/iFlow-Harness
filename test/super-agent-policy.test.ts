@@ -225,7 +225,7 @@ describe("super agent · 审批策略（纯逻辑）", () => {
     expect(summary.request?.options).toBe(PERMISSION_OPTIONS);
   });
 
-  it("合并子会话机械剔除嵌套派发工具，审批仍为 auto（自动合并不受影响）", () => {
+  it("合并超流体机械剔除嵌套派发工具，审批仍为 auto（自动合并不受影响）", () => {
     const policy = superMergeChildPolicy();
     expect(policy.approval).toBe("auto");
     expect(policy.disallowedTools).toEqual(["task", "super-agent"]);
@@ -334,7 +334,7 @@ describe("super agent · 审批策略（编排接线）", () => {
     });
   });
 
-  it("disallowedTools 透传到子会话 session/new 的 settings", async () => {
+  it("disallowedTools 透传到超流体 session/new 的 settings", async () => {
     const { client } = await spawnRunning({
       approval: "auto",
       disallowedTools: ["task", "read_file", " read_file ", "write_file"],

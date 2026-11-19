@@ -1101,9 +1101,9 @@ function UserMessage({
           /* M4 P1-9 inline editor: re-sending truncates this turn and
              everything after it (checkpoint restore first when available),
              so the editor replaces the bubble rather than cloning it. */
-          <div className="w-full min-w-[280px]" onClick={(e) => e.stopPropagation()}>
+          <div className="w-full min-w-0" onClick={(e) => e.stopPropagation()}>
             <TextArea
-              className="max-h-64 min-h-16 w-full leading-relaxed"
+              className="max-h-64 min-h-16 w-full min-w-0 leading-relaxed"
               resizable={false}
               value={draft}
               rows={Math.min(12, Math.max(3, draft.split("\n").length + 1))}
@@ -1119,8 +1119,8 @@ function UserMessage({
                 }
               }}
             />
-            <div className="mt-2 flex items-center justify-end gap-1.5">
-              <span className="mr-auto text-ui-caption text-muted-foreground">
+            <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
+              <span className="min-w-0 flex-1 text-ui-caption text-muted-foreground">
                 {checkpoint && !checkpoint.partial ? t("重发会先把这一轮的文件改回原样，并删除之后的对话") : t("重发会删除这条消息和之后的所有对话")}
               </span>
               <Button variant="ghost" size="sm" onClick={cancelEdit}>
@@ -2118,8 +2118,12 @@ function MessageListInner() {
   const streamingPillVisible =
     (state.status === "streaming" || state.initializing) &&
     !state.pendingApproval &&
+    !state.pendingQuestions &&
     !state.replaying &&
-    visibleBlocks.length > 0;
+    // Focus view filters tool / thought / system blocks out of `visibleBlocks`;
+    // a turn that currently owns only those blocks must still show the pill.
+    // Key off the unfiltered transcript instead.
+    state.blocks.length > 0;
   // UI-audit 4.9: the host notices that may RIDE the sticky streaming pill
   // instead of stacking a second indicator above it — the compress warning
   // (pre-existing) and the rate-limit / stream-interrupt countdown retries
@@ -2199,7 +2203,7 @@ function MessageListInner() {
             paddingBottom: "calc(0.25rem + var(--pending-card-h, 0px) + var(--stream-pill-h, 0px))",
           }}
         >
-          {visibleBlocks.length === 0 && !state.replaying && (
+          {state.blocks.length === 0 && !state.replaying && (
             <div className="empty-state stream-in">
               <div className="empty-state-logo">
                 {/* Real brand mark, consistent with the header logo */}

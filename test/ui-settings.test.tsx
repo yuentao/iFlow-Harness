@@ -650,7 +650,7 @@ describe("回合末 timeout rows follow their toggle", () => {
  * 切换、模型下拉。切换会让在跑的子会话用错凭据/模型，或让汇报落到被替换的
  * 主会话；但主会话仍必须能发消息（Composer 发送按钮不受影响）。
  */
-describe("活跃子会话禁用会话/模型/凭据切换", () => {
+describe("活跃超流体禁用会话/模型/凭据切换", () => {
   function child(status: SuperStatus): SuperSessionUi {
     return {
       id: `child-${status}`,
@@ -755,7 +755,7 @@ describe("活跃子会话禁用会话/模型/凭据切换", () => {
   });
 
   for (const status of ["preparing", "running", "awaiting_input"] as const) {
-    it(`子会话 ${status}：历史下拉 / API 配置 / 模型下拉禁用，发送仍可用`, () => {
+    it(`超流体 ${status}：历史下拉 / API 配置 / 模型下拉禁用，发送仍可用`, () => {
       renderApp([child(status)]);
       expect(historyButton()).toBeTruthy();
       expect(historyButton()!.disabled).toBe(true);
@@ -770,7 +770,7 @@ describe("活跃子会话禁用会话/模型/凭据切换", () => {
     });
   }
 
-  it("子会话全部终态：三处恢复可用", () => {
+  it("超流体全部终态：三处恢复可用", () => {
     renderApp([child("completed"), child("failed"), child("cancelled")]);
     expect(historyButton()!.disabled).toBe(false);
     expect(modelButton()!.disabled).toBe(false);
@@ -803,7 +803,7 @@ describe("API 配置保存按钮的 busy 门控", () => {
     }
   });
 
-  const SAVE_REASON = "这是正在使用的配置。正在生成或有子会话在跑，暂时不能保存。";
+  const SAVE_REASON = "这是正在使用的配置。正在生成或有超流体在跑，暂时不能保存。";
   /** B 变成当前使用的配置（编辑它才会触发重新认证）。 */
   const ACTIVE_B_AUTH: AuthUiState = {
     ...MULTI_AUTH,
@@ -836,7 +836,9 @@ describe("API 配置保存按钮的 busy 门控", () => {
   }
 
   const saveButton = () =>
-    [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "保存");
+    [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => b.textContent === "保存" || b.textContent === "保存中…",
+    );
 
   it("busy 时编辑非当前配置仍可保存（只落盘，不重连）", () => {
     renderApi(MULTI_AUTH, false);
@@ -869,5 +871,151 @@ describe("API 配置保存按钮的 busy 门控", () => {
     expect(save).toBeTruthy();
     expect(save!.disabled).toBe(false);
     expect(container.textContent).not.toContain(SAVE_REASON);
+  });
+
+  /** 用原生 setter 改受控输入（React 只认 value 的原型 setter + input 事件）。 */
+  function typeInput(placeholder: string, value: string) {
+    const input = [...container.querySelectorAll<HTMLInputElement>("input")].find(
+      (el) => el.placeholder === placeholder,
+    );
+    expect(input).toBeTruthy();
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setter.call(input!, value);
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    return input!;
+  }
+
+  it("保存失败：表单不关闭、字段保留，并就地显示宿主返回的具体错误", () => {
+    renderApi(MULTI_AUTH, false);
+    openEdit("B");
+    const edited = "https://changed.example.com/v1";
+    typeInput("https://api.example.com/v1", edited);
+
+    act(() => saveButton()!.click());
+    const call = send.mock.calls.at(-1)![0] as { type: string; requestId?: number; baseUrl?: string };
+    expect(call.type).toBe("saveAuth");
+    expect(typeof call.requestId).toBe("number");
+    expect(call.baseUrl).toBe(edited);
+    // 乐观关闭已移除：收到回执前表单仍在（字段还在，按钮变「保存中…」）。
+    expect(container.textContent).toContain("服务商预设");
+    expect([...container.querySelectorAll<HTMLInputElement>("input")].some(
+      (el) => el.value === edited,
+    )).toBe(true);
+
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", {
+        data: {
+          type: "saveAuthResult",
+          requestId: call.requestId,
+          ok: false,
+          error: "内核配置写入失败（磁盘只读）",
+        },
+      }));
+    });
+    expect(container.textContent).toContain("内核配置写入失败（磁盘只读）");
+    const alert = [...container.querySelectorAll('[role="alert"]')].find((el) =>
+      el.textContent?.includes("内核配置写入失败"),
+    );
+    expect(alert).toBeTruthy();
+    // 失败后用户输入的每一个字段都还在，可原地修改重试。
+    expect([...container.querySelectorAll<HTMLInputElement>("input")].some(
+      (el) => el.value === edited,
+    )).toBe(true);
+    expect(saveButton()).toBeTruthy();
+  });
+
+  it("只在该保存的成功回执到达后才关闭表单", () => {
+    renderApi(MULTI_AUTH, false);
+    openEdit("B");
+    act(() => saveButton()!.click());
+    const requestId = (send.mock.calls.at(-1)![0] as { requestId?: number }).requestId;
+
+    // 另一条保存的回执不能误关本表单。
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", {
+        data: { type: "saveAuthResult", requestId: (requestId ?? 0) + 100, ok: true },
+      }));
+    });
+    expect(saveButton()).toBeTruthy();
+
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", {
+        data: { type: "saveAuthResult", requestId, ok: true },
+      }));
+    });
+    expect(container.textContent).toContain("添加配置");
+    expect(saveButton()).toBeFalsy();
+  });
+});
+
+describe("记忆保存失败可见与状态播报", () => {
+  function renderMemory() {
+    act(() => root.render(
+      <SettingsModal
+        tab="memory"
+        onTabChange={() => {}}
+        onDismiss={() => {}}
+        dismissible
+        busy={false}
+        auth={BASIC_AUTH}
+      />,
+    ));
+  }
+
+  const MEM_STATE = {
+    home: "/home/.iflow",
+    cwd: null,
+    workspaceRoots: [],
+    files: [{
+      path: "/home/.iflow/AGENTS.md",
+      displayPath: "~/.iflow/AGENTS.md",
+      scope: "global",
+      role: "primary",
+      exists: true,
+      editable: true,
+      injected: true,
+      bytes: 12,
+      tokens: 3,
+      updatedAt: null,
+      hash: "abc",
+    }],
+    globalPrimary: "/home/.iflow/AGENTS.md",
+    projectPrimary: null,
+  } as unknown as import("../shared/messages").MemoryStateUi;
+
+  function post(data: unknown) {
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", { data }));
+    });
+  }
+
+  it("写入失败就地可见、提供重试，失败/成功节点带 aria-live", () => {
+    renderMemory();
+    post({ type: "memoryState", state: MEM_STATE });
+    // 模拟一次快速追加失败后宿主回报的具体错误。
+    post({
+      type: "memorySaved",
+      path: "/home/.iflow/AGENTS.md",
+      ok: false,
+      error: "磁盘只读，无法写入记忆文件",
+    });
+
+    expect(container.textContent).toContain("磁盘只读，无法写入记忆文件");
+    const alert = [...container.querySelectorAll('[role="alert"]')].find((el) =>
+      el.textContent?.includes("磁盘只读，无法写入记忆文件"),
+    );
+    expect(alert).toBeTruthy();
+    // 就地重试动作：点击会重发上一条写入请求。
+    const retry = [...alert!.querySelectorAll("button")].find((b) => b.textContent === "重试");
+    expect(retry).toBeTruthy();
+
+    // 成功回执清掉失败节点，成功提示带 role=status / aria-live=polite。
+    post({ type: "memorySaved", path: "/home/.iflow/AGENTS.md", ok: true });
+    expect(container.textContent).not.toContain("磁盘只读，无法写入记忆文件");
+    const status = container.querySelector('[role="status"][aria-live="polite"]');
+    expect(status).toBeTruthy();
+    expect(status!.textContent).toContain("已保存");
   });
 });

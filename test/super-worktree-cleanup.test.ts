@@ -322,7 +322,7 @@ describe("super agent · 没有产生提交时的隔离释放", () => {
     await manager.dispose();
   }, 30000);
 
-  it("子会话在自己的 worktree 里另建过分支时：删目录不删掉那个分支，提交仍在", async () => {
+  it("超流体在自己的 worktree 里另建过分支时：删目录不删掉那个分支，提交仍在", async () => {
     const repo = makeRepo();
     const { manager } = makeManager(repo);
     const worktree = makeWorktree(repo, "own-branch");
@@ -430,7 +430,7 @@ describe("super agent · 残留 worktree 清扫", () => {
     await manager.dispose();
   }, 30000);
 
-  it("活着的子会话正在用的 worktree 不删", async () => {
+  it("活着的超流体正在用的 worktree 不删", async () => {
     const repo = makeRepo();
     const { manager, sessions } = makeManager(repo, "hang");
     manager.spawn({ title: "改登录", task: "干活" });

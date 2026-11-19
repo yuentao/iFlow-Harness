@@ -126,7 +126,7 @@ function makeService(options: {
     cancelTask: async () => undefined,
     mergeTask: async () => ({ ok: true, detail: "已合并" }),
     discardTask: async () => ({}),
-    readTaskOutcome: () => ({ summary: "子会话完成", stopReason: "end_turn" }),
+    readTaskOutcome: () => ({ summary: "超流体完成", stopReason: "end_turn" }),
     deliver: async (msg) => {
       delivered.push({ ...msg });
       return { ok: true };
@@ -260,7 +260,7 @@ describe("buildQqMainPrompt", () => {
 // ---------------------------------------------------------------------------
 
 describe("主会话路由 · 排队与注入", () => {
-  it("入站立即回「已排队（第 1 位）」且不派子会话", async () => {
+  it("入站立即回「已排队（第 1 位）」且不派超流体", async () => {
     const f = makeService();
     await f.service.handleInboundMessage(inbound());
 
@@ -302,16 +302,16 @@ describe("主会话路由 · 排队与注入", () => {
     await f.injections[0]!.input.onInjected();
     f.injections[0]!.resolve({
       injected: true,
-      text: "已经派子会话改好了",
+      text: "已经派超流体改好了",
       stopReason: "end_turn",
     });
 
     await waitFor(() => resultTexts(f).length > 0);
-    expect(resultTexts(f).join("\n")).toContain("已经派子会话改好了");
+    expect(resultTexts(f).join("\n")).toContain("已经派超流体改好了");
     const task = onlyTask(f);
     expect(task.status).toBe("succeeded");
     expect(task.resultDeliveredAt).toBeTypeOf("number");
-    expect(task.result?.summary).toBe("已经派子会话改好了");
+    expect(task.result?.summary).toBe("已经派超流体改好了");
 
     // 自动回包只此一次（幂等锚点）；refresh 只是用户主动查摘要，不算重复推送。
     const deliveredAt = task.resultDeliveredAt;
@@ -361,7 +361,7 @@ describe("主会话路由 · 排队与注入", () => {
     expect(onlyTask(f).status).toBe("failed");
   });
 
-  it("宿主没有注入能力时如实失败，绝不退化成子会话", async () => {
+  it("宿主没有注入能力时如实失败，绝不退化成超流体", async () => {
     const f = makeService({ withoutInjection: true });
     await f.service.handleInboundMessage(inbound());
     await waitFor(() => resultTexts(f).length > 0);
@@ -469,14 +469,14 @@ describe("主会话路由 · 停止与重启", () => {
 
 describe("主会话路由 · 最终回执归属", () => {
   /** 走完入站 + 注入，并让注入轮以 delegated=true 收尾。 */
-  async function delegatedTask(): Promise<Fixture> {
+  async function delegatedTask(msgOverrides: Partial<InboundMessage> = {}): Promise<Fixture> {
     const f = makeService();
-    await f.service.handleInboundMessage(inbound());
+    await f.service.handleInboundMessage(inbound(msgOverrides));
     await waitFor(() => f.injections.length === 1);
     await f.injections[0]!.input.onInjected();
     f.injections[0]!.resolve({
       injected: true,
-      text: "已派子会话去做，先等一下",
+      text: "已派超流体去做，先等一下",
       stopReason: "end_turn",
       delegated: true,
     });
@@ -494,9 +494,29 @@ describe("主会话路由 · 最终回执归属", () => {
     expect(task.result).toBeUndefined();
     expect(task.resultDeliveredAt).toBeUndefined();
     // 占位文本绝不能作为最终结果回给 QQ（既不是 result 文本，也不在投递里）。
-    expect(f.delivered.some((item) => item.text.includes("已派子会话去做"))).toBe(false);
+    expect(f.delivered.some((item) => item.text.includes("已派超流体去做"))).toBe(false);
     // 但用户能收到一条明确的「已受理、正在处理」进度，不碰幂等锚点。
     expect(f.delivered.some((item) => item.text.includes("已受理，正在处理"))).toBe(true);
+  });
+
+  it("受理回执显示用户消息标题而非裸任务 id", async () => {
+    const f = await delegatedTask({ text: "/qq task 修复登录页白屏" });
+    const task = onlyTask(f);
+    const accepted = f.delivered.find((item) => item.text.includes("已受理，正在处理"));
+    expect(accepted).toBeTruthy();
+    // 标题来自用户消息，裸 id（末 6 位）不再出现在受理回执里。
+    expect(accepted?.text).toContain("修复登录页白屏");
+    expect(accepted?.text).not.toContain(task.taskId.slice(-6));
+  });
+
+  it("取不到可读标题时受理回执退化为中性文案，不回显裸 id 也不留空引号", async () => {
+    // 纯 Markdown 标题符（无正文）没有可读内容：qqTaskTitle 返回空串。
+    const f = await delegatedTask({ text: "/qq task #\n##\n###" });
+    const task = onlyTask(f);
+    const accepted = f.delivered.find((item) => item.text.includes("已受理，正在处理"));
+    expect(accepted).toBeTruthy();
+    expect(accepted?.text).toBe("任务已受理，正在处理，完成后会把最终结果发回这里。");
+    expect(accepted?.text).not.toContain(task.taskId.slice(-6));
   });
 
   it("汇总轮真正答复单次回传，且只投递一次（非占位文本）", async () => {
@@ -510,7 +530,7 @@ describe("主会话路由 · 最终回执归属", () => {
     });
 
     expect(resultTexts(f).join("\n")).toContain("真正最终答复：三个文件都改好了");
-    expect(resultTexts(f).join("\n")).not.toContain("已派子会话去做");
+    expect(resultTexts(f).join("\n")).not.toContain("已派超流体去做");
     const done = f.service.getTask(taskId);
     expect(done?.status).toBe("succeeded");
     expect(done?.result?.summary).toBe("真正最终答复：三个文件都改好了，测试全过。");

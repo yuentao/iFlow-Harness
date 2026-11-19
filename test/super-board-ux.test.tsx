@@ -82,7 +82,7 @@ function render(sessions: SuperSessionUi[], qqTasks: unknown[] = []): void {
 }
 
 function control(): HTMLButtonElement {
-  const el = container.querySelector<HTMLButtonElement>('button[aria-label="子会话看板"]');
+  const el = container.querySelector<HTMLButtonElement>('button[aria-label="超流体看板"]');
   expect(el).toBeTruthy();
   return el!;
 }
@@ -150,14 +150,31 @@ describe("P1-1 needsAction 可见性", () => {
       }),
     ]);
     expand();
-    // Only one row's detail is open at a time — check each in turn.
+    // 「需人工合并」刻意出现在两处：折叠行的警示 chip（collapsedIntegrationIssue，
+    // 让人一眼看出哪条要人工处理，切换展开行也不会抹掉）+ 展开详情里的 needsAction
+    // chip。所以断言必须限定在「当前展开行」内，不能用整个 body 的文本 —— 旧断言
+    // 把上一行折叠态的警示 chip 误当成「旧行详情没收起」。
+    const detailOf = (title: string): HTMLElement => {
+      const row = rowButton(title);
+      const wrap = row.closest<HTMLElement>("div.shrink-0");
+      expect(wrap).toBeTruthy();
+      const detail = wrap!.lastElementChild as HTMLElement | null;
+      expect(detail).toBeTruthy();
+      expect(detail).not.toBe(row.parentElement); // 必须取到展开详情，不是折叠行本身
+      return detail!;
+    };
     act(() => rowButton("改动重叠需人工").click());
-    expect(document.body.textContent).toContain("未自动合并");
-    expect(document.body.textContent).toContain("需人工合并");
+    expect(detailOf("改动重叠需人工").textContent).toContain("未自动合并");
+    expect(detailOf("改动重叠需人工").textContent).toContain("需人工合并");
 
     act(() => rowButton("中断不用管").click());
-    expect(document.body.textContent).toContain("未自动合并");
-    expect(document.body.textContent).not.toContain("需人工合并");
+    // 一次只展开一行（产品由 openRow 单选状态保证）：旧行详情确实已收起。
+    expect(rowButton("改动重叠需人工").getAttribute("aria-expanded")).toBe("false");
+    expect(rowButton("中断不用管").getAttribute("aria-expanded")).toBe("true");
+    expect(detailOf("中断不用管").textContent).toContain("未自动合并");
+    expect(detailOf("中断不用管").textContent).not.toContain("需人工合并");
+    // 折叠行上的警示 chip 仍留在那一行（刻意设计，不随展开态消失）。
+    expect(rowButton("改动重叠需人工").closest("div.shrink-0")!.textContent).toContain("需人工合并");
   });
 
   it("折叠分组里 needsAction 会话被单独计数，标题显示警示 chip", () => {
@@ -179,10 +196,10 @@ describe("P1-1 needsAction 可见性", () => {
     ]);
     expand();
     const toggle = document.body.querySelector<HTMLButtonElement>(
-      'button[aria-label="展开已完成的子会话"]',
+      'button[aria-label="展开已完成的超流体"]',
     );
     expect(toggle).toBeTruthy();
-    expect(toggle!.textContent).toContain("已完成、需人工合并的 2 个子会话");
+    expect(toggle!.textContent).toContain("已完成、需人工合并的 2 个超流体");
     expect(toggle!.textContent).toContain("1 个需人工合并");
     expect(toggle!.textContent).not.toContain("已完成、无需合并的");
   });
@@ -204,7 +221,7 @@ describe("P1-2 合并确认按钮色调", () => {
     act(() => rowButton("修复登录跳转").click());
     act(() => buttonByText("让智能体合并").click());
 
-    const confirm = [...dialog("合并子会话分支").querySelectorAll("button")].find(
+    const confirm = [...dialog("合并超流体分支").querySelectorAll("button")].find(
       (b) => (b.textContent ?? "").trim() === "让智能体合并分支",
     );
     expect(confirm).toBeTruthy();
@@ -216,9 +233,9 @@ describe("P1-2 合并确认按钮色调", () => {
     render([session({ id: "c", status: "running" })]);
     expand();
     act(() => rowButton("修复登录跳转").click());
-    act(() => buttonByLabel("中断这个子会话").click());
+    act(() => buttonByLabel("中断这个超流体").click());
 
-    const confirm = [...dialog("中断子会话").querySelectorAll("button")].find(
+    const confirm = [...dialog("中断超流体").querySelectorAll("button")].find(
       (b) => (b.textContent ?? "").trim() === "中断",
     );
     expect(confirm).toBeTruthy();
@@ -233,7 +250,7 @@ describe("P2-1 忙态色调与全部中断", () => {
   it("中断中 / 清理中 chip 是 danger 色", () => {
     render([session({ id: "c", status: "running" })]);
     expand();
-    act(() => buttonByLabel("中断这个子会话").click());
+    act(() => buttonByLabel("中断这个超流体").click());
     act(() => buttonByText("中断").click());
     expect(chipSpan("中断中").parentElement!.className).toContain("text-destructive");
   });
@@ -269,7 +286,7 @@ describe("P2-1 忙态色调与全部中断", () => {
 // P2-2 — 提交回答的乐观反馈
 // ---------------------------------------------------------------------------
 describe("P2-2 提交回答乐观反馈", () => {
-  it("提交后头部切成「已提交，等待子会话继续」且保留 aria-live", () => {
+  it("提交后头部切成「已提交，等待超流体继续」且保留 aria-live", () => {
     render([
       session({
         id: "ask",
@@ -286,12 +303,12 @@ describe("P2-2 提交回答乐观反馈", () => {
       }),
     ]);
     const body = () => document.body.textContent ?? "";
-    expect(body()).toContain("子会话需要你回答");
+    expect(body()).toContain("超流体需要你回答");
 
     act(() => buttonByText("提交回答").click());
 
-    expect(body()).toContain("已提交，等待子会话继续");
-    expect(body()).not.toContain("子会话需要你回答");
+    expect(body()).toContain("已提交，等待超流体继续");
+    expect(body()).not.toContain("超流体需要你回答");
     const live = [...document.body.querySelectorAll('[aria-live="polite"]')].find((el) =>
       (el.textContent ?? "").includes("已提交"),
     );
@@ -358,8 +375,13 @@ describe("P2-4 QQ 元信息 chip 窄屏收缩", () => {
     );
     expect(channel).toBeTruthy();
     expect(sender).toBeTruthy();
-    expect(channel!.className).toContain("@max-[380px]:hidden");
-    expect(sender!.className).toContain("@max-[380px]:hidden");
+    // 这两个 chip 只出现在 portal 到 document.body 的浮层里，没有 @container
+    // 祖先，所以刻意用视口查询 max-[380px]:hidden（不是 @max-[380px]:hidden）。
+    // 两条断言缺一不可：只写 toContain 的话两种写法都会通过，守不住回归。
+    expect(channel!.className).toContain("max-[380px]:hidden");
+    expect(channel!.className).not.toContain("@max-[380px]:hidden");
+    expect(sender!.className).toContain("max-[380px]:hidden");
+    expect(sender!.className).not.toContain("@max-[380px]:hidden");
     expect(channel!.className).toContain("shrink-0");
   });
 });

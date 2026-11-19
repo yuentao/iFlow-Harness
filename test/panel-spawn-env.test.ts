@@ -127,7 +127,7 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     expect(env.IFLOW_HARNESS).toBe("1");
   }, 30000);
 
-  it("子会话的 spawn env 没有 IFLOW_SUPER_TOOL（即便宿主 process.env 里设了）", async () => {
+  it("超流体的 spawn env 没有 IFLOW_SUPER_TOOL（即便宿主 process.env 里设了）", async () => {
     // 模拟一个「用户 shell 里已经设了该变量」的环境：子会话必须显式抹掉，
     // 不能靠「父进程没设」这个偶然条件。
     process.env.IFLOW_SUPER_TOOL = "1";
@@ -215,7 +215,7 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     expect(argv).toContain("--stream");
   }, 30000);
 
-  it("子会话的 spawn argv 只放共享 broker 的 server 名（并发子会话仍只有一份 server 进程）", async () => {
+  it("超流体的 spawn argv 只放共享 broker 的 server 名（并发超流体仍只有一份 server 进程）", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-spawnenv-mcp-"));
     const spawnLog = path.join(dir, "spawns.log");
     fs.writeFileSync(spawnLog, "");
@@ -267,7 +267,7 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     }
   }, 40000);
 
-  it("没有配置 MCP 时子会话仍退回哨兵（不伪造共享）", async () => {
+  it("没有配置 MCP 时超流体仍退回哨兵（不伪造共享）", async () => {
     const dump = path.join(storageDir, "child-no-mcp-argv.json");
     process.env.ACP_MOCK_ARGV_DUMP = dump;
 

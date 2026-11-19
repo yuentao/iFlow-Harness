@@ -1990,6 +1990,11 @@ export type HostToWebview =
   /** Reply to `deleteProfile`: the row clears its pending chip on receipt.
    * `ok:false` means the profile is still present (the host also toasts). */
   | { type: "profileDeleteResult"; name: string; ok: boolean }
+  /** Reply to `saveAuth`: the credential editor stays open until this arrives
+   * (no optimistic close) so a failed save keeps the user's typed values.
+   * `ok:false` carries the concrete reason to show inline in the form. The
+   * optional `requestId` is echoed from `saveAuth` for correlation. */
+  | { type: "saveAuthResult"; requestId?: number; ok: boolean; error?: string }
   /** Editor color theme changed ("dark" | "light"); the webview follows it
    * unless the user picked a theme manually in the panel. `auroraIntensity`
    * (0–100) mirrors the `iflow.auroraIntensity` setting — the webview scales
@@ -2032,6 +2037,14 @@ export type HostToWebview =
   /** QQ 远程任务（Wave3-B）：bridge / 适配器的连接状态；`detail` 是给人看的
    * 补充说明（例如端点地址或失败原因）。 */
   | { type: "qqStatus"; connected: boolean; detail?: string }
+  /**
+   * 远程接续开关的权威状态回推（host → webview）。`active=true` 表示当前会话
+   * 已被远程接管：webview 冻结所有本地干预入口、常驻 toast 由 host 发送，
+   * 转录仍可只读滚动。状态不持久化：webview 重连 / 宿主重启后 host 一律回推
+   * `active=false`，不会遗留锁死会话。按钮态与冻结态都订阅这条消息，不用 toast
+   * 承载状态（toast 只做提示，关闭由按钮 stop 触发 host dismiss）。
+   */
+  | { type: "qqTakeoverState"; active: boolean }
   /**
    * 扫码登录（Wave5-C0）：宿主从 QQ 官方扫码接口取二维码 →
    * base64 data URL → webview 用 `<img>` 显示，避免 CSP 禁止的 iframe。
@@ -2250,6 +2263,9 @@ export type WebviewToHost =
       modelName: string;
       profileName?: string | null;
       replaceName?: string | null;
+      /** Echoed on `saveAuthResult` so an open editor only reacts to its own
+       * save (other saves — e.g. the onboarding wizard — may be in flight). */
+      requestId?: number;
     }
   /** M3: forget stored credentials (CLI keeps its own). */
   | { type: "clearAuth" }
@@ -2428,6 +2444,12 @@ export type WebviewToHost =
    * `hasAppSecret` 是宿主回传的投影，这里只会被忽略——凭据只在扫码成功后
    * 由宿主写入 SecretStorage，不走设置补丁。 */
   | { type: "qqSettingsPatch"; patch: QqSettingsPatch }
+  /**
+   * 底部输入区「远程接续」开关（webview → host）。仅在 `qqSettings.enabled`
+   * 时渲染；start 冻结本地干预并在当前会话上设内存暂停门，stop 恢复本地干预、
+   * 取消在跑的 QQ 主会话注入并断开该会话的 QQ 注入。状态不持久化（纯内存态）。
+   */
+  | { type: "qqTakeover"; action: "start" | "stop" }
   /**
    * 一键托管（Wave5-C0）：设置页请求宿主开始接入 / 停止 QQBot 托管。
    * `start` 触发准备→配置→启动→等待扫码授权流程，`stop` 停止并清理。

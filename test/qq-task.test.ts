@@ -9,7 +9,9 @@ import {
   makeIdempotencyKey,
   QQ_CHUNK_MAX_BYTES,
   QQ_CHUNK_MAX_CHARS,
+  QQ_TASK_TITLE_MAX_CHARS,
   qqTaskStatusLabel,
+  qqTaskTitle,
   shortTaskId,
   transitionQqTask,
   validateQqTaskRequest,
@@ -98,6 +100,46 @@ describe("createQqTask / idempotency", () => {
   it("shortTaskId 取末 6 位", () => {
     expect(shortTaskId("T-abc-def123")).toBe("def123");
     expect(shortTaskId("T-xy")).toBe("T-xy");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 受理回执标题（代替裸 id）
+// ---------------------------------------------------------------------------
+
+describe("qqTaskTitle", () => {
+  it("从用户消息取首个非空行作为标题", () => {
+    expect(qqTaskTitle("整理登录模块")).toBe("整理登录模块");
+    expect(qqTaskTitle("\n\n  修一下这个问题\n后面还有细节  ")).toBe("修一下这个问题");
+  });
+
+  it("去掉 Markdown 标题 / 列表 / 引用符，合并空白", () => {
+    expect(qqTaskTitle("## 修复登录 bug")).toBe("修复登录 bug");
+    expect(qqTaskTitle("- 梳理  注册  流程")).toBe("梳理 注册 流程");
+    expect(qqTaskTitle("> 引用一句话")).toBe("引用一句话");
+  });
+
+  it("按码点截断并加省略号，不劈开 emoji 代理对", () => {
+    const long = "一二三四五六七八九十一二三四五六七八九十";
+    const title = qqTaskTitle(long, 10);
+    expect(Array.from(title).length).toBe(10);
+    expect(title.endsWith("…")).toBe(true);
+    const emoji = "😀😀😀😀😀😀😀😀😀😀";
+    const emojiTitle = qqTaskTitle(emoji, 5);
+    expect(emojiTitle).toBe("😀😀😀😀…");
+    expect(Array.from(emojiTitle).length).toBe(5);
+  });
+
+  it("空白或纯格式符返回空串，交给调用方退化为中性文案", () => {
+    expect(qqTaskTitle("")).toBe("");
+    expect(qqTaskTitle("   \n\t  \n")).toBe("");
+    expect(qqTaskTitle("##   \n-  \n")).toBe("");
+    expect(qqTaskTitle(undefined as unknown as string)).toBe("");
+  });
+
+  it("默认上限与导出常量一致", () => {
+    const long = "字".repeat(QQ_TASK_TITLE_MAX_CHARS + 10);
+    expect(Array.from(qqTaskTitle(long)).length).toBe(QQ_TASK_TITLE_MAX_CHARS);
   });
 });
 
@@ -404,7 +446,9 @@ describe("formatQqTaskSummary", () => {
 
   it("包含关键字段且不含 Markdown 标题 / 表格", () => {
     const text = formatQqTaskSummary(task, "standard");
-    expect(text).toContain(shortTaskId(task.taskId));
+    // 首行是展示位：用可读标题代替裸短 id。
+    expect(text.split("\n")[0]).toBe("QQ 任务 整理登录模块");
+    expect(text).not.toContain(`QQ 任务 ${shortTaskId(task.taskId)}`);
     expect(text).toContain("成功 (succeeded)");
     expect(text).toContain("耗时");
     expect(text).toContain("1 分 30 秒");
@@ -472,6 +516,21 @@ describe("formatQqTaskSummary", () => {
     expect(text).toContain("取消  停止原因：cancelled");
     // 自相矛盾的「状态 已取消」紧跟「失败 agent_canceled」是旧行为。
     expect(text).not.toContain("失败  agent_canceled");
+  });
+
+  it("首行用人类可读标题（去 Markdown 标记），末尾命令仍用完整 id", () => {
+    const titled = makeTask({ payload: { prompt: "## 重构  登录模块", attachments: [], contexts: [] } });
+    const text = formatQqTaskSummary(titled, "standard");
+    expect(text.split("\n")[0]).toBe("QQ 任务 重构 登录模块");
+    expect(text).toContain(`/qq status ${titled.taskId}`);
+    expect(text).toContain(`/qq log ${titled.taskId}`);
+  });
+
+  it("取不到可读标题时首行退化为短 id，不出现空标题", () => {
+    const untitled = makeTask({ payload: { prompt: "  \n ##  \n  ", attachments: [], contexts: [] } });
+    const text = formatQqTaskSummary(untitled, "summary");
+    expect(text.split("\n")[0]).toBe(`QQ 任务 ${shortTaskId(untitled.taskId)}`);
+    expect(text.split("\n")[0]).not.toBe("QQ 任务 ");
   });
 });
 

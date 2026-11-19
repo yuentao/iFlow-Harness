@@ -108,12 +108,23 @@
 
   --destructive: oklch(0.57 0.21 25);
   --success: oklch(0.55 0.15 153);
-  --warning: oklch(0.65 0.15 76);
+  /* Warning text sits on a 15–20% tint of itself. The old 0.65 lightness gave
+     only ~2.8:1 against that tint (12–13px warning captions / soft buttons need
+     4.5:1). Darkening the token lifts text-on-tint to ~5.0:1 in the light theme;
+     the dark theme keeps its bright amber (8.3:1 on card). */
+  --warning: oklch(0.5 0.13 55);
   --info: oklch(0.58 0.18 255);
   /* External MCP tools get their own hue family — teal sits clearly apart
      from the violet primary and the blue info used by read/image cards. */
   --mcp: oklch(0.52 0.12 190);
 
+  /* Faint hairline by design. A brief experiment darkened this to 0.64 to hit
+     3:1 (WCAG 1.4.11) for field/chip outlines, but that made every chip, card
+     and overlay read as a heavy frame (user feedback 2026-11-20: 「加边框后
+     看起来奇怪、难看，还是去掉边框吧」). Resting boundaries now come from the
+     surface fills (bg-editor / bg-surface) and keyboard focus from
+     --shadow-focus; text contrast lives in the dedicated foreground tokens.
+     Keep this light — the focus ring and text contrast do not depend on it. */
   --border: oklch(0.9 0.008 265);
 
   --diff-add: oklch(0.91 0.06 153 / 70%);
@@ -734,6 +745,21 @@ header.acrylic.header-scrolled {
   box-shadow: var(--shadow-focus);
 }
 .shadow-focus-soft {
+  box-shadow: var(--shadow-focus-soft);
+}
+/* Tailwind v4 parses `shadow-focus` as a shadow-COLOR modifier (the suffix
+   doubles as a colour name), so the `focus:shadow-focus` /
+   `focus-within:shadow-focus-soft` variants used by kit fields emit NO
+   box-shadow at all — the built CSS carried the class name but no ring
+   (verified in dist/assets/*.css via `npx vite build`). These unlayered rules
+   declare the escaped selectors by hand so every text field, commit field,
+   Select trigger and search wrapper shows a real focus ring in both themes;
+   the values still come from the theme tokens above. */
+.focus\:shadow-focus:focus,
+.focus\:shadow-focus:focus-visible {
+  box-shadow: var(--shadow-focus);
+}
+.focus-within\:shadow-focus-soft:focus-within {
   box-shadow: var(--shadow-focus-soft);
 }
 

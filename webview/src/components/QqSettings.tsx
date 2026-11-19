@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   AlertTriangle,
   Check,
@@ -42,6 +42,7 @@ import {
   Select,
   SettingsDisclosure,
   SettingsGroup,
+  SettingsRow,
   Switch,
   TextInput,
 } from "./ui";
@@ -97,30 +98,6 @@ export interface QqSettingsProps {
   qqLoginQr?: QqLoginQr | null;
   /** 当前托管阶段进度；null = 未开始托管。 */
   qqManagedStatus?: QqManagedStatus | null;
-}
-
-/** Label + description on the left, one control on the right — the same row
- * rhythm the other settings sections use (SettingsModal's SettingRow). */
-function Row({
-  label,
-  description,
-  wide = false,
-  children,
-}: {
-  label: string;
-  description?: string;
-  wide?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-3 px-4 py-4 @min-[600px]:flex-row @min-[600px]:items-start @min-[600px]:gap-5">
-      <div className="min-w-0 flex-1">
-        <div className="text-ui-body font-medium leading-snug text-foreground">{label}</div>
-        {description && <Hint className="mt-1">{description}</Hint>}
-      </div>
-      <div className={wide ? "w-full shrink-0 @min-[600px]:w-auto" : "shrink-0"}>{children}</div>
-    </div>
-  );
 }
 
 /**
@@ -622,6 +599,12 @@ export function QqSettings({
   qqLoginQr,
   qqManagedStatus,
 }: QqSettingsProps) {
+  /**
+   * 「解除绑定」的二次确认。解绑是破坏性操作（二维码授权凭据被清除），
+   * 一旦误点就要重新扫码；与设置页其它危险动作一样走 kit 的
+   * {@link ConfirmDialog}（portal 到 body），不自绘弹框。
+   */
+  const [confirmUnbind, setConfirmUnbind] = useState(false);
   const policy = POLICY_OPTIONS.find((option) => option.value === value.remotePolicy)!;
   const detail = DETAIL_OPTIONS.find((option) => option.value === value.resultDetail)!;
   const statusTone =
@@ -672,7 +655,12 @@ export function QqSettings({
 
   return (
     <div className="flex flex-col gap-3">
-      {/* 一键接入：宿主完成 QQBot 接入（准备→配置→启动→扫码授权），面板只发请求与展示回执。 */}
+      {/*
+       * 一键接入卡（含扫码区）是远程任务的从属配置：总开关关闭时整卡不渲染
+       * （AGENTS.md「设置项的从属配置应跟随对应开关」：关闭时完全不显示，
+       * 而不是仅禁用）。打开开关后的说明由「连接」分组里的提示补上。
+       */}
+      {value.enabled && (
       <div className="rounded-lg border border-border bg-surface/40 px-3 py-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
@@ -767,6 +755,7 @@ export function QqSettings({
           </div>
         )}
       </div>
+      )}
 
       {warnings.length > 0 && (
         <div role="alert" className="rounded-lg border border-warning/50 bg-warning/10 px-3 py-2">
@@ -805,7 +794,11 @@ export function QqSettings({
           <Button icon={<PlugZap className={ICON_INLINE} />} onClick={onTestConnection}>
             {t("测试连接")}
           </Button>
-          <Button variant="danger" icon={<Unlink className={ICON_INLINE} />} onClick={onUnbind}>
+          <Button
+            variant="danger"
+            icon={<Unlink className={ICON_INLINE} />}
+            onClick={() => setConfirmUnbind(true)}
+          >
             {t("解除绑定")}
           </Button>
         </ActionRow>
@@ -873,7 +866,7 @@ export function QqSettings({
       )}
 
       <SettingsGroup title={t("连接")}>
-        <Row
+        <SettingsRow
           label={t("启用 QQ 远程任务")}
           description={t(
             "从 QQ 私聊或群聊接收任务，在独立分支上执行。关闭面板不会停止 QQ 通道（通道随扩展宿主存活，重开面板可继续查看）。",
@@ -884,9 +877,23 @@ export function QqSettings({
             label={t("启用 QQ 远程任务")}
             onChange={(enabled) => onChange({ enabled })}
           />
-        </Row>
+        </SettingsRow>
+        {/*
+         * 关闭态只留开关本身 + 这一行说明：一键接入、访问控制、执行策略、
+         * 高级都是远程任务专属配置，总开关关掉就没有可配置的对象。
+         * 「完全不显示」是硬约束（不是仅禁用），见 AGENTS.md。
+         */}
+        {!value.enabled && (
+          <div className="px-4 pb-4">
+            <Hint>
+              {t("启用后可配置一键接入、白名单与执行策略；关闭期间不会接收 QQ 消息。")}
+            </Hint>
+          </div>
+        )}
       </SettingsGroup>
 
+      {value.enabled && (
+        <>
       <SettingsGroup title={t("访问控制")} hint={t("留空表示不接受该来源的任务")}>
         <AccessList
           label={t("允许的用户")}
@@ -909,23 +916,23 @@ export function QqSettings({
       </SettingsGroup>
 
       <SettingsGroup title={t("执行策略")}>
-        <Row label={t("远程任务策略")} description={policy.description} wide>
+        <SettingsRow label={t("远程任务策略")} description={policy.description} wide>
           <Select
             ariaLabel={t("远程任务策略")}
             value={value.remotePolicy}
             options={POLICY_OPTIONS}
             onChange={(next) => onChange({ remotePolicy: next as QqRemotePolicy })}
           />
-        </Row>
-        <Row label={t("结果详细度")} description={detail.description} wide>
+        </SettingsRow>
+        <SettingsRow label={t("结果详细度")} description={detail.description} wide>
           <Select
             ariaLabel={t("结果详细度")}
             value={value.resultDetail}
             options={DETAIL_OPTIONS}
             onChange={(next) => onChange({ resultDetail: next as QqResultDetail })}
           />
-        </Row>
-        <Row label={t("同时运行的任务数")} description={t("范围 1–10，超出后排队等待。")}>
+        </SettingsRow>
+        <SettingsRow label={t("同时运行的任务数")} description={t("范围 1–10，超出后排队等待。")}>
           <CommitNumberInput
             label={t("同时运行的任务数")}
             value={value.maxConcurrentTasks}
@@ -933,8 +940,8 @@ export function QqSettings({
             max={10}
             onCommit={(maxConcurrentTasks) => onChange({ maxConcurrentTasks })}
           />
-        </Row>
-        <Row label={t("每分钟任务上限")} description={t("范围 1–60，超过上限的任务会被拒绝。")}>
+        </SettingsRow>
+        <SettingsRow label={t("每分钟任务上限")} description={t("范围 1–60，超过上限的任务会被拒绝。")}>
           <CommitNumberInput
             label={t("每分钟任务上限")}
             value={value.rateLimitPerMin}
@@ -942,14 +949,14 @@ export function QqSettings({
             max={60}
             onCommit={(rateLimitPerMin) => onChange({ rateLimitPerMin })}
           />
-        </Row>
-        <Row label={t("完成后自动合并")} description={t("任务成功后把分支自动合并回当前分支。")}>
+        </SettingsRow>
+        <SettingsRow label={t("完成后自动合并")} description={t("任务成功后把分支自动合并回当前分支。")}>
           <Switch checked={value.autoMerge} label={t("完成后自动合并")} onChange={(autoMerge) => onChange({ autoMerge })} />
-        </Row>
+        </SettingsRow>
       </SettingsGroup>
 
       <SettingsDisclosure title={t("高级")}>
-        <Row label={t("工作区目录")} description={t("远程任务运行的工作区；留空表示当前工作区根目录。")} wide>
+        <SettingsRow label={t("工作区目录")} description={t("远程任务运行的工作区；留空表示当前工作区根目录。")} wide>
           <Field label={t("工作区目录")}>
             <CommitTextInput
               mono
@@ -959,8 +966,34 @@ export function QqSettings({
               onCommit={(workspace) => onChange({ workspace })}
             />
           </Field>
-        </Row>
+        </SettingsRow>
       </SettingsDisclosure>
+        </>
+      )}
+
+      {/*
+       * 解除绑定是破坏性动作（清掉扫码授权凭据）：先弹 kit 的 ConfirmDialog
+       * 说明影响，确认后才把 unbind 交回宿主。danger 动作按钮表达危险性。
+       */}
+      {confirmUnbind && (
+        <ConfirmDialog
+          title={t("解除绑定")}
+          message={t(
+            "解除绑定后，QQ 远程任务与消息接入都会停止，需要重新扫码授权才能再次使用。",
+          )}
+          actions={[
+            {
+              label: t("解除绑定"),
+              variant: "danger",
+              onClick: () => {
+                setConfirmUnbind(false);
+                onUnbind();
+              },
+            },
+          ]}
+          onCancel={() => setConfirmUnbind(false)}
+        />
+      )}
     </div>
   );
 }

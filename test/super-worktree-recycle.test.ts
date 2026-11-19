@@ -281,7 +281,7 @@ describe("super agent · 回收的保守闸门", () => {
     await harness.manager.dispose();
   }, 30000);
 
-  it("failed 的子会话不回收（重试要复用现场）", async () => {
+  it("failed 的超流体不回收（重试要复用现场）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "throw", { mode: "manual" });
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -296,7 +296,7 @@ describe("super agent · 回收的保守闸门", () => {
     await harness.manager.dispose();
   }, 30000);
 
-  it("cancelled 的子会话不回收", async () => {
+  it("cancelled 的超流体不回收", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang", { mode: "manual" });
     const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });

@@ -159,6 +159,10 @@ describe("MemoryService", () => {
     const saved = lastSaved(messages);
     expect(saved.ok).toBe(false);
     expect(saved.error).toBeTruthy();
+    // A failed write must carry the concrete reason: the webview renders this
+    // string inline (role=alert) so the failure is visible, never silent.
+    expect(typeof saved.error).toBe("string");
+    expect((saved.error ?? "").length).toBeGreaterThan(0);
   });
 
   it("generates a knowledge index and toggles its managed import", async () => {

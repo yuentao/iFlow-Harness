@@ -142,7 +142,7 @@ describe("Super Agent · 批量清理的汇总回执", () => {
     // 串行 + 按顺序逐个调用。
     expect(cleanup.mock.calls.map((call) => call[0])).toEqual(["super-a", "super-b"]);
     // 一条回执，不是每个子会话各一条。
-    expect(toasts).toEqual([{ level: "info", message: "已清理 2 个子会话" }]);
+    expect(toasts).toEqual([{ level: "info", message: "已清理 2 个超流体" }]);
   });
 
   it("部分失败：如实给出成功与失败的数量（warning，不谎报全部成功）", async () => {
@@ -157,7 +157,7 @@ describe("Super Agent · 批量清理的汇总回执", () => {
     });
 
     expect(toasts).toEqual([
-      { level: "warning", message: "已清理 1 个子会话，1 个未能清理" },
+      { level: "warning", message: "已清理 1 个超流体，1 个未能清理" },
     ]);
   });
 
@@ -170,7 +170,7 @@ describe("Super Agent · 批量清理的汇总回执", () => {
       sessionIds: ["super-a", "super-b"],
     });
 
-    expect(toasts).toEqual([{ level: "warning", message: "未能清理这 2 个子会话" }]);
+    expect(toasts).toEqual([{ level: "warning", message: "未能清理这 2 个超流体" }]);
   });
 
   it("分支被保留时如实补一句（不把「目录已删、分支还在」说成全部清干净）", async () => {
@@ -185,7 +185,7 @@ describe("Super Agent · 批量清理的汇总回执", () => {
     });
 
     expect(toasts).toEqual([
-      { level: "info", message: "已清理 2 个子会话，1 个分支已保留" },
+      { level: "info", message: "已清理 2 个超流体，1 个分支已保留" },
     ]);
   });
 
@@ -200,6 +200,6 @@ describe("Super Agent · 批量清理的汇总回执", () => {
 
     expect(cleanup).toHaveBeenCalledTimes(1);
     expect(cleanup).toHaveBeenCalledWith("super-a", { keepBranch: undefined });
-    expect(toasts).toEqual([{ level: "info", message: "已清理子会话" }]);
+    expect(toasts).toEqual([{ level: "info", message: "已清理超流体" }]);
   });
 });

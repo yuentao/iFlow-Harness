@@ -22,8 +22,22 @@ import { QuestionBody, type QuestionAnswerMap } from "./QuestionBody";
  * "streaming"), so buttons must NOT be gated on streaming state — the agent
  * is blocked waiting for this answer.
  */
-export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
+export function QuestionCard({
+  pending,
+  active = true,
+}: {
+  pending: PendingQuestionsUi;
+  /**
+   * Whether this card is the one the user can act on. PendingCards passes
+   * `false` for a card covered by a newer arrival in the stack. A buried
+   * card must not answer ESC — `inert` mutes DOM focus/hit-testing but NOT
+   * a `window` keydown listener, so the shortcut is gated on this flag.
+   */
+  active?: boolean;
+}) {
   const send = useChat((s) => s.send);
+  // 远程接续冻结：独立于 streaming 的全局态，接管期间不得回答问题。
+  const remoteTakeover = useChat((s) => s.remoteTakeover);
   const [answered, setAnswered] = useState(false);
   const titleId = useId();
   const descId = useId();
@@ -33,13 +47,13 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
   const [answers, setAnswers] = useState<QuestionAnswerMap>({});
 
   const submit = () => {
-    if (answered) return;
+    if (answered || remoteTakeover) return;
     setAnswered(true);
     send({ type: "answerQuestions", id: pending.id, answers });
   };
 
   const dismiss = () => {
-    if (answered) return;
+    if (answered || remoteTakeover) return;
     setAnswered(true);
     send({ type: "answerQuestions", id: pending.id, answers: {} });
   };
@@ -52,6 +66,38 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
   useEffect(() => {
     actionsRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, []);
+
+  // ESC on a question card means "不回答并继续" (dismiss) — the card's own
+  // safe-side exit, never "stop generation". It was previously absent here
+  // entirely, so ESC while a question waited always fell through to
+  // Composer's window listener and killed the whole turn. Same gates as
+  // ApprovalCard: active card only, no modal above, not from an editable
+  // target, not already consumed; preventDefault + stopPropagation keep the
+  // global stop shortcut out.
+  useEffect(() => {
+    if (!active) return;
+    const handler = (e: KeyboardEvent) => {
+      if (answered || remoteTakeover || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      if (e.key !== "Escape") return;
+      if (document.querySelector(".auth-backdrop")) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target
+        && (target.tagName === "INPUT"
+          || target.tagName === "TEXTAREA"
+          || target.tagName === "SELECT"
+          || target.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      setAnswered(true);
+      send({ type: "answerQuestions", id: pending.id, answers: {} });
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [active, answered, remoteTakeover, pending.id, send]);
 
   return (
     <div
@@ -89,7 +135,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
       >
         <QuestionBody
           questions={pending.questions}
-          disabled={answered}
+          disabled={answered || remoteTakeover}
           onAnswersChange={setAnswers}
           onSubmit={submit}
         />
@@ -101,14 +147,14 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         <Button
           variant="primary"
           size="sm"
-          disabled={answered}
+          disabled={answered || remoteTakeover}
           aria-label={t("提交回答")}
           icon={<Check className={ICON_INLINE} />}
           onClick={submit}
         >
           {t("提交回答")}
         </Button>
-        <Button variant="secondary" size="sm" disabled={answered} aria-label={t("不回答并继续")} onClick={dismiss}>
+        <Button variant="secondary" size="sm" disabled={answered || remoteTakeover} aria-label={t("不回答并继续")} onClick={dismiss}>
           {t("不回答并继续")}
         </Button>
       </div>

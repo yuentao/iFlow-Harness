@@ -27,7 +27,7 @@ function record(overrides: Partial<PersistedSuperSession> = {}): PersistedSuperS
   };
 }
 
-describe("super agent · 子会话归档", () => {
+describe("super agent · 超流体归档", () => {
   let baseDir: string;
 
   beforeEach(() => {
@@ -48,7 +48,7 @@ describe("super agent · 子会话归档", () => {
     expect(loaded.damaged).toBe(false);
   });
 
-  it("归档保留子会话的 todolist（重启后时间轴仍有步骤可看）", async () => {
+  it("归档保留超流体的 todolist（重启后时间轴仍有步骤可看）", async () => {
     const todos = [
       { content: "读代码", status: "completed" as const },
       { content: "改实现", status: "in_progress" as const, priority: "high" as const },

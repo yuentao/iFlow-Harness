@@ -998,17 +998,37 @@ const QQ_MAIN_IDLE_POLL_MS = 300;
 /**
  * QQ 最终答复「迟到补发」阈值（R2）。
  *
- * 汇报轮的 final 标记由 pendingCount===0 决定；当同会话里还有别的非终态子会话
- * （典型是主 Agent 派出的复核子会话）时 pendingCount 长期 >0，汇总轮会被判成
- * 非 final，QQ 于是永远停在「已受理」。这里给等最终答复的 awaiter 两道兜底：
- *  - 软阈值：awaiter 已等超过 QQ_FINAL_RESCUE_MS 且本会话已无活跃子会话 → 补发；
- *  - 硬上限：即使还有子会话卡在非终态，等超过 QQ_FINAL_HARD_RESCUE_MS 也补发
- *    （宁可给一条如实兜底，也不让 QQ 永久停在已受理）。
+ * **等待过久 ≠ 可以定终局**（2026-11-19 修复）：补发机制的目的是「别让 QQ
+ * 永久停在已受理」，而不是「等够久就替主 Agent 把结论写死」。因此：
+ *  - 软阈值（QQ_FINAL_RESCUE_MS）：awaiter 已等超过该阈值**且本会话已无活跃
+ *    子会话** → 可以定终局（真的不会再有更正文了，走补发收尾）；
+ *  - 硬上限（QQ_FINAL_HARD_RESCUE_MS）：到点时**若仍有活跃子会话**，绝不写
+ *    终局、绝不写 resultDeliveredAt —— 只降级成一条「仍在进行中」的进度
+ *    措辞，并保留 awaiter，让真正的最终汇报轮还有机会投递完整正文。
+ * 汇报轮的 final 标记只由 pendingCount===0 决定：rescueDue 只用来放宽提示词
+ * （让模型这一轮就给结论），不消费 awaiter、不定终局（见
+ * {@link ChatPanel.settleSuperReportsIfReady}）。
  * 轮询间隔远小于阈值，仅为让补发在阈值到点后尽快发生。
  */
 const QQ_FINAL_RESCUE_MS = 120_000;
 const QQ_FINAL_HARD_RESCUE_MS = 600_000;
 const QQ_FINAL_RESCUE_POLL_MS = 10_000;
+/**
+ * 硬上限降级成「仍在进行中」进度措辞时的最小间隔。
+ *
+ * 补发轮询每 10s 拍一次；进度措辞没有新信息量（子会话还在跑），连发只会
+ * 刷屏并挤占 QQ 的被动回复窗口。同一任务在这个间隔内只提醒一次。
+ */
+const QQ_FINAL_RESCUE_PROGRESS_MIN_INTERVAL_MS = 120_000;
+/**
+ * 硬上限补发遇到「本会话汇报轮正在投递 / 排队」时最多让出的轮询拍数。
+ *
+ * 让真实最终汇报（finalReport 收尾投递）优先收尾：抢在它前面补发会把兜底
+ * 文案当结论写死，并让随后迟到的真实正文被丢弃（2026-11-19 用户实测）。
+ * 只让出有限拍数，超过仍未收尾就强制处理 —— 保留「真正卡死」时的兜底，
+ * 绝不永久推迟。强制处理同样受「子会话仍在跑就不定终局」约束。
+ */
+const QQ_FINAL_RESCUE_MAX_DEFERS = 6;
 
 /**
  * 注入轮结束时判定 delegated 的宽限期（R3）：子会话登记可能与回合收尾差错一拍，
@@ -1016,6 +1036,80 @@ const QQ_FINAL_RESCUE_POLL_MS = 10_000;
  * 等最终答复的记账。测试可注入更小值。
  */
 const QQ_DELEGATION_GRACE_MS = 120;
+
+/**
+ * QQ 最终答复兜底用的子会话汇报正文上限。QQ 单条消息有字符预算（见
+ * `src/qq/service.ts` 的 `QQ_CHUNK_MAX_CHARS`），这里先截到远小于它的长度，
+ * 既保留结论又不会把整段子会话转录灌给外部渠道。
+ */
+const QQ_REPORT_FALLBACK_MAX_CHARS = 1_500;
+
+/**
+ * 一次 QQ 正文投递的**来源**（归档事件 `task_answer_delivered` 的 source）。
+ *
+ *  - `final-report`：pendingCount=0 的汇报汇总轮产出的最终正文（真·最终答复）；
+ *  - `rescue`：迟到补发（等太久且已无活跃子会话）投递的收尾正文；
+ *  - `intermediate`：中间正文 / 降级进度措辞（任务**没有**被定终局）。
+ *
+ * 有了它，事后能查清「QQ 收到的是哪一段、当时走的是哪条通道」。
+ */
+export type QqAnswerDeliverySource = "final-report" | "rescue" | "intermediate";
+
+/**
+ * 正文指纹（FNV-1a 32bit，十六进制）：归档事件里记一段正文的指纹，
+ * 便于事后核对「QQ 收到的就是这一段」，又不把整段正文写进事件日志。
+ */
+function qqTextFingerprint(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+/**
+ * 把子会话汇报正文（`report.summary`）清洗成可安全转发给 QQ 的纯文本。
+ *
+ * 汇报是子会话自己写的自由文本，可能带 super-agent 委派围栏 / ACP 工具与角色
+ * 标签（协议标记）、本机绝对路径、token/密钥与长 id。发到外部渠道前一律去掉：
+ *  - 保留项目相对路径（用户要知道「改了哪些文件、验证了什么」），只抹本机绝对路径；
+ *  - 凭据与 id 用占位替代，避免把本机信息泄漏到聊天记录；
+ *  - 折叠空白并按上限截断。
+ * 空串代表这条正文不可用，调用方据此再退到如实占位文案。
+ */
+function sanitizeQqReportFallback(raw: string | undefined): string {
+  if (!raw || !raw.trim()) return "";
+  let text = raw;
+  // 协议标记：super-agent 委派围栏 / ACP 工具与角色标签 / 纯 JSON 信封行。
+  text = text.replace(/```(?:super-agent|json)\b[\s\S]*?```/gi, "");
+  text = text.replace(
+    /<\/?(?:tool_call|function_call|function|thinking|system|user|assistant)\b[^>]*>/gi,
+    "",
+  );
+  text = text.replace(/^\s*\{[^\n]*"(?:type|tool_call_id)"\s*:[^\n]*\}\s*$/gm, "");
+  // 凭据：常见 token 前缀直写，以及 key=value 形式。
+  text = text.replace(/\b(?:sk|gho|ghs|ghp|github_pat)-[A-Za-z0-9_-]{8,}/gi, "[已隐藏]");
+  text = text.replace(
+    /(["']?(?:api[_-]?key|app[_-]?secret|password|token|access[_-]?key)["']?\s*[:=]\s*)(["']?)([^"'\s,;&})]+)\2/gi,
+    "$1$2[已隐藏]$2",
+  );
+  // 本机绝对路径（Windows 盘符 / UNC / POSIX home/tmp），保留项目相对路径。
+  text = text.replace(/\b[A-Za-z]:[\\/][^\s,;)\]"']*/g, "[路径]");
+  text = text.replace(/\\\\[^\s\\/]+\\[^\s,;)\]"']*/g, "[路径]");
+  text = text.replace(/(?:^|[\s(])\/(?:home|Users|root|tmp|var)\/[^\s,;)\]"']*/g, " [路径]");
+  // 长 id / UUID（openid、session id、随机串）。
+  text = text.replace(
+    /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/gi,
+    "[ID]",
+  );
+  text = text.replace(/\b[0-9a-fA-F]{16,}\b/g, "[ID]");
+  text = text.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > QQ_REPORT_FALLBACK_MAX_CHARS
+    ? `${text.slice(0, QQ_REPORT_FALLBACK_MAX_CHARS - 1)}…`
+    : text;
+}
 
 export class DisposedError extends Error {
   constructor(message = "panel disposed") {
@@ -1112,6 +1206,25 @@ export class ChatPanel implements vscode.Disposable {
   private readonly qqInjectAborts = new Map<string, AbortController>();
   private qqInjectedTaskId: string | null = null;
   /**
+   * 远程接续开关（纯内存态，不持久化）：开启 = 远程继续干活 —— QQ 消息照常
+   * 注入主会话、agent 继续执行，只冻结本地干预入口（转录保持只读可观察），
+   * 防止两边同时操作造成混淆；关闭 = 本地恢复 + 断开远程 —— 在本次接管的
+   * sessionId 上设「不再接收 QQ 注入」的门，并取消在跑的注入回合。
+   *
+   * `qqTakeoverActive` / `qqTakeoverSessionId` 是本地冻结态；
+   * `qqRemoteDetachedSessions` 是「已断开远程接管的会话集合」，只有它命中才
+   * 拦截 QQ 注入（start / 默认状态一律放行）。冻结态在 stop / 会话切换 /
+   * webview 重连 / dispose 时清；断开门不因 webview 重连而清（同一 panel
+   * 进程里远程关系仍在，清了会让已断开的会话意外恢复注入），只在会话切换
+   * / 重建（newSession / restore / dispose）时清。toastId 只是 toast 的 host
+   * id，不是凭据。
+   */
+  private qqTakeoverActive = false;
+  private qqTakeoverSessionId: string | null = null;
+  private qqTakeoverToastId: number | null = null;
+  /** 已断开远程接管的会话集合：命中即拒绝 QQ 主会话注入；不持久化。 */
+  private readonly qqRemoteDetachedSessions = new Set<string>();
+  /**
    * QQ 主渠道「等最终答复」记账：注入轮已把任务派给子会话的任务 id → 归属
    * 主会话 id。
    *
@@ -1132,6 +1245,27 @@ export class ChatPanel implements vscode.Disposable {
    * 不参与正常 final 回执；awaiter 清空时一并清理。
    */
   private readonly qqFinalRescueText = new Map<string, string>();
+  /**
+   * 每个归属主会话最近一次子会话汇报正文（report.summary 清洗后）作为补发兜底。
+   *
+   * 与 `qqFinalRescueText` 分离：后者会被非 final 的进度汇报轮正文覆盖，硬上限
+   * 补发时可能为空；这条只在汇报入队时写入，保证补发即便缓存正文为空也能回
+   * 真实汇报正文而不是一句占位文案（2026-11-19 补发抢跑 bug）。
+   */
+  private readonly qqReportFallbackText = new Map<string, string>();
+  /**
+   * 每个 awaiter 因「在途汇报轮」让出的补发拍数（taskId → 次数）。达到
+   * `QQ_FINAL_RESCUE_MAX_DEFERS` 后强制处理，避免真正卡死时永久等待。
+   */
+  private readonly qqFinalRescueDefers = new Map<string, number>();
+  /**
+   * 每个 awaiter 最近一次「仍在进行中」进度措辞的发送时刻（taskId → ts）。
+   *
+   * 硬上限到点但子会话仍在跑时，补发降级成进度提醒而不是定终局；轮询每 10s
+   * 一次，没有新信息量的提醒要节流，否则会刷屏并挤占 QQ 的被动回复窗口。
+   * 与 awaiter 同生命周期：投递 / 撤销 / 停通道时清理。
+   */
+  private readonly qqFinalRescueProgressAt = new Map<string, number>();
   /** 迟到补发的轮询定时器（仅在有 awaiter 时存活）。 */
   private qqFinalRescueTimer: ReturnType<typeof setInterval> | null = null;
   /** 注入轮 delegated 判定的宽限期；测试可注入更小值。 */
@@ -1157,6 +1291,16 @@ export class ChatPanel implements vscode.Disposable {
    * `onNeedInput` 据此把提问提醒回灌到正确的 QQ 任务。
    */
   private readonly qqTaskBySuperSession = new Map<string, string>();
+  /**
+   * QQ 主任务「自己那一轮」的汇报正文（taskId → 清洗后的子会话汇报）。
+   *
+   * 同一主会话里连发多条 QQ 消息时，各任务派生各自的超流体子会话；一轮汇总
+   * 结论若广播给该会话所有 awaiter，就会出现「摘要相同、taskId 不同」的重复
+   * 卡。这里在汇报入队时按 {@link qqTaskBySuperSession} 把每个子会话的汇报归
+   * 到它的主任务，最终回执时逐 task 取回自己那份，绝不共享别人的结论。
+   * 与 awaiter 同生命周期：投递 / 撤销 / 停通道时清理。
+   */
+  private readonly qqTaskFinalText = new Map<string, string>();
   /** 主动停止中：防止与在飞的启停重叠。 */
   private qqStopping = false;
   /** 最近一次推给 webview 的连接状态（用于「面板重新打开时」的立即回显）。 */
@@ -1371,7 +1515,7 @@ export class ChatPanel implements vscode.Disposable {
    * 每条都带**归属主会话**：排队期间用户可能切了会话，A 的汇报不能投进
    * B 的对话（投错会话 = 串台）。
    */
-  private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean }> = [];
+  private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean; fallbackText?: string; suppressQqProgress?: boolean }> = [];
   /**
    * 已经执行完、等着回执给主会话的子会话管理动作（先进先出）。
    *
@@ -1461,6 +1605,13 @@ export class ChatPanel implements vscode.Disposable {
    * 切会话 / 反复恢复不会叠出多条 `git status` 子进程链。
    */
   private sweepInFlight = false;
+  /**
+   * 后台残留清扫的延时（ms）。恢复会话时 CLI 正在跑 session/new、
+   * loadSession 与 MCP 发现，此刻三类 sweep 一起读盘 / 跑 git 会争抢 I/O，
+   * 拖慢恢复（2026-11-19 用户实测）。延时到恢复窗口之后再触发，值 0 供测试
+   * 立即触发验证「清扫挂住也不阻塞恢复」。
+   */
+  private superSweepDelayMs = 3_000;
   /**
    * 已经把汇报交给宿主的子会话 id。
    *
@@ -1866,9 +2017,15 @@ export class ChatPanel implements vscode.Disposable {
         text = `$(sync~spin) iFlow${model}`;
         break;
       case "streaming": {
-        const label = state.compressing
-          ? vscode.l10n.t("正在压缩")
-          : vscode.l10n.t("生成中");
+        // beginReplay 也会把 status 置成 "streaming"，但那是恢复转录而不是
+        // 模型在生成：转圈配「生成中」会让用户以为卡在生成（webview 同一
+        // 时刻显示的是「正在恢复会话…」）。replaying 优先于 compressing 与
+        // 生成中，文案与 webview 的 restore 态保持一致。
+        const label = state.replaying
+          ? vscode.l10n.t("正在恢复会话…")
+          : state.compressing
+            ? vscode.l10n.t("正在压缩")
+            : vscode.l10n.t("生成中");
         text = `$(sync~spin) iFlow: ${label}${model}`;
         break;
       }
@@ -1896,7 +2053,7 @@ export class ChatPanel implements vscode.Disposable {
           const awaiting = kids.some((session) => session.status === "awaiting_input");
           text = awaiting
             ? `$(bell) iFlow: ${vscode.l10n.t("等待你处理")}${model}`
-            : `$(sync~spin) iFlow: ${vscode.l10n.t("子会话进行中")}${model}`;
+            : `$(sync~spin) iFlow: ${vscode.l10n.t("超流体进行中")}${model}`;
         } else {
           text = `$(check) iFlow${mode}${model}`;
         }
@@ -1926,7 +2083,7 @@ export class ChatPanel implements vscode.Disposable {
     // 死锁。它比用量信息更重要，所以即使没有用量也要出现在 tooltip 里。
     const heldTip = state.superHeld
       ? vscode.l10n.t(
-          "已停止：还有 {0} 项子会话结果待处理。发送下一条消息，或点提示条上的「继续处理」来收取汇报",
+          "已停止：还有 {0} 项超流体结果待处理。发送下一条消息，或点提示条上的「继续处理」来收取汇报",
           state.superPendingCount ?? 0,
         )
       : null;
@@ -2002,11 +2159,18 @@ export class ChatPanel implements vscode.Disposable {
     for (const controller of this.qqInjectAborts.values()) controller.abort();
     this.qqInjectAborts.clear();
     this.qqInjectedTaskId = null;
+    // 远程接续是纯内存态：宿主销毁时必须清冻结态并撤掉常驻 toast。
+    this.clearQqTakeover();
+    this.clearQqRemoteDetachedSessions();
     this.stopQqFinalRescueTimer();
     this.qqMainFinalAwaiters.clear();
     this.qqMainFinalAwaiterSince.clear();
     this.qqFinalRescueText.clear();
+    this.qqReportFallbackText.clear();
+    this.qqFinalRescueDefers.clear();
+    this.qqFinalRescueProgressAt.clear();
     this.qqTaskBySuperSession.clear();
+    this.qqTaskFinalText.clear();
     // Final flush: a turn interrupted by window close / extension reload has
     // no later persist point (completion never runs) — write the tail now so
     // the session survives a restart intact. No-op when blocks are empty.
@@ -2492,6 +2656,11 @@ export class ChatPanel implements vscode.Disposable {
         // The webview (re)booted and lost its transcript anchor: resync()
         // forces the next push to be a full snapshot (P-1 blockPatch would
         // apply on top of a transcript the webview no longer holds).
+        // 本地冻结态随 webview 重连失效（重连即无干预面），连带撤掉常驻 toast。
+        // 注意：这里只清冻结态，不清 `qqRemoteDetachedSessions` —— 重连不换会话，
+        // 同一 panel 进程里「已断开远程」的关系仍在，清了会让该会话意外恢复 QQ
+        // 注入。断开门只在会话切换 / 重建（newSession / restore / dispose）时清。
+        this.clearQqTakeover();
         this.store.resync();
         this.store.pushSnapshot();
         // Child transcripts are NOT part of the snapshot (their own channel),
@@ -2651,15 +2820,29 @@ export class ChatPanel implements vscode.Disposable {
       case "openImage":
         void this.openImageAttachment(msg.dataUrl);
         break;
-      case "saveAuth":
-        await this.saveAuthAndReconnect(
-          msg.baseUrl,
-          msg.apiKey,
-          msg.modelName,
-          msg.profileName ?? null,
-          msg.replaceName ?? null,
-        );
+      case "saveAuth": {
+        // Explicit receipt, including on an unexpected throw: without it the
+        // credential editor would wait forever (or, in the old optimistic
+        // design, close and throw the typed values away on failure).
+        let result: { ok: boolean; error?: string };
+        try {
+          result = await this.saveAuthAndReconnect(
+            msg.baseUrl,
+            msg.apiKey,
+            msg.modelName,
+            msg.profileName ?? null,
+            msg.replaceName ?? null,
+          );
+        } catch (e) {
+          result = { ok: false, error: errorMessage(e) };
+        }
+        this.postToWebview({
+          type: "saveAuthResult",
+          ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
+          ...result,
+        });
         break;
+      }
       case "clearAuth":
         await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, undefined);
         await this.context.workspaceState.update(WORKSPACE_MODEL_KEY, undefined);
@@ -2944,6 +3127,9 @@ export class ChatPanel implements vscode.Disposable {
       case "qqManagedSetup":
         await this.handleQqManagedSetup(msg.action);
         break;
+      case "qqTakeover":
+        this.handleQqTakeover(msg.action);
+        break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different
         // commit can send message kinds this host does not know; without a
@@ -3182,8 +3368,16 @@ export class ChatPanel implements vscode.Disposable {
    *   - announceChildDone   → `childDone`,   child 音, 「子会话「{0}」已…」
    * Host bookkeeping turns that are NOT reports (action receipts, delegated
    * user-turn backfill) never call any of these — they stay silent.
+   *
+   * QQ 远程接管态本机静音(2026-11-19):接管时用户已离开本机、反馈只走 QQ 转发
+   * (`deliverQqMainFinalAnswer` / 子会话 QQ 回执)。这里是最小的统一出口 —— 在入口
+   * 一步挡住 OS 原生通知 + done/child 提示音,同时覆盖 turnDone / superReport /
+   * childDone 三类完成提示。切勿上移到 sendPrompt 收尾的 finalReport 块:那里还放着
+   * QQ 转发调用,误伤会让远程用户永远收不到最终答复。错误音 `postSound("error")`
+   * 不经此出口,保持原样。
    */
   private announceCue(event: OsNotifyEvent, text: string, kind: "done" | "child"): void {
+    if (this.qqTakeoverActive) return;
     const decision = this.notifyOsDecision(event, text);
     if (!decision.fire && isDuplicateNotificationBlock(decision.reason)) return;
     this.postSound(kind);
@@ -4619,7 +4813,7 @@ export class ChatPanel implements vscode.Disposable {
     this.clearDeferredAutoTurnsToast();
     this.deferredAutoTurnsToastId = this.store.sendToast(
       "info",
-      vscode.l10n.t("已停止；还有 {0} 项子会话结果待处理。发送下一条消息，或点「继续处理」来收取汇报", pending),
+      vscode.l10n.t("已停止；还有 {0} 项超流体结果待处理。发送下一条消息，或点「继续处理」来收取汇报", pending),
       {
         persistent: true,
         action: { actionId: "resume-super-turns", label: vscode.l10n.t("继续处理") },
@@ -4896,10 +5090,10 @@ export class ChatPanel implements vscode.Disposable {
           })),
         })
         .catch((error: unknown) => {
-          this.log.warn(`QQ 子会话提问提醒转发失败：${errorMessage(error)}`);
+          this.log.warn(`QQ 超流体提问提醒转发失败：${errorMessage(error)}`);
         });
     } catch (error) {
-      this.log.warn(`QQ 子会话提问提醒转发失败：${errorMessage(error)}`);
+      this.log.warn(`QQ 超流体提问提醒转发失败：${errorMessage(error)}`);
     }
   }
 
@@ -4998,7 +5192,7 @@ export class ChatPanel implements vscode.Disposable {
     const requestId = `super-residue-${++this.superResidueConfirmSeq}`;
     const title = vscode.l10n.t("清空并新建会话？");
     const message = vscode.l10n.t(
-      "检测到 {0} 个历史子会话残留目录（worktree {1} 个 / 降级目录 {2} 个 / 附件 {3} 个）。继续将清空全部残留，包括未合并的 worktree——其中未提交/未合并的代码改动将永久丢失且不可恢复。请确认这些工作不再需要。",
+      "检测到 {0} 个历史超流体残留目录（worktree {1} 个 / 降级目录 {2} 个 / 附件 {3} 个）。继续将清空全部残留，包括未合并的 worktree——其中未提交/未合并的代码改动将永久丢失且不可恢复。请确认这些工作不再需要。",
       count.total,
       count.worktrees,
       count.dirs,
@@ -5071,7 +5265,7 @@ export class ChatPanel implements vscode.Disposable {
       if (purged.failed > 0) {
         this.store.sendToast(
           "warning",
-          vscode.l10n.t("已清空历史子会话残留，但有 {0} 个目录未能删除（请手动检查）", purged.failed),
+          vscode.l10n.t("已清空历史超流体残留，但有 {0} 个目录未能删除（请手动检查）", purged.failed),
         );
       }
     }
@@ -6151,7 +6345,7 @@ export class ChatPanel implements vscode.Disposable {
     modelName: string,
     profileName: string | null,
     replaceName: string | null = null,
-  ): Promise<void> {
+  ): Promise<{ ok: boolean; error?: string }> {
     // `replaceName` is the name this profile had BEFORE the edit (absent for a
     // brand-new profile). Editing is NOT a profile switch: only the edited row
     // may change — the active pointer, the live CLI and this workspace's model
@@ -6169,8 +6363,9 @@ export class ChatPanel implements vscode.Disposable {
     // has to type one; never borrow another profile's secret.
     const effectiveKey = apiKey ?? (replaced ? previous?.apiKey ?? null : stored?.apiKey ?? null);
     if (replaced && !effectiveKey) {
-      this.store.markError(vscode.l10n.t("编辑 API 配置时请填写 API Key"));
-      return;
+      const error = vscode.l10n.t("编辑 API 配置时请填写 API Key");
+      this.store.markError(error);
+      return { ok: false, error };
     }
     const validation = validateCredentials({
       baseUrl,
@@ -6179,7 +6374,7 @@ export class ChatPanel implements vscode.Disposable {
     });
     if (!validation.ok) {
       this.store.markError(validation.error);
-      return;
+      return { ok: false, error: validation.error };
     }
     const creds = validation.value;
 
@@ -6195,12 +6390,11 @@ export class ChatPanel implements vscode.Disposable {
       Object.keys(readCliSettings()?.apiProfiles ?? {}).map((key) => key.trim()),
     );
     if (replaced && replaced !== name && (profiles[name] || kernelNames.has(name))) {
-      void vscode.window.showWarningMessage(
-        vscode.l10n.t("已存在同名 API 配置: {0}，请换一个名称", name),
-      );
+      const error = vscode.l10n.t("已存在同名 API 配置: {0}，请换一个名称", name);
+      void vscode.window.showWarningMessage(error);
       const auth = this.store.getState().auth;
       this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
-      return;
+      return { ok: false, error };
     }
     if (replaced && replaced !== name) {
       delete profiles[replaced];
@@ -6211,11 +6405,12 @@ export class ChatPanel implements vscode.Disposable {
     // write above remains the runtime cache used for hot re-authentication.
     const kernelWritten = writeKernelApiProfile(name, creds);
     if (kernelWritten && replaced && replaced !== name) deleteKernelApiProfile(replaced);
-    if (!kernelWritten) {
-      // Never report a silent success: the profile only lives in this
-      // window's SecretStorage until the kernel file becomes writable.
-      void vscode.window.showWarningMessage(vscode.l10n.t("无法写入内核配置 {0}", name));
-    }
+    // A kernel write failure is a partial success: the profile is live in
+    // SecretStorage for this window but will not survive a restart. Keep the
+    // editor open with the concrete reason (inline, not just the toast) —
+    // same contract deleteProfile uses via `ok: !kernelWriteFailed`.
+    const kernelError = kernelWritten ? undefined : vscode.l10n.t("无法写入内核配置 {0}", name);
+    if (kernelError) void vscode.window.showWarningMessage(kernelError);
 
     // "Is this the row the panel is running on?" — by credential IDENTITY,
     // never by the final name: a new profile defaulting to the current model,
@@ -6234,7 +6429,7 @@ export class ChatPanel implements vscode.Disposable {
       setKernelActiveProfile(name);
       await this.rememberWorkspaceModelFor(name, creds.modelName);
       await this.reconnectWithCredentials(creds, false);
-      return;
+      return { ok: !kernelError, ...(kernelError ? { error: kernelError } : {}) };
     }
 
     if (!isActiveProfile) {
@@ -6242,7 +6437,7 @@ export class ChatPanel implements vscode.Disposable {
       // no reconnect, no pointer move — the panel keeps running as it was.
       const auth = this.store.getState().auth;
       this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
-      return;
+      return { ok: !kernelError, ...(kernelError ? { error: kernelError } : {}) };
     }
 
     // The edited row is the live one: follow a rename in the pointer, then
@@ -6262,9 +6457,10 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.window.showInformationMessage(
         vscode.l10n.t("API 配置已保存；本次连接仍在用旧凭据，重新连接后生效"),
       );
-      return;
+      return { ok: !kernelError, ...(kernelError ? { error: kernelError } : {}) };
     }
     await this.reconnectWithCredentials(creds, true);
+    return { ok: !kernelError, ...(kernelError ? { error: kernelError } : {}) };
   }
 
   /** True when two credential sets describe the same endpoint ("current
@@ -7225,6 +7421,9 @@ export class ChatPanel implements vscode.Disposable {
     if (this.historySyncBusy) return false;
     // A3: the panel was disposed — the store is gone.
     if (this.disposed) return false;
+    // 远程接续绑定在旧会话上：切走即失效。
+    this.clearQqTakeover();
+    this.clearQqRemoteDetachedSessions();
     // Fast path: the CLI only persists jsonl transcripts for sessions that
     // actually had a conversation. A "dead" session (auto-created on panel
     // open, never used) would burn 60s+ on new+load for nothing.
@@ -7462,10 +7661,10 @@ export class ChatPanel implements vscode.Disposable {
       // 那会连带丢掉刚重建好的转录并让用户以为恢复失败。失败可见（toast +
       // 日志）但不阻断（新建会话、继续对话都照常）。
       await this.restoreSuperSessions(loadedId).catch((error: unknown) => {
-        this.log.warn(`super agent: 恢复子会话记录失败（不影响会话恢复）：${errorMessage(error)}`);
+        this.log.warn(`super agent: 恢复超流体记录失败（不影响会话恢复）：${errorMessage(error)}`);
         this.store.sendToast(
           "warning",
-          vscode.l10n.t("子会话记录恢复失败（不影响会话）：{0}", errorMessage(error)),
+          vscode.l10n.t("超流体记录恢复失败（不影响会话）：{0}", errorMessage(error)),
         );
       });
       void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
@@ -7701,12 +7900,12 @@ export class ChatPanel implements vscode.Disposable {
     // 什么。损坏的原件已由读侧留底（归档名.corrupt），路径一并报出。
     if (archive.damaged) {
       this.log.warn(
-        `super agent: 子会话归档读不出来（${archive.damage ?? "unknown"}），备份：${archive.backupPath ?? "-"}`,
+        `super agent: 超流体归档读不出来（${archive.damage ?? "unknown"}），备份：${archive.backupPath ?? "-"}`,
       );
       this.store.sendToast(
         "warning",
         vscode.l10n.t(
-          "子会话记录已损坏，原文件已备份；这条会话的子会话记录无法恢复（{0}）",
+          "超流体记录已损坏，原文件已备份；这条会话的超流体记录无法恢复（{0}）",
           archive.backupPath ?? archive.damage ?? "unknown",
         ),
       );
@@ -7775,45 +7974,55 @@ export class ChatPanel implements vscode.Disposable {
         .getConfiguration("iflow")
         .get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
     );
+    // 同步占位：延时窗口内反复恢复 / 新建会话也只排一份 sweep。manager 的
+    // 同步抛错仍在调用点按原语义冒泡（由上层 catch 兜住），不推迟到定时器里。
     this.sweepInFlight = true;
-    void Promise.resolve()
-      // 用一个已 resolve 的 promise 起链：manager 的同步抛错也落进 catch，
-      // 不会在调用点炸出去打断恢复。
-      .then(async () => {
-        // 三类残留同在 `.iflow/super/` 下：worktrees（既有清扫）、attachments、
-        // dirs（降级目录）。并排跑，任何一类失败都落进下面的 catch，不影响会话。
-        // 每一项都经 Promise.resolve().then() 包一层：即便某个 manager 方法同步
-        // 抛错（stub 未实现 / 未来改动），也只是该项变成 rejected，不会在数组
-        // 求值时打断其余项的 handler 绑定 —— 否则先返回的 rejected promise 会
-        // 变成 unhandled rejection（Vitest Errors 1）。
-        const [swept] = await Promise.all([
-          Promise.resolve().then(() => manager.sweepStaleWorktrees({ maxKeep })),
-          Promise.resolve().then(() => manager.sweepStaleSuperAttachmentDirs()),
-          Promise.resolve().then(() => manager.sweepStaleSuperDirs()),
-        ]);
-        return swept;
-      })
-      .then((swept) => {
-        if (this.disposed) return;
-        if (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0) {
-          this.log.info(
-            `super agent: 残留清扫（后台）— 删除 ${swept.removed} 个，保留 ${swept.kept} 个，疑似残留 ${swept.orphans.length} 个（需人工确认）`,
-          );
-        }
-      })
-      .catch((error: unknown) => {
-        // 背景清扫失败不是会话故障：可观测（日志 + 提示），但绝不冒泡。
-        this.log.warn(`super agent: 后台残留清扫失败（不影响会话）：${errorMessage(error)}`);
-        if (!this.disposed) {
-          this.store.sendToast(
-            "warning",
-            vscode.l10n.t("后台清理残留工作目录失败（不影响会话）：{0}", errorMessage(error)),
-          );
-        }
-      })
-      .finally(() => {
+    const timer = setTimeout(() => {
+      if (this.disposed) {
         this.sweepInFlight = false;
-      });
+        return;
+      }
+      void Promise.resolve()
+        // 用一个已 resolve 的 promise 起链：manager 的同步抛错也落进 catch，
+        // 不会在定时器回调里炸出去变成 unhandled rejection。
+        .then(async () => {
+          // 三类残留同在 `.iflow/super/` 下：worktrees（既有清扫）、attachments、
+          // dirs（降级目录）。并排跑，任何一类失败都落进下面的 catch，不影响会话。
+          // 每一项都经 Promise.resolve().then() 包一层：即便某个 manager 方法同步
+          // 抛错（stub 未实现 / 未来改动），也只是该项变成 rejected，不会在数组
+          // 求值时打断其余项的 handler 绑定 —— 否则先返回的 rejected promise 会
+          // 变成 unhandled rejection（Vitest Errors 1）。
+          const [swept] = await Promise.all([
+            Promise.resolve().then(() => manager.sweepStaleWorktrees({ maxKeep })),
+            Promise.resolve().then(() => manager.sweepStaleSuperAttachmentDirs()),
+            Promise.resolve().then(() => manager.sweepStaleSuperDirs()),
+          ]);
+          return swept;
+        })
+        .then((swept) => {
+          if (this.disposed) return;
+          if (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0) {
+            this.log.info(
+              `super agent: 残留清扫（后台）— 删除 ${swept.removed} 个，保留 ${swept.kept} 个，疑似残留 ${swept.orphans.length} 个（需人工确认）`,
+            );
+          }
+        })
+        .catch((error: unknown) => {
+          // 背景清扫失败不是会话故障：可观测（日志 + 提示），但绝不冒泡。
+          this.log.warn(`super agent: 后台残留清扫失败（不影响会话）：${errorMessage(error)}`);
+          if (!this.disposed) {
+            this.store.sendToast(
+              "warning",
+              vscode.l10n.t("后台清理残留工作目录失败（不影响会话）：{0}", errorMessage(error)),
+            );
+          }
+        })
+        .finally(() => {
+          this.sweepInFlight = false;
+        });
+    }, this.superSweepDelayMs);
+    // 定时器本身不该把扩展宿主 / 测试进程吊住。
+    timer.unref?.();
   }
 
   /**
@@ -7999,7 +8208,7 @@ export class ChatPanel implements vscode.Disposable {
       // 远程派发的任务还要把这条提问提醒转发给 QQ 发起者（本地任务不受影响：
       // 服务侧找不到对应的 QQ 任务就会直接忽略）。
       onNeedInput: (session) => {
-        this.notifyOs("question", vscode.l10n.t("子会话「{0}」在等你回答", session.title));
+        this.notifyOs("question", vscode.l10n.t("超流体「{0}」在等你回答", session.title));
         if (session.pending?.kind === "question") {
           // main 渠道 QQ 任务派生的子会话：按 QQ 主任务寻址，答案回灌子会话。
           // 旧 child 渠道仍走 superSessionId 匹配，两者互不干扰。
@@ -8021,7 +8230,7 @@ export class ChatPanel implements vscode.Disposable {
           this.store.sendToast(
             "info",
             vscode.l10n.t(
-              "合并子会话已把子会话「{0}」的分支 {1} 合入当前分支",
+              "合并超流体已把超流体「{0}」的分支 {1} 合入当前分支",
               info.title,
               info.branch,
             ),
@@ -8030,7 +8239,7 @@ export class ChatPanel implements vscode.Disposable {
           this.store.sendToast(
             "warning",
             vscode.l10n.t(
-              "合并子会话没能完成合并，分支仍保留：{0}（{1}）",
+              "合并超流体没能完成合并，分支仍保留：{0}（{1}）",
               info.branch,
               info.detail,
             ),
@@ -8123,7 +8332,7 @@ export class ChatPanel implements vscode.Disposable {
         this.log.error(`MCP broker failed to start: ${errorMessage(error)}`);
         this.store.sendToast(
           "error",
-          vscode.l10n.t("MCP 共享代理启动失败，子会话将无 MCP 工具：{0}", errorMessage(error)),
+          vscode.l10n.t("MCP 共享代理启动失败，超流体将无 MCP 工具：{0}", errorMessage(error)),
         );
         return null;
       }
@@ -8244,11 +8453,15 @@ export class ChatPanel implements vscode.Disposable {
     const scan = this.superScan.push(text);
     if (scan.invalidBlocks.length > 0) {
       // 只报「无法解析」等于让用户和模型都没法自查；带上失败原因与正文长度，
-      // 才能一眼看出是 JSON 写坏了还是任务书太长被截断。
+      // 才能一眼看出是 JSON 写坏了还是任务书太长被截断。原因里含字段级诊断
+      // （如 tasks[0].title 必填），这里同步记日志定位是哪个任务缺标题。
       const first = scan.invalidBlocks[0]!;
+      this.log.warn(
+        `super agent: invalid delegation directive (${first.reason}, ${first.body.length} chars) — nothing dispatched`,
+      );
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("子会话派发指令无法解析（{0}，内容共 {1} 字符），已忽略", first.reason, first.body.length),
+        vscode.l10n.t("超流体派发指令无法解析（{0}，内容共 {1} 字符），已忽略", first.reason, first.body.length),
       );
     }
     if (scan.blocks.length === 0) return;
@@ -8269,10 +8482,15 @@ export class ChatPanel implements vscode.Disposable {
   ): void {
     const manager = this.getSuperAgent();
     if (!manager) {
-      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
+      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
       return;
     }
     if (issues.length > 0) {
+      // 宿主侧可诊断日志：字段级原因里带 tasks[i]，这里整条记下来（尤其 title 必填
+      // 的拒绝），便于从日志直接定位是哪个任务缺标题，而不是只有一句笼统 toast。
+      this.log.warn(
+        `super agent: rejected ${issues.length} malformed task entry(ies): ${issues.join("; ")}`,
+      );
       // 混合载荷：合法任务照常派发，但被丢掉的畸形条目必须可见 —— 静默丢一半
       // 正是「用户只看到一堵 JSON 墙」的来源。只报首条原因，避免 toast 过长。
       this.store.sendToast(
@@ -8315,7 +8533,7 @@ export class ChatPanel implements vscode.Disposable {
     if (droppedAttachments > 0) {
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("子会话派发指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
+        vscode.l10n.t("超流体派发指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
       );
     }
     // 全部命中重复时没有「已经派发」这件事可报 ——
@@ -8329,7 +8547,7 @@ export class ChatPanel implements vscode.Disposable {
     );
     this.store.sendToast(
       "info",
-      vscode.l10n.t("已派发 {0} 个子会话（并发上限 {1}）", dispatched, concurrency),
+      vscode.l10n.t("已派发 {0} 个超流体（并发上限 {1}）", dispatched, concurrency),
     );
   }
 
@@ -8437,7 +8655,7 @@ export class ChatPanel implements vscode.Disposable {
     );
     this.store.sendToast(
       "warning",
-      vscode.l10n.t("super-agent 工具调用已完成，但宿主没有收到派发载荷，未派发任何子会话"),
+      vscode.l10n.t("super-agent 工具调用已完成，但宿主没有收到派发载荷，未派发任何超流体"),
     );
     this.queueSuperToolCallCorrection(
       "the tool call completed without a usable payload — no tasks/actions ever reached the host, so nothing was dispatched",
@@ -8531,7 +8749,7 @@ export class ChatPanel implements vscode.Disposable {
     );
     this.store.sendToast(
       "warning",
-      vscode.l10n.t("super-agent 调用载荷不合法（{0}），未派发子会话", reason),
+      vscode.l10n.t("super-agent 调用载荷不合法（{0}），未派发超流体", reason),
     );
     // 宿主能看见「这次没派出去」，模型却只收到一个 failed 工具帧 —— 补一条
     // hidden prompt 把原因和正确格式送回主会话上下文，让它在同一轮里自行修正。
@@ -8643,7 +8861,7 @@ export class ChatPanel implements vscode.Disposable {
     const scan = extractSuperActions(this.superActionScanText, this.superActionScanOffset);
     if (scan.end > this.superActionScanOffset) this.superActionScanOffset = scan.end;
     if (scan.invalidBlocks.length > 0) {
-      this.store.sendToast("warning", vscode.l10n.t("子会话管理指令无法解析，已忽略"));
+      this.store.sendToast("warning", vscode.l10n.t("超流体管理指令无法解析，已忽略"));
     }
     if (scan.actions.length > 0) {
       void this.runSuperActions(scan.actions);
@@ -8764,7 +8982,7 @@ export class ChatPanel implements vscode.Disposable {
               this.store.sendToast(
                 "warning",
                 vscode.l10n.t(
-                  "中断失败：找不到子会话 {0}，可能已被清理或 id 有误",
+                  "中断失败：找不到超流体 {0}，可能已被清理或 id 有误",
                   action.sessionId,
                 ),
               );
@@ -8821,12 +9039,12 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     if (applied > 0) {
-      this.store.sendToast("info", vscode.l10n.t("已按主会话指令管理子会话：成功 {0} 个", applied));
+      this.store.sendToast("info", vscode.l10n.t("已按主会话指令管理超流体：成功 {0} 个", applied));
     }
     if (ignored > 0) {
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("{0} 个子会话管理动作未生效（目标不存在或状态不适用）", ignored),
+        vscode.l10n.t("{0} 个超流体管理动作未生效（目标不存在或状态不适用）", ignored),
       );
     }
     // 工具调用触发的动作：把真实结果回填到那张工具帧，动作卡据此显示
@@ -9123,10 +9341,17 @@ export class ChatPanel implements vscode.Disposable {
     // 汇报归属会话：pendingCount 与 QQ awaiter 归属都用它，避免从 entries[0]
     // 推断时因异步归属回填而与 awaiter 漂移（R2）。
     const reportOwner = this.currentMainSessionId();
+    // 迟到补发判定必须早于提示词生成：pendingCount>0 却被放宽为 final 的回合，
+    // 提示词也要同步改成「本次给最终汇报」，否则模型照常压制最终正文，标记与
+    // 提示词自相矛盾（2026-11-19 补发抢跑 bug）。
+    const rescueDue = this.qqFinalRescueDue(reportOwner);
     let text = "";
     let pendingCount: number | undefined;
     if (manager && typeof manager.reportPromptWithPending === "function") {
-      const prompt = manager.reportPromptWithPending(batch, { pendingOwner: reportOwner });
+      const prompt = manager.reportPromptWithPending(batch, {
+        pendingOwner: reportOwner,
+        finalOverride: rescueDue,
+      });
       text = prompt.text;
       pendingCount = prompt.pendingCount;
     } else {
@@ -9145,17 +9370,81 @@ export class ChatPanel implements vscode.Disposable {
     this.log.info(`super agent: queued report for ${batch.length} settled child session(s)`);
     // pendingCount=0 即「所有子会话都已结束」的汇总轮 —— 主 Agent 在这一轮
     // 给出最终完整汇报，是 QQ 最终回执应当采用的那一轮文本。
-    // R2 迟到补发：若该会话的 QQ awaiter 已等过阈值，而 pendingCount 因别的
-    // 非终态子会话（复核子会话等）长期 >0，就别让 final 永远=false —— 以本轮
-    // 文本作为最终回执（空文本再由 deliverQqMainFinalAnswer 兜底）。
-    const rescueDue = this.qqFinalRescueDue(reportOwner);
-    if (rescueDue && pendingCount !== 0) {
-      this.log.warn(`QQ 最终回执迟到补发：汇报轮 pendingCount=${pendingCount}，仍按 final 投递`);
+    //
+    // **等待过久 ≠ 可以定终局**（2026-11-19 修复）：旧实现在 rescueDue 时把
+    // 这一轮也标成 final，于是「awaiter 等过了阈值」被直接等价成「可以定终局」
+    // —— 子会话明明还在跑，QQ 却先收到一条空正文兜底（22 字占位），任务被写成
+    // 终态、awaiter 被摘掉，随后迟到的真实长正文再也投不出去（用户实测：QQ
+    // 端只收到 22 字占位）。
+    //
+    // 现在：rescueDue 只用来**放宽提示词**（finalOverride=true，让模型这一轮
+    // 就给结论），final 仍严格由 pendingCount===0 决定。放宽后的这一轮按
+    // 「进度轮」处理 —— 正文经 deliverQqMainIntermediateText 转发，不写终态、
+    // 不摘 awaiter；真正的最终汇报轮（pendingCount=0）到达时，那一轮的完整正文
+    // 才会作为最终答复投递（逐字送达）。
+    const rescuedRound = rescueDue && pendingCount !== 0;
+    if (rescuedRound) {
+      const activeChildren = this.qqActiveChildrenCount(reportOwner);
+      const waited = this.qqFinalRescueWaitedMs(reportOwner);
+      const taskIds = [...this.qqMainFinalAwaiters.entries()]
+        .filter(([, owner]) => owner === reportOwner)
+        .map(([taskId]) => taskId);
+      this.log.warn(
+        `QQ 迟到补发：汇报轮 pendingCount=${pendingCount} activeChildren=${activeChildren} —— 仅放宽提示词（要结论），不定终局、不摘 awaiter`,
+      );
+      // 逐 task 记一条让路事件：事后能查清「哪个 QQ 任务等太久被放宽了」。
+      for (const taskId of taskIds) {
+        void this.appendQqArchiveEvent("task_final_rescue_deferred", taskId, {
+          owner: reportOwner,
+          reason: "report-round-relaxed",
+          waited,
+          activeChildren,
+          pendingCount,
+          defers: 0,
+        });
+      }
     }
+    // 子会话汇报正文：二次转述（主 Agent 汇总轮）确为空时，兜底回给用户看的是
+    // 子会话实际做了什么，而不是一句占位文案。取本批终态汇报的 summary（失败 /
+    // 中断的取 error 或「已中断」），清洗在消费端做（见 sanitizeQqReportFallback）。
+    const fallbackText = batch
+      .map((entry) => {
+        const summary = entry.report?.summary ?? entry.session.summary ?? "";
+        const error = entry.session.error ?? "";
+        return summary.trim() || error.trim() || (entry.report?.state === "dropped" ? "已中断" : "");
+      })
+      .filter((value) => value.length > 0)
+      .join("\n")
+      .trim();
+    // QQ task 级归属：把本批每个子会话的汇报正文归到派生它的主任务（见
+    // qqTaskBySuperSession）。deliverQqMainFinalAnswer 据此逐 task 投递各自的
+    // 结论，同会话多条消息不再共用一份汇总文本（重复卡根因）。只记仍在等的
+    // 任务，避免给已收尾的任务留陈旧缓存。
+    for (const entry of batch) {
+      const taskId = this.qqTaskBySuperSession.get(entry.session.id);
+      if (!taskId || !this.qqMainFinalAwaiters.has(taskId)) continue;
+      const own = sanitizeQqReportFallback(
+        entry.report?.summary ||
+          entry.session.summary ||
+          entry.session.error ||
+          (entry.report?.state === "dropped" ? "已中断" : ""),
+      );
+      if (!own) continue;
+      const prev = this.qqTaskFinalText.get(taskId);
+      this.qqTaskFinalText.set(taskId, prev ? `${prev}\n${own}` : own);
+    }
+    // 本批是否全是「被中断」的子会话（用户点取消 / 面板关闭）。这类通知是
+    // 宿主注入的纯 host-state，不是新结论 —— 一次取消会连带状态上报 + 动作
+    // 回执两条通知，各自的 assistant 转述若都转发到 QQ 就是重复投递。
+    const allDropped = batch.length > 0 && batch.every((entry) => entry.report.state === "dropped");
     this.pendingSuperReportPrompts.push({
       mainSessionId: reportOwner,
       text,
-      final: pendingCount === 0 || rescueDue,
+      // 只有「所有子会话都已结束」的汇总轮才是 final：迟到补发（rescueDue）
+      // 只放宽提示词，绝不把这一轮变成定终局的最终回执（2026-11-19 修复）。
+      final: pendingCount === 0,
+      fallbackText,
+      suppressQqProgress: allDropped,
     });
     this.ensureSuperHeartbeat();
     // 用户按过停止时补一次常驻「继续处理」提示：此后才结束的子会话此前不会
@@ -9183,7 +9472,7 @@ export class ChatPanel implements vscode.Disposable {
           : summary;
       this.store.sendToast(
         "info",
-        vscode.l10n.t("已归档子会话「{0}」的迟到结论（该子会话已被清理，主会话未能在当时收取）：{1}", entry.session.title, clipped),
+        vscode.l10n.t("已归档超流体「{0}」的迟到结论（该超流体已被清理，主会话未能在当时收取）：{1}", entry.session.title, clipped),
         { sticky: true },
       );
     }
@@ -9244,8 +9533,20 @@ export class ChatPanel implements vscode.Disposable {
         const visibleBefore = this.store.getState().blocks.filter(
           (block) => block.kind === "text" && !block.system,
         );
-        const reportAnchorId = visibleBefore[visibleBefore.length - 1]?.id;
+        const reportAnchor = visibleBefore[visibleBefore.length - 1];
+        const reportAnchorId = reportAnchor?.id;
+        const reportAnchorLen = reportAnchor?.kind === "text" ? reportAnchor.text.length : 0;
         const reportTextBefore = visibleBefore.length;
+        // 子会话汇报正文（report.summary）作为「二次转述确实为空」时的兜底：
+        // 先清洗（去协议标记 / 脱敏 / 截断），预置进 R2 缓存，并透传给 sendPrompt
+        // 的最终回执收尾。宿主本就持有这段正文，绝不只发一句占位文案。
+        const cleanFallback = sanitizeQqReportFallback(item.fallbackText);
+        if (cleanFallback && owner && this.qqFinalRescueOwnerPending(owner)) {
+          this.qqFinalRescueText.set(owner, cleanFallback);
+          // 独立缓存：不会被下面非 final 进度轮的 reportTurnText 覆盖，硬上限
+          // 补发时即使缓存正文为空也能回真实汇报正文（2026-11-19 补发抢跑 bug）。
+          this.qqReportFallbackText.set(owner, cleanFallback);
+        }
         const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
           delegateOnBusy: false,
           hidden: true,
@@ -9255,6 +9556,8 @@ export class ChatPanel implements vscode.Disposable {
           // pendingCount=0 的汇总轮：收尾时把这一轮 assistant 文本作为 QQ
           // 任务的真正最终答复回传（中途进度汇报轮不带此标记）。
           finalReport: item.final === true,
+          // 汇总轮二次转述为空时，用子会话真实汇报正文兜底（见 deliverQqMainFinalAnswer）。
+          finalFallbackText: item.fallbackText,
         });
         if (!started) {
           // 回合没跑起来（主会话被别的回合占着）：这条汇报**留在队列里**，
@@ -9265,16 +9568,27 @@ export class ChatPanel implements vscode.Disposable {
         if (pos !== -1) this.pendingSuperReportPrompts.splice(pos, 1);
         // 本轮 assistant 正文：只含 agent 的 text 块（thought / tool / diff /
         // 子会话卡都不在其中），与最终结果取文本同口径。
-        const reportTurnText = this.captureQqReportTurnText(reportAnchorId, reportTextBefore);
+        const reportTurnText = this.captureQqReportTurnText(
+          reportAnchorId,
+          reportTextBefore,
+          reportAnchorLen,
+        );
         // R2：缓存本轮正文供迟到补发复用（只在该会话仍有 awaiter 时才有意义）。
         if (reportTurnText && owner && this.qqFinalRescueOwnerPending(owner)) {
           this.qqFinalRescueText.set(owner, reportTurnText);
         }
-        // 中间正文轮同步：非汇总的汇报轮正文只是进度，转发给该会话所有在等
-        // 最终答复的 QQ 任务。汇总轮（final=true）绝不在这里转发 —— 它的正文
-        // 由 sendPrompt 收尾时的 deliverQqMainFinalAnswer 作为最终结果投递，
-        // 两边同时发就是重复。
-        if (!item.final && reportTurnText) {
+        // 中间正文轮同步：非汇总汇报轮的 assistant 正文作为进度转给该会话所有
+        // 等最终答复的 QQ 任务。汇总轮（final=true）绝不在这里转发 —— 它的正文
+        // 由 sendPrompt 收尾的 deliverQqMainFinalAnswer 作为最终结果投递。
+        //
+        // 来源判别（2026-11-19 重复转发修复）：本批若全是「被中断」的子会话
+        // （用户点了取消 / 面板关闭），这条 [子会话状态上报] 是宿主注入的纯
+        // host-state 通知，主 Agent 对它的确认 / 复述不是给用户的新结论 ——
+        // 一次取消会连带 interrupted 状态上报 + cancel 动作回执两条通知，旧实现
+        // 把每条的 assistant 正文都当进度转发，QQ 上连续收到多条相近回复。
+        // 这类中断通知回合只缓存正文供迟到补发，不再直接投递；正常的「有子会话
+        // 完成」进度汇报仍照常转发（不削弱被节流中间正文补发等既有修复）。
+        if (!item.final && reportTurnText && item.suppressQqProgress !== true) {
           void this.deliverQqMainIntermediateText(owner, reportTurnText);
         }
         // 这一轮失败了（端点 / 内核报错）：别在心跳里连续喂下一批，留给用户
@@ -9597,12 +9911,12 @@ export class ChatPanel implements vscode.Disposable {
   private announceChildSettled(session: SuperSessionUi): void {
     const title = session.title;
     if (session.status === "completed") {
-      this.announceChildDone(vscode.l10n.t("子会话「{0}」已完成", title));
+      this.announceChildDone(vscode.l10n.t("超流体「{0}」已完成", title));
     } else if (session.status === "failed") {
-      this.announceChildDone(vscode.l10n.t("子会话「{0}」已失败", title));
+      this.announceChildDone(vscode.l10n.t("超流体「{0}」已失败", title));
     } else {
       // 终态只剩 cancelled（isTerminalSuperStatus 已过滤）。
-      this.announceChildDone(vscode.l10n.t("子会话「{0}」已中断", title));
+      this.announceChildDone(vscode.l10n.t("超流体「{0}」已中断", title));
     }
   }
 
@@ -9644,22 +9958,22 @@ export class ChatPanel implements vscode.Disposable {
     const message = held
       ? awaiting > 0
         ? vscode.l10n.t(
-            "已停止；{0} 个子会话仍在运行（其中 {1} 个等待你的回答），发送下一条消息后继续收取汇报",
+            "已停止；{0} 个超流体仍在运行（其中 {1} 个等待你的回答），发送下一条消息后继续收取汇报",
             live.length,
             awaiting,
           )
         : vscode.l10n.t(
-            "已停止；{0} 个子会话仍在运行，发送下一条消息后继续收取汇报",
+            "已停止；{0} 个超流体仍在运行，发送下一条消息后继续收取汇报",
             live.length,
           )
       : awaiting > 0
         ? vscode.l10n.t(
-            "正在等待 {0} 个子会话汇报（其中 {1} 个等待你的回答），完成一个即汇报一个，会自动继续",
+            "正在等待 {0} 个超流体汇报（其中 {1} 个等待你的回答），完成一个即汇报一个，会自动继续",
             live.length,
             awaiting,
           )
         : vscode.l10n.t(
-            "正在等待 {0} 个子会话汇报（完成一个即汇报一个，会自动继续）",
+            "正在等待 {0} 个超流体汇报（完成一个即汇报一个，会自动继续）",
             live.length,
           );
     this.superWaitToastKey = key;
@@ -9679,6 +9993,18 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Route a Super Agent action from the board. */
   private async handleSuperAgentAction(msg: Extract<WebviewToHost, { type: "superAgent" }>): Promise<void> {
+    // 接管期间本机侧不执行任何看板动作。webview 已把看板与待答条整体 inert，
+    // 但那是 UI 层的门 —— portal 出来的浮层、旧快照里残留的按钮、以及任何
+    // 绕开 UI 的通道都能把消息发到这里。远端正在推进的流程不能被本机的
+    // 中断 / 合并 / 清理打断，所以宿主侧必须有这道硬门；拒绝时如实提示原因
+    // （不是静默丢弃，否则用户会以为点了没反应）。
+    if (this.qqTakeoverActive) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("远程接管中，本机的超流体操作已冻结"),
+      );
+      return;
+    }
     const manager = this.getSuperAgent();
     if (!manager) return;
     switch (msg.action) {
@@ -9699,23 +10025,23 @@ export class ChatPanel implements vscode.Disposable {
         // 按 SuperCancelOutcome 的真实 reason 区分文案：幂等重复（已终态）
         // 不是失败，但要如实告诉用户「无需中断」，避免以为刚才那下没生效。
         if (outcome.reason === "cancelled") {
-          this.store.sendToast("info", vscode.l10n.t("已中断子会话"));
+          this.store.sendToast("info", vscode.l10n.t("已中断超流体"));
         } else if (outcome.reason === "already-terminal") {
-          this.store.sendToast("info", vscode.l10n.t("这个子会话已经结束了，不用再中断"));
+          this.store.sendToast("info", vscode.l10n.t("这个超流体已经结束了，不用再中断"));
         } else {
-          this.store.sendToast("warning", vscode.l10n.t("该子会话不存在或已被清理"));
+          this.store.sendToast("warning", vscode.l10n.t("该超流体不存在或已被清理"));
         }
         break;
       }
       case "cancelAll": {
         const count = await manager.cancelAll("user");
-        this.store.sendToast("info", vscode.l10n.t("已中断 {0} 个子会话", count));
+        this.store.sendToast("info", vscode.l10n.t("已中断 {0} 个超流体", count));
         break;
       }
       case "respond": {
         if (!msg.sessionId) return;
         const ok = manager.respond(msg.sessionId, { answers: msg.answers });
-        if (!ok) this.store.sendToast("warning", vscode.l10n.t("该子会话没有待处理的请求"));
+        if (!ok) this.store.sendToast("warning", vscode.l10n.t("该超流体没有待处理的请求"));
         break;
       }
       case "cleanup": {
@@ -9734,7 +10060,7 @@ export class ChatPanel implements vscode.Disposable {
             vscode.l10n.t("已清理工作目录，分支已保留：{0}", result.reason ?? ""),
           );
         } else {
-          this.store.sendToast("info", vscode.l10n.t("已清理子会话"));
+          this.store.sendToast("info", vscode.l10n.t("已清理超流体"));
         }
         break;
       }
@@ -9776,9 +10102,9 @@ export class ChatPanel implements vscode.Disposable {
         if (!msg.sessionId) return;
         const ok = await manager.retry(msg.sessionId);
         if (ok) {
-          this.store.sendToast("info", vscode.l10n.t("已重新派发子会话（沿用原工作目录）"));
+          this.store.sendToast("info", vscode.l10n.t("已重新派发超流体（沿用原工作目录）"));
         } else {
-          this.store.sendToast("warning", vscode.l10n.t("该子会话当前无法重试"));
+          this.store.sendToast("warning", vscode.l10n.t("该超流体当前无法重试"));
         }
         break;
       }
@@ -10421,7 +10747,7 @@ export class ChatPanel implements vscode.Disposable {
 
       spawnTask: (spec, opts) => {
         const manager = this.getSuperAgent();
-        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        if (!manager) throw new Error("超流不可用（未打开工作区）");
         const session = manager.spawn(
           { title: spec.title, task: spec.task },
           {
@@ -10472,7 +10798,7 @@ export class ChatPanel implements vscode.Disposable {
           } else if (appeared) {
             return;
           } else if (!this.getSuperAgent()?.get(superSessionId)) {
-            throw new Error(`QQ 任务指向的子会话不存在：${superSessionId}`);
+            throw new Error(`QQ 任务指向的超流体不存在：${superSessionId}`);
           }
           const remain = deadline - Date.now();
           if (remain <= 0) throw new QqSettleTimeoutError(superSessionId, cap);
@@ -10485,7 +10811,7 @@ export class ChatPanel implements vscode.Disposable {
 
       cancel: async (superSessionId) => {
         const manager = this.getSuperAgent();
-        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        if (!manager) throw new Error("超流不可用（未打开工作区）");
         // 对已终态的子会话再取消是幂等重复，管理器自己会如实返回。
         await manager.cancel(superSessionId, "agent");
       },
@@ -10500,23 +10826,23 @@ export class ChatPanel implements vscode.Disposable {
        */
       merge: async (superSessionId) => {
         const manager = this.getSuperAgent();
-        if (!manager) return { ok: false, detail: "Super Agent 不可用（未打开工作区）" };
+        if (!manager) return { ok: false, detail: "超流不可用（未打开工作区）" };
         const session = manager.get(superSessionId);
-        if (!session) return { ok: false, detail: "子会话不存在或已被清理" };
+        if (!session) return { ok: false, detail: "超流体不存在或已被清理" };
         if (session.integration?.state === "merged") {
           return { ok: true, detail: "改动已经在当前分支上" };
         }
         if (!isQqTerminalSuperStatus(session.status)) {
-          return { ok: false, detail: "子会话还没结束，完成后再合并" };
+          return { ok: false, detail: "超流体还没结束，完成后再合并" };
         }
         if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
-          return { ok: false, detail: "该子会话没有可合并的分支（仅目录隔离）" };
+          return { ok: false, detail: "该超流体没有可合并的分支（仅目录隔离）" };
         }
         const outcome = await this.requestSuperMerge(superSessionId);
         if (outcome.dispatched) {
           return {
             ok: false,
-            detail: "已派出合并子会话（异步执行），合并结果稍后在看板确认",
+            detail: "已派出合并超流体（异步执行），合并结果稍后在看板确认",
           };
         }
         if (outcome.queued) {
@@ -10527,7 +10853,7 @@ export class ChatPanel implements vscode.Disposable {
 
       discard: async (superSessionId) => {
         const manager = this.getSuperAgent();
-        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        if (!manager) throw new Error("超流不可用（未打开工作区）");
         // 如实回传 cleanup 的观测：分支还带未合并提交时 git 会保下分支
         // （只删工作目录），QQ 回执与看板都要把这件事说清楚。
         const result = await manager.cleanup(superSessionId, { keepBranch: false });
@@ -10626,6 +10952,15 @@ export class ChatPanel implements vscode.Disposable {
    * 排队等空闲期间被 `/qq stop` 打断就返回 canceled，由服务侧收尾。
    */
   private async injectQqMainTurn(input: QqMainInjectInput): Promise<QqMainInjectResult> {
+    // 远程接续断开门：只有「已断开远程接管」的会话才拒绝 QQ 注入。接管期间
+    // （start）QQ 消息照常进入会话、agent 继续执行；门是会话级的，机器人仍
+    // 可把其它会话的任务注入它们自己的主会话。
+    if (this.isQqRemoteDetachedFor(this.store.getState().sessionId)) {
+      return {
+        injected: false,
+        reason: "当前会话已断开远程接续，QQ 消息不再注入本地。",
+      };
+    }
     const taskId = input.task.taskId;
     // F1：main 渠道跑在用户自己的主会话里，不能像 child 那样剔除写工具。
     // 与 child 走同源策略判定：readonly（deny）一律拒绝，绝不注入。
@@ -10663,6 +10998,14 @@ export class ChatPanel implements vscode.Disposable {
         if (this.disposed || controller.signal.aborted) {
           return { injected: false, canceled: true };
         }
+        // 等空闲期间会话被断开远程接管（用户关闭接续）：不再把这条 QQ 消息
+        // 投进本地。接管中（start）不拦，QQ 照常驱动 agent 继续干活。
+        if (this.isQqRemoteDetachedFor(this.store.getState().sessionId)) {
+          return {
+            injected: false,
+            reason: "当前会话已断开远程接续，QQ 消息不再注入本地。",
+          };
+        }
         if (Date.now() > deadline) {
           return {
             injected: false,
@@ -10679,7 +11022,9 @@ export class ChatPanel implements vscode.Disposable {
           (block) => block.kind === "text" && !block.system,
         );
         const textCountBefore = visibleTextBefore.length;
-        const anchorId = visibleTextBefore[visibleTextBefore.length - 1]?.id;
+        const anchorBlock = visibleTextBefore[visibleTextBefore.length - 1];
+        const anchorId = anchorBlock?.id;
+        const anchorLen = anchorBlock?.kind === "text" ? anchorBlock.text.length : 0;
 
         let started = false;
         // 子会话基线：这一轮开始时该主会话已有的子会话 id。轮末若出现新 id，
@@ -10704,6 +11049,10 @@ export class ChatPanel implements vscode.Disposable {
               this.qqMainFinalAwaiterSince.set(taskId, Date.now());
               // 新一轮开始：清掉上一轮遗留的补发缓存，避免迟到补发误用旧结论。
               this.qqFinalRescueText.delete(sessionIdBefore);
+              this.qqReportFallbackText.delete(sessionIdBefore);
+              this.qqFinalRescueDefers.delete(taskId);
+              this.qqFinalRescueProgressAt.delete(taskId);
+              this.qqTaskFinalText.delete(taskId);
               this.ensureQqFinalRescueTimer();
             }
             superIdsBefore = new Set(
@@ -10731,31 +11080,21 @@ export class ChatPanel implements vscode.Disposable {
               reason: "会话在本轮执行期间被切换，未能取回本轮结果。",
             };
           }
-          const visibleText = state.blocks.filter(
-            (block) => block.kind === "text" && !block.system,
+          const { text: resultText, anchorLost } = this.extractQqTurnTextFromAnchor(
+            anchorId,
+            anchorLen,
+            textCountBefore,
           );
-          let resultStart = 0;
-          if (anchorId !== undefined) {
-            const anchorIndex = visibleText.findIndex((block) => block.id === anchorId);
-            if (anchorIndex < 0) {
-              // 基线锚块消失（转录被清空/重排）：同样不能安全地按数量切片。
-              return {
-                injected: true,
-                text: "",
-                failed: true,
-                reason: "本轮转录基线已失效，未能取回本轮结果。",
-              };
-            }
-            resultStart = anchorIndex + 1;
-          } else {
-            // 没有锚块（历史数据无稳定 id）：退回数量口径，但 sessionId 已校验。
-            resultStart = textCountBefore;
+          if (anchorLost) {
+            // 基线锚块消失（转录被清空/重排）：同样不能安全地按数量切片。
+            return {
+              injected: true,
+              text: "",
+              failed: true,
+              reason: "本轮转录基线已失效，未能取回本轮结果。",
+            };
           }
-          const text = visibleText
-            .slice(resultStart)
-            .map((block) => (block.kind === "text" ? block.text : ""))
-            .join("\n")
-            .trim();
+          const text = resultText;
           const failed = state.status === "error";
           // 本轮是否派生了子会话（相对轮初基线出现新 id）。派生了就把本任务
           // 登记为「等最终答复」：这一轮文本只是占位，真正的答复将在子会话
@@ -10803,6 +11142,9 @@ export class ChatPanel implements vscode.Disposable {
       if (!delegated) {
         this.qqMainFinalAwaiters.delete(taskId);
         this.qqMainFinalAwaiterSince.delete(taskId);
+        this.qqFinalRescueDefers.delete(taskId);
+        this.qqFinalRescueProgressAt.delete(taskId);
+        this.qqTaskFinalText.delete(taskId);
       }
       if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
       this.qqInjectAborts.delete(taskId);
@@ -10812,45 +11154,79 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 子会话汇报**汇总轮**（pendingCount=0）结束时，把该轮 assistant 文本作为
-   * 真正最终答复回传给对应的 QQ 任务。
+   * 子会话汇报**汇总轮**（pendingCount=0）结束时，把结论回传给对应的 QQ 任务。
    *
-   * 按归属会话取所有登记过的任务（一轮汇总结论覆盖该主会话里正在等答案的
-   * QQ 任务）。空文本不再静默留账：改为回传一条如实兜底文案并摘除记账，
-   * 避免 QQ 永久停在「已受理」（R1）。单次投递 / 幂等由服务的 resultDeliveredAt
-   * 保证。onlyTaskIds 供 R2 迟到补发精确命中单个任务，避免误伤同会话其它 awaiter。
+   * 按 task 归属投递：同一主会话可叠加多条 QQ 消息、各自派生子会话，绝不能把
+   * 一轮汇总结论广播给该会话所有 awaiter（那正是「摘要相同、taskId 不同」的
+   * 重复卡根因）。每个任务取自己派生子会话的汇报正文（qqTaskFinalText），取
+   * 不到且会话里还有别的 awaiter 时走如实兜底、绝不共享别人的结论；单任务
+   * 或 R2 精确补发（onlyTaskIds）时沿用本轮文本 / `fallbackText` / 空文本兜底。
+   * 无论哪条路径都摘除记账，不让 QQ 停在「已受理」（R1）。单次投递 / 幂等由
+   * 服务的 resultDeliveredAt 保证；补发与汇总轮命中同一 task 时靠「删 awaiter
+   * + resultDeliveredAt」双保险避免各投一次。
    */
   private async deliverQqMainFinalAnswer(
     sessionId: string | null,
     rawText: string,
     stopReason: string,
     onlyTaskIds?: ReadonlySet<string>,
+    fallbackText?: string,
+    source: QqAnswerDeliverySource = "final-report",
   ): Promise<void> {
     if (this.disposed || !sessionId) return;
+    const honestFallback = vscode.l10n.t(
+      "超流体任务已完成，但未产生可转发的正文摘要。",
+    );
     // R1：汇总轮可能只调了合并/复核动作而没有 assistant 正文。旧实现在这里
     // 静默 return 且不摘记账 —— QQ 永远停在「已受理」。改为如实兜底：摘除记账
     // 并回传一条明确文案（走 completeMainFinalAnswer 的 forceActive 主动消息，
     // 长任务下也真能发出），绝不伪造「已完成」之类内容。
-    const text =
-      rawText.trim().length > 0
-        ? rawText.trim()
-        : vscode.l10n.t("子会话任务已完成，但未产生可转发的正文摘要。");
-    const taskIds = [...this.qqMainFinalAwaiters.entries()]
+    //
+    // 2026-11-19：二次转述确为空时优先用宿主已持有的子会话汇报正文
+    // （report.summary），让用户看到子会话实际做了什么；只有连汇报正文也为空
+    // 才退回占位文案。清洗后文本必为非空，服务侧不会再追加一条占位通知。
+    const cleanFallback = sanitizeQqReportFallback(fallbackText);
+    const sessionTaskIds = [...this.qqMainFinalAwaiters.entries()]
       .filter(([, owner]) => owner === sessionId)
-      .map(([taskId]) => taskId)
-      .filter((taskId) => (onlyTaskIds ? onlyTaskIds.has(taskId) : true));
+      .map(([taskId]) => taskId);
+    const taskIds = sessionTaskIds.filter((taskId) =>
+      onlyTaskIds ? onlyTaskIds.has(taskId) : true,
+    );
+    // 多任务叠加时禁止广播：只有「单任务（无歧义）」或「R2 精确补发」才可沿用
+    // 本轮共享结论；其余每个 awaiter 只取自己那份归属正文，取不到就如实兜底，
+    // 绝不把别人的汇总结论投给它（重复卡根因）。
+    const shareable = onlyTaskIds !== undefined || sessionTaskIds.length <= 1;
     for (const taskId of taskIds) {
+      const own = this.qqTaskFinalText.get(taskId)?.trim() ?? "";
+      // 单任务：主 Agent 汇总正文 > 归属正文 > 汇报正文兜底 > 如实占位。
+      // 多任务：只用自己那份归属正文，缺则如实占位（不共享汇总/兜底正文）。
+      const answer = shareable
+        ? rawText.trim() || own || cleanFallback || honestFallback
+        : own || honestFallback;
       this.qqMainFinalAwaiters.delete(taskId);
       this.qqMainFinalAwaiterSince.delete(taskId);
+      this.qqFinalRescueDefers.delete(taskId);
+      this.qqFinalRescueProgressAt.delete(taskId);
+      this.qqTaskFinalText.delete(taskId);
       try {
-        await this.qq?.service.completeMainFinalAnswer({ taskId, text, stopReason });
+        await this.qq?.service.completeMainFinalAnswer({ taskId, text: answer, stopReason });
       } catch (error) {
         this.log.warn(`QQ 主会话最终答复回传失败：${errorMessage(error)}`);
+        continue;
       }
+      // 可观测：QQ 收到的到底是哪一段、走的哪条通道 —— 归档一条投递事件。
+      void this.appendQqArchiveEvent("task_answer_delivered", taskId, {
+        owner: sessionId,
+        source,
+        chars: answer.length,
+        fingerprint: qqTextFingerprint(answer),
+        stopReason,
+      });
     }
     // 该会话已无 awaiter：清掉补发缓存，避免下一条任务误用上一轮的旧结论。
     if (![...this.qqMainFinalAwaiters.values()].includes(sessionId)) {
       this.qqFinalRescueText.delete(sessionId);
+      this.qqReportFallbackText.delete(sessionId);
     }
     if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
   }
@@ -10860,7 +11236,14 @@ export class ChatPanel implements vscode.Disposable {
     return [...this.qqMainFinalAwaiters.values()].includes(owner);
   }
 
-  /** 该归属会话是否存在已等过软阈值的 QQ awaiter（R2 汇报轮 final 放宽的依据）。 */
+  /**
+   * 该归属会话是否存在已等过软阈值的 QQ awaiter（R2 汇报轮**放宽提示词**的依据）。
+   *
+   * 注意口径：它只回答「这个会话的 QQ 发起者等太久了，该让模型这一轮就给结论」，
+   * **不**回答「可以定终局了」—— 定终局只发生在真的没有活跃子会话时（见
+   * {@link rescueStaleQqFinalAwaiters}）。等待过久绝不等价于定终局
+   * （2026-11-19 修复）。
+   */
   private qqFinalRescueDue(owner: string | null): boolean {
     if (!owner) return false;
     const now = Date.now();
@@ -10870,6 +11253,72 @@ export class ChatPanel implements vscode.Disposable {
       if (now - since >= this.qqFinalRescueMs) return true;
     }
     return false;
+  }
+
+  /**
+   * 某个归属主会话当前**仍在跑**（非终态）的子会话数量。
+   *
+   * 补发判定与软阈值口径必须一致：只有「没有子会话在跑」才谈得上定终局；
+   * 仍有子会话在跑时，任何补发都只能降级成进度措辞（2026-11-19 修复）。
+   */
+  private qqActiveChildrenCount(owner: string | null): number {
+    if (!owner) return 0;
+    const live = this.getSuperAgent()?.list() ?? [];
+    return live.filter(
+      (session) =>
+        (session.mainSessionId ?? owner) === owner && !isTerminalSuperStatus(session.status),
+    ).length;
+  }
+
+  /** 某个归属会话的 QQ awaiter 已经等了多久（取最久的那一个）。 */
+  private qqFinalRescueWaitedMs(owner: string | null): number {
+    if (!owner) return 0;
+    const now = Date.now();
+    let waited = 0;
+    for (const [taskId, taskOwner] of this.qqMainFinalAwaiters.entries()) {
+      if (taskOwner !== owner) continue;
+      const since = this.qqMainFinalAwaiterSince.get(taskId) ?? now;
+      waited = Math.max(waited, now - since);
+    }
+    return waited;
+  }
+
+  /**
+   * 写一条 QQ 归档事件（events.ndjson）。
+   *
+   * 可观测性要求：「QQ 收到的是这一段」事后要能查出来 —— 谁在什么时候因为
+   * 等太久而让路 / 降级成进度，最终那一段正文又是从哪条通道投出去的。
+   * 事件类型：
+   *  - `task_final_rescue_deferred`：补发被让路或降级（带 defers / waited /
+   *    activeChildren / reason）；
+   *  - `task_answer_delivered`：一次正文投递（带 source：final-report 汇报
+   *    汇总轮 / rescue 迟到补发 / intermediate 中间正文，以及 chars /
+   *    fingerprint 便于核对「就是这一段」）。
+   *
+   * 口径说明：`task_answer_delivered` 记的是**面板把这段正文交给了投递通道**
+   * 这一事实；通道侧的真实投递失败由服务自己的归档事件记录
+   * （`task_progress_undelivered` / `task_result_undelivered`），两者合起来
+   * 才是完整链路。
+   *
+   * 归档失败绝不影响主链路：只记日志，不抛错。
+   */
+  private async appendQqArchiveEvent(
+    type: string,
+    taskId?: string,
+    detail?: Record<string, unknown>,
+  ): Promise<void> {
+    const store = this.qq?.store;
+    if (!store || typeof store.appendEvent !== "function") return;
+    try {
+      await store.appendEvent({
+        type,
+        ts: Date.now(),
+        ...(taskId ? { taskId } : {}),
+        ...(detail ? { detail } : {}),
+      });
+    } catch (error) {
+      this.log.warn(`QQ 归档事件写入失败（${type}）：${errorMessage(error)}`);
+    }
   }
 
   /** 迟到补发定时器：仅在有 awaiter 时存活，避免无谓唤醒宿主。 */
@@ -10888,27 +11337,83 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * R2 迟到补发：等最终答复的 awaiter 若等得太久，强制以「最近一次汇报文本（或兜底）」
-   * 收尾，避免 QQ 永久停在「已受理」。
-   *  - 软阈值：已超 qqFinalRescueMs 且本会话已无活跃子会话（正常长任务的收尾窗口）；
-   *  - 硬上限：已超 qqFinalHardRescueMs，即便还有子会话卡在非终态也补发
-   *    （复核子会话卡在等输入时不能让发起者永远等下去）。
-   * 只补发到点的那一个 taskId（onlyTaskIds 过滤），不误伤同会话刚开始的其它 awaiter。
+   * R2 迟到补发：等最终答复的 awaiter 若等得太久，别让 QQ 永久停在「已受理」。
+   *
+   * **等待过久 ≠ 可以定终局**（2026-11-19 修复）：
+   *  - 软阈值：已超 qqFinalRescueMs **且本会话已无活跃子会话** → 真的不会再有
+   *    更正文了，此时才以「最近一次汇报文本（或兜底）」收尾；
+   *  - 硬上限：已超 qqFinalHardRescueMs 但**仍有活跃子会话** → 绝不写终局、
+   *    绝不写 resultDeliveredAt，只降级成一条如实的「仍在进行中」进度措辞，
+   *    awaiter 保留，等子会话终态后的真·最终汇报轮投递完整正文
+   *    （旧实现在这里直接补发，把等太久当成了可以定终局：QQ 只收到 22 字
+   *    占位，真实长正文再也投不出去）。
+   * 只处理到点的那一个 taskId（onlyTaskIds 过滤），不误伤同会话刚开始的其它 awaiter。
+   *
+   * 2026-11-19 补发抢跑修复：到点时若本会话的汇报轮正在投递（`superReportRunning`）
+   * 或还排在队列里，先让出有限拍数，让 finalReport 收尾投递真实最终正文；抢在它
+   * 前面补发会把兜底文案写死、并让随后迟到的真实正文被丢弃。让路有上限（见
+   * `QQ_FINAL_RESCUE_MAX_DEFERS`），真正卡死时仍强制处理，绝不永久推迟。
+   * 让路与降级都写归档事件（`task_final_rescue_deferred`），事后可查。
    */
   private rescueStaleQqFinalAwaiters(): void {
     if (this.disposed || this.qqMainFinalAwaiters.size === 0) return;
     const now = Date.now();
-    const live = this.getSuperAgent()?.list() ?? [];
     for (const [taskId, owner] of [...this.qqMainFinalAwaiters.entries()]) {
       const since = this.qqMainFinalAwaiterSince.get(taskId) ?? now;
       const age = now - since;
-      const activeChildren = live.filter(
-        (s) => (s.mainSessionId ?? owner) === owner && !isTerminalSuperStatus(s.status),
-      ).length;
-      const due =
-        age >= this.qqFinalHardRescueMs ||
-        (age >= this.qqFinalRescueMs && activeChildren === 0);
-      if (!due) continue;
+      // 与软阈值、汇报轮放宽用的是同一口径（qqActiveChildrenCount）。
+      const activeChildren = this.qqActiveChildrenCount(owner);
+      // 软阈值：到点**且本会话已无活跃子会话** —— 真的不会再有更正文了，才谈得
+      // 上定终局。硬上限：到点但子会话仍在跑 —— 只能降级成进度措辞（见下）。
+      const softDue = age >= this.qqFinalRescueMs && activeChildren === 0;
+      const hardDue = age >= this.qqFinalHardRescueMs;
+      if (!softDue && !hardDue) continue;
+      // 汇报轮在途 / 排队时先让路：真实最终汇报马上就会由 finalReport 收尾投递。
+      const reportInFlight =
+        this.superReportRunning ||
+        this.pendingSuperReportPrompts.some((item) => item.mainSessionId === owner);
+      if (reportInFlight) {
+        const defers = (this.qqFinalRescueDefers.get(taskId) ?? 0) + 1;
+        if (defers <= QQ_FINAL_RESCUE_MAX_DEFERS) {
+          this.qqFinalRescueDefers.set(taskId, defers);
+          this.log.info(
+            `QQ 最终答复补发让路：task=${taskId} waited=${age}ms activeChildren=${activeChildren} defers=${defers}`,
+          );
+          void this.appendQqArchiveEvent("task_final_rescue_deferred", taskId, {
+            owner,
+            reason: "report-in-flight",
+            waited: age,
+            activeChildren,
+            defers,
+          });
+          continue;
+        }
+        this.log.warn(
+          `QQ 主会话最终答复补发：task=${taskId} 已让出 ${defers - 1} 拍，汇报轮仍未收尾，强制处理`,
+        );
+      }
+      const deferCount = this.qqFinalRescueDefers.get(taskId) ?? 0;
+      this.qqFinalRescueDefers.delete(taskId);
+      // **子会话仍在跑 → 绝不写终局**（2026-11-19 修复）：旧实现在硬上限这里
+      // 直接补发，把「等太久」当成了「可以定终局」—— QQ 收到的是一条空正文
+      // 兜底（22 字占位），任务被写成 succeeded、resultDeliveredAt 落盘，
+      // awaiter 被摘掉，随后迟到的真实长正文再也投不出去。
+      // 现在降级成「仍在进行中」的进度措辞：任务保持 injected，awaiter 保留，
+      // 等子会话终态后的真·最终汇报轮投递完整正文。
+      if (activeChildren > 0) {
+        this.log.warn(
+          `QQ 最终答复硬上限到点但仍有活跃子会话：task=${taskId} waited=${age}ms activeChildren=${activeChildren} —— 降级为进度措辞，不定终局`,
+        );
+        void this.appendQqArchiveEvent("task_final_rescue_deferred", taskId, {
+          owner,
+          reason: "children-running",
+          waited: age,
+          activeChildren,
+          defers: deferCount,
+        });
+        void this.deliverQqMainRescueProgress(owner, taskId, activeChildren, age);
+        continue;
+      }
       this.log.warn(
         `QQ 主会话最终答复迟到补发：task=${taskId} waited=${age}ms activeChildren=${activeChildren}`,
       );
@@ -10917,26 +11422,93 @@ export class ChatPanel implements vscode.Disposable {
         this.qqFinalRescueText.get(owner) ?? "",
         "end_turn",
         new Set([taskId]),
+        this.qqReportFallbackText.get(owner),
+        "rescue",
       );
     }
     if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
   }
 
-  /** 汇报回合收尾后提取「本轮新增」的 assistant 文本，供迟到补发复用。 */
-  private captureQqReportTurnText(anchorId: string | undefined, beforeCount: number): string {
+  /**
+   * 硬上限到点但子会话仍在跑时的**降级补发**：只发一条如实的「仍在进行中」
+   * 进度措辞。
+   *
+   * 绝不写终局：任务保持 `injected`（服务侧 deliverMainTurnText 本身就只接
+   * 非终态任务），不落 resultDeliveredAt，awaiter 保留 —— 子会话终态后的
+   * 真·最终汇报轮仍能把完整正文投出去。
+   *
+   * 措辞必须如实：说清「还有几个子会话没结束、结论会在它们结束后送达」，
+   * 绝不说「已完成」。同一任务在 `QQ_FINAL_RESCUE_PROGRESS_MIN_INTERVAL_MS`
+   * 内只提醒一次（没有新信息量，连发只会刷屏）。
+   */
+  private async deliverQqMainRescueProgress(
+    owner: string | null,
+    taskId: string,
+    activeChildren: number,
+    age: number,
+  ): Promise<void> {
+    if (this.disposed || !owner) return;
+    const now = Date.now();
+    const last = this.qqFinalRescueProgressAt.get(taskId);
+    if (last !== undefined && now - last < QQ_FINAL_RESCUE_PROGRESS_MIN_INTERVAL_MS) return;
+    this.qqFinalRescueProgressAt.set(taskId, now);
+    const text = vscode.l10n.t(
+      "任务仍在进行中：还有 {0} 个子会话未结束，最终结论会在它们全部完成后送达。",
+      String(activeChildren),
+    );
+    await this.deliverQqMainIntermediateText(owner, text, [taskId]);
+    this.log.info(
+      `QQ 最终答复降级补发（进行中）：task=${taskId} waited=${age}ms activeChildren=${activeChildren}`,
+    );
+  }
+
+  /**
+   * 从「回合开始时末尾可见 text 块」（锚点）提取本轮新增的 assistant 正文。
+   *
+   * 流式 `appendTextToLast` 会把新 chunk 就地拼进最后一个 text 块并复用它的 id。
+   * hidden 汇报回合没有 user 块做边界，新正文必然被并进锚块；只按 id
+   * `slice(anchorIndex + 1)` 会整段丢掉，转发出空摘要（2026-11-19 回归）。因此
+   * 锚点除 id 外必须记录回合开始时的块内文本长度：先取锚块 `slice(旧长度)`，
+   * 再接锚块之后的新 text 块。system 状态行由 reducer 的合并边界挡开，不会混入。
+   *
+   * `anchorLost` 供调用方区分「本轮确实没有正文」（text=""）与「转录被清空/重排，
+   * 按 id 切片不安全」（anchorLost=true）。此时返回的 text 是按 `fallbackCount`
+   * （回合开始时的可见块数）切片的结果；配合汇报正文兜底（finalFallbackText）
+   * 仍能给出真实结论，绝不再静默放弃（2026-11-19 补发抢跑 bug）。
+   */
+  private extractQqTurnTextFromAnchor(
+    anchorId: string | undefined,
+    anchorLen: number,
+    fallbackCount: number,
+  ): { text: string; anchorLost: boolean } {
     const visible = this.store.getState().blocks.filter(
       (block) => block.kind === "text" && !block.system,
     );
-    let start = beforeCount;
-    if (anchorId !== undefined) {
-      const idx = visible.findIndex((block) => block.id === anchorId);
-      start = idx >= 0 ? idx + 1 : beforeCount;
+    const countText = (): string =>
+      visible
+        .slice(fallbackCount)
+        .map((block) => (block.kind === "text" ? block.text : ""))
+        .join("\n")
+        .trim();
+    if (anchorId === undefined) return { text: countText(), anchorLost: false };
+    const anchorIndex = visible.findIndex((block) => block.id === anchorId);
+    if (anchorIndex < 0) return { text: countText(), anchorLost: true };
+    const parts: string[] = [];
+    const anchor = visible[anchorIndex]!;
+    if (anchor.kind === "text") parts.push(anchor.text.slice(anchorLen));
+    for (const block of visible.slice(anchorIndex + 1)) {
+      if (block.kind === "text") parts.push(block.text);
     }
-    return visible
-      .slice(start)
-      .map((block) => (block.kind === "text" ? block.text : ""))
-      .join("\n")
-      .trim();
+    return { text: parts.join("\n").trim(), anchorLost: false };
+  }
+
+  /** 汇报回合收尾后提取「本轮新增」的 assistant 文本，供迟到补发复用。 */
+  private captureQqReportTurnText(
+    anchorId: string | undefined,
+    beforeCount: number,
+    anchorLen = 0,
+  ): string {
+    return this.extractQqTurnTextFromAnchor(anchorId, anchorLen, beforeCount).text;
   }
 
   /**
@@ -10967,7 +11539,16 @@ export class ChatPanel implements vscode.Disposable {
         await service.deliverMainTurnText(taskId, text);
       } catch (error) {
         this.log.warn(`QQ 主会话中间正文回传失败：${errorMessage(error)}`);
+        continue;
       }
+      // 可观测：中间正文 / 降级进度措辞也走这条通道 —— 记 source=intermediate，
+      // 事后能分辨「QQ 收到的这段是最终答复还是进度」。
+      void this.appendQqArchiveEvent("task_answer_delivered", taskId, {
+        owner,
+        source: "intermediate",
+        chars: text.trim().length,
+        fingerprint: qqTextFingerprint(text.trim()),
+      });
     }
   }
 
@@ -11011,6 +11592,62 @@ export class ChatPanel implements vscode.Disposable {
     });
   }
 
+  /** 会话是否已断开远程接续（关闭接管后）：命中即拦截 QQ 注入。 */
+  private isQqRemoteDetachedFor(sessionId: string | null): boolean {
+    return sessionId !== null && this.qqRemoteDetachedSessions.has(sessionId);
+  }
+
+  /**
+   * 底部输入区「远程接续」开关（语义按用户澄清反转）：
+   * - start：远程继续干活 —— QQ 消息照常注入主会话、agent 继续执行；只冻结
+   *   本地干预入口（转录保持只读可观察），并把该会话从「已断开」集合移除
+   *   （重新接上远程）。发常驻只读 toast + 回推 active=true。
+   * - stop：本地恢复 + 断开远程 —— 在本次接管的 sessionId 上设「不再接收 QQ
+   *   注入」的门、取消在跑的注入回合、撤掉 toast、回推 active=false。
+   * 门是会话级的：机器人仍服务其它会话；断开态不持久化，只在会话切换 /
+   * 重建（newSession / restore / dispose）时清，webview 重连不清。
+   */
+  private handleQqTakeover(action: "start" | "stop"): void {
+    if (this.disposed) return;
+    if (action === "stop") {
+      // 只有走到 stop 才断开远程：先记下本次接管的会话（清冻结态后会置空），
+      // 设断开门 → 取消在跑的 QQ 主会话注入回合 → 清本地冻结态与 toast。
+      const detachedSession = this.qqTakeoverSessionId;
+      if (detachedSession !== null) this.qqRemoteDetachedSessions.add(detachedSession);
+      this.cancelAllQqMainInjections();
+      this.clearQqTakeover();
+      return;
+    }
+    // start 不设任何暂停门：重新接上远程 + 冻结本地干预，QQ 注入照常放行。
+    const sessionId = this.store.getState().sessionId;
+    this.qqTakeoverActive = true;
+    this.qqTakeoverSessionId = sessionId;
+    if (sessionId !== null) this.qqRemoteDetachedSessions.delete(sessionId);
+    if (this.qqTakeoverToastId === null) {
+      this.qqTakeoverToastId = this.store.sendToast("info", vscode.l10n.t("远程接管中…"), {
+        persistent: true,
+        displayOnly: true,
+      });
+    }
+    this.postToWebview({ type: "qqTakeoverState", active: this.qqTakeoverActive });
+  }
+
+  /** 清掉本地冻结态与常驻 toast；不碰「已断开远程」的会话集合。 */
+  private clearQqTakeover(): void {
+    this.qqTakeoverActive = false;
+    this.qqTakeoverSessionId = null;
+    if (this.qqTakeoverToastId !== null) {
+      this.store.dismissToast(this.qqTakeoverToastId);
+      this.qqTakeoverToastId = null;
+    }
+    this.postToWebview({ type: "qqTakeoverState", active: this.qqTakeoverActive });
+  }
+
+  /** 会话切换 / 重建时清掉「已断开远程」集合，避免旧会话永久收不到 QQ。 */
+  private clearQqRemoteDetachedSessions(): void {
+    this.qqRemoteDetachedSessions.clear();
+  }
+
   /**
    * 停止整条 QQ 通道时的一次性放手（F6）：撤掉所有「等空闲」的注入，并打断
    * 当前真正跑在主会话上的那一轮。与单任务 {@link cancelQqMainInjection} 同源
@@ -11026,7 +11663,11 @@ export class ChatPanel implements vscode.Disposable {
     this.qqMainFinalAwaiters.clear();
     this.qqMainFinalAwaiterSince.clear();
     this.qqFinalRescueText.clear();
+    this.qqReportFallbackText.clear();
+    this.qqFinalRescueDefers.clear();
+    this.qqFinalRescueProgressAt.clear();
     this.qqTaskBySuperSession.clear();
+    this.qqTaskFinalText.clear();
     this.stopQqFinalRescueTimer();
     if (activeTaskId !== null) {
       this.qqInjectedTaskId = null;
@@ -11047,6 +11688,7 @@ export class ChatPanel implements vscode.Disposable {
     const isActiveTurn = this.qqInjectedTaskId === taskId;
     const wasAwaitingFinal = this.qqMainFinalAwaiters.delete(taskId);
     if (wasAwaitingFinal) this.qqMainFinalAwaiterSince.delete(taskId);
+    this.qqFinalRescueDefers.delete(taskId);
     if (this.qqMainFinalAwaiters.size === 0) this.stopQqFinalRescueTimer();
     if (!controller && !isActiveTurn && !wasAwaitingFinal) return false;
     controller?.abort();
@@ -11488,29 +12130,29 @@ export class ChatPanel implements vscode.Disposable {
     if (cleaned === 0 && failed === 0) return;
     if (failed === 0) {
       if (branchesKept === 0) {
-        this.store.sendToast("info", vscode.l10n.t("已清理 {0} 个子会话", cleaned));
+        this.store.sendToast("info", vscode.l10n.t("已清理 {0} 个超流体", cleaned));
       } else {
         this.store.sendToast(
           "info",
-          vscode.l10n.t("已清理 {0} 个子会话，{1} 个分支已保留", cleaned, branchesKept),
+          vscode.l10n.t("已清理 {0} 个超流体，{1} 个分支已保留", cleaned, branchesKept),
         );
       }
       return;
     }
     if (cleaned === 0) {
-      this.store.sendToast("warning", vscode.l10n.t("未能清理这 {0} 个子会话", failed));
+      this.store.sendToast("warning", vscode.l10n.t("未能清理这 {0} 个超流体", failed));
       return;
     }
     if (branchesKept === 0) {
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("已清理 {0} 个子会话，{1} 个未能清理", cleaned, failed),
+        vscode.l10n.t("已清理 {0} 个超流体，{1} 个未能清理", cleaned, failed),
       );
     } else {
       this.store.sendToast(
         "warning",
         vscode.l10n.t(
-          "已清理 {0} 个子会话，{1} 个未能清理，{2} 个分支已保留",
+          "已清理 {0} 个超流体，{1} 个未能清理，{2} 个分支已保留",
           cleaned,
           failed,
           branchesKept,
@@ -11544,32 +12186,32 @@ export class ChatPanel implements vscode.Disposable {
       return {
         dispatched: false,
         queued: false,
-        reason: "Super Agent 不可用（未打开工作区）",
+        reason: "超流不可用（未打开工作区）",
       };
     }
     const session = manager.get(id);
     if (!session) {
-      this.store.sendToast("warning", vscode.l10n.t("该子会话不存在或已被清理"));
-      return { dispatched: false, queued: false, reason: "该子会话不存在或已被清理" };
+      this.store.sendToast("warning", vscode.l10n.t("该超流体不存在或已被清理"));
+      return { dispatched: false, queued: false, reason: "该超流体不存在或已被清理" };
     }
     if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
-      this.store.sendToast("warning", vscode.l10n.t("该子会话没有可合并的分支（仅目录隔离）"));
+      this.store.sendToast("warning", vscode.l10n.t("该超流体没有可合并的分支（仅目录隔离）"));
       return {
         dispatched: false,
         queued: false,
-        reason: "该子会话没有可合并的分支（仅目录隔离）",
+        reason: "该超流体没有可合并的分支（仅目录隔离）",
       };
     }
     if (session.integration?.state === "merged") {
-      this.store.sendToast("info", vscode.l10n.t("该子会话的改动已经合并"));
-      return { dispatched: false, queued: false, reason: "该子会话的改动已经合并" };
+      this.store.sendToast("info", vscode.l10n.t("该超流体的改动已经合并"));
+      return { dispatched: false, queued: false, reason: "该超流体的改动已经合并" };
     }
     if (!isTerminalSuperStatus(session.status)) {
-      this.store.sendToast("warning", vscode.l10n.t("子会话还没结束，完成后再让智能体合并"));
+      this.store.sendToast("warning", vscode.l10n.t("超流体还没结束，完成后再让智能体合并"));
       return {
         dispatched: false,
         queued: false,
-        reason: "子会话还没结束，完成后再让智能体合并",
+        reason: "超流体还没结束，完成后再让智能体合并",
       };
     }
     const state = this.store.getState();
@@ -11589,10 +12231,10 @@ export class ChatPanel implements vscode.Disposable {
           reason: "主会话正忙，合并请求已排队，空闲后自动派发",
         };
       }
-      const reason = "主会话正在生成，未派出合并子会话，请等本轮结束后重试";
+      const reason = "主会话正在生成，未派出合并超流体，请等本轮结束后重试";
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("主会话正在生成，未派出合并子会话，请等本轮结束后重试"),
+        vscode.l10n.t("主会话正在生成，未派出合并超流体，请等本轮结束后重试"),
       );
       return { dispatched: false, queued: false, reason };
     }
@@ -11626,24 +12268,24 @@ export class ChatPanel implements vscode.Disposable {
         return {
           dispatched: false,
           queued: true,
-          reason: "已有合并子会话在跑，合并请求已排队，等它结束后派发",
+          reason: "已有合并超流体在跑，合并请求已排队，等它结束后派发",
         };
       }
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("已有合并子会话在跑，等它结束后再合并：{0}", branch),
+        vscode.l10n.t("已有合并超流体在跑，等它结束后再合并：{0}", branch),
       );
       return {
         dispatched: false,
         queued: false,
-        reason: `已有合并子会话在跑，未派出新的合并子会话（分支 ${branch}），请稍后重试`,
+        reason: `已有合并超流体在跑，未派出新的合并超流体（分支 ${branch}），请稍后重试`,
       };
     }
     this.store.sendToast(
       "info",
       options?.auto
-        ? vscode.l10n.t("子会话「{0}」的改动没能自动合并，已派出合并子会话", session.title)
-        : vscode.l10n.t("已派出合并子会话，合并子会话「{0}」的分支", session.title),
+        ? vscode.l10n.t("超流体「{0}」的改动没能自动合并，已派出合并超流体", session.title)
+        : vscode.l10n.t("已派出合并超流体，合并超流体「{0}」的分支", session.title),
     );
     return { dispatched: true, mergeSessionId: child.id };
   }
@@ -12099,7 +12741,10 @@ export class ChatPanel implements vscode.Disposable {
             return false;
           }));
         if (!restored) {
-          await this.startNewSession();
+          // 启动自动新建：跳过子会话残留检测（confirmAndPurgeSuperResidue 里
+          // countResidue 要读全工作区目录，冷启动和恢复窗口里同步 await 会明显
+          // 拖慢面板）。残留确认框只在用户显式点「新建会话」时出现。
+          await this.startNewSession({ bypassSuperWait: true });
         }
         // History list in the background: prune dead entries + push the
         // switcher list without touching activeSessionId. Fire-and-forget —
@@ -12962,6 +13607,12 @@ export class ChatPanel implements vscode.Disposable {
    * persistActiveTranscript) run exactly once.
    */
   private async startNewSession(options?: { bypassSuperWait?: boolean }): Promise<void> {
+    // 远程接续绑定在旧会话上：切走即失效，不能把冻结态带进新会话。
+    // 断开门同样按会话归属：旧会话的「不再接收 QQ」标记随会话一起作废。
+    if (!this.disposed) {
+      this.clearQqTakeover();
+      this.clearQqRemoteDetachedSessions();
+    }
     const running = this.newSessionRun;
     if (running) {
       // 进行中重复点击：直接忽略，不重复发 `session/new`（join 同一个 run
@@ -13014,7 +13665,7 @@ export class ChatPanel implements vscode.Disposable {
     if (!options?.bypassSuperWait && !this.autoTurnsHeld() && this.superWaitingForReports()) {
       this.log.warn("new session refused: the host is still waiting for child session reports");
       this.store.appendNotice(
-        vscode.l10n.t("还有子会话在运行并等待汇报，请等它们结束（或在看板上中断）后再新建会话"),
+        vscode.l10n.t("还有超流体在运行并等待汇报，请等它们结束（或在看板上中断）后再新建会话"),
       );
       return;
     }
@@ -13289,6 +13940,8 @@ export class ChatPanel implements vscode.Disposable {
       hidden?: boolean;
       reportTurn?: boolean;
       finalReport?: boolean;
+      /** 汇总轮二次转述为空时兜底回 QQ 的子会话汇报正文（由 drainSuperReports 透传）。 */
+      finalFallbackText?: string;
       origin?: "qq";
       displayText?: string;
       quietBusy?: boolean;
@@ -13299,6 +13952,7 @@ export class ChatPanel implements vscode.Disposable {
     const hidden = options?.hidden === true;
     const reportTurn = options?.reportTurn === true;
     const finalReport = reportTurn && options?.finalReport === true;
+    const finalFallbackText = options?.finalFallbackText;
     /** QQ 主会话注入回合：对话派生的回合末任务（下一步 / 记忆）必须跳过。 */
     const qqTurn = options?.origin === "qq";
     const trimmed = text.trim();
@@ -13387,7 +14041,7 @@ export class ChatPanel implements vscode.Disposable {
       const title = normalizeSuperTitle(trimmed.split("\n")[0] ?? "");
       const manager = this.getSuperAgent();
       if (!manager) {
-        this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
+        this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
         return false;
       }
       manager.spawn({ title, task, ...(attachments.length > 0 ? { attachments } : {}) });
@@ -13408,13 +14062,13 @@ export class ChatPanel implements vscode.Disposable {
       this.ensureSuperHeartbeat();
       this.store.sendToast(
         "info",
-        vscode.l10n.t("主会话正在生成，已把这条消息派发为子会话「{0}」", title),
+        vscode.l10n.t("主会话正在生成，已把这条消息派发为超流体「{0}」", title),
       );
       if (droppedAttachments > 0) {
         this.store.sendToast(
           "warning",
           vscode.l10n.t(
-            "每个子会话最多携带 {0} 个附件，超出上限的 {1} 个已忽略",
+            "每个超流体最多携带 {0} 个附件，超出上限的 {1} 个已忽略",
             MAX_SUPER_ATTACHMENTS,
             droppedAttachments,
           ),
@@ -13605,13 +14259,20 @@ export class ChatPanel implements vscode.Disposable {
       }
       // 最终汇报轮的 assistant 文本锚点：与 injectQqMainTurn 同口径（可见
       // text 块、排除 system），轮末只取基线之后的文本，避免把上一轮内容
-      // 当成本轮结论回给 QQ。
+      // 当成本轮结论回给 QQ。除了 id 还要记下锚块**当前文本长度**：hidden
+      // 回合没有 user 块边界，流式正文会被并进这个块且 id 不变，只按 id
+      // slice 会整段漏掉（2026-11-19 空摘要回归）。
       let finalReportAnchorId: string | undefined;
+      let finalReportAnchorLen = 0;
+      let finalReportFallbackCount = 0;
       if (finalReport) {
         const visible = this.store.getState().blocks.filter(
           (block) => block.kind === "text" && !block.system,
         );
-        finalReportAnchorId = visible[visible.length - 1]?.id;
+        finalReportFallbackCount = visible.length;
+        const anchor = visible[visible.length - 1];
+        finalReportAnchorId = anchor?.id;
+        finalReportAnchorLen = anchor?.kind === "text" ? anchor.text.length : 0;
       }
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
       // 本轮已结束：委派指令只在流式期间出现，之后不该再把旧附件带给新子会话。
@@ -13626,26 +14287,22 @@ export class ChatPanel implements vscode.Disposable {
       this.store.promptCompleted(result.stopReason, result.usage);
       // QQ 最终回执：pendingCount=0 的汇报汇总轮收尾后，把本轮 assistant 文本
       // 作为等待中的 QQ 任务的真正答复回传（fire-and-forget，不挡回合收尾）。
-      // 锚点失效（转录被清空/重排）时保守放弃，绝不把上一轮文本当成本轮结论。
+      // 锚点失效（转录被清空/重排）时按「回合开始时的块数」切片取本轮新增文本；
+      // 切片为空则由 finalFallbackText（子会话汇报正文）接管 —— 绝不静默放弃，
+      // 那会让 awaiter 一直挂到空缓存补发、最终只发一句占位文案。
       if (finalReport && result.stopReason !== "cancelled") {
-        const visible = this.store.getState().blocks.filter(
-          (block) => block.kind === "text" && !block.system,
+        const { text: answer } = this.extractQqTurnTextFromAnchor(
+          finalReportAnchorId,
+          finalReportAnchorLen,
+          finalReportFallbackCount,
         );
-        let start = 0;
-        let anchorLost = false;
-        if (finalReportAnchorId !== undefined) {
-          const anchorIndex = visible.findIndex((block) => block.id === finalReportAnchorId);
-          if (anchorIndex >= 0) start = anchorIndex + 1;
-          else anchorLost = true;
-        }
-        if (!anchorLost) {
-          const answer = visible
-            .slice(start)
-            .map((block) => (block.kind === "text" ? block.text : ""))
-            .join("\n")
-            .trim();
-          void this.deliverQqMainFinalAnswer(promptSessionId, answer, result.stopReason);
-        }
+        void this.deliverQqMainFinalAnswer(
+          promptSessionId,
+          answer,
+          result.stopReason,
+          undefined,
+          finalFallbackText,
+        );
       }
       // 回合收尾：复核动作围栏 —— 回合都结束了还停在未闭合围栏上，说明这个
       // 动作块永远不会被执行。旧实现对此完全静默（零日志、零 toast）。
@@ -13664,7 +14321,7 @@ export class ChatPanel implements vscode.Disposable {
           // 主会话汇报回合：主 Agent 读完子会话结果并汇报回来，那是主会话
           // 真实的收尾工作，用**独立事件** superReport + 常规 done 音 —— 与
           // 单个子会话收尾（childDone + child 音）明确分开。
-          this.announceSuperReport(vscode.l10n.t("主会话已汇报子会话结果"));
+          this.announceSuperReport(vscode.l10n.t("主会话已汇报超流体结果"));
         }
         // 其余 hidden 回合（动作回执 / 被改道用户消息补投）**完全静音**：
         // 那是宿主自己的记账回合，转录里没有用户气泡，也不对应任何新事件。

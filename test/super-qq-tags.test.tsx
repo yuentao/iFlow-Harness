@@ -108,7 +108,7 @@ function render(sessions: SuperSessionUi[], tasks: QqTaskUi[] = []): void {
 }
 
 function expand(): void {
-  const control = container.querySelector<HTMLButtonElement>('button[aria-label="子会话看板"]');
+  const control = container.querySelector<HTMLButtonElement>('button[aria-label="超流体看板"]');
   expect(control).toBeTruthy();
   act(() => control!.click());
 }
@@ -121,7 +121,7 @@ function rowButton(title = "QQ q3pzqq"): HTMLButtonElement {
   return el!;
 }
 
-describe("findQqTaskForSuperSession —— QQ 任务与子会话的关联", () => {
+describe("findQqTaskForSuperSession —— QQ 任务与超流体的关联", () => {
   it("派发时写入的 QQ <shortId> 标题命中远程任务", () => {
     const qq = task();
     expect(findQqTaskForSuperSession([qq], session())).toBe(qq);
@@ -133,7 +133,7 @@ describe("findQqTaskForSuperSession —— QQ 任务与子会话的关联", () =
     expect(findQqTaskForSuperSession([qq], s)).toBe(qq);
   });
 
-  it("主会话渠道的任务不冒充远程子会话", () => {
+  it("主会话渠道的任务不冒充远程超流体", () => {
     const main = task({ channel: "main", shortId: "q3pzqq", branch: session().isolation.branch });
     expect(findQqTaskForSuperSession([main], session({ title: "普通任务" }))).toBeUndefined();
   });
@@ -150,7 +150,7 @@ describe("findQqTaskForSuperSession —— QQ 任务与子会话的关联", () =
 });
 
 describe("Super Agent 看板上的 QQ 远程任务 tag", () => {
-  it("远程子会话 title 后渲染渠道与发起人 tag", () => {
+  it("远程超流体 title 后渲染渠道与发起人 tag", () => {
     render([session()], [task()]);
     expand();
     const row = rowButton();
@@ -158,13 +158,13 @@ describe("Super Agent 看板上的 QQ 远程任务 tag", () => {
     expect(row.textContent).toContain("发起人：D754********8D11");
   });
 
-  it("群聊远程子会话渲染群聊渠道 tag", () => {
+  it("群聊远程超流体渲染群聊渠道 tag", () => {
     render([session()], [task({ chatType: "group", chatId: "grp-1234" })]);
     expand();
     expect(rowButton().textContent).toContain("渠道：群聊");
   });
 
-  it("普通子会话不渲染任何 QQ tag", () => {
+  it("普通超流体不渲染任何 QQ tag", () => {
     render([session({ id: "super-local", title: "本地任务", isolation: { kind: "git_worktree", path: "/tmp/x", branch: "iflow/super/local" } })]);
     expand();
     const row = rowButton("本地任务");

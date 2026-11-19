@@ -256,6 +256,7 @@ function createMockHost(): HostApi {
 
   // Mock memory files (F3): enough to exercise the tab in a browser — one
   // global primary with structured facts, one project file, one legacy file.
+  const mockTakeoverToastId = 990_001;
   const mockMemoryHome = "C:\\Users\\mock\\.iflow";
   const mockMemoryRoot = "C:\\mock\\workspace";
   const mockMemoryContent = new Map<string, string>([
@@ -587,7 +588,7 @@ function createMockHost(): HostApi {
       // host is the frontend's dev surface, so browser iteration needs a
       // sample that exercises the split-card layout).
       text: [
-        "这三个任务书我拆给三个子会话并行做：",
+        "这三个任务书我拆给三个超流体并行做：",
         "",
         "```super-agent",
         JSON.stringify(
@@ -631,7 +632,7 @@ function createMockHost(): HostApi {
       // branch in SuperDirectiveCard (the 3-task block above only covers the
       // batch layout).
       text: [
-        "这一件只需要一个子会话：",
+        "这一件只需要一个超流体：",
         "",
         "```super-agent",
         JSON.stringify(
@@ -946,7 +947,7 @@ function createMockHost(): HostApi {
       updatedAt: Date.now() - 500_000,
       startedAt: Date.now() - 538_000,
       endedAt: Date.now() - 500_000,
-      error: "子会话内核退出（code=1）",
+      error: "超流体内核退出（code=1）",
       reports: [],
     },
   ];
@@ -1189,6 +1190,7 @@ function createMockHost(): HostApi {
         // otherwise the settings hub's QQ tab renders empty tables.
         broadcast({ type: "qqSettings", values: mockQqSettings });
         broadcast({ type: "qqStatus", connected: false });
+        broadcast({ type: "qqTakeoverState", active: false });
         broadcast({
           type: "snapshot",
           state: {
@@ -1201,6 +1203,22 @@ function createMockHost(): HostApi {
             auth: authState,
           },
         });
+        return;
+      }
+      if (m.type === "qqTakeover") {
+        broadcast({ type: "qqTakeoverState", active: m.action === "start" });
+        if (m.action === "start") {
+          broadcast({
+            type: "toast",
+            level: "info",
+            message: "远程接管中…",
+            toastId: mockTakeoverToastId,
+            persistent: true,
+            displayOnly: true,
+          });
+        } else {
+          broadcast({ type: "dismissToast", toastId: mockTakeoverToastId });
+        }
         return;
       }
       if (m.type === "qqSettingsPatch") {
@@ -2211,7 +2229,7 @@ function createMockHost(): HostApi {
           // in-progress state flash by unseen).
           demoBlocks.push({
             kind: "user",
-            text: "请把子会话的分支合并到当前分支（mock 请求，由智能体执行）",
+            text: "请把超流体的分支合并到当前分支（mock 请求，由智能体执行）",
           });
           broadcastDemo(mockStatus, null);
           const id = m.sessionId;
@@ -2226,7 +2244,7 @@ function createMockHost(): HostApi {
               };
               target.updatedAt = Date.now();
             }
-            demoBlocks.push({ kind: "text", text: "*（已让智能体合并子会话分支，mock）*" });
+            demoBlocks.push({ kind: "text", text: "*（已让智能体合并超流体分支，mock）*" });
             broadcastDemo(mockStatus, null);
           }, 1500);
           return;
@@ -2547,6 +2565,12 @@ interface ChatStore {
   /** 最近一次连接检查 / 适配器状态回执；null = 尚未收到。 */
   qqStatus: { connected: boolean; detail?: string } | null;
   /**
+   * 远程接续开关的 webview 内存态（host 经 `qqTakeoverState` 回推）。true = 当前
+   * 会话被远程接管：Composer 所有干预入口与审批/提问卡决策按钮冻结，转录保持
+   * 只读可滚动。不进 snapshot / blockPatch，webview 重连即回到 false。
+   */
+  remoteTakeover: boolean;
+  /**
    * QQ 授权模型：白名单外的人发来消息时留下的待审核记录（宿主每次全量重发，
    * 这里直接替换）。顺序由宿主按 `lastSeenAt` 倒序保证。
    */
@@ -2635,6 +2659,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
   qqStatus: null,
+  remoteTakeover: false,
   qqPendingUsers: [],
   qqLoginQr: null,
   qqManagedStatus: null,
@@ -2765,6 +2790,11 @@ export const useChat = create<ChatStore>((set, get) => ({
       set({ qqStatus: { connected: msg.connected, detail: msg.detail } });
       return;
     }
+    if (msg.type === "qqTakeoverState") {
+      // 远程接续是 host 权威的纯内存态：按回推值同步按钮与冻结门，不写快照。
+      set({ remoteTakeover: msg.active });
+      return;
+    }
     if (msg.type === "qqPendingUsers") {
       // 授权模型：宿主每次全量重发（新增 / 放行 / 拒绝都会推），直接替换。
       set({ qqPendingUsers: msg.users });
@@ -2879,6 +2909,7 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "memoryCandidates" ||
       msg.type === "knowledgeJob" ||
       msg.type === "profileDeleteResult" ||
+      msg.type === "saveAuthResult" ||
       msg.type === "enhancedPrompt" ||
       msg.type === "queueEdited" ||
       msg.type === "contextResolved" ||

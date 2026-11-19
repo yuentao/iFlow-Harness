@@ -252,6 +252,14 @@ describe("formatQqQuestionNotice", () => {
     expect(text).toContain("2. 要多大？");
     expect(text).toContain("所有问题的答案");
   });
+
+  it("传入标题时首行用标题展示，但 /qq answer 命令参数仍是短 id", () => {
+    const text = formatQqQuestionNotice("abc123", [question()], 240_000, "修一下登录问题");
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("任务「修一下登录问题」需要你回答：");
+    expect(lines[0]).not.toContain("abc123");
+    expect(text).toContain("/qq answer abc123");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -279,7 +287,7 @@ describe("远程任务提问提醒转发", () => {
     expect(notice.chatId).toBe("u1");
   });
 
-  it("本地子会话（没有对应 QQ 任务）不会转发任何消息", async () => {
+  it("本地超流体（没有对应 QQ 任务）不会转发任何消息", async () => {
     const f = makeFixture();
     await runningRemoteTask(f);
     f.delivered.length = 0;
@@ -637,7 +645,7 @@ describe("主会话渠道提问提醒转发（main）", () => {
     f.service.stop();
   });
 
-  it("main 任务派生子会话的提问转发到 QQ，回答经 child 端口回灌子会话", async () => {
+  it("main 任务派生超流体的提问转发到 QQ，回答经 child 端口回灌超流体", async () => {
     const f = makeFixture();
     const task = await runningMainTask(f);
     f.delivered.length = 0;

@@ -36,7 +36,7 @@ const REQUEST = {
   type: "superResidueConfirm" as const,
   requestId: "super-residue-test-1",
   title: "清空并新建会话？",
-  message: "检测到 3 个历史子会话残留：未合并 worktree 的未提交改动将永久丢失且不可恢复。",
+  message: "检测到 3 个历史超流体残留：未合并 worktree 的未提交改动将永久丢失且不可恢复。",
   confirmLabel: "清空并新建",
   cancelLabel: "取消",
 };
@@ -86,6 +86,18 @@ describe("SuperResidueConfirmDialog", () => {
     expect(document.body.textContent).toContain(REQUEST.message);
     expect(buttonByText(REQUEST.confirmLabel)).toBeTruthy();
     expect(buttonByText(REQUEST.cancelLabel)).toBeTruthy();
+  });
+
+  it("backdrop mousedown does not answer or close the dialog", () => {
+    postRequest(REQUEST);
+    const backdrop = document.body.querySelector<HTMLElement>(".auth-backdrop");
+    expect(backdrop).toBeTruthy();
+    act(() => {
+      backdrop!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    });
+    expect(capture.posted.filter((m) => m.type === "respondSuperResidueConfirm")).toHaveLength(0);
+    expect(useChat.getState().superResidueConfirm).toEqual(REQUEST);
+    expect(document.body.textContent).toContain(REQUEST.title);
   });
 
   it("confirm posts confirmed:true exactly once and closes the dialog", () => {

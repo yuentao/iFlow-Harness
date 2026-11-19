@@ -16,6 +16,7 @@ import {
   ChevronRight,
   CircleHelp,
   Clock,
+  ExternalLink,
   GitBranch,
   GitMerge,
   Hourglass,
@@ -109,6 +110,11 @@ function statusLabel(session: SuperSessionUi): string {
  *
  * 「准备中」与「等待你处理」曾经共用同一个 warning 色 —— 现在是
  * 沙漏/蓝 与 问号/琥珀，一眼可分：前者用户只能等，后者用户必须动手。
+ *
+ * 「已中断」刻意用静音色（muted），不是失败的同款 danger 红：shared 层把
+ * cancelled 单独计数、明确不计入 failed（见 summarizeSuperSessions / #2919），
+ * 染成红色会让人以为子会话出了故障。方块图标 +「已中断」文案仍是主编码，
+ * 颜色只是冗余，所以换成静音色不会丢信息，反而少一层误导。failed 继续 danger + X。
  */
 const STATUS_VISUAL: Record<SuperStatus, { tone: StatusTone; icon: ReactNode }> = {
   preparing: { tone: "info", icon: <Hourglass className="size-3 shrink-0" aria-hidden="true" /> },
@@ -116,7 +122,7 @@ const STATUS_VISUAL: Record<SuperStatus, { tone: StatusTone; icon: ReactNode }> 
   awaiting_input: { tone: "warning", icon: <CircleHelp className="size-3 shrink-0" aria-hidden="true" /> },
   completed: { tone: "success", icon: <Check className="size-3 shrink-0" aria-hidden="true" /> },
   failed: { tone: "danger", icon: <X className="size-3 shrink-0" aria-hidden="true" /> },
-  cancelled: { tone: "danger", icon: <Square className="size-3 shrink-0" aria-hidden="true" /> },
+  cancelled: { tone: "muted", icon: <Square className="size-3 shrink-0" aria-hidden="true" /> },
 };
 
 /** 排队中：等一个并发名额，还没开始 —— 灰色时钟，与「准备中」的沙漏区分。 */
@@ -179,11 +185,18 @@ function QqTaskTags({ session }: { session: SuperSessionUi }) {
       {/* Every other chip in the row/header yields at ≤380px; these two were
           the only shrink-0 chip pair left, squeezing the title and status on
           narrow screens. The full channel/sender still lives in the QQ task
-          panel, so hiding them here loses nothing. */}
-      <Chip tone="muted" className="shrink-0 @max-[380px]:hidden">
+          panel, so hiding them here loses nothing.
+
+          用视口媒体查询 `max-[380px]:hidden`，不是容器查询 `@max-[380px]:hidden`：
+          这对 chip 只出现在看板的两个 portal 浮层（折叠待答条 + 展开面板）里。
+          portal 挂到 document.body 后，App 根的 @container 不再是祖先、body 也
+          不是容器，容器查询会恒不匹配（注释声称的窄屏隐藏从未生效）。两个浮层
+          都是 fixed 贴视口、宽度=视口减固定 gutter，视口媒体查询才精确对应
+          「视口 ≤380px」的意图，也与顶栏控件在同一视口宽度一起收敛。 */}
+      <Chip tone="muted" className="shrink-0 max-[380px]:hidden">
         {t("渠道：{0}", qqTask.chatType === "private" ? t("私聊") : t("群聊"))}
       </Chip>
-      <Chip tone="muted" className="shrink-0 @max-[380px]:hidden">
+      <Chip tone="muted" className="shrink-0 max-[380px]:hidden">
         {t("发起人：{0}", maskQqOpenId(qqTask.senderId))}
       </Chip>
     </>
@@ -201,6 +214,32 @@ const INTEGRATION_TEXT: Record<SuperIntegrationState, string> = {
   skipped: "text-muted-foreground",
   not_needed: "text-muted-foreground",
 };
+
+/**
+ * 折叠行上的集成问题小 chip。
+ *
+ * 一个「已完成」的子会话并不等于改动落地了：conflict / failed / skipped 以及
+ * needsAction 的行，改动还留在分支上等人处理。折叠行只有几十像素，先前只报
+ * 「已完成」会把这种问题藏起来，必须展开才知道 —— 这里给一个一眼可见的小
+ * chip，完整说明（分支 / detail / PR 地址）仍在展开详情里，不重复。
+ *
+ * 优先级：needsAction 最需要人动手，先说「需人工合并」；否则 conflict 说
+ * 「冲突」；failed / skipped 统一说「未自动合并」（都表示改动没自动进主分支）。
+ * 只认终态：还在跑 / 等你回答的行，集成结果还没落定，不该提前打问题标签。
+ */
+function collapsedIntegrationIssue(
+  session: SuperSessionUi,
+): { label: string; tone: "danger" | "warning" | "muted" } | null {
+  if (!isTerminalSuperStatus(session.status)) return null;
+  const state = session.integration?.state;
+  const needsAction = session.integration?.needsAction === true;
+  if (state !== "conflict" && state !== "failed" && state !== "skipped" && !needsAction) {
+    return null;
+  }
+  if (needsAction) return { label: t("需人工合并"), tone: "warning" };
+  if (state === "conflict") return { label: t("冲突"), tone: "danger" };
+  return { label: t("未自动合并"), tone: "muted" };
+}
 
 /**
  * Short display name for a worktree branch.
@@ -517,6 +556,74 @@ function releasedIsolationLabel(isolation: SuperIsolation): string {
   return isolation.recycled ? t("工作目录已删除，分支保留") : t("工作目录和分支都已删除");
 }
 
+/**
+ * 单个「清理」确认文案 —— 按隔离类型如实说明宿主的实际行为。
+ *
+ * 真相来源是 `src/panel/super-agent.ts` 的 `cleanup()`，四种情况各不相同：
+ *  - `git_worktree`：工作目录里有未提交改动 → **拒绝清理**（目录不会删）；
+ *    分支上还有未合并提交 → 只删目录、保留分支；已合并或没有提交 → 目录与
+ *    分支一起删。旧文案写「未提交的改动会被一起删掉」，与「拒绝清理」相反。
+ *  - `directory`：非 git 仓库的降级隔离，直接删掉那个独立目录，没有分支。
+ *  - `repo`：合并子会话跑在主仓工作区，path 就是主仓根 —— 清理**只移除看板
+ *    记录**，绝不删主仓里的任何文件（旧文案会让人以为要删主仓）。
+ *  - 已释放（合并成功清理过 / 终态回收）：磁盘上早就没有目录与分支了，同样
+ *    只移除记录；重复清理是幂等的。
+ */
+function cleanupConfirmMessage(session: SuperSessionUi): string {
+  const isolation = session.isolation;
+  if (isolation.released) {
+    return t(
+      "移除超流体「{0}」的看板记录？它的工作目录与分支之前已经清理过，这次只删除记录。",
+      session.title,
+    );
+  }
+  switch (isolation.kind) {
+    case "repo":
+      return t(
+        "移除超流体「{0}」的看板记录？它直接跑在主工作区（没有独立工作目录与分支），清理不会删除主仓里的任何文件。",
+        session.title,
+      );
+    case "directory":
+      return t(
+        "删除超流体「{0}」的独立目录？它只有目录隔离、没有分支，目录里的全部内容会被删掉，无法恢复。",
+        session.title,
+      );
+    case "git_worktree":
+    default:
+      return t(
+        "删除超流体「{0}」的工作目录？工作目录里有未提交的改动时会被拒绝清理（请先提交或丢弃）；分支上还有未合并的提交时只删工作目录、保留分支，已合并或没有提交时分支一并删除。",
+        session.title,
+      );
+  }
+}
+
+/**
+ * 批量「清理已结束」确认文案 —— 与 {@link cleanupConfirmMessage} 同一口径。
+ *
+ * 批量入口只收仍占着磁盘目录的终态子会话（`holdsWorktree`），所以只会出现
+ * `git_worktree` 与 `directory` 两档；两者的真实行为不同，必须分开说清：
+ * 有未提交改动会被拒绝、分支是否保留由未合并提交决定、目录档没有分支。
+ */
+function bulkCleanupConfirmMessage(sessions: readonly SuperSessionUi[]): string {
+  const worktrees = sessions.filter((s) => s.isolation.kind === "git_worktree").length;
+  const directories = sessions.length - worktrees;
+  const clauses: string[] = [];
+  if (worktrees > 0) {
+    clauses.push(
+      t(
+        "删除 {0} 个 git 工作目录：有未提交的改动时会被拒绝清理；分支上还有未合并的提交时只删目录、保留分支，已合并或没有提交时分支一并删除",
+        worktrees,
+      ),
+    );
+  }
+  if (directories > 0) {
+    clauses.push(
+      t("删除 {0} 个只有目录隔离的独立目录：它们没有分支，目录内容会全部删除", directories),
+    );
+  }
+  return t("将清理 {0} 个超流体：{1}。", sessions.length, clauses.join("；"));
+}
+
 /** Stable empty transcript: returning a fresh `[]` from a zustand selector
  * would change identity on every render. */
 const EMPTY_TRANSCRIPT: Block[] = [];
@@ -611,7 +718,25 @@ function formatCostPrecise(usd: number): string {
  * is placed in viewport coordinates from the header's rect and re-measured
  * whenever the header moves or resizes.
  */
-export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement | null) => void }) {
+export function SuperAgentBoard({
+  panelRef,
+  frozen = false,
+}: {
+  panelRef?: (el: HTMLDivElement | null) => void;
+  /**
+   * 远程接管（QQ takeover）期间冻结看板的**可交互表面**。
+   *
+   * 折叠控件本身由 App 的 inert 子树包住，但展开的浮层与折叠时的待答条都
+   * `createPortal` 到 `document.body` —— 它们不在那棵子树里，App 的 inert
+   * 管不到。于是接管态下：顶栏里的控件看着是禁用的，portal 出来的浮层却仍
+   * 能点「中断 / 合并 / 清理」，甚至能回答子会话的提问，把远端正在推进的
+   * 流程打断。这里给两个 portal 表面加 inert（鼠标与键盘一起拦），并以
+   * opacity 标出冻结态；不额外加 `pointer-events-none` —— 那会让点击穿透到
+   * 浮层下面的转录区，误触到别的按钮。宿主侧还有第二层门（接管期间
+   * `handleSuperAgentAction` 直接拒绝），不靠 UI 单层保证。
+   */
+  frozen?: boolean;
+}) {
   const sessions = useChat((s) => s.state?.superSessions);
   const activeSessionId = useChat((s) => s.state?.activeSessionId ?? null);
   const send = useChat((s) => s.send);
@@ -635,12 +760,12 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   );
   const [confirmMerge, setConfirmMerge] = useState<SuperSessionUi | null>(null);
   const [confirmCleanup, setConfirmCleanup] = useState<SuperSessionUi | null>(null);
-  // Bulk cleanup snapshots the reclaimable ids at open time — recomputing while
-  // the dialog is open could silently drop a child that just turned terminal
-  // (or claim one that is still running) between the click and the confirm.
-  const [confirmCleanupAll, setConfirmCleanupAll] = useState<{ count: number; ids: string[] } | null>(
-    null,
-  );
+  // Bulk cleanup snapshots the reclaimable SESSIONS at open time — the confirm
+  // text has to name what is actually going to happen per isolation kind
+  // (git worktree vs. plain directory), and recomputing while the dialog is
+  // open could silently drop a child that just turned terminal (or claim one
+  // that is still running) between the click and the confirm.
+  const [confirmCleanupAll, setConfirmCleanupAll] = useState<SuperSessionUi[] | null>(null);
   // Cleanup is asynchronous on the host side (dispose client → delete the
   // worktree → git probes → emit). The confirm dialog closes immediately and
   // the row stays put until the host removes it, so without an optimistic flag
@@ -998,7 +1123,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
       next.set(session.id, label);
       const before = previousStatuses.current.get(session.id);
       if (before !== undefined && before !== label) {
-        changed.push(t("子会话 {0}：{1}", session.title, label));
+        changed.push(t("超流体 {0}：{1}", session.title, label));
       }
     }
     previousStatuses.current = next;
@@ -1101,7 +1226,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           its shield, so the row can never wrap or push the header actions.
           Hover: the button paints the single hover surface (hover:bg-accent/40)
           — no nested DisclosureButton tint stacked on top of it. */}
-      {/* Accessible name is STATIC ("子会话看板"): it names the control, while
+      {/* Accessible name is STATIC ("超流体看板"): it names the control, while
           the open/closed state is already carried by aria-expanded. Baking the
           action into the name made a screen reader read 「展开子会话看板，已展开」
           — the name contradicted the state. The hover tooltip still spells out
@@ -1112,8 +1237,8 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         ref={controlRef}
         aria-expanded={expanded}
         aria-controls={expanded ? SUPER_BOARD_PANEL_ID : undefined}
-        aria-label={t("子会话看板")}
-        title={expanded ? t("收起子会话看板") : t("展开子会话看板")}
+        aria-label={t("超流体看板")}
+        title={expanded ? t("收起超流体看板") : t("展开超流体看板")}
         onClick={() => setExpanded((v) => !v)}
         className={`press relative isolate flex h-7 shrink-0 items-center gap-2.5 rounded-md border border-border/70 bg-surface/60 px-3 text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/40${received ? " super-board-received" : ""}`}
       >
@@ -1131,7 +1256,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             total and three chips read as one crowded block. */}
         <span className="flex shrink-0 items-center gap-1.5">
           <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
-          <span className="shrink-0 @max-[380px]:hidden">{t("子会话")}</span>
+          <span className="shrink-0 @max-[380px]:hidden">{t("超流体")}</span>
           {/* Total count: the one count that survives at ≤380px, where the
               header also has to fit the status chip and the action cluster. The
               per-state chips collapse there (see below) and the panel — which
@@ -1194,7 +1319,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         <span
           role="img"
           aria-label={t("不弹审批")}
-          title={t("子会话里的工具调用（包括运行命令）会直接执行，不会先征求你的同意")}
+          title={t("超流体里的工具调用（包括运行命令）会直接执行，不会先征求你的同意")}
           className="flex shrink-0 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-ui-micro font-medium text-warning"
         >
           <ShieldOff className="size-3 shrink-0" aria-hidden="true" />
@@ -1223,9 +1348,12 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             // overwrite each other's measurement.
             ref={setPanelNode}
             role="region"
-            aria-label={t("子会话待答问题")}
+            aria-label={t("超流体待答问题")}
+            // 接管冻结：这条待答条 portal 在 body 末尾，不在 App 的 inert
+            // 子树里 —— 不在这里加 inert，远端接管时本机仍能替子会话作答。
+            inert={frozen || undefined}
             style={surfaceStyle(BOARD_STRIP_GAP)}
-            className={`stream-in fixed z-35 max-h-[40vh] overflow-y-auto rounded-lg border border-border/70 acrylic-frosted px-1 py-1${anchor ? "" : " invisible"}`}
+            className={`stream-in fixed z-35 max-h-[40vh] overflow-y-auto rounded-lg border border-border/70 acrylic-frosted px-1 py-1${anchor ? "" : " invisible"}${frozen ? " opacity-40" : ""}`}
           >
             {awaiting.map((session) => (
               <div key={session.id} className="shrink-0">
@@ -1262,14 +1390,17 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             id={SUPER_BOARD_PANEL_ID}
             ref={setPanelNode}
             role="region"
-            aria-label={t("子会话")}
+            aria-label={t("超流体")}
+            // 接管冻结（同待答条）：浮层 portal 在 body 末尾，App 的 inert
+            // 子树管不到它，必须在这里自己拦。
+            inert={frozen || undefined}
             style={surfaceStyle(BOARD_PANEL_GAP)}
-            className={`stream-in fixed z-35 overflow-hidden rounded-lg border border-border/70 acrylic-frosted${anchor ? "" : " invisible"}`}
+            className={`stream-in fixed z-35 overflow-hidden rounded-lg border border-border/70 acrylic-frosted${anchor ? "" : " invisible"}${frozen ? " opacity-40" : ""}`}
           >
             <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
               <span className="flex min-w-0 items-center gap-1.5 text-ui-label font-medium text-foreground">
                 <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
-                <span className="truncate">{t("子会话")}</span>
+                <span className="truncate">{t("超流体")}</span>
               </span>
               {/* The board's ONE help bubble: every rule that used to be
                   spelled out under each row lives here now (what a child may
@@ -1279,9 +1410,9 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   board unreadable at a glance. */}
               <HelpTip label={t("看板说明")}>
                 <div className="flex flex-col gap-1">
-                  <span>{t("子会话里的工具调用（包括运行命令）会直接执行，不会先征求你的同意")}</span>
-                  <span>{t("子会话结束之后才能合并；已经合并过、或者没有改动可合并的子会话，不需要再合并")}</span>
-                  <span>{t("子会话还在运行时不能清理，请先中断它")}</span>
+                  <span>{t("超流体里的工具调用（包括运行命令）会直接执行，不会先征求你的同意")}</span>
+                  <span>{t("超流体结束之后才能合并；已经合并过、或者没有改动可合并的超流体，不需要再合并")}</span>
+                  <span>{t("超流体还在运行时不能清理，请先中断它")}</span>
                 </div>
               </HelpTip>
               <div className="ml-auto flex shrink-0 items-center gap-1">
@@ -1297,7 +1428,11 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                     title={t("全部中断")}
                     onClick={() => setConfirmCancelAll(active.length)}
                   >
-                    <span className="@max-[380px]:hidden">{t("全部中断")}</span>
+                    {/* 这段文案在 portal 到 document.body 的面板里 —— 用视口
+                        媒体查询而不是容器查询：portal 后没有 @container 祖先，
+                        `@max-[380px]:hidden` 会恒不匹配，窄屏下文字永远不会收起、
+                        继续挤压标题。图标（aria-label「全部中断」）始终保留。 */}
+                    <span className="max-[380px]:hidden">{t("全部中断")}</span>
                   </Button>
                 )}
               </div>
@@ -1333,20 +1468,20 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                 <div className="shrink-0">
                   <DisclosureButton
                     expanded={showFolded}
-                    aria-label={showFolded ? t("收起已完成的子会话") : t("展开已完成的子会话")}
-                    title={showFolded ? t("收起已完成的子会话") : t("展开已完成的子会话")}
+                    aria-label={showFolded ? t("收起已完成的超流体") : t("展开已完成的超流体")}
+                    title={showFolded ? t("收起已完成的超流体") : t("展开已完成的超流体")}
                     className="w-full rounded-sm px-2 py-1.5"
                     onClick={() => setShowFolded((v) => !v)}
                   >
                     {showFolded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
                     <span className="shrink-0">
                       {foldedOutcomes.needsAttention > 0
-                        ? t("已完成、需人工合并的 {0} 个子会话", folded.length)
+                        ? t("已完成、需人工合并的 {0} 个超流体", folded.length)
                         : foldedOutcomes.nothingToMerge === 0
-                          ? t("已完成并合并的 {0} 个子会话", folded.length)
+                          ? t("已完成并合并的 {0} 个超流体", folded.length)
                           : foldedOutcomes.merged === 0
-                            ? t("已完成、无需合并的 {0} 个子会话", folded.length)
-                            : t("已完成的 {0} 个子会话", folded.length)}
+                            ? t("已完成、无需合并的 {0} 个超流体", folded.length)
+                            : t("已完成的 {0} 个超流体", folded.length)}
                     </span>
                     {foldedOutcomes.needsAttention > 0 && (
                       <Chip tone="warning">{t("{0} 个需人工合并", foldedOutcomes.needsAttention)}</Chip>
@@ -1382,7 +1517,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 text-ui-micro text-muted-foreground"
                   title={t("按公开单价估算，仅供参考")}
                 >
-                  <span className="font-medium text-foreground">{t("子会话合计开销")}</span>
+                  <span className="font-medium text-foreground">{t("超流体合计开销")}</span>
                   <span className="tabular-nums">
                     {t("输入 {0} · 输出 {1}", formatTokens(totals.input), formatTokens(totals.output))}
                   </span>
@@ -1408,12 +1543,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                       variant="secondary"
                       size="sm"
                       icon={<Trash2 className={ICON_INLINE} />}
-                      onClick={() =>
-                        setConfirmCleanupAll({
-                          count: reclaimable.length,
-                          ids: reclaimable.map((s) => s.id),
-                        })
-                      }
+                      onClick={() => setConfirmCleanupAll(reclaimable)}
                     >
                       {t("清理已结束")}
                     </Button>
@@ -1436,7 +1566,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
 
       {confirmMerge && (
         <ConfirmDialog
-          title={t("合并子会话分支")}
+          title={t("合并超流体分支")}
           message={t(
             "让智能体把分支 {0} 合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。",
             confirmMerge.isolation.branch ?? "",
@@ -1462,9 +1592,9 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
       )}
       {confirmCancel && (
         <ConfirmDialog
-          title={t("中断子会话")}
+          title={t("中断超流体")}
           message={t(
-            "中断子会话「{0}」？它会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。",
+            "中断超流体「{0}」？它会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。",
             confirmCancel.title,
           )}
           confirmLabel={t("中断")}
@@ -1481,7 +1611,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         <ConfirmDialog
           title={t("全部中断")}
           message={t(
-            "中断全部 {0} 个进行中的子会话？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。",
+            "中断全部 {0} 个进行中的超流体？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。",
             confirmCancelAll,
           )}
           confirmLabel={t("全部中断")}
@@ -1496,11 +1626,8 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
       )}
       {confirmCleanup && (
         <ConfirmDialog
-          title={t("清理子会话")}
-          message={t(
-            "删除子会话「{0}」的工作目录？分支上未合并的提交会保留；工作目录里尚未提交的改动会被一起删掉，无法恢复。",
-            confirmCleanup.title,
-          )}
+          title={t("清理超流体")}
+          message={cleanupConfirmMessage(confirmCleanup)}
           confirmLabel={t("清理")}
           onConfirm={() => {
             send({ type: "superAgent", action: "cleanup", sessionId: confirmCleanup.id });
@@ -1514,25 +1641,23 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
       )}
       {confirmCleanupAll !== null && (
         <ConfirmDialog
-          title={t("清理已结束的子会话")}
-          message={t(
-            "将删除 {0} 个子会话的工作目录；它们的分支都会保留（未合并的提交不会丢），但工作目录里尚未提交的改动会被一起删掉，无法恢复。",
-            confirmCleanupAll.count,
-          )}
+          title={t("清理已结束的超流体")}
+          message={bulkCleanupConfirmMessage(confirmCleanupAll)}
           confirmLabel={t("清理已结束")}
           onConfirm={() => {
             // One batched request: the host cleans the whole set serially and
             // reports a single aggregate receipt. Sending one `cleanup` per
             // child made the transcript collect N identical toasts and left
             // the user unable to tell where the batch as a whole stood.
+            const ids = confirmCleanupAll.map((session) => session.id);
             send({
               type: "superAgent",
               action: "cleanupBatch",
-              sessionIds: confirmCleanupAll.ids,
+              sessionIds: ids,
             });
             // Mark every child busy at click time so each row shows its own
             // in-progress state while the host cleans them up asynchronously.
-            beginCleanup(confirmCleanupAll.ids);
+            beginCleanup(ids);
             setConfirmCleanupAll(null);
           }}
           onCancel={() => setConfirmCleanupAll(null)}
@@ -1611,6 +1736,8 @@ function SuperSessionRow({
   onCancel: () => void;
 }) {
   const [showLive, setShowLive] = useState(false);
+  // pr_created 行的「打开 PR」按钮走宿主 openExternal（只放行 http(s)）。
+  const send = useChat((s) => s.send);
   // Busy states take the chip over: each one is a request the user just made
   // and is waiting on, so it must outrank the stale status it is replacing
   // (a merge target is `completed` — without this it would still read
@@ -1643,28 +1770,38 @@ function SuperSessionRow({
   // What survives is the record — the branch and its worktree — so the merge
   // and cleanup actions stay available.
   const historical = session.restored === true;
+  // 折叠行只报状态时也要能看出「改动没落地」：终态且集成有问题的行给一个小
+  // chip（需人工合并 / 冲突 / 未自动合并），完整说明仍只在展开详情里。
+  const integrationIssue = collapsedIntegrationIssue(session);
   // Why the merge action is unavailable right now. The RULE is stated once,
   // in the board header's help bubble; this string only feeds the button's
   // title / aria-label, so a greyed-out button still says why it is greyed
   // out for a screen reader and on hover.
+  const integrationState = session.integration?.state;
   const mergeBlocked =
     !session.isolation.branch ||
-    session.integration?.state === "merged" ||
+    integrationState === "merged" ||
+    integrationState === "not_needed" ||
+    integrationState === "pr_created" ||
     isActive(session);
   const mergeReason =
-    session.integration?.state === "merged"
-      ? t("这个子会话的改动已经合并")
-      : !session.isolation.branch
-        ? t("这个子会话没有可合并的分支")
-        : isActive(session)
-          ? t("子会话还没结束，等它完成再合并")
-          : t("让一个子会话把这条分支合并到当前分支，冲突由它自己解决");
+    integrationState === "merged"
+      ? t("这个超流体的改动已经合并")
+      : integrationState === "not_needed"
+        ? t("这个超流体没有产生改动，不需要合并")
+        : integrationState === "pr_created"
+          ? t("改动已经提到 PR，请打开 PR 处理合并")
+          : !session.isolation.branch
+            ? t("这个超流体没有可合并的分支")
+            : isActive(session)
+              ? t("超流体还没结束，等它完成再合并")
+              : t("让一个超流体把这条分支合并到当前分支，冲突由它自己解决");
   // Cleanup deletes the worktree, so it must not race a live child: the
   // process would keep writing into a directory that no longer exists.
   // Same discipline as the merge action — the rule lives in the board
   // header's help bubble, and the button keeps it in title / aria-label.
   const cleanupBlocked = isActive(session);
-  const cleanupReason = t("子会话还在运行，请先中断再清理");
+  const cleanupReason = t("超流体还在运行，请先中断再清理");
   // Diagnostics — full branch ref, worktree path, retry count, restored
   // marker — ride the title tooltip instead of occupying their own lines.
   const titleHint = [
@@ -1685,7 +1822,7 @@ function SuperSessionRow({
         ? t("目录 {0}", session.isolation.path)
         : (session.isolation.note ?? null),
     (session.attempts ?? 1) > 1 ? t("第 {0} 次尝试", session.attempts ?? 1) : null,
-    historical ? t("这次子会话在上一次运行里就已经结束（扩展重启后恢复的历史记录）") : null,
+    historical ? t("这次超流体在上一次运行里就已经结束（扩展重启后恢复的历史记录）") : null,
   ]
     .filter(Boolean)
     .join("\n");
@@ -1708,9 +1845,23 @@ function SuperSessionRow({
             {chip.icon}
             <span className="text-ui-micro font-medium">{chip.label}</span>
           </span>
+          {/* 历史恢复记录（进程已随上次扩展退出）：原先「上次运行」只在展开
+              详情里，折叠时看不出这条是旧记录。状态后补一个静音 chip，窄屏可
+              收缩隐藏，不挤压标题。详见下方工具提示。 */}
+          {historical && (
+            <Chip tone="muted" className="shrink-0 max-[380px]:hidden">
+              {t("上次运行")}
+            </Chip>
+          )}
           <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
             {session.title}
           </span>
+          {/* 终态但改动没落地的行，折叠态就给出提示 —— 完整说明仍在展开详情。 */}
+          {integrationIssue && (
+            <Chip tone={integrationIssue.tone} className="shrink-0 max-[380px]:hidden">
+              {integrationIssue.label}
+            </Chip>
+          )}
           {interruptSourceLabel && (
             <span className="shrink-0 text-ui-micro text-muted-foreground">
               {interruptSourceLabel}
@@ -1736,7 +1887,7 @@ function SuperSessionRow({
                 <Square className={ICON_INLINE} />
               )
             }
-            label={cancelPending ? t("中断中") : t("中断这个子会话")}
+            label={cancelPending ? t("中断中") : t("中断这个超流体")}
             size="sm"
             tone="danger"
             hoverSurface="row"
@@ -1831,7 +1982,7 @@ function SuperSessionRow({
             {session.tokens && (
               <span
                 className="font-mono tabular-nums"
-                title={t("输入是上一次请求实际携带的上下文；输出按子会话的文字估算")}
+                title={t("输入是上一次请求实际携带的上下文；输出按超流体的文字估算")}
               >
                 ↑{formatTokens(session.tokens.input)} ↓{formatTokens(session.tokens.output)}
                 {session.tokens.estimatedCost !== null && session.tokens.estimatedCost !== undefined && (
@@ -1841,7 +1992,8 @@ function SuperSessionRow({
                 )}
               </span>
             )}
-            {historical && <span>{t("上次运行")}</span>}
+            {/* 「上次运行」已上移到折叠行状态后的静音 chip（展开态也会渲染那一行），
+                这里不再重复，避免展开后读两遍。完整历史说明仍在 titleHint。 */}
             {(session.attempts ?? 1) > 1 && <span>{t("第 {0} 次尝试", session.attempts ?? 1)}</span>}
           </div>
 
@@ -1881,8 +2033,8 @@ function SuperSessionRow({
                    user the request went out. Same `aria-disabled` discipline
                    as merge / cleanup (keeps title + aria-label readable). */
                 aria-disabled={retryPending || undefined}
-                aria-label={retryPending ? t("重试中") : t("重试这个子会话：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）")}
-                title={retryPending ? t("重试中") : t("重试这个子会话：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）")}
+                aria-label={retryPending ? t("重试中") : t("重试这个超流体：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）")}
+                title={retryPending ? t("重试中") : t("重试这个超流体：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）")}
                 className={retryPending ? "cursor-not-allowed opacity-40" : undefined}
                 onClick={() => {
                   if (retryPending) return;
@@ -1923,6 +2075,23 @@ function SuperSessionRow({
             >
               {mergePending ? t("合并中") : t("让智能体合并")}
             </Button>
+            {/* pr_created 的合并按钮已禁用（见 mergeBlocked），改动在 PR 里，
+                真正的下一步是打开 PR 处理 —— 给一个直达链接，而不是让用户面对
+                一个灰按钮无从下手。URL 只在宿主写入时才有，缺失就不渲染。 */}
+            {integrationState === "pr_created" && session.integration?.url && (
+              <Button
+                variant="canvas"
+                size="sm"
+                icon={<ExternalLink className={ICON_INLINE} />}
+                title={session.integration.url}
+                onClick={() => {
+                  const url = session.integration?.url;
+                  if (url) send({ type: "openExternal", uri: url });
+                }}
+              >
+                {t("打开 PR")}
+              </Button>
+            )}
             {!session.isolation.released && (
               <Button
                 variant="canvas"
@@ -2015,7 +2184,7 @@ function SuperSessionLive({
       wide
       title={session.title}
       icon={<Activity className={`${ICON_INLINE} shrink-0 text-primary`} />}
-      ariaLabel={t("子会话实时进度")}
+      ariaLabel={t("超流体实时进度")}
       onClose={onClose}
       initialFocus="first"
     >
@@ -2127,10 +2296,10 @@ function SuperPendingArea({ session }: { session: SuperSessionUi }) {
         role="status"
         aria-live="polite"
       >
-        {sent ? t("已提交，等待子会话继续") : t("子会话需要你回答")}
+        {sent ? t("已提交，等待超流体继续") : t("超流体需要你回答")}
       </div>
       <div className="mt-1 text-ui-micro text-muted-foreground">
-        {t("子会话在等你的回答；不回答会在倒计时结束后按「未回答」继续。")}
+        {t("超流体在等你的回答；不回答会在倒计时结束后按「未回答」继续。")}
       </div>
       <div className="mt-1.5">
         <QuestionBody

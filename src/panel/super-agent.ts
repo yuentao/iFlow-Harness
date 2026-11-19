@@ -955,11 +955,11 @@ export class SuperAgentManager {
   }): Promise<SuperSessionUi | null> {
     const branch = options.source.isolation.branch;
     if (!branch) {
-      this.deps.log.warn("super agent: 来源子会话没有分支，无法派合并子会话");
+      this.deps.log.warn("super agent: 来源超流体没有分支，无法派合并超流体");
       return null;
     }
     if (this.repoMergeRunning()) {
-      this.deps.log.warn("super agent: 已有一个合并子会话在跑（主仓工作区无版本隔离），本次不派发");
+      this.deps.log.warn("super agent: 已有一个合并超流体在跑（主仓工作区无版本隔离），本次不派发");
       return null;
     }
     const child = this.spawn(
@@ -971,7 +971,7 @@ export class SuperAgentManager {
       branch,
       title: options.source.title,
     });
-    this.deps.log.info(`super agent: 派出合并子会话 ${child.id}（合并 ${branch}）`);
+    this.deps.log.info(`super agent: 派出合并超流体 ${child.id}（合并 ${branch}）`);
     return child;
   }
 
@@ -1241,7 +1241,7 @@ export class SuperAgentManager {
     //  2. worktree 里还有未提交改动 → 删目录不可逆，那些改动会永久消失。
     // 两者都**如实拒绝**并给出原因，绝不静默放行、也绝不先删再报告。
     if (!isTerminalSuperStatus(session.status)) {
-      return { ok: false, reason: "子会话仍在运行，请先中断再清理工作目录" };
+      return { ok: false, reason: "超流体仍在运行，请先中断再清理工作目录" };
     }
     if (
       session.isolation.kind === "git_worktree" &&
@@ -1403,7 +1403,7 @@ export class SuperAgentManager {
       }
       if (livePaths.has(key)) {
         result.kept += 1;
-        this.deps.log.info(`super agent: 跳过残留目录 ${target}（仍是活着的子会话的工作目录）`);
+        this.deps.log.info(`super agent: 跳过残留目录 ${target}（仍是活着的超流体的工作目录）`);
         continue;
       }
       if (!(await isBranchMerged({ repoRoot: this.deps.repoRoot, branch }))) {
@@ -2063,7 +2063,7 @@ export class SuperAgentManager {
         try {
           await client.setMode(sessionId, "yolo");
         } catch (error) {
-          this.deps.log.warn(`子会话切换到免确认模式失败（改由宿主自动放行）：${errorMessage(error)}`);
+          this.deps.log.warn(`超流体切换到免确认模式失败（改由宿主自动放行）：${errorMessage(error)}`);
         }
       }
 
@@ -2072,7 +2072,7 @@ export class SuperAgentManager {
         try {
           await client.setModel(sessionId, model);
         } catch (error) {
-          this.deps.log.warn(`子会话设置模型失败（沿用内核默认）：${errorMessage(error)}`);
+          this.deps.log.warn(`超流体设置模型失败（沿用内核默认）：${errorMessage(error)}`);
         }
         this.patchModel(id, model);
       }
@@ -2136,7 +2136,7 @@ export class SuperAgentManager {
           if (commit.committed) {
             this.appendReport(id, {
               state: "progress",
-              summary: `宿主已代子会话提交 ${commit.files} 个文件`,
+              summary: `宿主已代超流体提交 ${commit.files} 个文件`,
               at: Date.now(),
             });
           }
@@ -2243,7 +2243,7 @@ export class SuperAgentManager {
         {
           mode: this.deps.integrationMode(),
           state: "merged",
-          detail: `合并子会话已把 ${target.branch} 合入 ${targetBranch}`,
+          detail: `合并超流体已把 ${target.branch} 合入 ${targetBranch}`,
           at: Date.now(),
         },
         `merged into ${targetBranch}`,
@@ -2262,10 +2262,10 @@ export class SuperAgentManager {
     }
     const failed = child?.status === "failed" || child?.status === "cancelled";
     const detail = failed
-      ? `合并子会话${child?.status === "cancelled" ? "被中断" : "失败"}，${target.branch} 仍保留${
+      ? `合并超流体${child?.status === "cancelled" ? "被中断" : "失败"}，${target.branch} 仍保留${
           child?.error ? `：${child.error}` : ""
         }`
-      : `合并子会话没有把 ${target.branch} 合入当前分支，${target.branch} 仍保留`;
+      : `合并超流体没有把 ${target.branch} 合入当前分支，${target.branch} 仍保留`;
     this.recordIntegration(
       target.sourceId,
       {
@@ -2399,7 +2399,7 @@ export class SuperAgentManager {
       onExit: (code) => {
         const session = this.sessions.get(id);
         if (!session || isTerminalSuperStatus(session.status)) return;
-        this.apply(id, { type: "failed", error: `子会话内核退出（code=${code ?? "null"}）`, at: Date.now() });
+        this.apply(id, { type: "failed", error: `超流体内核退出（code=${code ?? "null"}）`, at: Date.now() });
         this.notifyReport(id);
       },
       onStderr: (line) => this.deps.log.debug?.(`[${id}] ${line}`),
@@ -2436,7 +2436,7 @@ export class SuperAgentManager {
     // 会清空主仓依赖的命令也绝不放行。
     const guarded = this.dependencyGuard(id, request);
     if (guarded) {
-      this.deps.log.warn(`[${id}] 拒绝子会话命令（保护主工作区依赖）：${guarded.reason ?? ""}`);
+      this.deps.log.warn(`[${id}] 拒绝超流体命令（保护主工作区依赖）：${guarded.reason ?? ""}`);
       return resolvePermissionResponse(request.options, "deny");
     }
 
@@ -2511,7 +2511,7 @@ export class SuperAgentManager {
   private blockChildSession(id: string, reason: string): void {
     const session = this.sessions.get(id);
     if (!session || isTerminalSuperStatus(session.status)) return;
-    this.deps.log.warn(`[${id}] 预检拒绝子会话命令并终止会话：${reason}`);
+    this.deps.log.warn(`[${id}] 预检拒绝超流体命令并终止会话：${reason}`);
     if (session.isolation.kind !== "repo") {
       void this.cancel(id);
       return;
@@ -2696,7 +2696,7 @@ export class SuperAgentManager {
       .then(() => this.runIntegration(id, attempt))
       .catch((error) => {
         const reason = errorMessage(error);
-        this.deps.log.error(`子会话集成失败：${reason}`);
+        this.deps.log.error(`超流体集成失败：${reason}`);
         // runIntegration 抛错时若还没写下任何结论，看板会停在旧状态、
         // maybeRequestAgentMerge 读到空直接 return —— 集成结果彻底丢失。补写
         // 一条 failed + needsAction：看板有明确去向，主会话也会被请去处理分支。
@@ -2755,7 +2755,7 @@ export class SuperAgentManager {
       // 目录删不掉。先登记，实际释放由 prepare() 的 finally 在进程回收之后
       // 执行（与「合并成功后释放隔离」同一时序）。
       record(
-        { state: "not_needed", detail: "无需合并：子会话没有产生任何提交" },
+        { state: "not_needed", detail: "无需合并：超流体没有产生任何提交" },
         "the child session produced no commits",
       );
       this.pendingEmptyRelease.add(id);
@@ -2821,7 +2821,7 @@ export class SuperAgentManager {
             {
               state: "skipped",
               needsAction: true,
-              detail: `主工作区有未提交改动，其中 ${overlap.length} 个文件与子会话的改动重叠（${describePaths(overlap)}），分支已保留待你手动合并`,
+              detail: `主工作区有未提交改动，其中 ${overlap.length} 个文件与超流体的改动重叠（${describePaths(overlap)}），分支已保留待你手动合并`,
             },
             `the main workspace has uncommitted changes in ${overlap.length} file(s) that overlap the child session's changes (${describePathsEn(overlap)})`,
           );
@@ -2867,7 +2867,7 @@ export class SuperAgentManager {
             {
               state: "skipped",
               needsAction: true,
-              detail: `git 拒绝合并，工作区未被改动（常见原因：未跟踪文件与子会话新增的文件同名，请先移走或提交它）；分支 ${isolation.branch} 已保留：${result.error}`,
+              detail: `git 拒绝合并，工作区未被改动（常见原因：未跟踪文件与超流体新增的文件同名，请先移走或提交它）；分支 ${isolation.branch} 已保留：${result.error}`,
             },
             "git refused the merge and the working tree was not modified (a common cause is an untracked file with the same name as a file the child session added)",
           );
@@ -2979,7 +2979,7 @@ export class SuperAgentManager {
       message: `super-agent: ${session.title}\n\n${this.summarize(id)}`,
     });
     if (result.error) {
-      this.deps.log.warn(`子会话代提交失败：${result.error}`);
+      this.deps.log.warn(`超流体代提交失败：${result.error}`);
     } else if (result.committed) {
       this.deps.log.info(`super agent: ${id} 宿主代提交 ${result.files} 个文件`);
     }
@@ -3061,7 +3061,7 @@ export class SuperAgentManager {
     // 已经有集成结果（例如合并子会话的只读判定）就别覆盖它。
     if (session.integration) return;
     const branch = session.isolation.branch;
-    const what = reason === "cancelled" ? "子会话的回合被取消" : "子会话已被中断";
+    const what = reason === "cancelled" ? "超流体的回合被取消" : "超流体已被中断";
     this.recordIntegration(
       id,
       {
@@ -3257,7 +3257,7 @@ export class SuperAgentManager {
 
     if (await worktreeHasUncommittedChanges(isolation.path)) {
       return keep(
-        "子会话没有产生任何提交，工作目录保留（还有未提交改动）",
+        "超流体没有产生任何提交，工作目录保留（还有未提交改动）",
         "the child session produced no commits and the working directory still has uncommitted changes",
       );
     }
@@ -3267,7 +3267,7 @@ export class SuperAgentManager {
     const baseRef = isolation.baseRef;
     if (!baseRef) {
       return keep(
-        "子会话没有产生任何提交，工作目录保留（缺少分支起点，无法确认分支为空）",
+        "超流体没有产生任何提交，工作目录保留（缺少分支起点，无法确认分支为空）",
         "the child session produced no commits and the branch start point is unknown, so the branch cannot be confirmed empty",
       );
     }
@@ -3279,7 +3279,7 @@ export class SuperAgentManager {
       })
     ) {
       return keep(
-        "子会话没有产生任何提交（分支上出现新提交），工作目录保留",
+        "超流体没有产生任何提交（分支上出现新提交），工作目录保留",
         "the child session produced no commits, but new commits appeared on the branch",
       );
     }
@@ -3304,7 +3304,7 @@ export class SuperAgentManager {
         {
           mode: session.integration?.mode ?? this.deps.integrationMode(),
           state: "not_needed",
-          detail: "无需合并：子会话没有产生任何提交，工作目录清理未完成（稍后重试）",
+          detail: "无需合并：超流体没有产生任何提交，工作目录清理未完成（稍后重试）",
           at: Date.now(),
         },
         "the child session produced no commits and its working directory could not be cleaned up yet",
@@ -3318,7 +3318,7 @@ export class SuperAgentManager {
       {
         mode: session.integration?.mode ?? this.deps.integrationMode(),
         state: "not_needed",
-        detail: "无需合并：子会话没有产生任何提交，工作目录已清理",
+        detail: "无需合并：超流体没有产生任何提交，工作目录已清理",
         at: Date.now(),
       },
       "the child session produced no commits; its working directory was cleaned up",
@@ -3562,7 +3562,7 @@ export class SuperAgentManager {
    */
   reportPromptWithPending(
     entries: { session: SuperSessionUi; report: SuperReport }[],
-    options?: { pendingOwner?: string | null },
+    options?: { pendingOwner?: string | null; finalOverride?: boolean },
   ): { text: string; pendingCount: number } {
     // pendingCount 只统计**同一归属主会话**下还在跑的子会话：这份汇报是投给
     // 某个主会话的，别人家的子会话跟它无关。混进来算的话，提示词里的
@@ -3581,7 +3581,13 @@ export class SuperAgentManager {
       (session) =>
         !isTerminalSuperStatus(session.status) && (session.mainSessionId ?? owner) === owner,
     ).length;
-    return { text: buildSuperReportPrompt(entries, { pendingCount }), pendingCount };
+    return {
+      text: buildSuperReportPrompt(entries, {
+        pendingCount,
+        finalOverride: options?.finalOverride === true,
+      }),
+      pendingCount,
+    };
   }
 
   /**
@@ -3732,7 +3738,7 @@ export class SuperAgentManager {
     try {
       await client.dispose();
     } catch (error) {
-      this.deps.log.warn(`子会话进程回收失败：${errorMessage(error)}`);
+      this.deps.log.warn(`超流体进程回收失败：${errorMessage(error)}`);
     } finally {
       // 回收完成才摘掉：**进程被杀掉之前它还活着**，并发额度要按活着的进程
       // 算 —— 提前摘掉会让额度在这个窗口里被提前释放。
@@ -3890,7 +3896,7 @@ async function stageSuperAttachments(
       // English, so the child session reads it in the same language as the
       // rest of its instructions.
       staged.failures.push(`${label}: ${errorMessage(error)}`);
-      log.warn(`子会话附件复制失败（${label}）：${errorMessage(error)}`);
+      log.warn(`超流体附件复制失败（${label}）：${errorMessage(error)}`);
     }
   }
   return staged;
@@ -4059,7 +4065,7 @@ function describeSubmission(isolation: SuperSessionUi["isolation"]): string {
  * 提示词 —— 产出物语言不随提示词英文化而改变。
  */
 function buildPullRequestBody(session: SuperSessionUi): string {
-  return [session.task.trim(), "", `_由 iFlow Harness 子会话 \`${session.id}\` 自动创建。_`].join("\n");
+  return [session.task.trim(), "", `_由 iFlow Harness 超流体 \`${session.id}\` 自动创建。_`].join("\n");
 }
 
 /**

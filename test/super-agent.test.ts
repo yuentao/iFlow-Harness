@@ -99,6 +99,28 @@ describe("super agent · 委派指令解析", () => {
     expect(scan.invalidBlocks).toHaveLength(1);
   });
 
+  it("缺 title → 判为非法块，原因指向 title 必填（不拿任务正文当标题）", () => {
+    const scan = extractSuperDirectives([
+      "```super-agent",
+      '{"tasks":[{"task":"项目根目录：任务：背景：整段描述"}]}',
+      "```",
+    ].join("\n"));
+    expect(scan.blocks).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(1);
+    expect(scan.invalidBlocks[0]?.reason).toContain("title 必填");
+    expect(scan.invalidBlocks[0]?.issues?.[0]).toContain("title 必填");
+  });
+
+  it("title 空白 → 拒绝；带 title 的条目照常派发", () => {
+    const scan = extractSuperDirectives([
+      "```super-agent",
+      '{"tasks":[{"title":"   ","task":"空白标题"},{"title":"有效","task":"做点事"}]}',
+      "```",
+    ].join("\n"));
+    expect(scan.blocks[0]).toEqual([{ title: "有效", task: "做点事" }]);
+    expect(scan.issues?.[0]).toContain("title 必填");
+  });
+
   it("task 写成字符串数组 → 非法块的原因指向 task 字段", () => {
     const scan = extractSuperDirectives([
       "```super-agent",
@@ -361,7 +383,7 @@ describe("super agent · 委派指令解析", () => {
   it("标题折叠空白并截断", () => {
     expect(normalizeSuperTitle("  修好   登录  ")).toBe("修好 登录");
     expect(normalizeSuperTitle("x".repeat(60)).length).toBe(40);
-    expect(normalizeSuperTitle("")).toBe("子会话");
+    expect(normalizeSuperTitle("")).toBe("超流体");
   });
 });
 
@@ -369,7 +391,7 @@ describe("super agent · 工具调用式委派载荷", () => {
   // 实测（2026-11-10）：sensenova-6.8-flash-lite 不按 markdown 围栏块输出，
   // 而是写成工具调用语法，载荷本身仍是合法的 tasks JSON。
   const dsml = [
-    "我来把这两件工作分别委派给两个独立的子会话并行执行。",
+    "我来把这两件工作分别委派给两个独立的超流体并行执行。",
     "",
     "<｜DSML｜tool-super-agent>",
     '{"tasks":[{"title":"编写模块A设计说明","task":"新建 docs/alpha.md"},{"title":"编写模块B设计说明","task":"新建 docs/beta.md"}]}',
@@ -523,7 +545,7 @@ describe("super agent · 重复派发与载荷丢失", () => {
   });
 });
 
-describe("super agent · 子会话任务书的如实描述", () => {
+describe("super agent · 超流体任务书的如实描述", () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const brief = readFileSync(path.join(here, "..", "prompts", "super-agent-task.md"), "utf8");
 
@@ -695,7 +717,7 @@ describe("super agent · 状态机", () => {
     expect(next.cliSessionId).toBe("s1");
   });
 
-  it("终态粘性：迟到的事件不改写已完成的子会话", () => {
+  it("终态粘性：迟到的事件不改写已完成的超流体", () => {
     const done = applySuperEvent(
       applySuperEvent(session(), { type: "started", cliSessionId: "s1", at: 2000 }),
       { type: "report", report: { state: "ready", summary: "做完了", at: 3000 }, at: 3000 },
@@ -728,7 +750,7 @@ describe("super agent · 状态机", () => {
     expect(next.pending).toBeUndefined();
   });
 
-  it("report 五态映射到子会话状态", () => {
+  it("report 五态映射到超流体状态", () => {
     const base = applySuperEvent(session(), { type: "started", cliSessionId: "s1", at: 1 });
     expect(applySuperEvent(base, { type: "report", report: { state: "progress", summary: "s", at: 2 }, at: 2 }).status).toBe("running");
     expect(applySuperEvent(base, { type: "report", report: { state: "ready", summary: "s", at: 2 }, at: 2 }).status).toBe("completed");
@@ -810,7 +832,7 @@ describe("super agent · 意外中断后的重试", () => {
   it("重试把终态残留清掉，保留隔离环境与汇报历史", () => {
     const failed = applySuperEvent(session({ attempts: 1 }), {
       type: "failed",
-      error: "子会话内核退出（code=1）",
+      error: "超流体内核退出（code=1）",
       at: 2000,
     });
     const next = retrySuperSession(failed, 3000);
@@ -871,7 +893,7 @@ describe("super agent · 归档与恢复", () => {
     expect(restored.isolation.branch).toBe("iflow/super/a");
   });
 
-  it("运行中的子会话恢复成「已中断」—— 进程已经没了，不能谎称还在跑", () => {
+  it("运行中的超流体恢复成「已中断」—— 进程已经没了，不能谎称还在跑", () => {
     for (const status of ["preparing", "running", "awaiting_input"] as const) {
       const restored = fromPersistedSuperSession(toPersistedSuperSession(session({ status })));
       expect(restored.status).toBe("cancelled");
@@ -881,7 +903,7 @@ describe("super agent · 归档与恢复", () => {
     }
   });
 
-  it("已完成的子会话恢复后仍是已完成（不篡改历史）", () => {
+  it("已完成的超流体恢复后仍是已完成（不篡改历史）", () => {
     const restored = fromPersistedSuperSession(toPersistedSuperSession(session({ status: "completed" })));
     expect(restored.status).toBe("completed");
   });
@@ -986,12 +1008,12 @@ describe("super agent · 汇报", () => {
     expect(report?.humanAction).toBeTruthy();
   });
 
-  it("运行中的子会话没有需要上报的报告", () => {
+  it("运行中的超流体没有需要上报的报告", () => {
     const running = applySuperEvent(session(), { type: "started", cliSessionId: "s", at: 1 });
     expect(reportForSession(running, 2, "x")).toBeNull();
   });
 
-  it("汇报提示词带上子会话标题与状态", () => {
+  it("汇报提示词带上超流体标题与状态", () => {
     const text = buildSuperReportPrompt([
       { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
     ]);
@@ -1005,7 +1027,7 @@ describe("super agent · 汇报", () => {
     expect(buildSuperReportPrompt([])).toBe("");
   });
 
-  it("汇报提示词要求把后续步骤派给子会话、仅在疑惑时提问、最后完整汇报", () => {
+  it("汇报提示词要求把后续步骤派给超流体、仅在疑惑时提问、最后完整汇报", () => {
     const text = buildSuperReportPrompt([
       { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
     ]);
@@ -1018,7 +1040,7 @@ describe("super agent · 汇报", () => {
     expect(text).toContain("Do not invent results");
   });
 
-  it("没有子会话在跑时：提示词说宿主逐个交回，并保留最终完整汇报", () => {
+  it("没有超流体在跑时：提示词说宿主逐个交回，并保留最终完整汇报", () => {
     const text = buildSuperReportPrompt(
       [{ session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } }],
       { pendingCount: 0 },
@@ -1029,7 +1051,7 @@ describe("super agent · 汇报", () => {
     expect(text).not.toContain("wait until every one of them has finished");
   });
 
-  it("还有子会话在跑时：先处理这批结果，不要现在做最终完整汇报", () => {
+  it("还有超流体在跑时：先处理这批结果，不要现在做最终完整汇报", () => {
     const text = buildSuperReportPrompt(
       [{ session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } }],
       { pendingCount: 2 },
@@ -1042,7 +1064,7 @@ describe("super agent · 汇报", () => {
     expect(text).not.toContain("give the user one complete report");
   });
 
-  it("缺省 pendingCount 等同于 0（没有子会话在跑）", () => {
+  it("缺省 pendingCount 等同于 0（没有超流体在跑）", () => {
     const text = buildSuperReportPrompt([
       { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
     ]);
@@ -1086,7 +1108,7 @@ describe("super agent · 汇报", () => {
     expect(text).not.toContain("do not stop and wait for the user to speak again");
   });
 
-  it("全部被中断且还有子会话在跑：保留中断说明，并补上仍在运行的说明", () => {
+  it("全部被中断且还有超流体在跑：保留中断说明，并补上仍在运行的说明", () => {
     const text = buildSuperReportPrompt(
       [{ session: session({ status: "cancelled" }), report: { state: "dropped", summary: "用户中断", at: 1 } }],
       { pendingCount: 1 },
@@ -1100,7 +1122,7 @@ describe("super agent · 汇报", () => {
 });
 
 describe("super agent · 合并汇报", () => {
-  it("只有全部子会话进入终态才算结束", () => {
+  it("只有全部超流体进入终态才算结束", () => {
     expect(allSuperSessionsSettled([])).toBe(false);
     expect(allSuperSessionsSettled([session({ status: "running" })])).toBe(false);
     expect(allSuperSessionsSettled([session({ status: "awaiting_input" })])).toBe(false);
@@ -1129,7 +1151,7 @@ describe("super agent · 合并汇报", () => {
     expect(buffer.size).toBe(1);
   });
 
-  it("仍在跑的子会话结束后，它的汇报被取走", () => {
+  it("仍在跑的超流体结束后，它的汇报被取走", () => {
     const buffer = new SuperReportBuffer();
     buffer.add([
       { session: session({ id: "b", status: "running" }), report: { state: "ready", summary: "b 未完", at: 2 } },
@@ -1142,7 +1164,7 @@ describe("super agent · 合并汇报", () => {
     expect(buffer.size).toBe(0);
   });
 
-  it("已终态的子会话的汇报各自被取走（不再等整批结束）", () => {
+  it("已终态的超流体的汇报各自被取走（不再等整批结束）", () => {
     const buffer = new SuperReportBuffer();
     buffer.add([
       { session: session({ id: "b", status: "completed" }), report: { state: "ready", summary: "b 完成", at: 1 } },
@@ -1165,7 +1187,7 @@ describe("super agent · 合并汇报", () => {
     ).toBeNull();
   });
 
-  it("来源子会话已不存在：条目被丢掉（否则面板永久忙碌）", () => {
+  it("来源超流体已不存在：条目被丢掉（否则面板永久忙碌）", () => {
     const buffer = new SuperReportBuffer();
     buffer.add([
       { session: session({ id: "a", status: "completed" }), report: { state: "ready", summary: "a 完成", at: 1 } },
@@ -1178,7 +1200,7 @@ describe("super agent · 合并汇报", () => {
     expect(buffer.dropMissing([session({ id: "b", status: "running" })])).toEqual([]);
   });
 
-  it("takeMissing 返回被清理子会话的完整汇报（迟到结论可如实呈现）", () => {
+  it("takeMissing 返回被清理超流体的完整汇报（迟到结论可如实呈现）", () => {
     const buffer = new SuperReportBuffer();
     buffer.add([
       {
@@ -1200,7 +1222,7 @@ describe("super agent · 合并汇报", () => {
     expect(buffer.takeMissing([session({ id: "live", status: "running" })])).toEqual([]);
   });
 
-  it("同一子会话只保留最后一条汇报（blocked 被 ready 覆盖）", () => {
+  it("同一超流体只保留最后一条汇报（blocked 被 ready 覆盖）", () => {
     const buffer = new SuperReportBuffer();
     buffer.add([
       { session: session({ id: "a", status: "awaiting_input" }), report: { state: "blocked", summary: "等待回答", at: 1 } },
@@ -1235,7 +1257,7 @@ describe("super agent · 看板排序与折叠", () => {
       integration: { mode: "merge", state: "merged", at: createdAt + 10 },
     });
 
-  it("进行中的子会话排在最前，改动没落地的排其后", () => {
+  it("进行中的超流体排在最前，改动没落地的排其后", () => {
     const { visible } = groupSuperSessionsForBoard([
       merged("done"),
       session({ id: "failed", status: "failed", createdAt: 2000 }),
@@ -1246,7 +1268,7 @@ describe("super agent · 看板排序与折叠", () => {
     expect(visible.map((s) => s.id)).toEqual(["awaiting", "running", "failed", "pending-merge"]);
   });
 
-  it("已完成且已自动合并的子会话折叠成历史分组", () => {
+  it("已完成且已自动合并的超流体折叠成历史分组", () => {
     const { visible, folded } = groupSuperSessionsForBoard([
       merged("done"),
       session({ id: "running", status: "running" }),
@@ -1255,7 +1277,7 @@ describe("super agent · 看板排序与折叠", () => {
     expect(visible.map((s) => s.id)).toEqual(["running"]);
   });
 
-  it("已完成且无需合并（没有产生任何提交）的子会话也折叠成历史分组", () => {
+  it("已完成且无需合并（没有产生任何提交）的超流体也折叠成历史分组", () => {
     const { visible, folded } = groupSuperSessionsForBoard([
       session({
         id: "nothing-to-merge",
@@ -1269,7 +1291,7 @@ describe("super agent · 看板排序与折叠", () => {
     expect(visible.map((s) => s.id)).toEqual(["running"]);
   });
 
-  it("改动还没落地的已完成子会话不折叠（PR / 未自动合并 / 冲突都要人看）", () => {
+  it("改动还没落地的已完成超流体不折叠（PR / 未自动合并 / 冲突都要人看）", () => {
     const { visible, folded } = groupSuperSessionsForBoard([
       session({ id: "pr", status: "completed", createdAt: 1000, integration: { mode: "pr", state: "pr_created", at: 2 } }),
       session({ id: "skipped", status: "completed", createdAt: 2000, integration: { mode: "merge", state: "skipped", at: 2 } }),
@@ -1309,7 +1331,7 @@ describe("super agent · token 用量", () => {
     expect(withTokens.updatedAt).toBe(20);
   });
 
-  it("合计只统计产生了用量的子会话", () => {
+  it("合计只统计产生了用量的超流体", () => {
     const totals = sumSuperUsage([
       session({ id: "a", tokens: { input: 1000, output: 100, estimatedCost: 0.001 } }),
       session({ id: "b", tokens: { input: 500, output: 50, estimatedCost: 0.0005 } }),
@@ -1320,7 +1342,7 @@ describe("super agent · token 用量", () => {
     expect(totals.estimatedCost).toBeCloseTo(0.0015);
   });
 
-  it("混入无单价的子会话时合计成本不显示（不给偏小的总数）", () => {
+  it("混入无单价的超流体时合计成本不显示（不给偏小的总数）", () => {
     const totals = sumSuperUsage([
       session({ id: "a", tokens: { input: 1000, output: 100, estimatedCost: 0.001 } }),
       session({ id: "b", tokens: { input: 500, output: 50, estimatedCost: null } }),
@@ -1331,7 +1353,7 @@ describe("super agent · token 用量", () => {
 });
 
 describe("super agent · 看板摘要", () => {
-  it("没有子会话时仍注入看板标记（主/子会话的角色信号）", () => {
+  it("没有超流体时仍注入看板标记（主/超流体的角色信号）", () => {
     // 系统提示用「输入里有没有 [子会话看板]」区分主会话与子会话：
     // 空看板若返回空串，首轮主会话会被误判成子会话而自己动手干活。
     const digest = buildSuperDigest([]);
@@ -1359,7 +1381,7 @@ describe("super agent · 看板摘要", () => {
     expect(() => JSON.parse(match![1]!)).not.toThrow();
   });
 
-  it("列出每个子会话的 id、状态与摘要，并附管理动作说明", () => {
+  it("列出每个超流体的 id、状态与摘要，并附管理动作说明", () => {
     const digest = buildSuperDigest([
       session({ id: "super-a", status: "running", summary: "正在补单测" }),
       session({
@@ -1406,7 +1428,7 @@ describe("super agent · 看板摘要", () => {
     expect(digest).toContain("要覆盖压缩卡吗？");
   });
 
-  it("失败子会话的看板指令硬性要求 retry、禁止新派等价任务", () => {
+  it("失败超流体的看板指令硬性要求 retry、禁止新派等价任务", () => {
     // 用户实测：failed 子会话的 worktree 里已有大半未提交改动，主会话却用
     // super-agent 新派了一个等价任务（全新 worktree、从零开始），把半成品全丢了。
     // 因此看板末尾的英文指令必须把「失败优先 retry、不重派」写成硬规则。
@@ -1688,10 +1710,10 @@ describe("super agent · 让智能体合并的请求", () => {
   it("自动触发时不说「用户在看板点击了」，而是说明改动没能自动合并", () => {
     const text = buildSuperMergeRequestPrompt(
       session({ title: "修复登录跳转", status: "completed" }),
-      { auto: true, reason: "主工作区有未提交改动，与子会话的改动重叠" },
+      { auto: true, reason: "主工作区有未提交改动，与超流体的改动重叠" },
     );
     expect(text).toContain("could not be merged automatically");
-    expect(text).toContain("主工作区有未提交改动，与子会话的改动重叠");
+    expect(text).toContain("主工作区有未提交改动，与超流体的改动重叠");
     expect(text).not.toContain("The user clicked");
     // 执行步骤与手动触发一致。
     expect(text).toContain("git merge --no-ff iflow/super/a");
@@ -1751,14 +1773,14 @@ describe("super agent · 主仓工作区隔离（repo）", () => {
     expect(superIsolationLabel(restored.isolation)).toBe("直接在主工作区（无隔离）");
   });
 
-  it("运行中的主仓工作区子会话恢复后仍是「已中断」（进程已经没了）", () => {
+  it("运行中的主仓工作区超流体恢复后仍是「已中断」（进程已经没了）", () => {
     const restored = fromPersistedSuperSession(toPersistedSuperSession(repoSession({ status: "running" })));
     expect(restored.status).toBe("cancelled");
     expect(isTerminalSuperStatus(restored.status)).toBe(true);
   });
 });
 
-describe("子会话并发上限", () => {
+describe("超流体并发上限", () => {
   it("默认 5，可调范围 1–20", () => {
     expect(DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS).toBe(5);
     expect(MAX_CONCURRENT_SUPER_SESSIONS).toBe(20);
@@ -1803,7 +1825,7 @@ describe("super agent · 宿主与渲染共用块解析", () => {
         ],
       }),
       "```",
-      "两位子会话已经开工。",
+      "两位超流体已经开工。",
     ].join("\n");
     const scan = extractSuperDirectives(text);
     expect(scan.blocks).toHaveLength(1);
@@ -1894,8 +1916,8 @@ describe("super agent · 宿主与渲染共用块解析", () => {
     const body = '{"tasks":[{"task":"跑测试","owner":"x","title":"乙"},{"task":"读代码","owner":"y"}]}';
     expect(salvageSuperTasks(body)).toEqual([
       { title: "乙", task: "跑测试", attachments: [] },
-      // 缺 title 时用任务书首行兜底，绝不编造标题。
-      { title: "读代码", task: "读代码", attachments: [] },
+      // 缺 title 的展示兜底用明确占位，绝不拿任务正文顶到标题位。
+      { title: "未命名任务", task: "读代码", attachments: [] },
     ]);
   });
 
@@ -1962,13 +1984,13 @@ describe("super agent · 宿主与渲染共用块解析", () => {
   // findToolStylePayloads 派发，只认围栏的渲染侧切不出卡片 —— 看板上「等待子会话
   // 汇报」已经出现，转录里却还是一堵 JSON 墙。两条读者必须走同一条判定链。
   const dsmlShape = [
-    "我把这两件工作分别委派给两个子会话并行执行。",
+    "我把这两件工作分别委派给两个超流体并行执行。",
     "",
     "<｜DSML｜tool-super-agent>",
     '{"tasks":[{"title":"编写模块A设计说明","task":"新建 docs/alpha.md"},{"title":"编写模块B设计说明","task":"新建 docs/beta.md"}]}',
     "</tool-super-agent>",
     "",
-    "两个子会话已经开工。",
+    "两个超流体已经开工。",
   ].join("\n");
 
   it("工具调用式载荷：宿主派发时渲染同样切出卡片（不再是 JSON 墙）", () => {
@@ -1990,14 +2012,14 @@ describe("super agent · 宿主与渲染共用块解析", () => {
     expect(directive?.raw).toContain("<｜DSML｜tool-super-agent>");
     expect(directive?.raw).toContain("</tool-super-agent>");
     expect(segments[0]?.kind === "text" ? segments[0].text : "").toContain("我把这两件工作");
-    expect(segments[2]?.kind === "text" ? segments[2].text : "").toContain("两个子会话已经开工");
+    expect(segments[2]?.kind === "text" ? segments[2].text : "").toContain("两个超流体已经开工");
     // 宿主派发出来的不是容错预览。
     expect(display?.kind === "tasks" ? display.salvaged : undefined).not.toBe(true);
   });
 
   it("「super-agent:」+ ```json 围栏载荷渲染成卡片，正文不丢、代码块消失", () => {
     const text = [
-      "5 个子会话全部完成并已经合并到 beta，现在派一个复核会话跑全量检查。",
+      "5 个超流体全部完成并已经合并到 beta，现在派一个复核会话跑全量检查。",
       "super-agent:",
       "```json",
       '{"tasks":[{"title":"合并后全量复核","task":"跑全量检查、如实汇报真实输出"}]}',
@@ -2045,7 +2067,7 @@ describe("super agent · 宿主与渲染共用块解析", () => {
   });
 
   it("散文里提到 super-agent 但没有载荷时不出现卡片", () => {
-    const text = "我会在需要时用 super-agent 代码块来委派子会话。";
+    const text = "我会在需要时用 super-agent 代码块来委派超流体。";
     expect(extractSuperDirectives(text).blocks).toHaveLength(0);
     expect(splitSuperDirectiveSegments(text)).toEqual([{ kind: "text", text }]);
   });
@@ -2206,7 +2228,7 @@ describe("super agent · 归档关键内容指纹（写放大的分流依据）"
     expect(cosmetic).toBe(before);
   });
 
-  it("子会话集合变了 → 指纹变（增删都要落盘）", () => {
+  it("超流体集合变了 → 指纹变（增删都要落盘）", () => {
     const one = toPersistedSuperSession(session({ id: "a" }));
     const two = toPersistedSuperSession(session({ id: "b" }));
     expect(superArchiveFingerprint(archive([one, two]))).not.toBe(

@@ -91,14 +91,29 @@ describe("QQBot 宿主编排（M3-C）", () => {
       replyToMsgId: "m0",
     });
     adapter.send.mockResolvedValueOnce({ ok: false, error: "x", retryable: true } as never);
+    // 平台拒绝的原文（含业务错误码）必须原样透传：上层要靠它留痕
+    // （deliveryError / 归档事件 / 宿主日志），丢了就只剩一句「未能送达」。
     await expect(
       deliverViaQqBotAdapter(adapter, { chatType: "private", chatId: "u", text: "t" }),
-    ).resolves.toEqual({ ok: false, retryable: true });
+    ).resolves.toEqual({ ok: false, retryable: true, error: "x" });
     // 确定性拒绝（retryable:false）也要原样透传，服务据此短路不重试。
     adapter.send.mockResolvedValueOnce({ ok: false, error: "403", retryable: false } as never);
     await expect(
       deliverViaQqBotAdapter(adapter, { chatType: "private", chatId: "u", text: "t" }),
-    ).resolves.toEqual({ ok: false, retryable: false });
+    ).resolves.toEqual({ ok: false, retryable: false, error: "403" });
+    // 主动消息额度用尽这类拒绝：错误码必须能传到服务层（40054 是真实错误码）。
+    adapter.send.mockResolvedValueOnce({
+      ok: false,
+      error: "QQBot: 业务错误 40054（主动消息额度已用尽）",
+      retryable: false,
+    } as never);
+    await expect(
+      deliverViaQqBotAdapter(adapter, { chatType: "private", chatId: "u", text: "t" }),
+    ).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      error: "QQBot: 业务错误 40054（主动消息额度已用尽）",
+    });
   });
 
   it("扫码回调映射：onQr / onProgress / onFailure 走注入协议，失败文案脱敏", async () => {

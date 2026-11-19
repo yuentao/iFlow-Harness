@@ -387,6 +387,43 @@ export function shortTaskId(taskId: string): string {
   return taskId.length <= 6 ? taskId : taskId.slice(-6);
 }
 
+/** 受理回执标题的默认码点上限（超出截断并加省略号）。 */
+export const QQ_TASK_TITLE_MAX_CHARS = 24;
+
+/**
+ * 从用户原始任务消息里提取一个人类可读的简短标题，供 QQ 受理回执代替裸
+ * 任务 id（`shortTaskId`）展示 —— 后者对用户毫无意义（形如 `ncmcb9`）。
+ *
+ * 为什么从 prompt 派生而不是加标题字段：任务模型本身没有 title，委派时
+ * 宿主写的子会话标题也是 `QQ <shortId>`（还是 id），受理那一刻宿主注入结果
+ * 更不带标题。唯一可读且受理时已可用的来源就是用户消息 `payload.prompt` 本身，
+ * 派生而非持久化可避免动协议与落盘格式。
+ *
+ * 纯文本、不改写语义：取首个非空行 → 去掉 Markdown 标题 / 列表 / 引用符 →
+ * 合并空白 → 码点截断（不劈代理对）。取不到可读内容时返回空串，调用方据此
+ * 退化为不带 id 的中性文案（绝不回退到裸 id）。
+ */
+export function qqTaskTitle(prompt: string, maxChars: number = QQ_TASK_TITLE_MAX_CHARS): string {
+  if (typeof prompt !== "string") return "";
+  const cap = Number.isFinite(maxChars) ? Math.max(1, Math.floor(maxChars)) : QQ_TASK_TITLE_MAX_CHARS;
+  for (const rawLine of prompt.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    // 去掉行首 Markdown 标题 / 列表 / 引用标记，只处理格式符不改写内容。
+    const cleaned = line
+      .replace(/^#{1,6}(?:\s+|$)/u, "")
+      .replace(/^[-*+](?:\s+|$)/u, "")
+      .replace(/^\d+[.)(](?:\s+|$)/u, "")
+      .replace(/^>(?:\s+|$)/u, "")
+      .replace(/\s+/gu, " ")
+      .trim();
+    if (!cleaned) continue;
+    const points = Array.from(cleaned);
+    return points.length <= cap ? cleaned : `${points.slice(0, cap - 1).join("")}…`;
+  }
+  return "";
+}
+
 // ---------------------------------------------------------------------------
 // 状态机
 // ---------------------------------------------------------------------------
@@ -837,7 +874,10 @@ function indentBlock(text: string): string {
 export function formatQqTaskSummary(task: QqTask, detail: QqResultDetail): string {
   const lines: string[] = [];
   const result = task.result;
-  lines.push(`QQ 任务 ${shortTaskId(task.taskId)}`);
+  // 首行用人类可读的任务标题代替裸短 id（后者对用户毫无意义）；取不到标题
+  // 时退化为短 id，绝不出现「QQ 任务 」这种空标题。末尾的命令参数位保持
+  // 完整 taskId 不变（/qq status / /qq log 依赖它）。
+  lines.push(`QQ 任务 ${qqTaskTitle(task.payload.prompt) || shortTaskId(task.taskId)}`);
   lines.push(`状态  ${qqTaskStatusLabel(task.status)} (${task.status})`);
   lines.push(`耗时  ${formatDuration(task.updatedAt - task.createdAt)}`);
 

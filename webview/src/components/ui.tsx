@@ -1,5 +1,8 @@
 import {
+  Children,
+  cloneElement,
   useEffect,
+  isValidElement,
   useId,
   useLayoutEffect,
   useRef,
@@ -201,29 +204,25 @@ export function ModalShell({
       <div className={`auth-modal acrylic-pop${wide ? " auth-modal-wide @container" : ""}${className ? ` ${className}` : ""}`}>
         <div className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           {onBack ? (
-            <button
-              type="button"
-              className="press -ml-1 shrink-0 rounded p-0.5 text-muted-foreground transition-colors duration-200 hover:text-foreground"
-              title={t("返回列表")}
-              aria-label={t("返回列表")}
+            <IconButton
+              icon={<ArrowLeft className={ICON_INLINE} />}
+              label={t("返回列表")}
+              size="sm"
+              className="-ml-1"
               onClick={onBack}
-            >
-              <ArrowLeft className={ICON_INLINE} />
-            </button>
+            />
           ) : (
             icon
           )}
           <span className="min-w-0 truncate text-ui-title font-semibold">{title}</span>
           {dismissible && (
-            <button
-              type="button"
-              className="press ml-auto shrink-0 rounded p-0.5 text-muted-foreground transition-colors duration-200 hover:text-foreground"
-              title={t("收起")}
-              aria-label={t("收起")}
+            <IconButton
+              icon={<X className={ICON_INLINE} />}
+              label={t("关闭")}
+              size="sm"
+              className="ml-auto"
               onClick={onClose}
-            >
-              <X className={ICON_INLINE} />
-            </button>
+            />
           )}
         </div>
         {children}
@@ -290,7 +289,7 @@ export function CountdownBar({
   const warning = remainingMs <= 60_000;
   if (quietLabel && !warning) {
     return (
-      <p className={`px-3 pb-2 text-ui-caption leading-snug text-muted-foreground/70 ${className}`}>
+      <p className={`px-3 pb-2 text-ui-caption leading-snug text-muted-foreground ${className}`}>
         {t("约 {0} 分钟后{1}", Math.ceil(remainingMs / 60_000), quietLabel)}
       </p>
     );
@@ -658,7 +657,7 @@ export function Segmented<T extends string>({
           onKeyDown={onKeyDown}
           className={
             option.value === value
-              ? "press rounded-md whitespace-nowrap bg-primary/18 px-2 py-0.5 text-ui-label font-semibold text-primary disabled:pointer-events-none disabled:opacity-40"
+              ? "press rounded-md whitespace-nowrap bg-primary/10 px-2 py-0.5 text-ui-label font-semibold text-foreground disabled:pointer-events-none disabled:opacity-40"
               : "press rounded-md whitespace-nowrap px-2 py-0.5 text-ui-label text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           }
           onClick={() => onChange(option.value)}
@@ -692,10 +691,19 @@ export function Field({
   className?: string;
   children: ReactNode;
 }) {
+  // The asterisk is visual only; mirror `required` onto the inner control so
+  // screen readers announce the constraint (controls live in this kit file).
+  const controls = required
+    ? Children.map(children, (child) =>
+        isValidElement<{ "aria-required"?: string }>(child)
+          ? cloneElement(child, { "aria-required": "true" })
+          : child,
+      )
+    : children;
   return (
     <label className={`flex flex-col gap-1${className ? ` ${className}` : ""}`}>
       <FieldLabel required={required}>{label}</FieldLabel>
-      {children}
+      {controls}
     </label>
   );
 }
@@ -725,9 +733,10 @@ export function FileRef({ path, line, toolCallId }: { path: string; line?: numbe
  * in dense rows, so arming now opens a real dialog. Rendered through a
  * portal to document.body — the settings modal's acrylic layers create
  * containing blocks that would trap a plain `fixed` descendant.
- * ModalShell semantics: ESC / backdrop / X all cancel. Initial focus sits on
- * 取消 (data-autofocus) so an accidental Enter never fires the destructive
- * action.
+ * ModalShell semantics: 仅显式按钮关闭，遮罩 / ESC / X 都不关闭
+ * (dismissible = false)——危险确认框必须由用户显式选「确认 / 取消」，避免
+ * 误触遮罩或 ESC 被当成静默取消。Initial focus sits on 取消 (data-autofocus)
+ * so an accidental Enter never fires the destructive action.
  */
 export function ConfirmDialog({
   title,
@@ -741,6 +750,8 @@ export function ConfirmDialog({
    * conversation / both). Cancel keeps data-autofocus so an accidental Enter
    * never fires a destructive action. */
   actions,
+  /** 默认 false：确认框只通过显式按钮关闭，遮罩 / ESC / X 一律不取消。 */
+  dismissible = false,
 }: {
   title: string;
   message: string;
@@ -757,49 +768,35 @@ export function ConfirmDialog({
     variant?: "default" | "primary" | "danger";
     onClick: () => void;
   }[];
+  dismissible?: boolean;
 }) {
   return createPortal(
-    <ModalShell title={title} onClose={onCancel} ariaLabel={title} role="alertdialog">
+    <ModalShell title={title} onClose={onCancel} ariaLabel={title} role="alertdialog" dismissible={dismissible}>
       <div className="px-4 py-3 text-ui-label leading-relaxed text-foreground/90">{message}</div>
       {/* The action row wraps instead of squeezing: a long confirm label
           (e.g. 「让智能体合并分支」) used to be clipped mid-word, which left
           the user reading 「让智能体合…」 — a truncated instruction. */}
       <div className="flex flex-wrap items-center justify-end gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2">
-        <button
-          data-autofocus
-          type="button"
-          className="press inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-md border border-border bg-editor px-3 text-ui-caption font-medium text-foreground transition-colors hover:bg-accent"
-          onClick={onCancel}
-        >
+        <Button size="sm" variant="secondary" data-autofocus onClick={onCancel}>
           {cancelLabel ?? t("取消")}
-        </button>
+        </Button>
         {actions
           ? actions.map((a) => (
-              <button
+              <Button
                 key={a.label}
-                type="button"
+                size="sm"
+                variant={a.variant === "primary" ? "primary-soft" : a.variant === "danger" ? "outline-danger" : "secondary"}
                 title={a.title}
                 disabled={a.disabled}
-                className={`press inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-md border px-3 text-ui-caption font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                  a.variant === "primary"
-                    ? "border-primary/50 bg-primary/15 text-primary hover:bg-primary/25"
-                    : a.variant === "danger"
-                      ? "border-destructive/50 bg-destructive/10 text-destructive hover:bg-destructive/20"
-                      : "border-border bg-editor text-foreground hover:bg-accent"
-                }`}
                 onClick={a.onClick}
               >
                 {a.label}
-              </button>
+              </Button>
             ))
           : (
-            <button
-              type="button"
-              className="press inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-md border border-destructive/50 bg-destructive/10 px-3 text-ui-caption font-semibold text-destructive transition-colors hover:bg-destructive/20"
-              onClick={onConfirm}
-            >
+            <Button size="sm" variant="outline-danger" onClick={onConfirm}>
               {confirmLabel ?? t("删除")}
-            </button>
+            </Button>
           )}
       </div>
     </ModalShell>,
@@ -1186,6 +1183,64 @@ export function SettingsGroup({
       </div>
       <div className="divide-y divide-border/50">{children}</div>
     </section>
+  );
+}
+
+/**
+ * One label/control row inside a SettingsGroup. Single home for the setting
+ * row rhythm (`px-4 py-4`, a shrinking label column, 600px two-column switch)
+ * so MCP / QQ / modal pages stop re-declaring their own drifted copy.
+ *
+ * `description` is the short "what this changes" line; long caveats go in
+ * `detail`, surfaced as an ⓘ tooltip. `wide` lets the control fill the row on
+ * narrow viewports, `stacked` puts the label above a repeated-control body
+ * (arg / env / header lists), and `action` is a trailing slot for the list's
+ * 添加 button.
+ */
+export function SettingsRow({
+  label,
+  description,
+  detail,
+  required = false,
+  wide = false,
+  stacked = false,
+  action,
+  className = "",
+  children,
+}: {
+  label: string;
+  description?: string;
+  detail?: string;
+  required?: boolean;
+  wide?: boolean;
+  stacked?: boolean;
+  action?: ReactNode;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={`flex min-w-0 px-4 py-4 ${
+        stacked ? "flex-col gap-2" : "flex-col gap-3 @min-[600px]:flex-row @min-[600px]:items-start @min-[600px]:gap-5"
+      }${className ? ` ${className}` : ""}`}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="text-ui-body font-medium leading-snug text-foreground">{label}</span>
+          {required && <span className="text-destructive" aria-hidden="true">*</span>}
+          {detail && (
+            <HelpTip label={t("详细说明")} align="left">
+              {detail}
+            </HelpTip>
+          )}
+        </div>
+        {description && <Hint className="mt-1">{description}</Hint>}
+      </div>
+      <div className={wide ? "flex min-w-0 w-full shrink-0 flex-col gap-2 @min-[600px]:w-auto" : "flex min-w-0 shrink-0 items-center gap-2"}>
+        {children}
+        {action}
+      </div>
+    </div>
   );
 }
 

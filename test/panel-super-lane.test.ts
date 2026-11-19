@@ -105,12 +105,22 @@ type PanelInternals = {
   refreshSuperWaitHeartbeat: () => void;
   queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
   superAutoTurnCursor: number;
-  pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean }>;
+  pendingSuperReportPrompts: Array<{
+    mainSessionId: string | null;
+    text: string;
+    final?: boolean;
+    fallbackText?: string;
+  }>;
+  superReportRunning: boolean;
   pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }>;
   autoTurnsStoppedFor: string | null;
   qqMainFinalAwaiters: Map<string, string>;
   qqMainFinalAwaiterSince: Map<string, number>;
   qqFinalRescueText: Map<string, string>;
+  qqReportFallbackText: Map<string, string>;
+  qqTaskFinalText: Map<string, string>;
+  qqTaskBySuperSession: Map<string, string>;
+  qqFinalRescueDefers: Map<string, number>;
   qqFinalRescueMs: number;
   qqFinalHardRescueMs: number;
   rescueStaleQqFinalAwaiters: () => void;
@@ -240,7 +250,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     expect(p.pendingSuperReportPrompts).toHaveLength(1);
   });
 
-  it("子会话被清理后其迟到结论以「已归档」提示落到看板，不伪造实时汇报", async () => {
+  it("超流体被清理后其迟到结论以「已归档」提示落到看板，不伪造实时汇报", async () => {
     const awaiting = child({
       id: "super-archived",
       title: "归档任务",
@@ -265,7 +275,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     expect(p.pendingSuperReportPrompts).toHaveLength(0);
     expect(p.store.getState().superWaiting).toBe(false);
     const archived = toasts.find(
-      (t) => t.message.includes("已归档子会话") && t.message.includes("迟到的结论正文"),
+      (t) => t.message.includes("已归档超流体") && t.message.includes("迟到的结论正文"),
     );
     expect(archived).toBeTruthy();
     expect(archived!.message).toContain("归档任务");
@@ -274,7 +284,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     // 重复刷新不重复提示。
     p.refreshSuperWaitHeartbeat();
     await flush();
-    expect(toasts.filter((t) => t.message.includes("已归档子会话"))).toHaveLength(1);
+    expect(toasts.filter((t) => t.message.includes("已归档超流体"))).toHaveLength(1);
   });
 
   it("压制期间新到的汇报点亮「继续处理」动作，恢复不再只有下一条消息一个解除点", async () => {
@@ -334,7 +344,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
   });
 
-  it("pendingCount 长期>0 且 awaiter 等过阈值时，汇报轮仍被标为 final（R2 迟到补发）", async () => {
+  it("pendingCount 长期>0 且 awaiter 等过阈值时，汇报轮只放宽提示词、**不**标为 final（R2 迟到补发）", async () => {
     const done = child({ id: "super-done", status: "completed" });
     const stuck = child({ id: "super-stuck", status: "running" });
     manager.list = () => [done, stuck];
@@ -346,11 +356,17 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     p.queueSuperReport([{ session: done, report: READY_REPORT }]);
     await flush();
 
-    // pendingCount=1（stuck 子会话仍非终态），但 awaiter 迟到 → 该轮放宽为 final，
-    // 主会话这一轮的正文就能作为 QQ 真正最终答复投递（不再永远停在已受理）。
+    // pendingCount=1（stuck 子会话仍非终态）：**等待过久 ≠ 可以定终局**
+    // （2026-11-19 修复）。旧实现在这里把该轮标成 final，于是 QQ 先收到一条
+    // 空正文兜底（22 字占位）、任务被写成终态、awaiter 被摘掉，随后迟到的
+    // 真实长正文再也投不出去。
+    // 现在：rescueDue 只放宽提示词（让模型这一轮就给结论），这一轮仍是进度轮，
+    // awaiter 保留 —— 真·最终汇报轮（pendingCount=0）到达时才投递完整正文。
     const item = p.pendingSuperReportPrompts.find((i) => i.mainSessionId === "lane-session");
     expect(item).toBeTruthy();
-    expect(item!.final).toBe(true);
+    expect(item!.final).toBe(false);
+    // awaiter 没被消费：QQ 仍在等最终答复。
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(true);
   });
 
   it("无新汇报轮时，超时 awaiter 由迟到补发兜底并摘除（R2）", async () => {
@@ -375,7 +391,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
   });
 
-  it("软阈值下仍有活跃子会话时不提前补发（不误伤正常长任务）", async () => {
+  it("软阈值下仍有活跃超流体时不提前补发（不误伤正常长任务）", async () => {
     const complete = vi.fn(async () => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     manager.list = () => [child({ id: "super-running", status: "running" })];
@@ -389,5 +405,159 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
 
     expect(complete).not.toHaveBeenCalled();
     expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(true);
+  });
+
+  it("硬上限到点但汇报轮在途 / 排队时先让路，不抢在真实最终汇报前面", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    manager.list = () => [];
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.qqMainFinalAwaiterSince.set("T-qq", Date.now() - 1_000_000);
+    p.qqFinalHardRescueMs = 1;
+    p.qqFinalRescueText.set("lane-session", "缓存正文");
+
+    // 汇报轮正在投递：补发必须让路。
+    p.superReportRunning = true;
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    expect(complete).not.toHaveBeenCalled();
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(true);
+    expect(p.qqFinalRescueDefers.get("T-qq")).toBe(1);
+
+    // 汇报轮结束但同一 owner 还有排队汇报：继续让路。
+    p.superReportRunning = false;
+    p.pendingSuperReportPrompts = [{ mainSessionId: "lane-session", text: "QUEUED" }];
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    expect(complete).not.toHaveBeenCalled();
+    expect(p.qqFinalRescueDefers.get("T-qq")).toBe(2);
+
+    // 队列清空后补发照常发生 —— 让路只推迟、不永久取消。
+    p.pendingSuperReportPrompts = [];
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    await flush();
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledWith({
+      taskId: "T-qq",
+      text: "缓存正文",
+      stopReason: "end_turn",
+    });
+    expect(p.qqFinalRescueDefers.has("T-qq")).toBe(false);
+  });
+
+  it("在途汇报轮持续卡死时让路有上限，超过后仍强制补发（真正卡死的兜底）", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    manager.list = () => [];
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.qqMainFinalAwaiterSince.set("T-qq", Date.now() - 1_000_000);
+    p.qqFinalHardRescueMs = 1;
+    p.qqFinalRescueText.set("lane-session", "缓存正文");
+    p.superReportRunning = true;
+
+    // 让路 6 拍都不补发；第 7 拍强制补发。
+    for (let i = 0; i < 6; i += 1) {
+      p.rescueStaleQqFinalAwaiters();
+      await flush();
+      expect(complete).not.toHaveBeenCalled();
+    }
+    expect(p.qqFinalRescueDefers.get("T-qq")).toBe(6);
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    await flush();
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
+  });
+
+  it("补发缓存正文为空时用汇报正文兜底，不再只发一句占位文案", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    manager.list = () => [];
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.qqMainFinalAwaiterSince.set("T-qq", Date.now() - 1_000_000);
+    p.qqFinalHardRescueMs = 1;
+    // qqFinalRescueText 故意不设：缓存为空。
+    p.qqReportFallbackText.set("lane-session", "子会话真实汇报：登录跳转已修好并验证通过");
+
+    p.rescueStaleQqFinalAwaiters();
+    await flush();
+    await flush();
+
+    expect(complete).toHaveBeenCalledWith({
+      taskId: "T-qq",
+      text: "子会话真实汇报：登录跳转已修好并验证通过",
+      stopReason: "end_turn",
+    });
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
+  });
+
+  it("同会话两个 QQ task 的子会话汇报按归属分别投递，不广播同一份汇总", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    p.qqMainFinalAwaiters.set("T-A", "lane-session");
+    p.qqMainFinalAwaiters.set("T-B", "lane-session");
+    // 两个子会话分别归属两个 QQ 主任务（与派发时的 qqTaskBySuperSession 一致）。
+    p.qqTaskBySuperSession.set("super-a", "T-A");
+    p.qqTaskBySuperSession.set("super-b", "T-B");
+    const doneA = child({ id: "super-a", status: "completed" });
+    const doneB = child({ id: "super-b", status: "completed" });
+    manager.list = () => [doneA, doneB];
+
+    p.queueSuperReport([
+      { session: doneA, report: { state: "ready", summary: "A的结论：登录修好", at: 1 } },
+      { session: doneB, report: { state: "ready", summary: "B的结论：镜像切换完成", at: 2 } },
+    ]);
+    await flush();
+
+    // final 汇总轮：promptWithRetry 不流文本，real answer 走兜底。
+    const call = calls[calls.length - 1]!;
+    call.resolve({ stopReason: "end_turn" });
+    await flush();
+    await flush();
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    const byTask = new Map(
+      complete.mock.calls.map(([input]) => [input!.taskId, input!.text]),
+    );
+    expect(byTask.get("T-A")).toContain("A的结论");
+    expect(byTask.get("T-B")).toContain("B的结论");
+    // 每份只含自己的结论，不串台、不共享拼接后的汇总结论。
+    expect(byTask.get("T-A")).not.toContain("B的结论");
+    expect(byTask.get("T-B")).not.toContain("A的结论");
+    expect(p.qqMainFinalAwaiters.size).toBe(0);
+  });
+
+  it("finalReport 锚点失效时经 finalFallbackText 投递，不再静默放弃滑向空缓存补发", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    p.qqMainFinalAwaiters.set("T-qq", "lane-session");
+    p.store.getState().blocks.push({ kind: "text", id: "anchor", text: "上一轮旧正文" });
+    p.pendingSuperReportPrompts = [
+      {
+        mainSessionId: "lane-session",
+        text: "FINAL-REPORT",
+        final: true,
+        fallbackText: "子会话汇报正文兜底",
+      },
+    ];
+
+    void p.drainSuperReports();
+    await flush();
+    const call = calls[calls.length - 1]!;
+    // 模拟转录被清空 / 重排：锚块消失，按 id 切片不安全。
+    const blocks = p.store.getState().blocks;
+    blocks.splice(0, blocks.length);
+    call.resolve({ stopReason: "end_turn" });
+    await flush();
+    await flush();
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledWith({
+      taskId: "T-qq",
+      text: "子会话汇报正文兜底",
+      stopReason: "end_turn",
+    });
+    expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
   });
 });

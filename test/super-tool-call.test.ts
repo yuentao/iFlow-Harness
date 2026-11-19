@@ -261,21 +261,18 @@ describe("合并载荷纠偏 · super-agent 工具的 actions 参数", () => {
  * `parseSuperDelegationTasks` —— 宿主 reducer 与转录卡片共用的委派载荷解析。
  *
  * 口径必须与派发器**完全一致**（复用同一份实现，不复制校验）：模型调内置
- * `super-agent` 工具时**有时漏掉 `title`**（wire 实证：args 是
- * `{"tasks":[{"task":"…"}]}`），派发器容忍它（回退到 task 首行、照常派发），
- * 而卡片此前要求每条任务都有非空 title → 把一次成功的委派谎报成解析失败。
+ * `super-agent` 工具时漏掉 title 的载荷现在被**拒绝**（title 必填），卡片与
+ * 派发器给出同一字段级诊断，不会出现「派发成功但卡片说失败」的分叉。
  */
 describe("parseSuperDelegationTasks", () => {
-  it("缺 title 时回退到 task 首行（与派发器同口径，不判非法）", () => {
+  it("缺 title 的载荷被拒绝（title 必填，不会回退 task 首行）", () => {
     const tasks = parseSuperDelegationTasks({
       tasks: [{ task: "只读审查 src/panel/panel.ts\n补充说明在下一行" }],
     });
-    expect(tasks).not.toBeNull();
-    expect(tasks?.[0]?.title).toBe("只读审查 src/panel/panel.ts");
-    expect(tasks?.[0]?.task).toBe("只读审查 src/panel/panel.ts\n补充说明在下一行");
+    expect(tasks).toBeNull();
   });
 
-  it("显式 title 照常保留（与首行回退并存）", () => {
+  it("显式 title 照常保留", () => {
     const tasks = parseSuperDelegationTasks({
       tasks: [{ title: "审查面板", task: "只读审查 src/panel/panel.ts" }],
     });
@@ -295,7 +292,7 @@ describe("parseSuperDelegationTasks", () => {
   });
 
   it("字符串形态走宽松解析（原始换行 / 尾逗号都能救回来）", () => {
-    const tasks = parseSuperDelegationTasks('{"tasks":[{"task":"第一行\n第二行",}]}');
+    const tasks = parseSuperDelegationTasks('{"tasks":[{"title":"审查","task":"第一行\n第二行",}]}');
     expect(tasks).not.toBeNull();
     expect(tasks?.[0]?.task).toBe("第一行\n第二行");
   });
@@ -317,7 +314,7 @@ describe("parseSuperDelegationTasks", () => {
   });
 
   it("与派发器同源：解析结果与 parseSuperToolCall 的任务完全一致", () => {
-    const args = { tasks: [{ task: "同一个载荷" }] };
+    const args = { tasks: [{ title: "同一载荷", task: "同一个载荷" }] };
     const direct = parseSuperDelegationTasks(args);
     const viaDispatcher = parseSuperToolCall("dispatch", args);
     expect(viaDispatcher.ok).toBe(true);
@@ -350,6 +347,40 @@ describe("parseSuperDelegationPayload · 畸形载荷诊断", () => {
     expect(parsed.issues).toEqual(["tasks[0].task 必须是字符串"]);
   });
 
+  it("缺 title → 拒绝该条，原因指向 title 必填（绝不拿 task 正文当标题）", () => {
+    const parsed = parseSuperDelegationPayload({
+      tasks: [{ task: "项目根目录：任务：背景：一整段描述" }],
+    });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.reason).toContain("title 必填");
+    expect(parsed.issues).toEqual([
+      "tasks[0].title 必填（每个任务都必须有非空标题，不能用任务正文当标题）",
+    ]);
+    // 整段任务描述不能出现在任何结果的 title 上（这里根本没有结果任务）。
+    expect(JSON.stringify(parsed)).not.toContain('"title":"项目根目录');
+  });
+
+  it("title 为空白字符 → 同样拒绝", () => {
+    const parsed = parseSuperDelegationPayload({ tasks: [{ title: "   \t ", task: "做点事" }] });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.issues?.[0]).toContain("title 必填");
+  });
+
+  it("混合载荷：缺 title 的条目被拒绝、带 title 的照常派发", () => {
+    const parsed = parseSuperDelegationPayload({
+      tasks: [{ title: "合法", task: "做这件事" }, { task: "缺标题的任务" }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.tasks).toHaveLength(1);
+    expect(parsed.tasks[0]?.title).toBe("合法");
+    expect(parsed.issues).toEqual([
+      "tasks[1].title 必填（每个任务都必须有非空标题，不能用任务正文当标题）",
+    ]);
+  });
+
   it("非对象条目 → 指出是第几条不是对象", () => {
     const parsed = parseSuperDelegationPayload({ tasks: ["坏条目"] });
     expect(parsed.ok).toBe(false);
@@ -359,7 +390,7 @@ describe("parseSuperDelegationPayload · 畸形载荷诊断", () => {
 
   it("混合载荷：合法任务保留，畸形条目进 issues（ok:true）", () => {
     const parsed = parseSuperDelegationPayload({
-      tasks: [{ task: "合法任务" }, { task: 42 }],
+      tasks: [{ title: "合法任务", task: "合法任务" }, { task: 42 }],
     });
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -378,7 +409,7 @@ describe("parseSuperDelegationPayload · 畸形载荷诊断", () => {
 
   it("parseSuperToolCall 的成功分支带 issues（混合载荷）", () => {
     const parsed = parseSuperToolCall("dispatch", {
-      tasks: [{ task: "真的" }, { task: 7 }],
+      tasks: [{ title: "真的", task: "真的" }, { task: 7 }],
     });
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;

@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApprovalCard } from "../webview/src/components/ApprovalCard";
+import { PendingCards } from "../webview/src/components/PendingCards";
 import { QuestionCard } from "../webview/src/components/QuestionCard";
 import type { PendingApprovalUi, PendingQuestionsUi } from "../shared/messages";
 
@@ -147,6 +148,69 @@ it("ignores shortcuts originating from a select element", () => {
   select.remove();
 });
 
+/**
+ * Safety regression: the pending overlay stacks cards and marks the buried
+ * ones `inert`, but `inert` only removes a subtree from focus / hit-testing /
+ * the accessibility tree — a `keydown` listener on `window` still fires. A
+ * covered approval card therefore used to approve a decision the user could
+ * not see, just because they pressed Y for the card on top.
+ */
+it("does not approve from a covered card: only the top card answers Y", () => {
+  act(() =>
+    root.render(
+      <>
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-under" }} active={false} />
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-top" }} />
+      </>,
+    ),
+  );
+  key("y");
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-top",
+    optionId: "allow-1",
+  });
+});
+
+it("does not deny from a covered card either: N only answers the top card", () => {
+  act(() =>
+    root.render(
+      <>
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-under" }} active={false} />
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-top" }} />
+      </>,
+    ),
+  );
+  key("n");
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-top",
+    optionId: "reject-1",
+  });
+});
+
+it("keeps a buried approval in the real stack from answering Y", () => {
+  // Approval arrives first, then a question arrives on top of it: the
+  // approval is now the covered card (`inert` in the DOM) and must be silent.
+  act(() => root.render(<PendingCards pendingApproval={APPROVAL} pendingQuestions={null} />));
+  act(() => root.render(<PendingCards pendingApproval={APPROVAL} pendingQuestions={QUESTIONS} />));
+  key("y");
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("keeps the top-most approval in the real stack answering Y", () => {
+  act(() => root.render(<PendingCards pendingApproval={null} pendingQuestions={QUESTIONS} />));
+  act(() => root.render(<PendingCards pendingApproval={APPROVAL} pendingQuestions={QUESTIONS} />));
+  key("y");
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-1",
+    optionId: "allow-1",
+  });
+});
+
 it("states the approval shortcut hint once, matching how Esc actually resolves", () => {
   act(() => root.render(<ApprovalCard approval={APPROVAL} />));
   expect(container.textContent.match(/Y 允许一次/g)?.length).toBe(1);
@@ -192,6 +256,89 @@ it("answers Esc with the agent's own reject option (one deny affordance, no 取�
     id: "approval-1",
     optionId: "reject-1",
   });
+});
+
+/**
+ * ESC 语义收敛：卡片通过 window 监听持有 ESC，不再依赖焦点是否落在卡片
+ * 子树内。焦点在卡片外（例如 Composer / body）时同样 deny，且事件被
+ * preventDefault，避免漏到 Composer 的「ESC 停止生成」造成一次按键两种语义。
+ */
+it("denies Esc from the window even when focus is outside the card, and consumes the event", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  act(() => {
+    window.dispatchEvent(event);
+  });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-1",
+    optionId: "reject-1",
+  });
+  expect(event.defaultPrevented).toBe(true);
+});
+
+it("does not deny Esc from a covered approval card: only the top card owns it", () => {
+  act(() =>
+    root.render(
+      <>
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-under" }} active={false} />
+        <ApprovalCard approval={{ ...APPROVAL, id: "approval-top" }} />
+      </>,
+    ),
+  );
+  key("Escape");
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-top",
+    optionId: "reject-1",
+  });
+});
+
+it("does not deny Esc while a modal sits above the card", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  const backdrop = document.createElement("div");
+  backdrop.className = "auth-backdrop";
+  document.body.append(backdrop);
+  key("Escape");
+  expect(send).not.toHaveBeenCalled();
+  backdrop.remove();
+});
+
+it("does not deny Esc from an editable target", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  const input = document.createElement("input");
+  document.body.append(input);
+  act(() => {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
+  expect(send).not.toHaveBeenCalled();
+  input.remove();
+});
+
+it("dismisses a question card on Esc with an empty answer, and consumes the event", () => {
+  act(() => root.render(<QuestionCard pending={QUESTIONS} />));
+  const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  act(() => {
+    window.dispatchEvent(event);
+  });
+  expect(send).toHaveBeenCalledWith({ type: "answerQuestions", id: "q-1", answers: {} });
+  expect(event.defaultPrevented).toBe(true);
+});
+
+it("does not let a covered question card answer Esc", () => {
+  act(() =>
+    root.render(
+      <>
+        <QuestionCard pending={{ ...QUESTIONS, id: "q-under" }} active={false} />
+        <QuestionCard pending={{ ...QUESTIONS, id: "q-top" }} />
+      </>,
+    ),
+  );
+  key("Escape");
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "answerQuestions", id: "q-top" }));
 });
 
 it("drops the 取消 twin when the agent already offered a reject option", () => {

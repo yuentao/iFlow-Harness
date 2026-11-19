@@ -59,7 +59,7 @@ const DELEGATE_ONE = [
   "```super-agent",
   JSON.stringify(
     {
-      tasks: [{ title: "独自开工", task: "只派一个子会话时也应该就是一张卡" }],
+      tasks: [{ title: "独自开工", task: "只派一个超流体时也应该就是一张卡" }],
     },
     null,
     2,
@@ -91,7 +91,7 @@ const ACTIONS = [
  * 原文取自 ~/.iflow/acp/sessions 那一轮 assistant 文本（6111 字符，单任务书）。
  */
 const REAL_ONE_LINE_TASK = [
-  "项目：j:\\git\\iflow-harness（VSCode 扩展，TypeScript strict + React 19 + Tailwind 4 + vitest 5；Super Agent 多子会话看板）。你负责实现并自验下面这个完整需求。",
+  "项目：j:\\git\\iflow-harness（VSCode 扩展，TypeScript strict + React 19 + Tailwind 4 + vitest 5；Super Agent 多超流体看板）。你负责实现并自验下面这个完整需求。",
   "【背景：看板与数据】节点文本被截断，`status/title/aria-label` 要一起改。",
   "1. 数切：`webview/src/components/SuperAgentBoard.tsx:251` 的 SuperTimeline 编排为 `flex min-w-0 max-w-[50%] shrink items-center gap-1 overflow-hidden`，内容是 `shrink-0 items-center gap-1`。",
   "2. 数据：`src/acp/protocol.ts:312` 已有 `{ sessionStatus: 'plan'; entries: PlanEntry[] }`，L316 `PlanEntry { priority: 'high'|'medium'|'low'; status: 'pending'|'in_progress'|'completed' }`。",
@@ -100,10 +100,10 @@ const REAL_ONE_LINE_TASK = [
 ].join("\n");
 
 const REAL_ONE_LINE_DELEGATE = [
-  "已确认走「只用 todo 节点」方案。派一个子会话完成整条链路（数据捕获 → 纯逻辑 → 看板渲染），避免并行改动同一批类型文件时互相看不到。",
+  "已确认走「只用 todo 节点」方案。派一个超流体完成整条链路（数据捕获 → 纯逻辑 → 看板渲染），避免并行改动同一批类型文件时互相看不到。",
   "",
   "```super-agent",
-  JSON.stringify({ tasks: [{ title: "时间轴改用子会话 todo", task: REAL_ONE_LINE_TASK }] }),
+  JSON.stringify({ tasks: [{ title: "时间轴改用超流体 todo", task: REAL_ONE_LINE_TASK }] }),
   "```",
 ].join("\n");
 
@@ -242,7 +242,7 @@ describe("AssistantText 协议块卡片", () => {
 
     // 不再有「委派子会话 / N 个任务」那种汇总卡：只有每张卡自己的序号 chip。
     const body = text();
-    expect(body).not.toContain("委派子会话");
+    expect(body).not.toContain("委派超流体");
     expect(body.match(/第 \d+\/\d+ 个任务/g)).toEqual(["第 1/2 个任务", "第 2/2 个任务"]);
     // 原始载荷不再进 DOM。
     expect(body).not.toContain('"tasks"');
@@ -253,7 +253,7 @@ describe("AssistantText 协议块卡片", () => {
     const cards = taskCards();
     expect(cards).toHaveLength(1);
     expect(cards[0]!.textContent).toContain("独自开工");
-    expect(cards[0]!.textContent).toContain("只派一个子会话时也应该就是一张卡");
+    expect(cards[0]!.textContent).toContain("只派一个超流体时也应该就是一张卡");
     // 单卡没有批次信息，不显示「第 1/1 个任务」。
     expect(text()).not.toMatch(/第 \d+\/\d+ 个任务/);
   });
@@ -286,10 +286,10 @@ describe("AssistantText 协议块卡片", () => {
     expect(container.querySelector('[data-testid="super-task-salvaged"]')).toBeNull();
   });
 
-  it("super-agent-actions 围栏渲染成操作卡：动作中文名 + 目标子会话 id", () => {
+  it("super-agent-actions 围栏渲染成操作卡：动作中文名 + 目标超流体 id", () => {
     render(ACTIONS);
     const body = text();
-    expect(body).toContain("子会话操作");
+    expect(body).toContain("超流体操作");
     expect(body).toContain("3 个动作");
     expect(body).toContain("重试");
     expect(body).toContain("清理");
@@ -308,7 +308,7 @@ describe("AssistantText 协议块卡片", () => {
     const body = text();
     expect(body).toContain("原始指令内容");
     expect(body).toContain("内容格式不对，读不出来");
-    expect(body).not.toContain("委派子会话");
+    expect(body).not.toContain("委派超流体");
     expect(taskCards()).toHaveLength(0);
   });
 
@@ -331,7 +331,7 @@ describe("AssistantText 协议块卡片", () => {
   it("未闭合围栏（流式中间态）渲染「正在编写任务书…」占位卡，不再是代码块", () => {
     const unclosed = ["```super-agent", '{"tasks": [{"title": "进行中的任务"'].join("\n");
     expect(() => render(unclosed)).not.toThrow();
-    expect(text()).not.toContain("委派子会话");
+    expect(text()).not.toContain("委派超流体");
     expect(taskCards()).toHaveLength(0);
     // 进行中 ≠ 已派发：只有占位卡，没有任何任务卡。
     expect(container.querySelector('[data-testid="super-directive-pending"]')).toBeTruthy();
@@ -372,7 +372,7 @@ describe("AssistantText 协议块卡片", () => {
   it("工具调用式载荷（DSML 包裹）渲染成任务卡，不留 JSON 墙与包裹残字", () => {
     render(
       [
-        "我来拆分两件工作，分别交给两个子会话。",
+        "我来拆分两件工作，分别交给两个超流体。",
         "",
         "<｜DSML｜tool-super-agent>",
         '{"tasks":[{"title":"编写模块A设计说明","task":"新建 docs/alpha.md"},{"title":"编写模块B设计说明","task":"新建 docs/beta.md"}]}',
@@ -468,7 +468,7 @@ describe("AssistantText 协议块卡片", () => {
     render(REAL_ONE_LINE_DELEGATE);
     const cards = taskCards();
     expect(cards).toHaveLength(1);
-    expect(cards[0]!.textContent).toContain("时间轴改用子会话 todo");
+    expect(cards[0]!.textContent).toContain("时间轴改用超流体 todo");
     // 折叠态只给前几块（按设计），但绝不能是 JSON 墙：正文已按块排版。
     expect(cards[0]!.textContent).toContain("项目：j:\\git\\iflow-harness");
     expect(text()).toContain("已确认走「只用 todo 节点」方案");
@@ -492,7 +492,7 @@ describe("AssistantText 协议块卡片", () => {
     expect(splitSuperDirectiveSegments(indented).map((s) => s.kind)).toContain("directive");
     render(indented);
     expect(taskCards()).toHaveLength(1);
-    expect(taskCards()[0]!.textContent).toContain("时间轴改用子会话 todo");
+    expect(taskCards()[0]!.textContent).toContain("时间轴改用超流体 todo");
     expect(text()).not.toContain('"tasks"');
     expect(container.querySelector("pre code.language-super-agent")).toBeNull();
   });
@@ -504,7 +504,7 @@ describe("AssistantText 协议块卡片", () => {
     );
     render(indented);
     expect(taskCards()).toHaveLength(1);
-    expect(taskCards()[0]!.textContent).toContain("时间轴改用子会话 todo");
+    expect(taskCards()[0]!.textContent).toContain("时间轴改用超流体 todo");
     expect(text()).not.toContain('"tasks"');
     expect(container.querySelector("pre code.language-super-agent")).toBeNull();
   });
@@ -560,7 +560,7 @@ describe("AssistantText 协议块卡片", () => {
     ["收栏比开栏短（```` 开 / ``` 收）", "````super-agent", "```"],
   ])("%s 仍出任务卡、不留 JSON 墙", (_name, open, closeLine) => {
     const source = [
-      "派一个子会话。",
+      "派一个超流体。",
       "",
       open,
       '{"tasks":[{"title":"尾巴收栏任务","task":"收栏行后面还有内容"}]}',
@@ -578,7 +578,7 @@ describe("AssistantText 协议块卡片", () => {
     expect(cards[0]!.textContent).toContain("收栏行后面还有内容");
     expect(container.querySelector("pre code.language-super-agent")).toBeNull();
     expect(text()).not.toContain('"tasks"');
-    expect(text()).toContain("派一个子会话。");
+    expect(text()).toContain("派一个超流体。");
   });
 
   it("收栏同行带尾巴时，尾巴留在卡片之后的文本段里", () => {
@@ -816,8 +816,8 @@ describe("ThoughtText 思考卡正文", () => {
     expect(taskCards()).toHaveLength(0);
     expect(container.querySelector('[data-testid="super-task-salvaged"]')).toBeNull();
     expect(text()).not.toMatch(/第 \d+\/\d+ 个任务/);
-    expect(text()).not.toContain("委派子会话");
-    expect(text()).not.toContain("子会话操作");
+    expect(text()).not.toContain("委派超流体");
+    expect(text()).not.toContain("超流体操作");
     // 围栏就是普通代码块：语言标签与原始载荷都在，不再被投影成卡片。
     const code = container.querySelector("pre code.language-super-agent");
     expect(code).toBeTruthy();
@@ -919,7 +919,7 @@ describe("委派卡独立表面（与工具操作卡区分）", () => {
     const actionsCard = container.querySelector<HTMLElement>(".super-directive-card")!;
     expect(actionsCard.className).toContain("bg-primary/10");
     expect(actionsCard.className).not.toContain("bg-card");
-    expect(actionsCard.textContent).toContain("子会话操作");
+    expect(actionsCard.textContent).toContain("超流体操作");
     expect(actionsCard.textContent).toContain("3 个动作");
 
     render(["```super-agent", '{"tasks": [oops]}', "```"].join("\n"));
@@ -962,7 +962,7 @@ describe("SuperActionsToolCallCard（super-agent 工具 actions 载荷）", () =
     const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
     expect(card.classList.contains("super-directive-card")).toBe(true);
     expect(card.className).toContain("bg-primary/10");
-    expect(card.textContent).toContain("子会话操作");
+    expect(card.textContent).toContain("超流体操作");
     expect(card.textContent).toContain("3 个动作");
     expect(card.textContent).toContain("失败");
     expect(card.hasAttribute("data-super-delegation-origin")).toBe(false);
@@ -987,7 +987,7 @@ describe("SuperActionsToolCallCard（super-agent 工具 actions 载荷）", () =
     const failed = card.querySelector<HTMLElement>('[data-testid="super-action-result-failed"]');
     expect(failed).toBeTruthy();
     expect(failed!.textContent).toContain("super-wrong");
-    expect(failed!.textContent).toContain("找不到该子会话");
+    expect(failed!.textContent).toContain("找不到该超流体");
   });
 
   it("动作结果全部生效：显示绿色已完成与成功摘要", () => {

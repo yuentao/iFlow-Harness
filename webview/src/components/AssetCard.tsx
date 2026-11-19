@@ -383,7 +383,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
 
   return (
     <>
-      {loadError && <div className="text-ui-body text-destructive">{loadError}</div>}
+      {loadError && <div role="alert" className="text-ui-body text-destructive">{loadError}</div>}
 
       {editing === null && detail === null && creating === null && confirmDelete === null && (
         <>
@@ -406,14 +406,14 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             >
               {t("新建")}
             </Button>
-            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
+            {editError && <span role="alert" className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
-              <span className="ml-auto text-ui-label text-warning">
+              <span role="alert" className="ml-auto text-ui-label text-warning">
                 {t("文件已经在磁盘上被改过，请刷新后再编辑")}
               </span>
             )}
             {savedFlash && !saving && (
-              <span className="ml-auto text-ui-label text-success">{savedFlash}</span>
+              <span role="status" aria-live="polite" className="ml-auto text-ui-label text-success">{savedFlash}</span>
             )}
           </ToolbarRow>
           <SecondaryRow>
@@ -571,9 +571,9 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             <Button variant="primary" disabled={editLoading !== null} onClick={saveEditing}>
               {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
             </Button>
-            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
+            {editError && <span role="alert" className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
-              <span className="text-ui-label text-warning">
+              <span role="alert" className="text-ui-label text-warning">
                 {t("文件已经在磁盘上被改过，请刷新后再编辑")}
               </span>
             )}
@@ -654,7 +654,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               >
                 {generating ? t("生成中…") : t("AI 生成内容")}
               </Button>
-              {genError && <span className="text-ui-body text-destructive">{genError}</span>}
+              {genError && <span role="alert" className="text-ui-body text-destructive">{genError}</span>}
             </ActionRow>
           </div>
           <Field label={t("内容（模板，可直接修改）")}>
@@ -674,9 +674,9 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             <Button variant="primary" disabled={generating} onClick={createAsset}>
               {saving ? t("创建中…") : savedFlash ? t("已创建") : t("创建")}
             </Button>
-            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
+            {editError && <span role="alert" className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
-              <span className="text-ui-label text-warning">
+              <span role="alert" className="text-ui-label text-warning">
                 {t("已经有同名文件了，直接编辑它即可")}
               </span>
             )}

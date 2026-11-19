@@ -45,7 +45,7 @@ function stateWithText(): SessionState {
   return state;
 }
 
-function render(state: SessionState): void {
+function render(state: SessionState, focusMode = false): void {
   store.current = {
     state,
     toasts: [],
@@ -53,7 +53,7 @@ function render(state: SessionState): void {
     notify,
     dismissToast: vi.fn(),
     setHeaderScrolled: vi.fn(),
-    focusMode: false,
+    focusMode,
     promptSeq: 0,
     requestDraft: vi.fn(),
     requestMemoryDraft: vi.fn(),
@@ -162,5 +162,76 @@ describe("转录底部浮动 pill 的忙碌文案", () => {
     state.initializingReason = null;
     render(state);
     expect(container.textContent ?? "").toContain("正在创建新会话…");
+  });
+});
+
+describe("待决卡与 Focus 视图的 pill / 空态判据", () => {
+  function streamingState(): SessionState {
+    const state = stateWithText();
+    state.status = "streaming";
+    return state;
+  }
+
+  it("流式且有块时显示「正在生成」pill", () => {
+    render(streamingState());
+    expect(container.textContent ?? "").toContain("正在生成");
+  });
+
+  it("提问卡待回答时不显示「正在生成」pill", () => {
+    const state = streamingState();
+    state.pendingQuestions = {
+      id: "q-1",
+      questions: [{ header: "h", question: "Q?", options: [], multiSelect: false }],
+      deadline: Date.now() + 60_000,
+      timeoutMs: 60_000,
+    };
+    render(state);
+    expect(container.textContent ?? "").not.toContain("正在生成");
+  });
+
+  it("审批卡待决时不显示「正在生成」pill", () => {
+    const state = streamingState();
+    state.pendingApproval = {
+      id: "a-1",
+      toolName: "write_file",
+      title: "write",
+      toolKind: "edit",
+      locations: [],
+      options: [{ optionId: "o", name: "允许", kind: "allow_once" }],
+      deadline: Date.now() + 60_000,
+      timeoutMs: 60_000,
+    };
+    render(state);
+    expect(container.textContent ?? "").not.toContain("正在生成");
+  });
+
+  it("Focus 视图下本轮只有工具块时不误显空状态，且 pill 按未过滤块数显示", () => {
+    const state = streamingState();
+    state.blocks = [{ kind: "tool", id: "t-1", toolName: "run", status: "completed", content: "ok" } as never];
+    render(state, true);
+    // Focus view filters the tool block out of visibleBlocks, but the empty
+    // state must key off the UNFILTERED transcript.
+    expect(container.querySelector(".empty-state")).toBeNull();
+    // The pill likewise keys off state.blocks, not the filtered view.
+    expect(container.textContent ?? "").toContain("正在生成");
+  });
+});
+
+describe("窄屏内联编辑器", () => {
+  it("编辑器容器可收缩、动作行可换行，不设 280px 硬下限", () => {
+    const state = stateWithText();
+    state.blocks = [{ kind: "user", id: "u-1", text: "一条较长的问题需要编辑" }];
+    render(state);
+    const editBtn = container.querySelector<HTMLButtonElement>('button[aria-label="编辑并重发该消息"]');
+    expect(editBtn).toBeTruthy();
+    act(() => editBtn!.click());
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="编辑消息"]');
+    expect(textarea).toBeTruthy();
+    // TextArea kit wraps the field in a `relative grid content-start` div.
+    const editor = textarea!.parentElement!.parentElement!;
+    expect(editor.className).toContain("min-w-0");
+    expect(editor.className).not.toContain("min-w-[280px]");
+    const actionRow = editor.children[1] as HTMLElement;
+    expect(actionRow.className).toContain("flex-wrap");
   });
 });

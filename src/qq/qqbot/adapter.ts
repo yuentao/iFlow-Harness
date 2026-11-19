@@ -19,16 +19,19 @@
  *
  * 纪律：token 只出现在发往网关/API 的头与 Identify 载荷里，绝不进日志。
  *
- * 连接生命周期（2026-11-17 补齐断线恢复）：
+ * 连接生命周期（2026-11-20 收敛断线恢复；原 2026-11-17 补齐）：
  *  - 心跳发送异常与 ACK 断供都在定时器内部消化（记 lastError → 主动断开 →
- *    指数退避重连），异常绝不穿透定时器回调；
- *  - 101 建连成功后启动一次性握手超时（缺省 20s）：迟迟拿不到 READY 就断开
- *    重连，避免「已连接但不干活」（平台静默忽略 Resume 时就是这种形态）；
- *    定时器只在 READY 清除，HELLO 不算握手完成；
- *  - 退避按**连续失败次数**指数增长，只有 READY 成功才清零 —— 反复判死不
- *    会每次退回 1s 形成重连风暴；最近判死原因与连续失败次数进 health；
+ *    指数退避重连），异常绝不穿透定时器回调；缺省 1 个周期无 ACK 即判死
+ *    （更早发现半开连接，弱网可注入更大值）；
+ *  - 101 建连成功后启动一次性握手超时：Identify 20s、Resume 仅 8s（会话恢复
+ *    本应更快）。迟迟拿不到 READY 就断开重连，避免「已连接但不干活」；定时器
+ *    只在 READY 清除，HELLO 不算握手完成；
+ *  - 退避按**连续失败次数**指数增长、封顶 8s，只有 READY 成功才清零 —— 反复
+ *    判死不会每次退回 1s 形成重连风暴，也不会爬到 30s 拖慢恢复；
  *  - 重连优先 Resume（op=6，携带 session_id + 最近 seq，目标为 READY 给的
- *    resume_gateway_url），失败或没有会话时退回 Identify；
+ *    resume_gateway_url）；**resume 阶段连续失败 1 次**（建连失败或握手超时）
+ *    即清会话回默认网关 Identify，不拿失效会话反复退避 —— 实测这把 1006 断线
+ *    后 14 次无效重连 / 3.5 分钟的恢复压到秒级；
  *  - 退回 Identify 意味着断线区间无法补发：`missedWindowNotice` 会一直挂在
  *    health().detail 上，绝不宣称「消息已恢复」；
  *  - 出站 HTTP 失败（send）与断线都写入 lastError，health() 脱敏后带出。
@@ -92,11 +95,22 @@ export interface QqBotAdapterDeps {
    */
   heartbeatMaxMissedAcks?: number;
   /**
-   * WS 建连成功（101）后等待 HELLO/READY 的一次性握手超时（毫秒）；
-   * 缺省 20000，`<= 0` 关闭。平台对 Resume 静默忽略时连接会「看着活着但
+   * WS 建连成功（101）后等待 HELLO/READY 的一次性握手超时（毫秒），用于
+   * Identify；缺省 20000，`<= 0` 关闭。平台对握手静默忽略时连接会「看着活着但
    * 永远没有 READY」，这条超时是唯一能把它拉回来的机制。
    */
   handshakeTimeoutMs?: number;
+  /**
+   * Resume 专用握手超时（毫秒）；缺省 8000。resume 是已知会话的恢复，应比
+   * 首次 Identify 快得多，用更短超时在平台静默忽略失效会话时尽早回退 Identify。
+   * `<= 0` 时回退到 `handshakeTimeoutMs`。
+   */
+  resumeHandshakeTimeoutMs?: number;
+  /**
+   * Resume 连续失败上限；缺省 1。resume 阶段（建连失败或握手超时）失败这么
+   * 多次就放弃旧会话、回默认网关新建 Identify。测试可注入更大值覆盖抖动场景。
+   */
+  resumeFailureLimit?: number;
 }
 
 /** 过期前 5 分钟刷新：避免请求打到临界点被拒。 */
@@ -106,23 +120,47 @@ export const TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 const DEFAULT_HEARTBEAT_MS = 30_000;
 
 /**
- * 心跳连续多少个周期没收到 ACK 就判定连接已死（缺省 2 个周期 ≈ 平台容忍
- * 窗口）。可通过构造选项 `heartbeatMaxMissedAcks` 覆盖，行为默认不变。
+ * 心跳连续多少个周期没收到 ACK 就判定连接已死（缺省 1 个周期）。
+ *
+ * 原缺省 2 个周期（QQ 网关 heartbeat_interval 常为 40~60s → 最坏 80~120s 才
+ * 发现半开连接，期间入站消息静默丢失）。断线恢复已收敛到秒级后，单次误判
+ * 重连的代价很低，故收紧到 1 个周期以更早发现断线；弱网可用构造选项
+ * `heartbeatMaxMissedAcks` 调大。
  */
-export const DEFAULT_HEARTBEAT_MAX_MISSED_ACKS = 2;
+export const DEFAULT_HEARTBEAT_MAX_MISSED_ACKS = 1;
 
 /**
- * WS 建连（101）后等待 HELLO/READY 的一次性超时缺省值（20s）。
+ * Identify 握手超时缺省值（20s）：WS 建连（101）后等待 HELLO/READY 的一次性超时。
  *
  * 只覆盖「已连接但不干活」：TCP/TLS 与 101 由 transport 自己的连接超时管，
- * 这里管的是握手帧迟迟不来（典型：平台静默忽略 Resume，连接保持但没有
- * READY，心跳也永远不启动）。可用 `handshakeTimeoutMs` 覆盖或关闭。
+ * 这里管的是握手帧迟迟不来。可用 `handshakeTimeoutMs` 覆盖或关闭。
  */
 export const DEFAULT_QQBOT_HANDSHAKE_TIMEOUT_MS = 20_000;
 
-/** 重连退避：1s 起、指数增长、封顶 30s（测试可注入更小值）。 */
+/**
+ * Resume 握手超时缺省值（8s）：会话恢复本应比首次 Identify 快得多；平台静默
+ * 忽略一个已失效 session 时不会回 READY，用更短的超时尽快判死并回退 Identify。
+ *
+ * 实测（2026-11-20 用户日志）：resume 被静默忽略时每次吃满 20s 握手超时，
+ * 3 次重试就耗掉 ~52s 才回退（13:38:58 → 13:39:50），是断线恢复慢的主因之一。
+ */
+export const DEFAULT_QQBOT_RESUME_HANDSHAKE_TIMEOUT_MS = 8_000;
+
+/** 重连退避基数：1s 起、指数增长（测试可注入更小值）。 */
 const DEFAULT_RECONNECT_BASE_DELAY_MS = 1_000;
-const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
+/** 重连退避上限（导出便于测试断言收敛）：8s，旧值 30s。 */
+export const DEFAULT_RECONNECT_MAX_DELAY_MS = 8_000;
+
+/**
+ * Resume 连续失败上限（缺省 1）：resume 阶段（建连失败或握手超时）失败这么多次
+ * 就放弃旧会话、回默认网关新建 Identify。
+ *
+ * 旧实现要等 `reconnectAttempts > RESUME_MAX_ATTEMPTS(3)` 才回退，且判断发生在
+ * 退避 timer 内 —— 每次 resume 握手超时(20s) + 指数退避(最高 30s) 叠加，实测
+ * 1006 断线后 14 次无效重连、3.5 分钟才 ready（18:48:06 → 18:51:37）。收敛到 1
+ * 次即回退，避免拿着失效会话反复重试。
+ */
+export const DEFAULT_QQBOT_RESUME_MAX_FAILURES = 1;
 
 /**
  * 入站 msgId 去重窗口：同一条消息在窗口内只投递一次（resume 会重放断线区间，
@@ -131,12 +169,6 @@ const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
  */
 const SEEN_INBOUND_TTL_MS = 2 * 60_000;
 const SEEN_INBOUND_LIMIT = 5_000;
-
-/**
- * Resume 重试上限：连续这么多次重连都没成功（resume 地址不可达 / 会话被判死），
- * 就放弃恢复、改回默认网关新建会话 —— 否则会拿着一个失效地址无限退避重连。
- */
-const RESUME_MAX_ATTEMPTS = 3;
 
 /**
  * OP 码常量（导出便于测试/复用）。
@@ -281,6 +313,18 @@ export class QqBotAdapter implements ChannelAdapter {
   private readonly reconnectMaxDelayMs: number;
   private readonly heartbeatMaxMissedAcks: number;
   private readonly handshakeTimeoutMs: number;
+  private readonly resumeHandshakeTimeoutMs: number;
+  private readonly resumeFailureLimit: number;
+  /**
+   * resume 阶段连续失败次数（建连失败 / 握手超时都算），达到 resumeFailureLimit
+   * 就清掉旧会话回退 Identify。READY 成功（无论 resume/identify）时清零。
+   */
+  private resumeFailures = 0;
+  /**
+   * 已发 resume 帧但尚未收到 READY（READY / Identify 时清）。只有在 resume
+   * pending 窗口内断线才算「resume 失败」，避免把 READY 之后的正常断线误计入。
+   */
+  private resumePending = false;
   /** 退避抖动随机源（注入固定值便于测试；缺省 Math.random）。 */
   private readonly randomFn: () => number;
 
@@ -307,6 +351,18 @@ export class QqBotAdapter implements ChannelAdapter {
   private lastError: string | undefined;
   /** lastError 来源：send 类错误在下次成功发送时清除，连接类错误等连接成功才清。 */
   private lastErrorSource: "send" | "connection" | undefined;
+  /**
+   * 最近一次**被平台拒绝**的出站消息原因（含业务错误码，例如
+   * 「QQBot: 业务错误 40054（主动消息额度已用尽）」）。
+   *
+   * 与 `lastError` 的区别：`lastError` 表达「通道当前不健康」，一次成功发送
+   * 就会清掉；而这里表达「平台最近拒绝过我们，原因是什么」—— 主动消息额度
+   * 用尽、被动回复窗口过期、频率限制这些**必须留着看**，否则被回退通道救
+   * 回来的那一次成功会把原因一并抹掉，用户与运维都无从得知额度已经见底。
+   *
+   * 脱敏后再存（token / appSecret 绝不进这里）。
+   */
+  private lastSendRejection: string | undefined;
   /** 缺 msgId 而被丢弃的入站事件数（可观测；health.detail 会带出）。 */
   private droppedInbound = 0;
   /**
@@ -398,6 +454,25 @@ export class QqBotAdapter implements ChannelAdapter {
       typeof deps.handshakeTimeoutMs === "number" && Number.isFinite(deps.handshakeTimeoutMs)
         ? deps.handshakeTimeoutMs
         : DEFAULT_QQBOT_HANDSHAKE_TIMEOUT_MS;
+    // 显式 resume 超时优先；未设置且调用方显式给了 handshakeTimeoutMs（多见于
+    // 测试注入小值加速握手超时）时跟随它；否则用生产默认 8s。不单独关闭 resume
+    // 超时 —— 平台静默忽略失效会话时正是它把连接拉回来。
+    const explicitResume = deps.resumeHandshakeTimeoutMs;
+    const explicitHandshake = deps.handshakeTimeoutMs;
+    this.resumeHandshakeTimeoutMs =
+      typeof explicitResume === "number" && Number.isFinite(explicitResume) && explicitResume > 0
+        ? explicitResume
+        : typeof explicitHandshake === "number" &&
+            Number.isFinite(explicitHandshake) &&
+            explicitHandshake > 0
+          ? explicitHandshake
+          : DEFAULT_QQBOT_RESUME_HANDSHAKE_TIMEOUT_MS;
+    this.resumeFailureLimit =
+      typeof deps.resumeFailureLimit === "number" &&
+      Number.isFinite(deps.resumeFailureLimit) &&
+      deps.resumeFailureLimit >= 1
+        ? Math.floor(deps.resumeFailureLimit)
+        : DEFAULT_QQBOT_RESUME_MAX_FAILURES;
     this.randomFn =
       typeof deps.random === "function" ? deps.random : () => Math.random();
   }
@@ -521,9 +596,13 @@ export class QqBotAdapter implements ChannelAdapter {
     const epoch = this.socketEpoch;
     // 有可恢复会话时优先连 resume_gateway_url（README/官方语义：该地址专供
     // 恢复用）；字段缺失就退回默认网关，Resume 帧照样带 session/seq。
-    const target = this.sessionId
-      ? (this.resumeGatewayUrl ?? this.gatewayUrl)
-      : this.gatewayUrl;
+    const viaResume = this.sessionId !== undefined;
+    const target = viaResume ? (this.resumeGatewayUrl ?? this.gatewayUrl) : this.gatewayUrl;
+    // 连接的目标一确定就标记本次握手类型：resume 目标即使服务端静默不发 HELLO、
+    // sendHandshake 永远没机会执行，握手超时也必须识别为一次 resume 失败并回退
+    // Identify（否则会一直重连失效的 resume 地址）。READY 时由 captureReady 清。
+    this.handshake = viaResume ? "resume" : "identify";
+    this.resumePending = viaResume;
     const socket = await this.transport.connect(target, buildAuthHeaders(token));
     if (this.closing || epoch !== this.socketEpoch) {
       // 连接期间用户 close 或又发起了新的连接：丢弃这条迟到的 socket。
@@ -551,8 +630,12 @@ export class QqBotAdapter implements ChannelAdapter {
       );
     });
     // 握手超时：101 之后若一直拿不到 READY（典型：Resume 被平台静默忽略），
-    // 连接会「看着活着但不干活」。这里在拿到 READY 前兜一层超时。
-    this.startHandshakeTimeout(epoch);
+    // 连接会「看着活着但不干活」。这里在拿到 READY 前兜一层超时；resume 目标
+    // 用更短超时（连 HELLO 都没有时也照样快速判死回退）。
+    this.startHandshakeTimeout(
+      epoch,
+      viaResume ? this.resumeHandshakeTimeoutMs : this.handshakeTimeoutMs,
+    );
     this.log("QQBot: websocket connected");
   }
 
@@ -715,9 +798,16 @@ export class QqBotAdapter implements ChannelAdapter {
           },
         });
         this.log("QQBot: resume sent");
+        this.resumePending = true;
+        // 从发出 resume 的此刻重新计时，用更短的 resume 专用超时替换 openSocket
+        // 启动的 identify 超时（HELLO 可能姗姗来迟，不该吃掉 resume 的超时预算）。
+        this.startHandshakeTimeout(this.socketEpoch, this.resumeHandshakeTimeoutMs);
         return;
       }
       this.handshake = "identify";
+      // 本轮走 Identify（无会话 / 已回退）：resume pending 与计数都清零。
+      this.resumePending = false;
+      this.resumeFailures = 0;
       this.sendIdentify();
     } catch (error) {
       this.handleDisconnect(`鉴权帧发送失败：${errorText(error)}`, "connection");
@@ -768,6 +858,10 @@ export class QqBotAdapter implements ChannelAdapter {
     }
     this.disconnectedSinceReady = false;
     this.reconnectAttempts = 0;
+    // READY 是 resume 成功的唯一确认（也标识 Identify 建会话完成）：resume
+    // pending 与失败计数都清零，下一次断线重新按新会话计。
+    this.resumePending = false;
+    this.resumeFailures = 0;
     // 真正连上了：这是唯一的重置点 —— 连续失败次数与判死原因都清空，
     // 退避下次从头算；连接类 lastError 也在这里清（101 不算连上）。
     this.consecutiveFailures = 0;
@@ -831,18 +925,21 @@ export class QqBotAdapter implements ChannelAdapter {
    * 超时即按连接已死处理（关 socket + 记 lastError + 退避重连），避免连接
    * 「已连上但永远不干活」地挂着。
    */
-  private startHandshakeTimeout(epoch: number): void {
+  private startHandshakeTimeout(epoch: number, timeoutMs = this.handshakeTimeoutMs): void {
     this.clearHandshakeTimeout();
-    if (!(this.handshakeTimeoutMs > 0)) return;
+    if (!(timeoutMs > 0)) return;
     const timer = setTimeout(() => {
       if (this.handshakeTimer !== timer) return;
       this.handshakeTimer = undefined;
       if (this.closing || epoch !== this.socketEpoch || !this.socket) return;
+      // resume 超时也是一次 resume 失败：handleDisconnect 会据此累加
+      // resumeFailures，达到上限立即回退 Identify（不必等下一次重连）。
+      const wasResume = this.handshake === "resume";
       this.handleDisconnect(
-        `握手超时（${this.handshakeTimeoutMs}ms 内未收到 READY）`,
+        `握手超时（${timeoutMs}ms 内未收到 READY${wasResume ? "，resume 无响应" : ""}）`,
         "connection",
       );
-    }, this.handshakeTimeoutMs);
+    }, timeoutMs);
     timer.unref?.();
     this.handshakeTimer = timer;
   }
@@ -868,6 +965,10 @@ export class QqBotAdapter implements ChannelAdapter {
   private handleDisconnect(reason: string, source: "send" | "connection"): void {
     if (this.closing) return;
     const hadSocket = this.socket !== undefined;
+    // 只有「发了 resume 却没拿到 READY」才算 resume 失败；READY 之后的正常断线
+    // （1006 / op=7 / 心跳判死）不是 resume 失败，不该触发回退。
+    const failedResume = this.resumePending;
+    this.resumePending = false;
     this.clearHandshakeTimeout();
     this.stopHeartbeat();
     this.socketEpoch += 1;
@@ -884,6 +985,19 @@ export class QqBotAdapter implements ChannelAdapter {
     // 震荡记账：连续失败次数只由 READY 清零（见 captureReady），退避据此
     // 递增，绝不因为「又建上了一条 101」就退回 1s 重连。
     this.consecutiveFailures += 1;
+    if (failedResume) {
+      this.resumeFailures += 1;
+      // 达到上限：立即放弃旧会话回默认网关 Identify，不再对失效会话指数退避。
+      if (this.resumeFailures >= this.resumeFailureLimit && this.sessionId) {
+        this.log("QQBot: resume failed, falling back to identify");
+        this.sessionId = undefined;
+        this.resumeGatewayUrl = undefined;
+        this.lastSequence = null;
+        this.lastSequenceSessionId = undefined;
+        this.missedWindowNotice = "断线区间可能丢消息（resume 多次失败，已改为新建会话）";
+        this.resumeFailures = 0;
+      }
+    }
     this.lastDeathReason = reason;
     this.noteError(source, reason);
     this.log(`QQBot: disconnected: ${this.redact(reason)}`);
@@ -894,7 +1008,7 @@ export class QqBotAdapter implements ChannelAdapter {
   }
 
   /**
-   * 指数退避重连 + equal jitter（1s 起、双倍增长、封顶 30s）；用户 close 后
+   * 指数退避重连 + equal jitter（1s 起、双倍增长、封顶 8s）；用户 close 后
    * 不再排队。抖动让多实例同时断线时不会在同一毫秒集体重连（惊群）。
    */
   private scheduleReconnect(): void {
@@ -917,24 +1031,31 @@ export class QqBotAdapter implements ChannelAdapter {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       if (this.closing) return;
-      if (this.reconnectAttempts > RESUME_MAX_ATTEMPTS && this.sessionId) {
-        // resume 地址/会话连续重试仍不可用：放弃恢复，回默认网关新建会话。
-        // 旧会话断线后的事件无法再补发，必须把缺口留在可见状态上；序号属于
-        // 旧会话，一并作废，绝不能带进新的 Identify 会话。
-        this.log("QQBot: resume retries exhausted, falling back to identify");
-        this.sessionId = undefined;
-        this.resumeGatewayUrl = undefined;
-        this.lastSequence = null;
-        this.lastSequenceSessionId = undefined;
-        this.missedWindowNotice = "断线区间可能丢消息（resume 多次失败，已改为新建会话）";
-      }
+      // resume 回退已在 handleDisconnect / openSocket 失败出口按 resumeFailures
+      // 即时完成（不再在退避 timer 里等 reconnectAttempts 上限），避免每次
+      // resume 握手超时 + 指数退避叠加成分钟级恢复。
       void this.openSocket().catch((error: unknown) => {
         const reason = `重连失败：${errorText(error)}`;
         // 不在这里推进 consecutiveFailures：断线时 handleDisconnect 已记过一次，
         // 二次累加会让单次故障跳两级退避。这里只让重连尝试继续（attempts 由
         // 下一次 scheduleReconnect 自增），并保留可观测错误。
+        // resume 地址连不上（还没走到 sendHandshake）：同样计入 resumeFailures，
+        // 达到上限立即回默认网关 Identify，不拿失效地址反复退避。
+        const failedResumeConnect = this.sessionId !== undefined;
         this.lastDeathReason = reason;
         this.noteError("connection", reason);
+        if (failedResumeConnect) {
+          this.resumeFailures += 1;
+          if (this.resumeFailures >= this.resumeFailureLimit) {
+            this.log("QQBot: resume gateway unreachable, falling back to identify");
+            this.sessionId = undefined;
+            this.resumeGatewayUrl = undefined;
+            this.lastSequence = null;
+            this.lastSequenceSessionId = undefined;
+            this.missedWindowNotice = "断线区间可能丢消息（resume 多次失败，已改为新建会话）";
+            this.resumeFailures = 0;
+          }
+        }
         this.scheduleReconnect();
       });
     }, delay);
@@ -1013,6 +1134,9 @@ export class QqBotAdapter implements ChannelAdapter {
         const error = `QQBot: 业务错误 ${failure.code}（${failure.message}）`;
         // 发送失败也属于「最近错误」：health().detail 必须能看出发不出去。
         this.noteError("send", error);
+        // 另外留一份「最近被平台拒绝的原因」：它带业务错误码（如 40054
+        // 主动消息额度已用尽），即使随后被另一条通道救回来也不该被抹掉。
+        this.lastSendRejection = this.redact(error);
         return {
           ok: false,
           error,
@@ -1026,6 +1150,8 @@ export class QqBotAdapter implements ChannelAdapter {
         if (typeof id === "string" || typeof id === "number") messageId = String(id);
       }
       // 一次成功发送证明链路已恢复：只清 send 类错误，连接类错误等连接成功。
+      // 注意：**不动** lastSendRejection —— 它记的是「平台最近拒绝过我们、
+      // 原因是什么」，与「通道当前是否健康」是两件事。
       if (this.lastErrorSource === "send") {
         this.lastError = undefined;
         this.lastErrorSource = undefined;
@@ -1038,6 +1164,8 @@ export class QqBotAdapter implements ChannelAdapter {
       const retryable = status === undefined ? true : !isPermanentHttpStatus(status);
       const text = errorText(error);
       this.noteError("send", `发送失败：${text}`);
+      // 同上：被拒原因留着（含 HTTP 状态码的拒绝文案），成功后也不清除。
+      this.lastSendRejection = this.redact(text);
       // 网络/服务端异常交给上层重试；错误文本不含凭据。
       return { ok: false, error: text, retryable };
     }
@@ -1064,6 +1192,8 @@ export class QqBotAdapter implements ChannelAdapter {
     this.missedWindowNotice = undefined;
     this.reconnectAttempts = 0;
     this.consecutiveFailures = 0;
+    this.resumeFailures = 0;
+    this.resumePending = false;
     this.lastDeathReason = undefined;
     if (socket) {
       try {
@@ -1078,13 +1208,20 @@ export class QqBotAdapter implements ChannelAdapter {
   /**
    * 连接态快照；detail 只含状态描述与脱敏后的最近错误，不含 token。
    *
-   * 组成：连接态 + 最近错误（send/断线/op=9/心跳超时）+ 断线丢消息提示 +
-   * 缺 msgId 丢弃计数 —— 前两项满足「health 永不含最近错误」的修复，后两项
-   * 让静默丢失变成可观测状态，绝不宣称已恢复。
+   * 组成：连接态 + 最近错误（send/断线/op=9/心跳超时）+ **最近发送被拒**（带
+   * 平台业务错误码，成功发送后仍保留）+ 断线丢消息提示 + 缺 msgId 丢弃计数
+   * —— 前三项让「发不出去」始终可查（含额度用尽 40054 这类拒绝原因），
+   * 后两项让静默丢失变成可观测状态，绝不宣称已恢复。
    */
   async health(): Promise<ChannelHealth> {
     const parts: string[] = [this.connected ? "qqbot websocket" : "disconnected"];
     if (this.lastError) parts.push(this.redact(this.lastError));
+    // 最近一次被平台拒绝的原因（含业务错误码）：与「通道当前是否健康」是两
+    // 件事 —— 主动消息额度用尽（40054）/ 被动回复过期 / 频率限制这些信息，
+    // 即便被另一条通道救回来也不该被抹掉，否则用户与运维都看不出额度见底。
+    if (this.lastSendRejection) {
+      parts.push(`最近发送被拒：${this.lastSendRejection}`);
+    }
     // 判死原因单独带标签（可能与 lastError 同一句，成对出现也无害）。
     const deathReason = this.lastDeathReason ? this.redact(this.lastDeathReason) : undefined;
     if (deathReason) {

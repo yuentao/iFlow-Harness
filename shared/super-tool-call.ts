@@ -306,12 +306,14 @@ export function parseSuperToolCall(
  *    就返回 null —— 绝不编造内容。
  *
  * 口径与派发器**完全一致**（复用 {@link parseSuperDelegationPayload}，不复制
- * 校验）：缺 `title` 回退到 task 首行、附件同时接受 `string[]` 与 `{path,name}`
+ * 校验）：`title` 必填，缺 / 空白 / 占位符的条目会被拒绝并给出字段级诊断，
+ * 绝不用 task 首行当标题；附件同时接受 `string[]` 与 `{path,name}`
  * 对象、占位符任务跳过、空任务判失败；混合载荷里畸形条目被丢弃、合法条目照常
  * 返回（诊断原因见 `parseSuperDelegationPayload` 的 `issues`）。因此「宿主派发
  * 出去了」与「卡片说有任务」不会再出现分叉。
  *
- * @returns 解析出的任务列表；载荷不可用时为 null（调用方据此诚实降级）。
+ * @returns 解析出的任务列表；载荷不可用（如所有任务都缺 title）时为 null
+ * （调用方据此诚实降级）。
  */
 export function parseSuperDelegationTasks(args: unknown): SuperTaskSpec[] | null {
   const parsed = parseSuperDelegationPayload(args);

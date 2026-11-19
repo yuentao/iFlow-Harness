@@ -61,8 +61,26 @@ const KIND_ACTION: Record<string, string> = {
  * buttons must NOT be gated on streaming state — the agent is blocked waiting
  * for this answer.
  */
-export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
+export function ApprovalCard({
+  approval,
+  active = true,
+}: {
+  approval: PendingApprovalUi;
+  /**
+   * Whether this card is the one the user can actually see and act on.
+   * PendingCards passes `false` for cards covered by a newer arrival in the
+   * stack. `inert` (the stack's own guard) only removes a subtree from focus,
+   * hit-testing and the accessibility tree — it does NOT stop a listener on
+   * `window`, so a buried card would still approve/deny on a global Y/N that
+   * the user aimed at the visible card. The shortcut is therefore gated here,
+   * on explicit data, not on DOM position probing.
+   */
+  active?: boolean;
+}) {
   const send = useChat((s) => s.send);
+  // 远程接续冻结：与 streaming 无关的全局态（陷阱 #12），接管期间任何审批
+  // 决策都不得落地；卡片本身仍渲染，用户可只读查看远程在做什么。
+  const remoteTakeover = useChat((s) => s.remoteTakeover);
   // Optimistic lock: the first click answers the request; every button is
   // disabled until the host's next snapshot removes the card. Prevents
   // double-fire on rapid clicks.
@@ -84,7 +102,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   }, []);
 
   const answer = (optionId: string | null) => {
-    if (answered) return;
+    if (answered || remoteTakeover) return;
     setAnswered(true);
     send({ type: "respondApproval", id: approval.id, optionId });
   };
@@ -105,8 +123,11 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   const denyOptionId = rejectOption?.optionId ?? null;
 
   useEffect(() => {
+    // A covered card must not own the keyboard: its shortcuts would answer a
+    // decision the user cannot see (the top card is what they are reading).
+    if (!active) return;
     const handler = (e: KeyboardEvent) => {
-      if (answered || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      if (answered || remoteTakeover || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
       // A modal above this card (settings / confirm) owns the keyboard; the
       // card is still mounted underneath and must not answer a hidden prompt.
       if (document.querySelector(".auth-backdrop")) return;
@@ -118,6 +139,24 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           || target.tagName === "SELECT"
           || target.isContentEditable)
       ) {
+        return;
+      }
+      // ESC is the card's dismissal (deny) — the SAME decision as N, on the
+      // safe side. It used to live in a React onKeyDown on the card root,
+      // which only fired when focus sat inside the card and only called
+      // stopPropagation: focus elsewhere (Composer / body) let the key fall
+      // through to Composer's window-level "ESC stops generation" listener,
+      // so one key meant "deny" or "kill the whole turn" depending on where
+      // focus happened to be. Owning ESC here — behind the same `active` /
+      // modal / editable / defaultPrevented gates as Y/N — gives it one
+      // meaning. preventDefault makes the global stop listener bail even if
+      // listener registration order changes; stopPropagation keeps document-
+      // level closers out of the way.
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setAnswered(true);
+        send({ type: "respondApproval", id: approval.id, optionId: denyOptionId });
         return;
       }
       const key = e.key.toLowerCase();
@@ -135,7 +174,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [answered, allowOption?.optionId, denyOptionId, approval.id, send]);
+  }, [active, answered, remoteTakeover, allowOption?.optionId, denyOptionId, approval.id, send]);
 
   const actionVerb = KIND_ACTION[approval.toolKind.toLowerCase()] ?? "执行";
   const actionTarget = primary?.path || approval.toolName;
@@ -150,16 +189,6 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
       role="alertdialog"
       aria-labelledby={titleId}
       aria-describedby={descId}
-      onKeyDown={(e) => {
-        // W4: Escape means "deny" — consistent with the card's dismissal
-        // semantics (the host treats a missing answer as cancelled too).
-        // 拦下冒泡：等待审批时 status 仍是 streaming，事件漏到 window 会
-        // 连带触发「ESC 停止生成」，一次按键双语义。
-        if (e.key === "Escape") {
-          e.stopPropagation();
-          answer(denyOptionId);
-        }
-      }}
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2">
         <ShieldCheck className="size-3.5 shrink-0 text-primary" />
@@ -241,7 +270,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
               key={opt.optionId}
               variant={variant}
               size="sm"
-              disabled={answered}
+              disabled={answered || remoteTakeover}
               data-autofocus={isSafeSide ? true : undefined}
               title={OPTION_LABEL[opt.kind] ? opt.name : undefined}
               aria-label={approval.toolName ? t("{0}（{1}）", label, approval.toolName) : label}
@@ -257,7 +286,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           <Button
             variant="canvas"
             size="sm"
-            disabled={answered}
+            disabled={answered || remoteTakeover}
             data-autofocus
             aria-label={t("取消审批")}
             onClick={() => answer(null)}

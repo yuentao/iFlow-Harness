@@ -15,10 +15,12 @@ import {
   ListOrdered,
   Loader2,
   Paperclip,
+  Radio,
   SendHorizontal,
   Sparkles,
   Square,
   SquareTerminal,
+  Unplug,
   Wand2,
   X,
 } from "lucide-react";
@@ -27,7 +29,7 @@ import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Button, CANVAS_CHIP, Dropdown, ICON_INLINE, IconButton, SearchInput, fuzzyScore } from "./ui";
+import { Button, CANVAS_CHIP, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, SearchInput, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -295,6 +297,10 @@ export function Composer() {
   const needsSetup = useChat((s) => s.state?.auth.needsSetup ?? false);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
+  /** 远程接续按钮只在机器人已启用时渲染；状态来自设置页的 qqSettings 快照。 */
+  const qqEnabled = useChat((s) => s.qqSettings?.enabled ?? false);
+  /** host 权威的远程接续内存态：true 时冻结本地全部干预，转录仍只读可滚动。 */
+  const remoteTakeover = useChat((s) => s.remoteTakeover ?? false);
   const commands = useChat((s) => s.state?.commands ?? EMPTY_COMMANDS);
   const skills = useChat((s) => s.state?.skills ?? EMPTY_SKILLS);
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
@@ -328,7 +334,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   // text as a child session instead of stopping. One semantic: while a real
   // turn runs, Stop is there.
   const streaming = status === "streaming";
-  const canStop = streaming && !replaying && !initializing;
+  const canStop = streaming && !replaying && !initializing && !remoteTakeover;
+  /** 接管态关闭接续的二次确认：确认后才真正发 stop，避免误触断掉远程会话。
+   *  ConfirmDialog 走 portal 到 body，不受本卡片 overflow-hidden / 冻结门控影响。 */
+  const [takeoverConfirmOpen, setTakeoverConfirmOpen] = useState(false);
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
   /** Non-image attachments (chips only — paths ride the sendPrompt message,
@@ -610,7 +619,15 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   useEffect(() => {
     if (!canStop) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.isComposing) return;
+      if (e.key !== "Escape" || e.isComposing || e.defaultPrevented) return;
+      // 待决卡（审批 / 提问）在等待用户决策时 status 仍是 streaming，但此刻
+      // ESC 归卡片所有（拒绝 / 不回答并继续），不是「停掉整轮」。卡片的
+      // window 监听会 preventDefault；这里再按 store 的待决态兜一层，覆盖
+      // 监听注册先后差异，保证一次按键只有一种语义。上层 modal 有自己的
+      // document ESC 处理（会 stopPropagation），这里同样让位。
+      const s = useChat.getState().state;
+      if (s?.pendingApproval || s?.pendingQuestions) return;
+      if (document.querySelector(".auth-backdrop")) return;
       e.preventDefault();
       stopRef.current();
     };
@@ -760,12 +777,15 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   // block sending entirely. `streaming` / `canStop` are computed up top so the
   // ESC handler and the Stop button share one rule.
   const hasPendingInteraction = Boolean(pendingApproval || pendingQuestions);
-  const controlsLocked = streaming || replaying || initializing || pending !== null || hasPendingInteraction;
+  // 远程接续是独立于 streaming 的全局冻结态（陷阱 #12：审批/提问卡刻意不受
+  // streaming 门控，所以冻结必须另走一条）——覆盖模型/资料下拉、附件、enhance、
+  // 发送与停止，但不碰 MessageList，转录仍可只读滚动观察远程在做什么。
+  const controlsLocked = streaming || replaying || initializing || pending !== null || hasPendingInteraction || remoteTakeover;
   // 模型下拉额外跟随活跃子会话；发送 / enhance / 附件仍只看 controlsLocked。
   const modelLocked = controlsLocked || superActive;
-  const sendBlocked = replaying || initializing || pending !== null || needsSetup;
+  const sendBlocked = replaying || initializing || pending !== null || needsSetup || remoteTakeover;
   /** Enter/发送 while a real turn streams → the host spawns a child session. */
-  const delegateMode = streaming && !replaying && !initializing;
+  const delegateMode = streaming && !replaying && !initializing && !remoteTakeover;
   /** Optimistic switch in flight (`store.pending`, cleared by the confirming
    * snapshot or its 10s failsafe): the trigger shows a spinner instead of its
    * idle icon — the lock alone looked like a dead control. */
@@ -1409,10 +1429,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   return (
     <div
       ref={rootRef}
-      className={`acrylic @container relative z-20 flex flex-col shrink-0 border-t p-3 transition-colors ${
-        dragOver ? "border-primary/60 bg-primary/5" : "border-border"
-      }`}
-      style={{ height: height ?? undefined, boxShadow: "var(--shadow-stage)" }}
+      className={`acrylic @container relative z-20 flex flex-col shrink-0 border-t p-3 transition-all duration-200 ${
+        remoteTakeover ? "overflow-hidden" : ""
+      } ${dragOver ? "border-primary/60 bg-primary/5" : "border-border"}`}
+      style={{ height: remoteTakeover ? undefined : (height ?? undefined), boxShadow: "var(--shadow-stage)" }}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
@@ -1709,7 +1729,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           the wait is visible instead of the row appearing from nowhere. */}
       {suggestionsLoading && (suggestions?.length ?? 0) === 0 && !suggestionsHidden && (
         <div
-          className="mb-2 flex items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-muted-foreground shadow-card"
+          className={`flex items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 ${
+            remoteTakeover ? "mb-0 max-h-0 overflow-hidden py-0 opacity-0 pointer-events-none" : "mb-2 py-1"
+          }`}
           aria-label={t("正在想下一步建议…")}
         >
           <Loader2 className="size-3 shrink-0 animate-spin" />
@@ -1723,7 +1745,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           the batch when the user actually sends) retires the row. */}
       {suggestions && suggestions.length > 0 && !suggestionsHidden && (
         <div
-          className="mb-2 flex flex-wrap items-center gap-1.5"
+          className={`flex flex-wrap items-center gap-1.5 transition-all duration-200 ${
+            remoteTakeover ? "mb-0 max-h-0 overflow-hidden py-0 opacity-0 pointer-events-none" : "mb-2"
+          }`}
           aria-label={t("iFlow 猜的下一步，点一下填进输入框")}
         >
           <span className="inline-flex shrink-0 items-center gap-1 text-ui-caption text-muted-foreground">
@@ -1752,13 +1776,18 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border bg-editor/60 shadow-card transition-all duration-300 focus-within:border-primary/50 focus-within:shadow-focus">
+      <div className={`flex min-h-0 flex-1 flex-col transition-all duration-300 ${
+        remoteTakeover ? "" : "rounded-lg border border-border bg-editor/60 shadow-card focus-within:border-primary/50 focus-within:shadow-focus"
+      }`}>
         <textarea
           ref={taRef}
           value={text}
-          placeholder={delegateMode ? t("派发为子会话（Enter）") : t("向 iFlow 提问…")}
+          readOnly={remoteTakeover}
+          placeholder={delegateMode ? t("派发为超流体（Enter）") : t("向 iFlow 提问…")}
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
-          className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-3 text-ui-body leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
+          className={`min-h-0 w-full flex-1 resize-none bg-transparent px-3 text-ui-body leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80 transition-all duration-200 ${
+            remoteTakeover ? "max-h-0 overflow-hidden py-0 opacity-0 pointer-events-none" : "max-h-[420px] py-3 opacity-100"
+          }`}
           onChange={(e) => {
             if (histIndex >= 0 && e.target.value !== histEntryRef.current) {
               setHistIndex(-1);
@@ -1859,8 +1888,16 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             status (shrinks via truncate / icon-only degradation), right =
             actions at a constant anchor. No flex-wrap: wrapping used to drop
             buttons to a second line and drift the send key's position. */}
-        <div className="flex shrink-0 items-center gap-1.5 px-2 pb-2 pt-2">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <div
+          className={`flex shrink-0 items-center gap-1.5 transition-all duration-200 ${
+            remoteTakeover ? "justify-center px-2 py-1.5" : "px-2 pb-2 pt-2"
+          }`}
+        >
+          <div
+            className={`flex min-w-0 items-center gap-1.5 overflow-hidden transition-all duration-200 ${
+              remoteTakeover ? "max-w-0 flex-none opacity-0" : "max-w-full flex-1 opacity-100"
+            }`}
+          >
           {/* model dropdown — refreshed at open time: the host re-queries
               GET {baseUrl}/models, so newly added gateway models show up
               without restarting the session.
@@ -2063,6 +2100,34 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5">
+            {/* 远程接续开关：仅机器人已启用时显示。刻意不受 controlsLocked /
+                remoteTakeover 门控 —— 它是解冻的唯一出口，冻结自己会造成死锁。 */}
+            {qqEnabled && (
+              <Button
+                variant={remoteTakeover ? "danger" : "canvas"}
+                icon={remoteTakeover ? <Unplug className={ICON_INLINE} /> : <Radio className={ICON_INLINE} />}
+                aria-label={remoteTakeover ? t("关闭接续") : t("远程接续")}
+                title={remoteTakeover ? t("关闭远程接续，恢复本地操作") : t("开启后本地输入与审批将被冻结")}
+                onClick={() => {
+                  if (remoteTakeover) {
+                    // 关闭接续是解冻的唯一出口：先二次确认，确认后才真正 stop，
+                    // 避免误触把远程会话断掉。start 路径无需确认。
+                    setTakeoverConfirmOpen(true);
+                  } else {
+                    send({ type: "qqTakeover", action: "start" });
+                  }
+                }}
+              >
+                <span className="@max-[340px]:hidden">{remoteTakeover ? t("关闭接续") : t("远程接续")}</span>
+              </Button>
+            )}
+            {/* 接管态下其余操作按钮水平收缩隐藏，只留下方的「关闭接续」作为
+                解冻的唯一出口；用 CSS 过渡而非卸载 DOM，保持布局稳定。 */}
+            <div
+              className={`flex items-center gap-1.5 overflow-hidden transition-all duration-200 ${
+                remoteTakeover ? "max-w-0 opacity-0" : "max-w-full opacity-100"
+              }`}
+            >
             {/* UI-audit 4.6: the wand only appears once there is something to
                 enhance (or a rewrite to undo) — an always-present disabled
                 button just widened the row. */}
@@ -2112,16 +2177,30 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               <Button
                 variant={delegateMode ? "primary-soft" : "primary"}
                 icon={delegateMode ? <ListOrdered className={ICON_INLINE} /> : <SendHorizontal className={ICON_INLINE} />}
-                title={delegateMode ? t("派发为子会话 (Enter)") : t("发送 (Enter)")}
+                title={delegateMode ? t("派发为超流体 (Enter)") : t("发送 (Enter)")}
                 disabled={sendBlocked || (!text.trim() && images.length === 0 && attachments.length === 0 && contexts.length === 0)}
                 onClick={submit}
               >
                 <span className="@max-[340px]:hidden">{delegateMode ? t("派发") : t("发送")}</span>
               </Button>
             )}
+            </div>
           </div>
         </div>
       </div>
+      {takeoverConfirmOpen && (
+        <ConfirmDialog
+          title={t("确认关闭远程接续？")}
+          message={t("关闭后将恢复本地操作，远程用户将无法继续控制本会话。")}
+          confirmLabel={t("确认关闭")}
+          cancelLabel={t("取消")}
+          onCancel={() => setTakeoverConfirmOpen(false)}
+          onConfirm={() => {
+            setTakeoverConfirmOpen(false);
+            send({ type: "qqTakeover", action: "stop" });
+          }}
+        />
+      )}
     </div>
   );
 }
