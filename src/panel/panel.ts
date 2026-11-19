@@ -120,7 +120,6 @@ import {
   superSessionsDir,
   writeSuperSessionArchive,
 } from "./super-store.js";
-import { comparisonPathKey } from "./worktree.js";
 import {
   assembleContextSections,
   buildFolderListing,
@@ -7715,17 +7714,21 @@ export class ChatPanel implements vscode.Disposable {
     const records = archive.sessions;
     if (records.length > 0) {
       // 归档里的隔离目录可能已被外部手工删除，或上次失败的清理留下半删残迹。
-      // 恢复前核对磁盘事实（realpath 归一，兼容 Windows 目录联接），让
-      // fromPersistedSuperSession 如实校正 released / recycled —— 否则看板会
-      // 对一个早就不存在的目录显示「待清理」。核对失败时不猜（留 undefined =
-      // 保留归档原样）；这里只读盘，**绝不自动删**任何孤儿目录或分支。
+      // 恢复前核对磁盘事实，让 fromPersistedSuperSession 如实校正 released /
+      // recycled —— 否则看板会对一个早就不存在的目录显示「待清理」。
+      // **必须用原始 isolation.path 判存在性**：comparisonPathKey 为路径比较做了
+      // toLowerCase，Linux 大小写敏感，用它 existsSync 会把 mkdtemp 随机后缀含大写
+      // 字母的现存目录误判为不存在（ubuntu CI 实测），进而错误保留 released:true。
+      // 核对失败时不猜（留 undefined = 保留归档原样）；这里只读盘，**绝不自动删**
+      // 任何孤儿目录或分支。
       const restored = await Promise.all(
         records.map(async (record) => {
           const kind = record.isolation.kind;
           if (kind === "repo") return fromPersistedSuperSession(record);
           try {
-            const key = await comparisonPathKey(record.isolation.path);
-            return fromPersistedSuperSession(record, { worktreePresent: existsSync(key) });
+            return fromPersistedSuperSession(record, {
+              worktreePresent: existsSync(record.isolation.path),
+            });
           } catch {
             return fromPersistedSuperSession(record);
           }
@@ -7779,10 +7782,14 @@ export class ChatPanel implements vscode.Disposable {
       .then(async () => {
         // 三类残留同在 `.iflow/super/` 下：worktrees（既有清扫）、attachments、
         // dirs（降级目录）。并排跑，任何一类失败都落进下面的 catch，不影响会话。
+        // 每一项都经 Promise.resolve().then() 包一层：即便某个 manager 方法同步
+        // 抛错（stub 未实现 / 未来改动），也只是该项变成 rejected，不会在数组
+        // 求值时打断其余项的 handler 绑定 —— 否则先返回的 rejected promise 会
+        // 变成 unhandled rejection（Vitest Errors 1）。
         const [swept] = await Promise.all([
-          manager.sweepStaleWorktrees({ maxKeep }),
-          manager.sweepStaleSuperAttachmentDirs(),
-          manager.sweepStaleSuperDirs(),
+          Promise.resolve().then(() => manager.sweepStaleWorktrees({ maxKeep })),
+          Promise.resolve().then(() => manager.sweepStaleSuperAttachmentDirs()),
+          Promise.resolve().then(() => manager.sweepStaleSuperDirs()),
         ]);
         return swept;
       })

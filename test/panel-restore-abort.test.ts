@@ -315,6 +315,11 @@ describe("恢复进行中点「新会话」", () => {
             counter.calls += 1;
             return sweep();
           },
+          // 恢复归档时还会并排清扫附件副本与降级目录；stub 必须实现全，
+          // 否则数组求值时同步 TypeError 会让上面 reject 的 promise 逃逸成
+          // unhandled rejection（Vitest Errors 1、退出码 1）。
+          sweepStaleSuperAttachmentDirs: async () => 0,
+          sweepStaleSuperDirs: async () => 0,
         }) as never;
       return counter;
     }
