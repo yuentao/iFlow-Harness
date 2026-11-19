@@ -29,6 +29,7 @@ import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { MemoryQuickAdd } from "./components/MemoryQuickAdd";
 import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
+import { SuperResidueConfirmDialog } from "./components/SuperResidueConfirmDialog";
 import type { AgentStatus, ErrorAdviceUi, InitializingReason, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
 import { adjacentSessionId } from "../../shared/session-nav";
 import { hasActiveSuperSession } from "../../shared/super-agent";
@@ -1108,6 +1109,9 @@ export function App() {
           onCancel={() => setConfirmingDelete(null)}
         />
       )}
+      {/* 新建会话前的残留清空二次确认：文案由宿主组装随消息下发，
+          ConfirmDialog 内部 portal 到 body，不受本容器 acrylic / overflow 裁剪。 */}
+      <SuperResidueConfirmDialog />
     </div>
   );
 }

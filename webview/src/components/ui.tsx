@@ -733,6 +733,7 @@ export function ConfirmDialog({
   title,
   message,
   confirmLabel,
+  cancelLabel,
   onConfirm,
   onCancel,
   /** P1-8: multi-action variant — when set, replaces the single confirm
@@ -744,6 +745,9 @@ export function ConfirmDialog({
   title: string;
   message: string;
   confirmLabel?: string;
+  /** Optional host-provided cancel text (rendered verbatim). Defaults to
+   * 取消 so every other caller keeps its existing label. */
+  cancelLabel?: string;
   onConfirm?: () => void;
   onCancel: () => void;
   actions?: {
@@ -767,7 +771,7 @@ export function ConfirmDialog({
           className="press inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-md border border-border bg-editor px-3 text-ui-caption font-medium text-foreground transition-colors hover:bg-accent"
           onClick={onCancel}
         >
-          {t("取消")}
+          {cancelLabel ?? t("取消")}
         </button>
         {actions
           ? actions.map((a) => (
