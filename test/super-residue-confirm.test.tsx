@@ -88,6 +88,18 @@ describe("SuperResidueConfirmDialog", () => {
     expect(buttonByText(REQUEST.cancelLabel)).toBeTruthy();
   });
 
+  it("backdrop mousedown does not answer or close the dialog", () => {
+    postRequest(REQUEST);
+    const backdrop = document.body.querySelector<HTMLElement>(".auth-backdrop");
+    expect(backdrop).toBeTruthy();
+    act(() => {
+      backdrop!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    });
+    expect(capture.posted.filter((m) => m.type === "respondSuperResidueConfirm")).toHaveLength(0);
+    expect(useChat.getState().superResidueConfirm).toEqual(REQUEST);
+    expect(document.body.textContent).toContain(REQUEST.title);
+  });
+
   it("confirm posts confirmed:true exactly once and closes the dialog", () => {
     postRequest(REQUEST);
     act(() => {
