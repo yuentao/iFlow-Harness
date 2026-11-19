@@ -82,7 +82,7 @@ function render(sessions: SuperSessionUi[], qqTasks: unknown[] = []): void {
 }
 
 function control(): HTMLButtonElement {
-  const el = container.querySelector<HTMLButtonElement>('button[aria-label="子会话看板"]');
+  const el = container.querySelector<HTMLButtonElement>('button[aria-label="超流体看板"]');
   expect(el).toBeTruthy();
   return el!;
 }
@@ -179,10 +179,10 @@ describe("P1-1 needsAction 可见性", () => {
     ]);
     expand();
     const toggle = document.body.querySelector<HTMLButtonElement>(
-      'button[aria-label="展开已完成的子会话"]',
+      'button[aria-label="展开已完成的超流体"]',
     );
     expect(toggle).toBeTruthy();
-    expect(toggle!.textContent).toContain("已完成、需人工合并的 2 个子会话");
+    expect(toggle!.textContent).toContain("已完成、需人工合并的 2 个超流体");
     expect(toggle!.textContent).toContain("1 个需人工合并");
     expect(toggle!.textContent).not.toContain("已完成、无需合并的");
   });
@@ -204,7 +204,7 @@ describe("P1-2 合并确认按钮色调", () => {
     act(() => rowButton("修复登录跳转").click());
     act(() => buttonByText("让智能体合并").click());
 
-    const confirm = [...dialog("合并子会话分支").querySelectorAll("button")].find(
+    const confirm = [...dialog("合并超流体分支").querySelectorAll("button")].find(
       (b) => (b.textContent ?? "").trim() === "让智能体合并分支",
     );
     expect(confirm).toBeTruthy();
@@ -216,9 +216,9 @@ describe("P1-2 合并确认按钮色调", () => {
     render([session({ id: "c", status: "running" })]);
     expand();
     act(() => rowButton("修复登录跳转").click());
-    act(() => buttonByLabel("中断这个子会话").click());
+    act(() => buttonByLabel("中断这个超流体").click());
 
-    const confirm = [...dialog("中断子会话").querySelectorAll("button")].find(
+    const confirm = [...dialog("中断超流体").querySelectorAll("button")].find(
       (b) => (b.textContent ?? "").trim() === "中断",
     );
     expect(confirm).toBeTruthy();
@@ -233,7 +233,7 @@ describe("P2-1 忙态色调与全部中断", () => {
   it("中断中 / 清理中 chip 是 danger 色", () => {
     render([session({ id: "c", status: "running" })]);
     expand();
-    act(() => buttonByLabel("中断这个子会话").click());
+    act(() => buttonByLabel("中断这个超流体").click());
     act(() => buttonByText("中断").click());
     expect(chipSpan("中断中").parentElement!.className).toContain("text-destructive");
   });
@@ -269,7 +269,7 @@ describe("P2-1 忙态色调与全部中断", () => {
 // P2-2 — 提交回答的乐观反馈
 // ---------------------------------------------------------------------------
 describe("P2-2 提交回答乐观反馈", () => {
-  it("提交后头部切成「已提交，等待子会话继续」且保留 aria-live", () => {
+  it("提交后头部切成「已提交，等待超流体继续」且保留 aria-live", () => {
     render([
       session({
         id: "ask",
@@ -286,12 +286,12 @@ describe("P2-2 提交回答乐观反馈", () => {
       }),
     ]);
     const body = () => document.body.textContent ?? "";
-    expect(body()).toContain("子会话需要你回答");
+    expect(body()).toContain("超流体需要你回答");
 
     act(() => buttonByText("提交回答").click());
 
-    expect(body()).toContain("已提交，等待子会话继续");
-    expect(body()).not.toContain("子会话需要你回答");
+    expect(body()).toContain("已提交，等待超流体继续");
+    expect(body()).not.toContain("超流体需要你回答");
     const live = [...document.body.querySelectorAll('[aria-live="polite"]')].find((el) =>
       (el.textContent ?? "").includes("已提交"),
     );

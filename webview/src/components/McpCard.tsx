@@ -213,8 +213,8 @@ function fmtTokens(n: number): string {
  * flag is a design decision, not a broken server. */
 function statusLabel(view: McpServerStatusView & { contextTokens?: number; childConnected?: boolean } | undefined): string {
   if (!view) return t("状态未知");
-  if (view.childConnected === true) return t("已在子会话连接");
-  if (view.childConnected === false) return t("子会话连接失败");
+  if (view.childConnected === true) return t("已在超流体连接");
+  if (view.childConnected === false) return t("超流体连接失败");
   if (view.disabled) return t("已禁用");
   if (view.blocked) return t("主会话未加载 MCP");
   switch (view.status) {
@@ -567,7 +567,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               </SecondaryRow>
 
               <Hint className="mt-2">
-                {t("这些 MCP server 仅供 Super Agent 子会话使用，主会话不加载 MCP。")}
+                {t("这些 MCP server 仅供超流体使用，主会话不加载 MCP。")}
               </Hint>
             </>
           )}
@@ -683,7 +683,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       {view?.contextTokens !== undefined && (
                         <span
                           className="ml-1 shrink-0 text-ui-label font-mono text-muted-foreground"
-                          title={t("这些工具说明会在子会话中占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
+                          title={t("这些工具说明会在超流体中占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
                         >
                           ≈{fmtTokens(view.contextTokens)}
                         </span>
@@ -755,10 +755,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           <Hint className="mt-2">
             {scope === "project"
               ? t(
-                  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后重启内核，新建的子会话会通过共享代理使用这些 server。",
+                  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后重启内核，新建的超流体会通过共享代理使用这些 server。",
                 )
               : t(
-                  "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的子会话会通过共享代理使用这些 server。",
+                  "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的超流体会通过共享代理使用这些 server。",
                 )}
           </Hint>
         </>
@@ -803,7 +803,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                   {view?.contextTokens !== undefined && (
                     <span
                       className="ml-1.5 shrink-0 text-ui-label font-mono text-muted-foreground"
-                      title={t("这些工具说明会在子会话中占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
+                      title={t("这些工具说明会在超流体中占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
                     >
                       ≈{fmtTokens(view.contextTokens)} tokens
                     </span>
@@ -811,7 +811,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 </div>
                 {view?.error && (
                   <div className="rounded-lg border border-destructive/50 bg-destructive/8 px-2 py-1.5 text-ui-label text-destructive" title={view.error}>
-                    {view.childConnected === false ? t("子会话连接失败：") : t("连接失败：")}
+                    {view.childConnected === false ? t("超流体连接失败：") : t("连接失败：")}
                     <span className="font-mono">{view.error}</span>
                     {view.errorKind ? ` (${view.errorKind})` : ""}
                   </div>
@@ -826,10 +826,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                   <div className="rounded-lg border border-dashed border-border px-2 py-2 text-center text-ui-label text-muted-foreground">
                     {!view || view.status === "disconnected" || view.disabled || view.blocked
                       ? view?.blocked && view.childConnected === undefined
-                        ? t("主会话不加载 MCP，新建子会话并连接后才会上报工具列表")
+                        ? t("主会话不加载 MCP，新建超流体并连接后才会上报工具列表")
                         : t("拿不到工具列表（未连接，或没有开启状态上报）")
                       : view.childConnected === true
-                        ? t("主会话不加载 MCP，工具由子会话通过共享代理使用")
+                        ? t("主会话不加载 MCP，工具由超流体通过共享代理使用")
                         : view.status === "connected"
                           ? t("这个服务器没有提供工具或提示")
                           : t("正在读取工具列表…")}

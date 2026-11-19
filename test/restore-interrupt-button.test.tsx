@@ -150,7 +150,7 @@ describe("恢复进行中顶栏「新会话」按钮", () => {
     expect(send).toHaveBeenCalledWith({ type: "newSession" });
   });
 
-  it("其它忙碌态仍然禁用：生成中 / 正在创建新会话 / 等待子会话汇报", () => {
+  it("其它忙碌态仍然禁用：生成中 / 正在创建新会话 / 等待超流体汇报", () => {
     render({ status: "streaming" });
     expect(newSessionButton()!.disabled).toBe(true);
 

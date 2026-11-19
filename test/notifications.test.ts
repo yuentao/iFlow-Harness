@@ -232,7 +232,7 @@ describe("gateOsNotification", () => {
       windowFocused: false,
       nowMs: 0,
       gate: initOsNotifyGate(),
-      contentKey: "子会话「A」已完成",
+      contentKey: "超流体「A」已完成",
     });
     expect(first.fire).toBe(true);
 
@@ -243,10 +243,10 @@ describe("gateOsNotification", () => {
       windowFocused: false,
       nowMs: 1_000, // well inside the 5s same-kind throttle window
       gate: first.gate,
-      contentKey: "子会话「B」已完成",
+      contentKey: "超流体「B」已完成",
     });
     expect(second.fire).toBe(true);
-    expect(second.gate.lastContent?.text).toBe("子会话「B」已完成");
+    expect(second.gate.lastContent?.text).toBe("超流体「B」已完成");
 
     // The identical line (same child title + same status) inside the 60s
     // content cooldown is still dropped — no duplicate toast for one event.
@@ -257,7 +257,7 @@ describe("gateOsNotification", () => {
       windowFocused: false,
       nowMs: 2_000,
       gate: second.gate,
-      contentKey: "子会话「B」已完成",
+      contentKey: "超流体「B」已完成",
     });
     expect(repeat.fire).toBe(false);
     expect(repeat.reason).toBe("cooldown");

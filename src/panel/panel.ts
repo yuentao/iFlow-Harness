@@ -1928,7 +1928,7 @@ export class ChatPanel implements vscode.Disposable {
           const awaiting = kids.some((session) => session.status === "awaiting_input");
           text = awaiting
             ? `$(bell) iFlow: ${vscode.l10n.t("等待你处理")}${model}`
-            : `$(sync~spin) iFlow: ${vscode.l10n.t("子会话进行中")}${model}`;
+            : `$(sync~spin) iFlow: ${vscode.l10n.t("超流体进行中")}${model}`;
         } else {
           text = `$(check) iFlow${mode}${model}`;
         }
@@ -1958,7 +1958,7 @@ export class ChatPanel implements vscode.Disposable {
     // 死锁。它比用量信息更重要，所以即使没有用量也要出现在 tooltip 里。
     const heldTip = state.superHeld
       ? vscode.l10n.t(
-          "已停止：还有 {0} 项子会话结果待处理。发送下一条消息，或点提示条上的「继续处理」来收取汇报",
+          "已停止：还有 {0} 项超流体结果待处理。发送下一条消息，或点提示条上的「继续处理」来收取汇报",
           state.superPendingCount ?? 0,
         )
       : null;
@@ -4662,7 +4662,7 @@ export class ChatPanel implements vscode.Disposable {
     this.clearDeferredAutoTurnsToast();
     this.deferredAutoTurnsToastId = this.store.sendToast(
       "info",
-      vscode.l10n.t("已停止；还有 {0} 项子会话结果待处理。发送下一条消息，或点「继续处理」来收取汇报", pending),
+      vscode.l10n.t("已停止；还有 {0} 项超流体结果待处理。发送下一条消息，或点「继续处理」来收取汇报", pending),
       {
         persistent: true,
         action: { actionId: "resume-super-turns", label: vscode.l10n.t("继续处理") },
@@ -4939,10 +4939,10 @@ export class ChatPanel implements vscode.Disposable {
           })),
         })
         .catch((error: unknown) => {
-          this.log.warn(`QQ 子会话提问提醒转发失败：${errorMessage(error)}`);
+          this.log.warn(`QQ 超流体提问提醒转发失败：${errorMessage(error)}`);
         });
     } catch (error) {
-      this.log.warn(`QQ 子会话提问提醒转发失败：${errorMessage(error)}`);
+      this.log.warn(`QQ 超流体提问提醒转发失败：${errorMessage(error)}`);
     }
   }
 
@@ -5041,7 +5041,7 @@ export class ChatPanel implements vscode.Disposable {
     const requestId = `super-residue-${++this.superResidueConfirmSeq}`;
     const title = vscode.l10n.t("清空并新建会话？");
     const message = vscode.l10n.t(
-      "检测到 {0} 个历史子会话残留目录（worktree {1} 个 / 降级目录 {2} 个 / 附件 {3} 个）。继续将清空全部残留，包括未合并的 worktree——其中未提交/未合并的代码改动将永久丢失且不可恢复。请确认这些工作不再需要。",
+      "检测到 {0} 个历史超流体残留目录（worktree {1} 个 / 降级目录 {2} 个 / 附件 {3} 个）。继续将清空全部残留，包括未合并的 worktree——其中未提交/未合并的代码改动将永久丢失且不可恢复。请确认这些工作不再需要。",
       count.total,
       count.worktrees,
       count.dirs,
@@ -5114,7 +5114,7 @@ export class ChatPanel implements vscode.Disposable {
       if (purged.failed > 0) {
         this.store.sendToast(
           "warning",
-          vscode.l10n.t("已清空历史子会话残留，但有 {0} 个目录未能删除（请手动检查）", purged.failed),
+          vscode.l10n.t("已清空历史超流体残留，但有 {0} 个目录未能删除（请手动检查）", purged.failed),
         );
       }
     }
@@ -7508,10 +7508,10 @@ export class ChatPanel implements vscode.Disposable {
       // 那会连带丢掉刚重建好的转录并让用户以为恢复失败。失败可见（toast +
       // 日志）但不阻断（新建会话、继续对话都照常）。
       await this.restoreSuperSessions(loadedId).catch((error: unknown) => {
-        this.log.warn(`super agent: 恢复子会话记录失败（不影响会话恢复）：${errorMessage(error)}`);
+        this.log.warn(`super agent: 恢复超流体记录失败（不影响会话恢复）：${errorMessage(error)}`);
         this.store.sendToast(
           "warning",
-          vscode.l10n.t("子会话记录恢复失败（不影响会话）：{0}", errorMessage(error)),
+          vscode.l10n.t("超流体记录恢复失败（不影响会话）：{0}", errorMessage(error)),
         );
       });
       void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
@@ -7747,12 +7747,12 @@ export class ChatPanel implements vscode.Disposable {
     // 什么。损坏的原件已由读侧留底（归档名.corrupt），路径一并报出。
     if (archive.damaged) {
       this.log.warn(
-        `super agent: 子会话归档读不出来（${archive.damage ?? "unknown"}），备份：${archive.backupPath ?? "-"}`,
+        `super agent: 超流体归档读不出来（${archive.damage ?? "unknown"}），备份：${archive.backupPath ?? "-"}`,
       );
       this.store.sendToast(
         "warning",
         vscode.l10n.t(
-          "子会话记录已损坏，原文件已备份；这条会话的子会话记录无法恢复（{0}）",
+          "超流体记录已损坏，原文件已备份；这条会话的超流体记录无法恢复（{0}）",
           archive.backupPath ?? archive.damage ?? "unknown",
         ),
       );
@@ -8055,7 +8055,7 @@ export class ChatPanel implements vscode.Disposable {
       // 远程派发的任务还要把这条提问提醒转发给 QQ 发起者（本地任务不受影响：
       // 服务侧找不到对应的 QQ 任务就会直接忽略）。
       onNeedInput: (session) => {
-        this.notifyOs("question", vscode.l10n.t("子会话「{0}」在等你回答", session.title));
+        this.notifyOs("question", vscode.l10n.t("超流体「{0}」在等你回答", session.title));
         if (session.pending?.kind === "question") {
           // main 渠道 QQ 任务派生的子会话：按 QQ 主任务寻址，答案回灌子会话。
           // 旧 child 渠道仍走 superSessionId 匹配，两者互不干扰。
@@ -8077,7 +8077,7 @@ export class ChatPanel implements vscode.Disposable {
           this.store.sendToast(
             "info",
             vscode.l10n.t(
-              "合并子会话已把子会话「{0}」的分支 {1} 合入当前分支",
+              "合并超流体已把超流体「{0}」的分支 {1} 合入当前分支",
               info.title,
               info.branch,
             ),
@@ -8086,7 +8086,7 @@ export class ChatPanel implements vscode.Disposable {
           this.store.sendToast(
             "warning",
             vscode.l10n.t(
-              "合并子会话没能完成合并，分支仍保留：{0}（{1}）",
+              "合并超流体没能完成合并，分支仍保留：{0}（{1}）",
               info.branch,
               info.detail,
             ),
@@ -8179,7 +8179,7 @@ export class ChatPanel implements vscode.Disposable {
         this.log.error(`MCP broker failed to start: ${errorMessage(error)}`);
         this.store.sendToast(
           "error",
-          vscode.l10n.t("MCP 共享代理启动失败，子会话将无 MCP 工具：{0}", errorMessage(error)),
+          vscode.l10n.t("MCP 共享代理启动失败，超流体将无 MCP 工具：{0}", errorMessage(error)),
         );
         return null;
       }
@@ -8304,7 +8304,7 @@ export class ChatPanel implements vscode.Disposable {
       const first = scan.invalidBlocks[0]!;
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("子会话派发指令无法解析（{0}，内容共 {1} 字符），已忽略", first.reason, first.body.length),
+        vscode.l10n.t("超流体派发指令无法解析（{0}，内容共 {1} 字符），已忽略", first.reason, first.body.length),
       );
     }
     if (scan.blocks.length === 0) return;
@@ -8325,7 +8325,7 @@ export class ChatPanel implements vscode.Disposable {
   ): void {
     const manager = this.getSuperAgent();
     if (!manager) {
-      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
+      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
       return;
     }
     if (issues.length > 0) {
@@ -8371,7 +8371,7 @@ export class ChatPanel implements vscode.Disposable {
     if (droppedAttachments > 0) {
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("子会话派发指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
+        vscode.l10n.t("超流体派发指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
       );
     }
     // 全部命中重复时没有「已经派发」这件事可报 ——
@@ -8385,7 +8385,7 @@ export class ChatPanel implements vscode.Disposable {
     );
     this.store.sendToast(
       "info",
-      vscode.l10n.t("已派发 {0} 个子会话（并发上限 {1}）", dispatched, concurrency),
+      vscode.l10n.t("已派发 {0} 个超流体（并发上限 {1}）", dispatched, concurrency),
     );
   }
 
@@ -8493,7 +8493,7 @@ export class ChatPanel implements vscode.Disposable {
     );
     this.store.sendToast(
       "warning",
-      vscode.l10n.t("super-agent 工具调用已完成，但宿主没有收到派发载荷，未派发任何子会话"),
+      vscode.l10n.t("super-agent 工具调用已完成，但宿主没有收到派发载荷，未派发任何超流体"),
     );
     this.queueSuperToolCallCorrection(
       "the tool call completed without a usable payload — no tasks/actions ever reached the host, so nothing was dispatched",
@@ -8587,7 +8587,7 @@ export class ChatPanel implements vscode.Disposable {
     );
     this.store.sendToast(
       "warning",
-      vscode.l10n.t("super-agent 调用载荷不合法（{0}），未派发子会话", reason),
+      vscode.l10n.t("super-agent 调用载荷不合法（{0}），未派发超流体", reason),
     );
     // 宿主能看见「这次没派出去」，模型却只收到一个 failed 工具帧 —— 补一条
     // hidden prompt 把原因和正确格式送回主会话上下文，让它在同一轮里自行修正。
@@ -8699,7 +8699,7 @@ export class ChatPanel implements vscode.Disposable {
     const scan = extractSuperActions(this.superActionScanText, this.superActionScanOffset);
     if (scan.end > this.superActionScanOffset) this.superActionScanOffset = scan.end;
     if (scan.invalidBlocks.length > 0) {
-      this.store.sendToast("warning", vscode.l10n.t("子会话管理指令无法解析，已忽略"));
+      this.store.sendToast("warning", vscode.l10n.t("超流体管理指令无法解析，已忽略"));
     }
     if (scan.actions.length > 0) {
       void this.runSuperActions(scan.actions);
@@ -8820,7 +8820,7 @@ export class ChatPanel implements vscode.Disposable {
               this.store.sendToast(
                 "warning",
                 vscode.l10n.t(
-                  "中断失败：找不到子会话 {0}，可能已被清理或 id 有误",
+                  "中断失败：找不到超流体 {0}，可能已被清理或 id 有误",
                   action.sessionId,
                 ),
               );
@@ -8877,12 +8877,12 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     if (applied > 0) {
-      this.store.sendToast("info", vscode.l10n.t("已按主会话指令管理子会话：成功 {0} 个", applied));
+      this.store.sendToast("info", vscode.l10n.t("已按主会话指令管理超流体：成功 {0} 个", applied));
     }
     if (ignored > 0) {
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("{0} 个子会话管理动作未生效（目标不存在或状态不适用）", ignored),
+        vscode.l10n.t("{0} 个超流体管理动作未生效（目标不存在或状态不适用）", ignored),
       );
     }
     // 工具调用触发的动作：把真实结果回填到那张工具帧，动作卡据此显示
@@ -9239,7 +9239,7 @@ export class ChatPanel implements vscode.Disposable {
           : summary;
       this.store.sendToast(
         "info",
-        vscode.l10n.t("已归档子会话「{0}」的迟到结论（该子会话已被清理，主会话未能在当时收取）：{1}", entry.session.title, clipped),
+        vscode.l10n.t("已归档超流体「{0}」的迟到结论（该超流体已被清理，主会话未能在当时收取）：{1}", entry.session.title, clipped),
         { sticky: true },
       );
     }
@@ -9653,12 +9653,12 @@ export class ChatPanel implements vscode.Disposable {
   private announceChildSettled(session: SuperSessionUi): void {
     const title = session.title;
     if (session.status === "completed") {
-      this.announceChildDone(vscode.l10n.t("子会话「{0}」已完成", title));
+      this.announceChildDone(vscode.l10n.t("超流体「{0}」已完成", title));
     } else if (session.status === "failed") {
-      this.announceChildDone(vscode.l10n.t("子会话「{0}」已失败", title));
+      this.announceChildDone(vscode.l10n.t("超流体「{0}」已失败", title));
     } else {
       // 终态只剩 cancelled（isTerminalSuperStatus 已过滤）。
-      this.announceChildDone(vscode.l10n.t("子会话「{0}」已中断", title));
+      this.announceChildDone(vscode.l10n.t("超流体「{0}」已中断", title));
     }
   }
 
@@ -9700,22 +9700,22 @@ export class ChatPanel implements vscode.Disposable {
     const message = held
       ? awaiting > 0
         ? vscode.l10n.t(
-            "已停止；{0} 个子会话仍在运行（其中 {1} 个等待你的回答），发送下一条消息后继续收取汇报",
+            "已停止；{0} 个超流体仍在运行（其中 {1} 个等待你的回答），发送下一条消息后继续收取汇报",
             live.length,
             awaiting,
           )
         : vscode.l10n.t(
-            "已停止；{0} 个子会话仍在运行，发送下一条消息后继续收取汇报",
+            "已停止；{0} 个超流体仍在运行，发送下一条消息后继续收取汇报",
             live.length,
           )
       : awaiting > 0
         ? vscode.l10n.t(
-            "正在等待 {0} 个子会话汇报（其中 {1} 个等待你的回答），完成一个即汇报一个，会自动继续",
+            "正在等待 {0} 个超流体汇报（其中 {1} 个等待你的回答），完成一个即汇报一个，会自动继续",
             live.length,
             awaiting,
           )
         : vscode.l10n.t(
-            "正在等待 {0} 个子会话汇报（完成一个即汇报一个，会自动继续）",
+            "正在等待 {0} 个超流体汇报（完成一个即汇报一个，会自动继续）",
             live.length,
           );
     this.superWaitToastKey = key;
@@ -9755,23 +9755,23 @@ export class ChatPanel implements vscode.Disposable {
         // 按 SuperCancelOutcome 的真实 reason 区分文案：幂等重复（已终态）
         // 不是失败，但要如实告诉用户「无需中断」，避免以为刚才那下没生效。
         if (outcome.reason === "cancelled") {
-          this.store.sendToast("info", vscode.l10n.t("已中断子会话"));
+          this.store.sendToast("info", vscode.l10n.t("已中断超流体"));
         } else if (outcome.reason === "already-terminal") {
-          this.store.sendToast("info", vscode.l10n.t("这个子会话已经结束了，不用再中断"));
+          this.store.sendToast("info", vscode.l10n.t("这个超流体已经结束了，不用再中断"));
         } else {
-          this.store.sendToast("warning", vscode.l10n.t("该子会话不存在或已被清理"));
+          this.store.sendToast("warning", vscode.l10n.t("该超流体不存在或已被清理"));
         }
         break;
       }
       case "cancelAll": {
         const count = await manager.cancelAll("user");
-        this.store.sendToast("info", vscode.l10n.t("已中断 {0} 个子会话", count));
+        this.store.sendToast("info", vscode.l10n.t("已中断 {0} 个超流体", count));
         break;
       }
       case "respond": {
         if (!msg.sessionId) return;
         const ok = manager.respond(msg.sessionId, { answers: msg.answers });
-        if (!ok) this.store.sendToast("warning", vscode.l10n.t("该子会话没有待处理的请求"));
+        if (!ok) this.store.sendToast("warning", vscode.l10n.t("该超流体没有待处理的请求"));
         break;
       }
       case "cleanup": {
@@ -9790,7 +9790,7 @@ export class ChatPanel implements vscode.Disposable {
             vscode.l10n.t("已清理工作目录，分支已保留：{0}", result.reason ?? ""),
           );
         } else {
-          this.store.sendToast("info", vscode.l10n.t("已清理子会话"));
+          this.store.sendToast("info", vscode.l10n.t("已清理超流体"));
         }
         break;
       }
@@ -9832,9 +9832,9 @@ export class ChatPanel implements vscode.Disposable {
         if (!msg.sessionId) return;
         const ok = await manager.retry(msg.sessionId);
         if (ok) {
-          this.store.sendToast("info", vscode.l10n.t("已重新派发子会话（沿用原工作目录）"));
+          this.store.sendToast("info", vscode.l10n.t("已重新派发超流体（沿用原工作目录）"));
         } else {
-          this.store.sendToast("warning", vscode.l10n.t("该子会话当前无法重试"));
+          this.store.sendToast("warning", vscode.l10n.t("该超流体当前无法重试"));
         }
         break;
       }
@@ -10477,7 +10477,7 @@ export class ChatPanel implements vscode.Disposable {
 
       spawnTask: (spec, opts) => {
         const manager = this.getSuperAgent();
-        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        if (!manager) throw new Error("超流不可用（未打开工作区）");
         const session = manager.spawn(
           { title: spec.title, task: spec.task },
           {
@@ -10528,7 +10528,7 @@ export class ChatPanel implements vscode.Disposable {
           } else if (appeared) {
             return;
           } else if (!this.getSuperAgent()?.get(superSessionId)) {
-            throw new Error(`QQ 任务指向的子会话不存在：${superSessionId}`);
+            throw new Error(`QQ 任务指向的超流体不存在：${superSessionId}`);
           }
           const remain = deadline - Date.now();
           if (remain <= 0) throw new QqSettleTimeoutError(superSessionId, cap);
@@ -10541,7 +10541,7 @@ export class ChatPanel implements vscode.Disposable {
 
       cancel: async (superSessionId) => {
         const manager = this.getSuperAgent();
-        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        if (!manager) throw new Error("超流不可用（未打开工作区）");
         // 对已终态的子会话再取消是幂等重复，管理器自己会如实返回。
         await manager.cancel(superSessionId, "agent");
       },
@@ -10556,23 +10556,23 @@ export class ChatPanel implements vscode.Disposable {
        */
       merge: async (superSessionId) => {
         const manager = this.getSuperAgent();
-        if (!manager) return { ok: false, detail: "Super Agent 不可用（未打开工作区）" };
+        if (!manager) return { ok: false, detail: "超流不可用（未打开工作区）" };
         const session = manager.get(superSessionId);
-        if (!session) return { ok: false, detail: "子会话不存在或已被清理" };
+        if (!session) return { ok: false, detail: "超流体不存在或已被清理" };
         if (session.integration?.state === "merged") {
           return { ok: true, detail: "改动已经在当前分支上" };
         }
         if (!isQqTerminalSuperStatus(session.status)) {
-          return { ok: false, detail: "子会话还没结束，完成后再合并" };
+          return { ok: false, detail: "超流体还没结束，完成后再合并" };
         }
         if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
-          return { ok: false, detail: "该子会话没有可合并的分支（仅目录隔离）" };
+          return { ok: false, detail: "该超流体没有可合并的分支（仅目录隔离）" };
         }
         const outcome = await this.requestSuperMerge(superSessionId);
         if (outcome.dispatched) {
           return {
             ok: false,
-            detail: "已派出合并子会话（异步执行），合并结果稍后在看板确认",
+            detail: "已派出合并超流体（异步执行），合并结果稍后在看板确认",
           };
         }
         if (outcome.queued) {
@@ -10583,7 +10583,7 @@ export class ChatPanel implements vscode.Disposable {
 
       discard: async (superSessionId) => {
         const manager = this.getSuperAgent();
-        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        if (!manager) throw new Error("超流不可用（未打开工作区）");
         // 如实回传 cleanup 的观测：分支还带未合并提交时 git 会保下分支
         // （只删工作目录），QQ 回执与看板都要把这件事说清楚。
         const result = await manager.cleanup(superSessionId, { keepBranch: false });
@@ -10907,7 +10907,7 @@ export class ChatPanel implements vscode.Disposable {
     const text =
       rawText.trim().length > 0
         ? rawText.trim()
-        : vscode.l10n.t("子会话任务已完成，但未产生可转发的正文摘要。");
+        : vscode.l10n.t("超流体任务已完成，但未产生可转发的正文摘要。");
     const taskIds = [...this.qqMainFinalAwaiters.entries()]
       .filter(([, owner]) => owner === sessionId)
       .map(([taskId]) => taskId)
@@ -11617,29 +11617,29 @@ export class ChatPanel implements vscode.Disposable {
     if (cleaned === 0 && failed === 0) return;
     if (failed === 0) {
       if (branchesKept === 0) {
-        this.store.sendToast("info", vscode.l10n.t("已清理 {0} 个子会话", cleaned));
+        this.store.sendToast("info", vscode.l10n.t("已清理 {0} 个超流体", cleaned));
       } else {
         this.store.sendToast(
           "info",
-          vscode.l10n.t("已清理 {0} 个子会话，{1} 个分支已保留", cleaned, branchesKept),
+          vscode.l10n.t("已清理 {0} 个超流体，{1} 个分支已保留", cleaned, branchesKept),
         );
       }
       return;
     }
     if (cleaned === 0) {
-      this.store.sendToast("warning", vscode.l10n.t("未能清理这 {0} 个子会话", failed));
+      this.store.sendToast("warning", vscode.l10n.t("未能清理这 {0} 个超流体", failed));
       return;
     }
     if (branchesKept === 0) {
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("已清理 {0} 个子会话，{1} 个未能清理", cleaned, failed),
+        vscode.l10n.t("已清理 {0} 个超流体，{1} 个未能清理", cleaned, failed),
       );
     } else {
       this.store.sendToast(
         "warning",
         vscode.l10n.t(
-          "已清理 {0} 个子会话，{1} 个未能清理，{2} 个分支已保留",
+          "已清理 {0} 个超流体，{1} 个未能清理，{2} 个分支已保留",
           cleaned,
           failed,
           branchesKept,
@@ -11673,32 +11673,32 @@ export class ChatPanel implements vscode.Disposable {
       return {
         dispatched: false,
         queued: false,
-        reason: "Super Agent 不可用（未打开工作区）",
+        reason: "超流不可用（未打开工作区）",
       };
     }
     const session = manager.get(id);
     if (!session) {
-      this.store.sendToast("warning", vscode.l10n.t("该子会话不存在或已被清理"));
-      return { dispatched: false, queued: false, reason: "该子会话不存在或已被清理" };
+      this.store.sendToast("warning", vscode.l10n.t("该超流体不存在或已被清理"));
+      return { dispatched: false, queued: false, reason: "该超流体不存在或已被清理" };
     }
     if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
-      this.store.sendToast("warning", vscode.l10n.t("该子会话没有可合并的分支（仅目录隔离）"));
+      this.store.sendToast("warning", vscode.l10n.t("该超流体没有可合并的分支（仅目录隔离）"));
       return {
         dispatched: false,
         queued: false,
-        reason: "该子会话没有可合并的分支（仅目录隔离）",
+        reason: "该超流体没有可合并的分支（仅目录隔离）",
       };
     }
     if (session.integration?.state === "merged") {
-      this.store.sendToast("info", vscode.l10n.t("该子会话的改动已经合并"));
-      return { dispatched: false, queued: false, reason: "该子会话的改动已经合并" };
+      this.store.sendToast("info", vscode.l10n.t("该超流体的改动已经合并"));
+      return { dispatched: false, queued: false, reason: "该超流体的改动已经合并" };
     }
     if (!isTerminalSuperStatus(session.status)) {
-      this.store.sendToast("warning", vscode.l10n.t("子会话还没结束，完成后再让智能体合并"));
+      this.store.sendToast("warning", vscode.l10n.t("超流体还没结束，完成后再让智能体合并"));
       return {
         dispatched: false,
         queued: false,
-        reason: "子会话还没结束，完成后再让智能体合并",
+        reason: "超流体还没结束，完成后再让智能体合并",
       };
     }
     const state = this.store.getState();
@@ -11718,10 +11718,10 @@ export class ChatPanel implements vscode.Disposable {
           reason: "主会话正忙，合并请求已排队，空闲后自动派发",
         };
       }
-      const reason = "主会话正在生成，未派出合并子会话，请等本轮结束后重试";
+      const reason = "主会话正在生成，未派出合并超流体，请等本轮结束后重试";
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("主会话正在生成，未派出合并子会话，请等本轮结束后重试"),
+        vscode.l10n.t("主会话正在生成，未派出合并超流体，请等本轮结束后重试"),
       );
       return { dispatched: false, queued: false, reason };
     }
@@ -11755,24 +11755,24 @@ export class ChatPanel implements vscode.Disposable {
         return {
           dispatched: false,
           queued: true,
-          reason: "已有合并子会话在跑，合并请求已排队，等它结束后派发",
+          reason: "已有合并超流体在跑，合并请求已排队，等它结束后派发",
         };
       }
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("已有合并子会话在跑，等它结束后再合并：{0}", branch),
+        vscode.l10n.t("已有合并超流体在跑，等它结束后再合并：{0}", branch),
       );
       return {
         dispatched: false,
         queued: false,
-        reason: `已有合并子会话在跑，未派出新的合并子会话（分支 ${branch}），请稍后重试`,
+        reason: `已有合并超流体在跑，未派出新的合并超流体（分支 ${branch}），请稍后重试`,
       };
     }
     this.store.sendToast(
       "info",
       options?.auto
-        ? vscode.l10n.t("子会话「{0}」的改动没能自动合并，已派出合并子会话", session.title)
-        : vscode.l10n.t("已派出合并子会话，合并子会话「{0}」的分支", session.title),
+        ? vscode.l10n.t("超流体「{0}」的改动没能自动合并，已派出合并超流体", session.title)
+        : vscode.l10n.t("已派出合并超流体，合并超流体「{0}」的分支", session.title),
     );
     return { dispatched: true, mergeSessionId: child.id };
   }
@@ -13152,7 +13152,7 @@ export class ChatPanel implements vscode.Disposable {
     if (!options?.bypassSuperWait && !this.autoTurnsHeld() && this.superWaitingForReports()) {
       this.log.warn("new session refused: the host is still waiting for child session reports");
       this.store.appendNotice(
-        vscode.l10n.t("还有子会话在运行并等待汇报，请等它们结束（或在看板上中断）后再新建会话"),
+        vscode.l10n.t("还有超流体在运行并等待汇报，请等它们结束（或在看板上中断）后再新建会话"),
       );
       return;
     }
@@ -13525,7 +13525,7 @@ export class ChatPanel implements vscode.Disposable {
       const title = normalizeSuperTitle(trimmed.split("\n")[0] ?? "");
       const manager = this.getSuperAgent();
       if (!manager) {
-        this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
+        this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
         return false;
       }
       manager.spawn({ title, task, ...(attachments.length > 0 ? { attachments } : {}) });
@@ -13546,13 +13546,13 @@ export class ChatPanel implements vscode.Disposable {
       this.ensureSuperHeartbeat();
       this.store.sendToast(
         "info",
-        vscode.l10n.t("主会话正在生成，已把这条消息派发为子会话「{0}」", title),
+        vscode.l10n.t("主会话正在生成，已把这条消息派发为超流体「{0}」", title),
       );
       if (droppedAttachments > 0) {
         this.store.sendToast(
           "warning",
           vscode.l10n.t(
-            "每个子会话最多携带 {0} 个附件，超出上限的 {1} 个已忽略",
+            "每个超流体最多携带 {0} 个附件，超出上限的 {1} 个已忽略",
             MAX_SUPER_ATTACHMENTS,
             droppedAttachments,
           ),
@@ -13802,7 +13802,7 @@ export class ChatPanel implements vscode.Disposable {
           // 主会话汇报回合：主 Agent 读完子会话结果并汇报回来，那是主会话
           // 真实的收尾工作，用**独立事件** superReport + 常规 done 音 —— 与
           // 单个子会话收尾（childDone + child 音）明确分开。
-          this.announceSuperReport(vscode.l10n.t("主会话已汇报子会话结果"));
+          this.announceSuperReport(vscode.l10n.t("主会话已汇报超流体结果"));
         }
         // 其余 hidden 回合（动作回执 / 被改道用户消息补投）**完全静音**：
         // 那是宿主自己的记账回合，转录里没有用户气泡，也不对应任何新事件。

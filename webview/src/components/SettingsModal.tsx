@@ -149,7 +149,7 @@ export function SettingsModal({
       footer={
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           <HelpTip label={t("设置保存在哪里")} align="left">
-            {t("外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后由新子会话使用最新配置。")}
+            {t("外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后由新超流体使用最新配置。")}
           </HelpTip>
           <Button
             variant="ghost"
@@ -162,7 +162,7 @@ export function SettingsModal({
             className="ml-auto"
             disabled={busy}
             icon={<RefreshCw className={ICON_INLINE} />}
-            title={t("重启内核，当前会话会自动恢复。语言改动在重启后生效；MCP 仅供子会话使用，重启后的新子会话会通过共享代理加载。")}
+            title={t("重启内核，当前会话会自动恢复。语言改动在重启后生效；MCP 仅供超流体使用，重启后的新超流体会通过共享代理加载。")}
             onClick={() => {
               send({ type: "restartCli" });
               onDismiss();
@@ -601,11 +601,11 @@ function ChatSection() {
           onChange={(autoTitle) => update({ autoTitle })}
         />
       </SettingsGroup>
-      <SettingsGroup title={t("子会话")}>
+      <SettingsGroup title={t("超流体")}>
         <NumberRow
           label={t("并发上限")}
-          description={t("最多同时运行几个子会话。")}
-          detail={t("默认 5，可设 1–20。超出上限的派发会排队，等有空位再开始；调低后已经在跑的子会话不受影响。")}
+          description={t("最多同时运行几个超流体。")}
+          detail={t("默认 5，可设 1–20。超出上限的派发会排队，等有空位再开始；调低后已经在跑的超流体不受影响。")}
           value={settings.superAgentMaxConcurrent}
           min={1}
           max={20}
@@ -614,8 +614,8 @@ function ChatSection() {
         />
         <ChoiceRow
           label={t("集成模式")}
-          description={t("子会话完成后，把它的改动并回当前分支的方式。")}
-          detail={t("自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的子会话生效。")}
+          description={t("超流体完成后，把它的改动并回当前分支的方式。")}
+          detail={t("自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的超流体生效。")}
           value={settings.superAgentIntegration}
           options={[
             { value: "merge", label: t("自动合并") },
@@ -626,7 +626,7 @@ function ChatSection() {
         />
         <NumberRow
           label={t("工作目录上限")}
-          description={t("磁盘上最多保留几个已结束子会话的工作目录。")}
+          description={t("磁盘上最多保留几个已结束超流体的工作目录。")}
           detail={t("默认 10，可设 0–100；填 0 表示不限。超出时按修改时间从旧到新回收，分支一律保留，有未提交改动的目录不会被回收。")}
           value={settings.superAgentMaxWorktrees}
           min={0}
@@ -636,8 +636,8 @@ function ChatSection() {
         />
         <ToggleRow
           label={t("保留工作目录")}
-          description={t("子会话完成后，是否保留它的工作目录。")}
-          detail={t("默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的子会话从不回收。开启后工作目录会留在磁盘上，可随时手动清理。")}
+          description={t("超流体完成后，是否保留它的工作目录。")}
+          detail={t("默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的超流体从不回收。开启后工作目录会留在磁盘上，可随时手动清理。")}
           checked={settings.superAgentKeepWorktree}
           onChange={(superAgentKeepWorktree) => update({ superAgentKeepWorktree })}
         />
@@ -1195,7 +1195,7 @@ function ApiConfigSection({
           {formError && <span className="text-ui-label text-destructive">{formError}</span>}
         </ActionRow>
         {saveBlocked && editingActiveProfile && (
-          <Hint>{t("这是正在使用的配置。正在生成或有子会话在跑，暂时不能保存。")}</Hint>
+          <Hint>{t("这是正在使用的配置。正在生成或有超流体在跑，暂时不能保存。")}</Hint>
         )}
         <Hint>
           {t(

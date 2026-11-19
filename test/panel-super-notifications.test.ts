@@ -121,7 +121,7 @@ type PanelInternals = {
   };
 };
 
-describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
+describe("Super Agent 完成提示：超流体 / 主会话汇报分档", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let storageDir: string;
@@ -211,17 +211,17 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
     children = [child({ status: "completed", summary: "做完了" })];
     const { notify, sound } = spyCues();
 
-    await runHiddenTurn("【汇报】子会话 A 完成", { reportTurn: true });
+    await runHiddenTurn("【汇报】超流体 A 完成", { reportTurn: true });
 
     expect(notify).toHaveBeenCalledTimes(1);
-    expect(notify).toHaveBeenCalledWith("superReport", "主会话已汇报子会话结果");
+    expect(notify).toHaveBeenCalledWith("superReport", "主会话已汇报超流体结果");
     expect(sound).toHaveBeenCalledTimes(1);
     expect(sound).toHaveBeenCalledWith("done");
   });
 
   it("hidden 汇报回合被用户停止（cancelled）→ 不提示", async () => {
     const { notify, sound } = spyCues();
-    const started = p.sendPrompt("【汇报】子会话 A 完成", undefined, undefined, undefined, {
+    const started = p.sendPrompt("【汇报】超流体 A 完成", undefined, undefined, undefined, {
       hidden: true,
       delegateOnBusy: false,
       reportTurn: true,
@@ -240,7 +240,7 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
     children = [child({ status: "completed" }), child({ id: "super-2", status: "cancelled" })];
     const { notify, sound } = spyCues();
 
-    await runHiddenTurn("【动作回执】已按指令清理子会话：成功 1 个");
+    await runHiddenTurn("【动作回执】已按指令清理超流体：成功 1 个");
 
     expect(notify).not.toHaveBeenCalled();
     expect(sound).not.toHaveBeenCalled();
@@ -250,7 +250,7 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
     const internals = p as unknown as { pendingDelegatedUserTurns: unknown[] };
     // runHiddenTurn 显式传 undefined 附件 + delegateOnBusy:false —— 它是宿主
     // 记账回合，不是「streaming 中被改道的用户消息」，不该进补投缓冲。
-    await runHiddenTurn("【汇报】子会话 A 完成", { reportTurn: true });
+    await runHiddenTurn("【汇报】超流体 A 完成", { reportTurn: true });
     await flush();
     expect(calls).toHaveLength(1); // 只有这一轮 hidden prompt，没有补投出来的第二轮
     expect(internals.pendingDelegatedUserTurns).toHaveLength(0);
@@ -274,7 +274,7 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
 
   // ── 单个子会话收尾 ───────────────────────────────────────────────────────
 
-  it("子会话 running → completed：提示一次 childDone + child 音", () => {
+  it("超流体 running → completed：提示一次 childDone + child 音", () => {
     const { notify, sound } = spyCues();
     children = [child({ status: "running" })];
     p.syncSuperWaitingState();
@@ -283,7 +283,7 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
     children = [child({ status: "completed", summary: "做完了" })];
     p.syncSuperWaitingState();
     expect(notify).toHaveBeenCalledTimes(1);
-    expect(notify).toHaveBeenCalledWith("childDone", "子会话「修好登录跳转」已完成");
+    expect(notify).toHaveBeenCalledWith("childDone", "超流体「修好登录跳转」已完成");
     expect(sound).toHaveBeenCalledTimes(1);
     expect(sound).toHaveBeenCalledWith("child");
   });
@@ -299,7 +299,7 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
     expect(sound).toHaveBeenCalledTimes(1);
   });
 
-  it("新子会话开跑后再完成会再提示一次（按子会话逐个提示）", () => {
+  it("新超流体开跑后再完成会再提示一次（按超流体逐个提示）", () => {
     const { notify, sound } = spyCues();
     children = [child({ status: "running" })];
     p.syncSuperWaitingState();
@@ -315,10 +315,10 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
     ];
     p.syncSuperWaitingState();
     expect(sound).toHaveBeenCalledTimes(2);
-    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「第二个」已完成");
+    expect(notify).toHaveBeenLastCalledWith("childDone", "超流体「第二个」已完成");
   });
 
-  it("两个子会话先后完成：各提示一次（不是等到全部结束才提示）", () => {
+  it("两个超流体先后完成：各提示一次（不是等到全部结束才提示）", () => {
     const { notify, sound } = spyCues();
     children = [
       child({ status: "running", title: "A" }),
@@ -332,7 +332,7 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
       child({ id: "super-2", status: "running", title: "B" }),
     ];
     p.syncSuperWaitingState();
-    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「A」已完成");
+    expect(notify).toHaveBeenLastCalledWith("childDone", "超流体「A」已完成");
     expect(sound).toHaveBeenCalledTimes(1);
 
     children = [
@@ -340,7 +340,7 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
       child({ id: "super-2", status: "completed", title: "B" }),
     ];
     p.syncSuperWaitingState();
-    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「B」已完成");
+    expect(notify).toHaveBeenLastCalledWith("childDone", "超流体「B」已完成");
     expect(sound).toHaveBeenCalledTimes(2);
     expect(sound).toHaveBeenNthCalledWith(1, "child");
     expect(sound).toHaveBeenNthCalledWith(2, "child");
@@ -371,7 +371,7 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
     p.syncSuperWaitingState();
     children = [child({ status: "failed", title: "失败的那个" })];
     p.syncSuperWaitingState();
-    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「失败的那个」已失败");
+    expect(notify).toHaveBeenLastCalledWith("childDone", "超流体「失败的那个」已失败");
     expect(sound).toHaveBeenLastCalledWith("child");
 
     children = [
@@ -384,11 +384,11 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
       child({ id: "super-2", status: "cancelled", title: "被中断的那个" }),
     ];
     p.syncSuperWaitingState();
-    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「被中断的那个」已中断");
+    expect(notify).toHaveBeenLastCalledWith("childDone", "超流体「被中断的那个」已中断");
     expect(sound).toHaveBeenCalledTimes(2);
   });
 
-  it("子会话从看板消失后清掉记录，同 id 再次出现不会当成「刚刚结束」", () => {
+  it("超流体从看板消失后清掉记录，同 id 再次出现不会当成「刚刚结束」", () => {
     const { sound } = spyCues();
     children = [child({ status: "running" })];
     p.syncSuperWaitingState();
@@ -414,12 +414,12 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
     children = [child({ status: "completed", title: "子任务" })];
     p.syncSuperWaitingState();
 
-    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「子任务」已完成");
+    expect(notify).toHaveBeenLastCalledWith("childDone", "超流体「子任务」已完成");
     expect(sound).toHaveBeenLastCalledWith("child");
 
-    await runHiddenTurn("【汇报】子会话 A 完成", { reportTurn: true });
+    await runHiddenTurn("【汇报】超流体 A 完成", { reportTurn: true });
 
-    expect(notify).toHaveBeenLastCalledWith("superReport", "主会话已汇报子会话结果");
+    expect(notify).toHaveBeenLastCalledWith("superReport", "主会话已汇报超流体结果");
     expect(sound).toHaveBeenLastCalledWith("done");
 
     const events = notify.mock.calls.map((call) => call[0]);

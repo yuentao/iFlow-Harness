@@ -430,7 +430,7 @@ function ActionRows({ actions }: { actions: SuperDirectiveAction[] }) {
           <code className="min-w-0 break-all font-mono text-ui-micro text-muted-foreground">
             {action.title?.trim()
               ? t("{0}（{1}）", action.title.trim(), action.sessionId)
-              : action.sessionId || t("未指定子会话")}
+              : action.sessionId || t("未指定超流体")}
           </code>
           {action.keepBranch && (
             <span className="text-ui-micro text-muted-foreground">{t("保留分支")}</span>
@@ -454,7 +454,7 @@ function ActionsCard({ actions }: { actions: SuperDirectiveAction[] }) {
         aside={<Chip tone="info">{t("{0} 个动作", actions.length)}</Chip>}
       >
         <span className="block truncate text-ui-label font-medium text-foreground/90">
-          {t("子会话操作")}
+          {t("超流体操作")}
         </span>
       </DirectiveHeader>
       <ActionRows actions={actions} />
@@ -662,7 +662,7 @@ function SuperToolStatusChip({
 const ACTION_RESULT_REASON: Record<SuperActionReceipt["reason"], string> = {
   applied: "已生效",
   "already-terminal": "此前已结束，无需中断",
-  "not-found": "找不到该子会话（可能已被清理或 id 有误）",
+  "not-found": "找不到该超流体（可能已被清理或 id 有误）",
   "not-applicable": "当前状态不适用",
 };
 
@@ -941,7 +941,7 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
       >
         <div className="flex min-w-0 items-center gap-2">
           <span className="min-w-0 truncate text-ui-title font-semibold leading-snug text-foreground">
-            {t("子会话委派")}
+            {t("超流体委派")}
           </span>
           {parsed.ok && <Chip tone="primary">{t("{0} 个任务", tasks.length)}</Chip>}
         </div>
@@ -1067,7 +1067,7 @@ export function SuperActionsToolCallCard({ block }: { block: ToolBlock }) {
       >
         <div className="flex min-w-0 items-center gap-2">
           <span className="min-w-0 truncate text-ui-label font-medium text-foreground/90">
-            {t("子会话操作")}
+            {t("超流体操作")}
           </span>
           {parsed.ok && <Chip tone="info">{t("{0} 个动作", parsed.actions.length)}</Chip>}
         </div>
@@ -1077,7 +1077,7 @@ export function SuperActionsToolCallCard({ block }: { block: ToolBlock }) {
       ) : parsed.reason === "pending" ? (
         <div className="flex items-center gap-2 px-3 py-2 text-ui-caption text-muted-foreground">
           <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
-          <span>{t("正在编写子会话操作…")}</span>
+          <span>{t("正在编写超流体操作…")}</span>
         </div>
       ) : (
         // 与委派卡同一纪律：坏载荷只说清原因，不把原始 JSON 摊到卡面上。
@@ -1132,7 +1132,7 @@ function PendingDirectiveCard({ language }: { language: string }) {
       >
         <span className="block truncate text-ui-label font-medium text-foreground/90">
           {language === "super-agent-actions"
-            ? t("正在编写子会话操作…")
+            ? t("正在编写超流体操作…")
             : t("正在编写任务书…")}
         </span>
       </DirectiveHeader>

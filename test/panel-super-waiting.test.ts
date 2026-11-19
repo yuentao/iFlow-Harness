@@ -141,7 +141,7 @@ type PanelInternals = {
   };
 };
 
-describe("ChatPanel 等待子会话汇报期间的状态", () => {
+describe("ChatPanel 等待超流体汇报期间的状态", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let storageDir: string;
@@ -195,7 +195,7 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     expect(p.store.getState().status).toBe("idle");
   });
 
-  it("等待期用户消息仍由主会话响应（不会被派发成子会话）", async () => {
+  it("等待期用户消息仍由主会话响应（不会被派发成超流体）", async () => {
     manager.list = () => [child({ status: "running" })];
     p.refreshSuperWaitHeartbeat();
     expect(p.store.getState().superWaiting).toBe(true);
@@ -256,7 +256,7 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
 
     // 被拒绝：会话没换、也没抛异常。
     expect(p.store.getState().sessionId).toBe(before);
-    expect(notices.some((n) => n.includes("子会话"))).toBe(true);
+    expect(notices.some((n) => n.includes("超流体"))).toBe(true);
     // 排队里的汇报一条都没丢。
     expect(p.pendingSuperReportPrompts).toHaveLength(1);
     expect(p.pendingSuperReportPrompts[0]?.text).toContain("修好登录跳转");
@@ -273,7 +273,7 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     await p.handleWebviewMessage({ type: "newSession" });
 
     expect(p.store.getState().sessionId).toBe(before);
-    expect(notices.some((n) => n.includes("子会话"))).toBe(true);
+    expect(notices.some((n) => n.includes("超流体"))).toBe(true);
   });
 
   it("逐个终态即汇报：已结束的那个先交，不必等还在跑的那个", async () => {
@@ -307,7 +307,7 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     expect(p.store.getState().superWaiting).toBe(false);
   });
 
-  it("用户按停止后：排队的子会话汇报不会立刻接上，下一条消息后才继续", async () => {
+  it("用户按停止后：排队的超流体汇报不会立刻接上，下一条消息后才继续", async () => {
     const done = child({ status: "completed", summary: "登录跳转已修好" });
     manager.list = () => [done];
 
@@ -319,8 +319,8 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
 
     // 期间有两条子会话汇报备好、排在队列里等主会话空闲。
     p.pendingSuperReportPrompts = [
-      { mainSessionId: "sw-session", text: "【汇报】子会话 A 完成" },
-      { mainSessionId: "sw-session", text: "【汇报】子会话 B 完成" },
+      { mainSessionId: "sw-session", text: "【汇报】超流体 A 完成" },
+      { mainSessionId: "sw-session", text: "【汇报】超流体 B 完成" },
     ];
 
     // 用户按停止：这一轮按 cancelled 收尾。
@@ -350,17 +350,17 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
 
     // 回合结束后汇报才被投递（逐条即时汇报，顺序不变）。
     expect(calls).toHaveLength(3);
-    expect(calls[2]!.prompt[0]!.text).toContain("子会话 A");
+    expect(calls[2]!.prompt[0]!.text).toContain("超流体 A");
     // 在飞的那一条仍记在队列里（投递成功才出队）—— 剩下的继续排队。
     expect(p.pendingSuperReportPrompts.map((item) => item.text)).toEqual([
-      "【汇报】子会话 A 完成",
-      "【汇报】子会话 B 完成",
+      "【汇报】超流体 A 完成",
+      "【汇报】超流体 B 完成",
     ]);
 
     calls[2]!.resolve({ stopReason: "end_turn" });
     await flush();
     await flush();
-    expect(calls[3]!.prompt[0]!.text).toContain("子会话 B");
+    expect(calls[3]!.prompt[0]!.text).toContain("超流体 B");
     calls[3]!.resolve({ stopReason: "end_turn" });
     await flush();
   });
@@ -369,8 +369,8 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     const done = child({ status: "completed", summary: "登录跳转已修好" });
     manager.list = () => [done];
     p.pendingSuperReportPrompts = [
-      { mainSessionId: "sw-session", text: "【汇报】子会话 A 完成" },
-      { mainSessionId: "sw-session", text: "【汇报】子会话 B 完成" },
+      { mainSessionId: "sw-session", text: "【汇报】超流体 A 完成" },
+      { mainSessionId: "sw-session", text: "【汇报】超流体 B 完成" },
     ];
 
     // 主会话空闲 → drain 立刻投第一条汇报（hidden 回合，status streaming）。
@@ -390,10 +390,10 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     expect(calls).toHaveLength(1);
     expect(p.store.getState().status).toBe("idle");
     expect(p.pendingSuperReportPrompts).toHaveLength(1);
-    expect(p.pendingSuperReportPrompts[0]?.text).toContain("子会话 B");
+    expect(p.pendingSuperReportPrompts[0]?.text).toContain("超流体 B");
   });
 
-  it("来源子会话被清理：无从投递的汇报被丢弃，忙碌态不残留", async () => {
+  it("来源超流体被清理：无从投递的汇报被丢弃，忙碌态不残留", async () => {
     // A 还在等人回答：它的 blocked 汇报先入缓冲（来源没终态 → 条目留在缓冲里）。
     const a = child({ id: "super-a", status: "awaiting_input", summary: "等回答" });
     const b = child({ id: "super-b", status: "running" });
@@ -417,7 +417,7 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     expect(p.store.getState().superWaiting).toBe(false);
   });
 
-  it("思考通道的委派围栏只进转录：不派发子会话、不报「无法解析」", () => {
+  it("思考通道的委派围栏只进转录：不派发超流体、不报「无法解析」", () => {
     const toasts: string[] = [];
     vi.spyOn(p.store, "sendToast").mockImplementation(((...args: unknown[]) => {
       if (typeof args[1] === "string") toasts.push(args[1]);
@@ -473,7 +473,7 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
       expect(p.statusBar.tooltip).toContain("继续处理");
     });
 
-    it("子会话真在跑或等回答：状态栏如实文案，都不是生成中", () => {
+    it("超流体真在跑或等回答：状态栏如实文案，都不是生成中", () => {
       const base: SessionState = {
         ...p.store.getState(),
         status: "idle",
@@ -483,7 +483,7 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
       };
       p.updateStatusBar({ ...base, superSessions: [child({ status: "running" })] });
       expect(p.statusBar.text).not.toContain("生成中");
-      expect(p.statusBar.text).toContain("子会话进行中");
+      expect(p.statusBar.text).toContain("超流体进行中");
 
       p.updateStatusBar({ ...base, superSessions: [child({ status: "awaiting_input" })] });
       expect(p.statusBar.text).not.toContain("生成中");

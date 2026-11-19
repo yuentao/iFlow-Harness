@@ -274,7 +274,7 @@ describe("恢复进行中点「新会话」", () => {
     expect(client.newSession).toHaveBeenCalledTimes(2);
   });
 
-  it("正常恢复：不回归（写转录 + 恢复子会话 + 「已恢复会话」）", async () => {
+  it("正常恢复：不回归（写转录 + 恢复超流体 + 「已恢复会话」）", async () => {
     const replaceTranscript = vi.spyOn(p.store, "replaceTranscript");
     const recordSession = vi.spyOn(p, "recordSession");
     const restoreSuperSessions = vi.spyOn(p, "restoreSuperSessions");
@@ -404,7 +404,7 @@ describe("恢复进行中点「新会话」", () => {
       expect(p.store.getState().status).not.toBe("error");
     });
 
-    it("子会话看板恢复失败不把整个恢复判成失败，也不挡新建会话", async () => {
+    it("超流体看板恢复失败不把整个恢复判成失败，也不挡新建会话", async () => {
       useRealRestoreSuperSessions();
       p.getSuperAgent = () => {
         throw new Error("看板恢复炸了");

@@ -933,7 +933,7 @@ export function App() {
               {...(newSessionBusy
                 ? { title: newSessionWaiting ? t("正在等待后台任务结束") : t("正在新建会话…") }
                 : superWaiting && !superHeld
-                  ? { title: t("子会话还在运行，等它们汇报完才能新建会话") }
+                  ? { title: t("超流体还在运行，等它们汇报完才能新建会话") }
                   : superWaiting && superHeld
                     ? { title: t("已停止：可以新建会话，待处理的汇报仍留在原会话") }
                     : replaying
@@ -1087,7 +1087,7 @@ export function App() {
           title={t("新建会话")}
           confirmLabel={t("新建会话")}
           message={t(
-            "你按了停止，还有 {0} 项子会话结果没处理。新建会话不会丢掉它们：结果留在原会话里，切回去才会继续处理。要新建吗？",
+            "你按了停止，还有 {0} 项超流体结果没处理。新建会话不会丢掉它们：结果留在原会话里，切回去才会继续处理。要新建吗？",
             superPendingCount,
           )}
           onConfirm={() => {

@@ -1766,7 +1766,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           ref={taRef}
           value={text}
           readOnly={remoteTakeover}
-          placeholder={delegateMode ? t("派发为子会话（Enter）") : t("向 iFlow 提问…")}
+          placeholder={delegateMode ? t("派发为超流体（Enter）") : t("向 iFlow 提问…")}
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-3 text-ui-body leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
           onChange={(e) => {
@@ -2136,7 +2136,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               <Button
                 variant={delegateMode ? "primary-soft" : "primary"}
                 icon={delegateMode ? <ListOrdered className={ICON_INLINE} /> : <SendHorizontal className={ICON_INLINE} />}
-                title={delegateMode ? t("派发为子会话 (Enter)") : t("发送 (Enter)")}
+                title={delegateMode ? t("派发为超流体 (Enter)") : t("发送 (Enter)")}
                 disabled={sendBlocked || (!text.trim() && images.length === 0 && attachments.length === 0 && contexts.length === 0)}
                 onClick={submit}
               >

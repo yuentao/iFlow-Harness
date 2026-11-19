@@ -21,7 +21,7 @@ function isEnglish(): boolean {
 const en: Record<string, string> = {
   // Super Agent (child sessions of the main session)
   "委派指令": "Delegation directive",
-  "子会话": "Child sessions",
+  "超流体": "Child sessions",
   "准备中": "Preparing",
   "等你回答": "Waiting for you",
   "已中断": "Interrupted",
@@ -29,17 +29,17 @@ const en: Record<string, string> = {
   "由智能体中断": "Interrupted by agent",
   "由系统中断": "Interrupted by system",
   "不弹审批": "No approval prompts",
-  "子会话里的工具调用（包括运行命令）会直接执行，不会先征求你的同意":
+  "超流体里的工具调用（包括运行命令）会直接执行，不会先征求你的同意":
     "Tool calls in a child session — shell commands included — run directly, without asking you first",
   // 看板头帮助按钮（HelpTip）里的统一说明：不弹审批 / 合并规则 / 清理规则。
   "看板说明": "Board help",
-  "子会话结束之后才能合并；已经合并过、或者没有改动可合并的子会话，不需要再合并":
+  "超流体结束之后才能合并；已经合并过、或者没有改动可合并的超流体，不需要再合并":
     "A child session can be merged only after it finishes; one whose changes are already merged, or that has nothing to merge, does not need merging",
-  "子会话还在运行时不能清理，请先中断它":
+  "超流体还在运行时不能清理，请先中断它":
     "A running child session cannot be cleaned up — interrupt it first",
   "按未回答继续": "it continues with “no answer”",
-  "已提交，等待子会话继续": "Submitted — waiting for the child session to continue",
-  "子会话 {0}：{1}": "Child session {0}: {1}",
+  "已提交，等待超流体继续": "Submitted — waiting for the child session to continue",
+  "超流体 {0}：{1}": "Child session {0}: {1}",
   "让智能体合并分支": "Let the agent merge the branch",
   "已自动合并": "Auto-merged",
   "合并冲突": "Merge conflict",
@@ -48,22 +48,22 @@ const en: Record<string, string> = {
   "未自动合并": "Not auto-merged",
   "无需合并": "No merge needed",
   "需人工合并": "Needs manual merge",
-  "已完成、需人工合并的 {0} 个子会话": "Finished child sessions needing a manual merge ({0})",
-  "这个子会话的改动已经合并": "This child session's changes are already merged",
+  "已完成、需人工合并的 {0} 个超流体": "Finished child sessions needing a manual merge ({0})",
+  "这个超流体的改动已经合并": "This child session's changes are already merged",
   "{0} 个进行中": "{0} running",
   "{0} 个等你回答": "{0} waiting for you",
   "{0} 个失败": "{0} failed",
   "{0} 个需人工合并": "{0} needing a manual merge",
   "全部中断": "Interrupt all",
-  "子会话看板": "Child-session board",
-  "展开子会话看板": "Expand the child-session board",
-  "收起子会话看板": "Collapse the child-session board",
-  "子会话待答问题": "Child session waiting for your answer",
-  "展开已完成的子会话": "Expand the finished child sessions",
-  "收起已完成的子会话": "Collapse the finished child sessions",
-  "已完成并合并的 {0} 个子会话": "Finished and merged child sessions ({0})",
-  "已完成、无需合并的 {0} 个子会话": "Finished child sessions with nothing to merge ({0})",
-  "已完成的 {0} 个子会话": "Finished child sessions ({0})",
+  "超流体看板": "Child-session board",
+  "展开超流体看板": "Expand the child-session board",
+  "收起超流体看板": "Collapse the child-session board",
+  "超流体待答问题": "Child session waiting for your answer",
+  "展开已完成的超流体": "Expand the finished child sessions",
+  "收起已完成的超流体": "Collapse the finished child sessions",
+  "已完成并合并的 {0} 个超流体": "Finished and merged child sessions ({0})",
+  "已完成、无需合并的 {0} 个超流体": "Finished child sessions with nothing to merge ({0})",
+  "已完成的 {0} 个超流体": "Finished child sessions ({0})",
   "派发": "Dispatch",
   "已派出": "Dispatched",
   "已启动": "Started",
@@ -76,31 +76,31 @@ const en: Record<string, string> = {
   "高优先级": "High priority",
   "中优先级": "Medium priority",
   "低优先级": "Low priority",
-  "合并子会话分支": "Merge the child session's branch",
+  "合并超流体分支": "Merge the child session's branch",
   "让智能体把分支 {0} 合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。":
     "Let the agent merge branch {0} into the current branch? It performs the merge itself and handles conflicts; your working branch will change.",
   "让智能体合并": "Let the agent merge",
-  "子会话还没结束，等它完成再合并":
+  "超流体还没结束，等它完成再合并":
     "The child session has not finished — merge it after it completes",
-  "让一个子会话把这条分支合并到当前分支，冲突由它自己解决":
+  "让一个超流体把这条分支合并到当前分支，冲突由它自己解决":
     "Let a child session merge this branch into the current branch and resolve conflicts itself",
-  "这个子会话没有可合并的分支": "This child session has no branch to merge",
-  "清理子会话": "Clean up the child session",
-  "删除子会话「{0}」的工作目录？分支上未合并的提交会保留；工作目录里尚未提交的改动会被一起删掉，无法恢复。":
+  "这个超流体没有可合并的分支": "This child session has no branch to merge",
+  "清理超流体": "Clean up the child session",
+  "删除超流体「{0}」的工作目录？分支上未合并的提交会保留；工作目录里尚未提交的改动会被一起删掉，无法恢复。":
     "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in that directory are deleted for good.",
   "清理": "Clean up",
   "清理中": "Cleaning up",
   "合并中": "Merging",
   "重试中": "Retrying",
-  "子会话还在运行，请先中断再清理": "The child session is still running — interrupt it before cleaning up",
-  "中断这个子会话": "Interrupt this child session",
-  "中断子会话": "Interrupt the child session",
+  "超流体还在运行，请先中断再清理": "The child session is still running — interrupt it before cleaning up",
+  "中断这个超流体": "Interrupt this child session",
+  "中断超流体": "Interrupt the child session",
   "中断": "Interrupt",
-  "中断子会话「{0}」？它会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
+  "中断超流体「{0}」？它会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
     "Interrupt child session “{0}”? It stops immediately and this turn's changes are neither committed nor merged; what is already in its working directory is kept, and you can retry later.",
-  "中断全部 {0} 个进行中的子会话？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
+  "中断全部 {0} 个进行中的超流体？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
     "Interrupt all {0} running child sessions? They stop immediately and their changes are neither committed nor merged; what is already in their working directories is kept, and you can retry later.",
-  "重试这个子会话：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）":
+  "重试这个超流体：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）":
     "Retry this child session: reuses its working directory and creates no new commit, but clears the previous integration result and re-runs the whole task (spending tokens again)",
   "第 {0} 次尝试": "Attempt {0}",
   "独立工作目录": "Its own working directory",
@@ -113,22 +113,22 @@ const en: Record<string, string> = {
   "工作目录 {0} 个": "{0} working directories",
   "已结束 {0} 个可清理": "{0} finished and ready to clean up",
   "清理已结束": "Clean up finished",
-  "清理已结束的子会话": "Clean up finished child sessions",
-  "将删除 {0} 个子会话的工作目录；它们的分支都会保留（未合并的提交不会丢），但工作目录里尚未提交的改动会被一起删掉，无法恢复。":
+  "清理已结束的超流体": "Clean up finished child sessions",
+  "将删除 {0} 个超流体的工作目录；它们的分支都会保留（未合并的提交不会丢），但工作目录里尚未提交的改动会被一起删掉，无法恢复。":
     "Delete the working directories of {0} child sessions? Their branches are all kept (unmerged commits are not lost), but uncommitted changes in those directories are deleted for good.",
   "查看实时进度": "Show live progress",
-  "子会话实时进度": "Child session live progress",
+  "超流体实时进度": "Child session live progress",
   "上次运行": "From a previous run",
-  "这次子会话在上一次运行里就已经结束（扩展重启后恢复的历史记录）":
+  "这次超流体在上一次运行里就已经结束（扩展重启后恢复的历史记录）":
     "This child session had already finished in a previous run (a historical record restored after the extension restarted)",
   "准备中…": "Preparing…",
   "暂无输出": "No output yet",
-  "子会话需要你回答": "The child session needs an answer",
+  "超流体需要你回答": "The child session needs an answer",
   "提交回答": "Send answer",
-  "子会话合计开销": "Total child-session usage",
+  "超流体合计开销": "Total child-session usage",
   "输入 {0} · 输出 {1}": "Input {0} · Output {1}",
   "按公开单价估算，仅供参考": "Estimated at published prices; indicative only",
-  "输入是上一次请求实际携带的上下文；输出按子会话的文字估算":
+  "输入是上一次请求实际携带的上下文；输出按超流体的文字估算":
     "Input is the context the last request actually carried; output is estimated from the child's text",
   "本轮变更": "Changes this turn",
   "变更说明": "Changes-this-turn help",
@@ -274,12 +274,12 @@ const en: Record<string, string> = {
   "正在恢复会话…": "Restoring session…",
   "删除中…": "Deleting…",
   // Super Agent: 等待子会话汇报期间的「新会话」按钮禁用说明
-  "子会话还在运行，等它们汇报完才能新建会话":
+  "超流体还在运行，等它们汇报完才能新建会话":
     "Child sessions are still running — you can start a new session once they have reported",
   // 用户按了停止、汇报被压住：「新会话」必须放行，否则面板死锁。
   "已停止：可以新建会话，待处理的汇报仍留在原会话":
     "Stopped — you can start a new session; pending results stay with the original session",
-  "你按了停止，还有 {0} 项子会话结果没处理。新建会话不会丢掉它们：结果留在原会话里，切回去才会继续处理。要新建吗？":
+  "你按了停止，还有 {0} 项超流体结果没处理。新建会话不会丢掉它们：结果留在原会话里，切回去才会继续处理。要新建吗？":
     "You pressed Stop and {0} child-session result(s) are still unprocessed. Starting a new session will not lose them: they stay with the original session and are processed when you switch back. Start a new session?",
   // 恢复进行中：「新会话」按钮可点（宿主会放弃恢复并立刻新建会话）
   "取消正在进行的会话恢复并新建会话": "Cancel the session restore in progress and start a new session",
@@ -425,18 +425,18 @@ const en: Record<string, string> = {
   "项目级覆盖全局": "Project scope (overrides global)",
   "项目级和全局有同名服务器时，内核会用项目级那份整体替换全局的（不会合并字段）":
     "When a server name exists in both scopes, the Core replaces the global entry with the project one wholesale (fields are not merged)",
-  "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的子会话会通过共享代理使用这些 server。":
+  "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的超流体会通过共享代理使用这些 server。":
     "This edits the global configuration (~/.iflow/settings.json). Restart the Core after saving — new child sessions use these servers through the shared proxy.",
-  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后重启内核，新建的子会话会通过共享代理使用这些 server。":
+  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后重启内核，新建的超流体会通过共享代理使用这些 server。":
     "This edits the project configuration (<workspace>/.iflow/settings.json). For a name that also exists globally, the Core replaces the global entry with the project one wholesale (fields are not merged). Restart the Core after saving — new child sessions use these servers through the shared proxy.",
-  "这些 MCP server 仅供 Super Agent 子会话使用，主会话不加载 MCP。":
+  "这些 MCP server 仅供超流体使用，主会话不加载 MCP。":
     "These MCP servers are used only by Super Agent child sessions; the main session does not load MCP.",
   "保存中…": "Saving…",
   // MCP status indicators + detail sub-page (child-session view is authoritative)
   "状态未知": "Status unknown",
   "已禁用": "Disabled",
-  "已在子会话连接": "Connected in child sessions",
-  "子会话连接失败": "Child session connection failed",
+  "已在超流体连接": "Connected in child sessions",
+  "超流体连接失败": "Child session connection failed",
   "主会话未加载 MCP": "Not loaded in the main session",
   "已连接": "Connected",
   "连接中…": "Connecting…",
@@ -449,17 +449,17 @@ const en: Record<string, string> = {
   "MCP 服务器详情": "MCP server details",
   "刷新": "Refresh",
   "刷新中…": "Refreshing…",
-  "这些工具说明会在子会话中占用约 {0} tokens 上下文（估算）":
+  "这些工具说明会在超流体中占用约 {0} tokens 上下文（估算）":
     "These tool descriptions take about {0} tokens of context in child sessions (estimated)",
-  "子会话连接失败：": "Child session connection failed:",
+  "超流体连接失败：": "Child session connection failed:",
   "连接失败：": "Connection failed:",
   "这个服务器没有提供工具或提示": "This server provides no tools or prompts",
   "正在读取工具列表…": "Reading the tool list…",
   "拿不到工具列表（未连接，或没有开启状态上报）":
     "Cannot read the tool list (not connected, or status reporting not enabled)",
-  "主会话不加载 MCP，新建子会话并连接后才会上报工具列表":
+  "主会话不加载 MCP，新建超流体并连接后才会上报工具列表":
     "The main session does not load MCP; the tool list is reported after a child session connects",
-  "主会话不加载 MCP，工具由子会话通过共享代理使用":
+  "主会话不加载 MCP，工具由超流体通过共享代理使用":
     "The main session does not load MCP; tools are used by child sessions through the shared proxy",
   "工具 ({0})": "Tools ({0})",
   "提示词 ({0})": "Prompts ({0})",
@@ -652,19 +652,19 @@ const en: Record<string, string> = {
   "并发上限": "Concurrency limit",
   "个": "sessions",
   "集成模式": "Integration mode",
-  "子会话完成后，把它的改动并回当前分支的方式。": "How a finished child session's changes are merged back into the current branch.",
-  "自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的子会话生效。":
+  "超流体完成后，把它的改动并回当前分支的方式。": "How a finished child session's changes are merged back into the current branch.",
+  "自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的超流体生效。":
     "Auto-merge: merge into the current branch (conflicts are previewed first and your uncommitted changes are protected); Open PR: push the branch and open a pull request (needs the gh CLI); Manual: just keep the branch for you to merge from the board. Takes effect on the next child session that finishes.",
   "自动合并": "Auto-merge",
   "创建 PR": "Open PR",
   "手动": "Manual",
   "工作目录上限": "Worktree limit",
-  "磁盘上最多保留几个已结束子会话的工作目录。": "How many finished child-session worktrees to keep on disk at most.",
+  "磁盘上最多保留几个已结束超流体的工作目录。": "How many finished child-session worktrees to keep on disk at most.",
   "默认 10，可设 0–100；填 0 表示不限。超出时按修改时间从旧到新回收，分支一律保留，有未提交改动的目录不会被回收。":
     "Defaults to 10, range 0–100; 0 means no limit. When exceeded, the oldest are removed first by modification time; branches are always kept and worktrees with uncommitted changes are never removed.",
   "保留工作目录": "Keep worktree",
-  "子会话完成后，是否保留它的工作目录。": "Whether to keep a finished child session's working directory.",
-  "默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的子会话从不回收。开启后工作目录会留在磁盘上，可随时手动清理。":
+  "超流体完成后，是否保留它的工作目录。": "Whether to keep a finished child session's working directory.",
+  "默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的超流体从不回收。开启后工作目录会留在磁盘上，可随时手动清理。":
     "Off by default: finished worktrees are reclaimed automatically (branches are always kept); failed or interrupted sessions are never reclaimed. When on, worktrees stay on disk for manual cleanup.",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
   "调整面板整体字号。": "Adjust the panel font size.",
@@ -829,7 +829,7 @@ const en: Record<string, string> = {
   "正在生成…": "Generating…",
   "生成失败": "Generation failed",
   // super-agent 协议块卡片（转录里取代裸 JSON 代码块）
-  "子会话委派": "Child-session delegation",
+  "超流体委派": "Child-session delegation",
   "{0} 个任务": "{0} task(s)",
   "第 {0}/{1} 个任务": "Task {0}/{1}",
   "这段内容没能完整读取，下面的任务书仅供参考，可能还没有真正派出去":
@@ -838,13 +838,13 @@ const en: Record<string, string> = {
   "未派发": "Not dispatched",
   "部分未派发": "Partly dispatched",
   "复制原始参数": "Copy raw arguments",
-  "子会话操作": "Child session actions",
+  "超流体操作": "Child session actions",
   "{0} 个动作": "{0} action(s)",
   "回答": "Answer",
   "{0} 个回答": "{0} answer(s)",
   "保留分支": "Keep branch",
   "正在编写任务书…": "Writing the task brief…",
-  "正在编写子会话操作…": "Writing child session actions…",
+  "正在编写超流体操作…": "Writing child session actions…",
   "原始指令内容": "Raw directive content",
   "{0} · {1} 字符": "{0} · {1} chars",
   "内容格式不对，读不出来": "The content is malformed and cannot be read",
@@ -856,7 +856,7 @@ const en: Record<string, string> = {
   "展开任务说明": "Expand the task description",
   "收起任务说明": "Collapse the task description",
   "展开全文（还有 {0} 字）": "Show full text ({0} more characters)",
-  "未指定子会话": "No child session specified",
+  "未指定超流体": "No child session specified",
   // 多张待处理卡的堆叠计数器（审批 / 提问）
   "还有 {0} 张卡片待处理": "{0} more card(s) need you",
   "还有 {0} 张卡片待处理：{1}": "{0} more card(s) need you: {1}",
@@ -875,10 +875,10 @@ const en: Record<string, string> = {
 
   // 2026-11-16 文案优化：设置 / 引导 / 认证（键变更后的新词条）
   "设置保存在哪里": "Where settings are saved",
-  "外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后由新子会话使用最新配置。":
+  "外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后由新超流体使用最新配置。":
     "Panel preferences such as appearance and sound live in your VSCode user settings and follow VSCode Settings Sync. API profiles and keys, MCP and language live in the local iFlow config (keys are plaintext — mind who can read this machine); new child sessions pick up the latest config after a Core restart.",
   "打开 VSCode 设置": "Open VSCode settings",
-  "重启内核，当前会话会自动恢复。语言改动在重启后生效；MCP 仅供子会话使用，重启后的新子会话会通过共享代理加载。":
+  "重启内核，当前会话会自动恢复。语言改动在重启后生效；MCP 仅供超流体使用，重启后的新超流体会通过共享代理加载。":
     "Restart the Core — the current session comes back automatically. Language changes apply after the restart; MCP is used only by child sessions, which load it through the shared proxy after a restart.",
   "内容需要是列表（最外层用 [ ]）": "The content must be a list (wrap it in [ ])",
   "JSON 格式有误，请检查括号与引号": "Invalid JSON — check the brackets and quotes",
@@ -889,8 +889,8 @@ const en: Record<string, string> = {
     "Give the session a short title once its first turn finishes.",
   "每个会话只生成一次，会额外消耗少量 token。":
     "Generated once per session; costs a small amount of extra tokens.",
-  "最多同时运行几个子会话。": "How many child sessions may run at once.",
-  "默认 5，可设 1–20。超出上限的派发会排队，等有空位再开始；调低后已经在跑的子会话不受影响。":
+  "最多同时运行几个超流体。": "How many child sessions may run at once.",
+  "默认 5，可设 1–20。超出上限的派发会排队，等有空位再开始；调低后已经在跑的超流体不受影响。":
     "Defaults to 5, adjustable 1–20. Extra dispatches queue up and start when a slot frees; lowering the limit does not interrupt child sessions already running.",
   "每轮结束可能多花一次模型调用": "Each turn may cost one extra model call",
   "每轮回复结束后，推测你接下来可能想做什么，显示在输入框上方。":
@@ -948,7 +948,7 @@ const en: Record<string, string> = {
   "配置名称（可选，默认用模型名）": "Profile name (optional; defaults to the model name)",
   "如 工作密钥、备用线路": "e.g. Work key, Backup route",
   "接口地址（Base URL）": "Endpoint (Base URL)",
-  "这是正在使用的配置。正在生成或有子会话在跑，暂时不能保存。":
+  "这是正在使用的配置。正在生成或有超流体在跑，暂时不能保存。":
     "This is the profile in use. It cannot be saved while a turn is generating or a child session is running.",
   "配置与密钥以明文保存在本机 iFlow 配置中。编辑正在使用的配置会重新连接；编辑其他配置只是保存，不会切换。":
     "Profiles and keys are stored in plaintext in the local iFlow config. Editing the profile in use reconnects the session; editing another one only saves it.",
@@ -1035,10 +1035,10 @@ const en: Record<string, string> = {
   "删除资产文件": "Delete asset file",
   "确定删除「{0}」吗？删除后无法恢复。": "Delete \"{0}\"? This cannot be undone.",
   "预估成本（token 估算 × 公开单价，仅供参考）": "Estimated cost (token estimate × published rates; for reference only)",
-  "派发为子会话（Enter）": "Dispatch as child session (Enter)",
+  "派发为超流体（Enter）": "Dispatch as child session (Enter)",
   "取消增强": "Cancel enhancement",
   "增强提示词": "Enhance prompt",
-  "派发为子会话 (Enter)": "Dispatch as child session (Enter)",
+  "派发为超流体 (Enter)": "Dispatch as child session (Enter)",
   "安装 MCP 模板": "Install MCP template",
   "模板目录": "Template folder",
   "这个模板已经找不到了": "This template is no longer available",
@@ -1061,7 +1061,7 @@ const en: Record<string, string> = {
   "可用模型": "Available models",
   "回答操作": "Answer actions",
   "已运行 {0}": "Ran for {0}",
-  "子会话在等你的回答；不回答会在倒计时结束后按「未回答」继续。": "The child session is waiting for your answer; if you do not answer, it continues as “unanswered” when the countdown ends.",
+  "超流体在等你的回答；不回答会在倒计时结束后按「未回答」继续。": "The child session is waiting for your answer; if you do not answer, it continues as “unanswered” when the countdown ends.",
   "到 DeepSeek 开放平台创建 API Key，粘贴到 API Key 输入框即可。": "Create an API key on the DeepSeek platform and paste it into the API key field.",
   "到 Moonshot 开放平台创建 API Key，用于 Kimi 系列模型。": "Create an API key on the Moonshot platform for Kimi models.",
   "到智谱开放平台创建 API Key，用于 GLM 系列模型。": "Create an API key on the Zhipu platform for GLM models.",

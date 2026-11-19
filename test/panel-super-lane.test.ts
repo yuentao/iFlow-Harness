@@ -240,7 +240,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     expect(p.pendingSuperReportPrompts).toHaveLength(1);
   });
 
-  it("子会话被清理后其迟到结论以「已归档」提示落到看板，不伪造实时汇报", async () => {
+  it("超流体被清理后其迟到结论以「已归档」提示落到看板，不伪造实时汇报", async () => {
     const awaiting = child({
       id: "super-archived",
       title: "归档任务",
@@ -265,7 +265,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     expect(p.pendingSuperReportPrompts).toHaveLength(0);
     expect(p.store.getState().superWaiting).toBe(false);
     const archived = toasts.find(
-      (t) => t.message.includes("已归档子会话") && t.message.includes("迟到的结论正文"),
+      (t) => t.message.includes("已归档超流体") && t.message.includes("迟到的结论正文"),
     );
     expect(archived).toBeTruthy();
     expect(archived!.message).toContain("归档任务");
@@ -274,7 +274,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     // 重复刷新不重复提示。
     p.refreshSuperWaitHeartbeat();
     await flush();
-    expect(toasts.filter((t) => t.message.includes("已归档子会话"))).toHaveLength(1);
+    expect(toasts.filter((t) => t.message.includes("已归档超流体"))).toHaveLength(1);
   });
 
   it("压制期间新到的汇报点亮「继续处理」动作，恢复不再只有下一条消息一个解除点", async () => {
@@ -375,7 +375,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
     expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
   });
 
-  it("软阈值下仍有活跃子会话时不提前补发（不误伤正常长任务）", async () => {
+  it("软阈值下仍有活跃超流体时不提前补发（不误伤正常长任务）", async () => {
     const complete = vi.fn(async () => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     manager.list = () => [child({ id: "super-running", status: "running" })];

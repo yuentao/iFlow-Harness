@@ -661,7 +661,7 @@ describe("QQ 主渠道提问转发与回灌", () => {
     await expect(pending).resolves.toEqual({ answers: { 确认: "是" } });
   });
 
-  it("QQ 主任务派生的子会话提问转发到 QQ，并携带子会话 id 供回答回灌", async () => {
+  it("QQ 主任务派生的超流体提问转发到 QQ，并携带超流体 id 供回答回灌", async () => {
     const forwardChild = vi.fn(async () => undefined);
     p.qq = { service: { forwardMainTaskChildQuestion: forwardChild } };
     // 派发子会话时登记的归属映射：子会话 super-1 属于 QQ 主任务 TASK。
@@ -715,7 +715,7 @@ describe("QQ 注入轮与最终答复轮的衔接", () => {
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
-  it("注入轮派生了子会话：回 delegated=true 并登记等最终答复，占位文本不当最终回执", async () => {
+  it("注入轮派生了超流体：回 delegated=true 并登记等最终答复，占位文本不当最终回执", async () => {
     const children: Array<{ id: string; mainSessionId?: string | null; status: string }> = [];
     p.getSuperAgent = () => ({ list: () => children });
     p.sendPrompt = async (...args: unknown[]) => {
@@ -724,7 +724,7 @@ describe("QQ 注入轮与最终答复轮的衔接", () => {
       await options.onTurnStarted?.();
       // 主 Agent 在注入轮里派出了子会话（基线之后才出现）。
       children.push({ id: "child-1", mainSessionId: "main-session", status: "running" });
-      p.store.getState().blocks.push({ kind: "text", text: "已派子会话去做" });
+      p.store.getState().blocks.push({ kind: "text", text: "已派超流体去做" });
       p.store.getState().status = "idle";
       return true;
     };
@@ -740,12 +740,12 @@ describe("QQ 注入轮与最终答复轮的衔接", () => {
     });
 
     expect(result.injected).toBe(true);
-    expect(result.text).toBe("已派子会话去做");
+    expect(result.text).toBe("已派超流体去做");
     expect(result.delegated).toBe(true);
     expect(p.qqMainFinalAwaiters.get(TASK.taskId)).toBe("main-session");
   });
 
-  it("子会话登记晚于回合收尾一拍时，宽限期内仍判 delegated，awaiter 不被提前摘除（R3）", async () => {
+  it("超流体登记晚于回合收尾一拍时，宽限期内仍判 delegated，awaiter 不被提前摘除（R3）", async () => {
     const children: Array<{ id: string; mainSessionId?: string | null; status: string }> = [];
     p.getSuperAgent = () => ({ list: () => children });
     p.qqDelegationGraceMs = 80;
@@ -753,7 +753,7 @@ describe("QQ 注入轮与最终答复轮的衔接", () => {
       const options = args[4] as { onTurnStarted?: () => Promise<void> | void };
       p.store.userPrompt("原文");
       await options.onTurnStarted?.();
-      p.store.getState().blocks.push({ kind: "text", text: "已派子会话去做" });
+      p.store.getState().blocks.push({ kind: "text", text: "已派超流体去做" });
       p.store.getState().status = "idle";
       // 模拟子会话异步登记：回合结束后才出现在 list()（比收尾晚一拍）。
       setTimeout(() => {
@@ -776,7 +776,7 @@ describe("QQ 注入轮与最终答复轮的衔接", () => {
     expect(p.qqMainFinalAwaiters.get(TASK.taskId)).toBe("main-session");
   });
 
-  it("注入轮没有派生子会话：delegated 缺省，不登记等最终答复（兼容直答）", async () => {
+  it("注入轮没有派生超流体：delegated 缺省，不登记等最终答复（兼容直答）", async () => {
     p.getSuperAgent = () => ({ list: () => [] });
     p.sendPrompt = fakeSendPrompt(p, []);
     const result = await p.injectQqMainTurn({
@@ -807,7 +807,7 @@ describe("QQ 注入轮与最终答复轮的衔接", () => {
     expect(complete).toHaveBeenCalledTimes(1);
     expect(complete).toHaveBeenCalledWith({
       taskId: TASK.taskId,
-      text: "子会话任务已完成，但未产生可转发的正文摘要。",
+      text: "超流体任务已完成，但未产生可转发的正文摘要。",
       stopReason: "end_turn",
     });
     expect(p.qqMainFinalAwaiters.has(TASK.taskId)).toBe(false);

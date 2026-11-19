@@ -102,7 +102,7 @@ function render(sessions: SuperSessionUi[] = [session()]): void {
 
 /** Collapsed form: the one inline control in the header. */
 function control(): HTMLButtonElement {
-  const el = container.querySelector<HTMLButtonElement>('button[aria-label="子会话看板"]');
+  const el = container.querySelector<HTMLButtonElement>('button[aria-label="超流体看板"]');
   expect(el).toBeTruthy();
   return el!;
 }
@@ -113,7 +113,7 @@ function control(): HTMLButtonElement {
  * The panel is PORTALED to document.body, so it is queried on the document.
  */
 function panel(): HTMLElement | null {
-  return document.body.querySelector<HTMLElement>('[role="region"][aria-label="子会话"]');
+  return document.body.querySelector<HTMLElement>('[role="region"][aria-label="超流体"]');
 }
 
 function panelRoot(): HTMLElement {
@@ -174,7 +174,7 @@ describe("Super Agent 看板表面材质", () => {
     );
     expect(clusters).toHaveLength(2);
     expect(clusters[0]!.querySelector("svg")).toBeTruthy();
-    expect(clusters[0]!.textContent).toContain("子会话");
+    expect(clusters[0]!.textContent).toContain("超流体");
     expect(clusters[0]!.textContent).toContain("3");
     // 运行中 / 待处理 / 未成功各一个 chip（aria-label 让 chip 带 role="img"）。
     expect(clusters[1]!.querySelectorAll('[role="img"]')).toHaveLength(3);
@@ -185,7 +185,7 @@ describe("Super Agent 看板表面材质", () => {
     );
     expect(inFlow).toHaveLength(4);
     expect(inFlow.at(-1)!.tagName.toLowerCase()).toBe("svg");
-    expect(el.getAttribute("aria-label")).toBe("子会话看板");
+    expect(el.getAttribute("aria-label")).toBe("超流体看板");
   });
 
   it("没有任何运行中/待处理/未成功时状态簇整体不渲染（不留一段空行间距）", () => {
@@ -388,7 +388,7 @@ describe("Super Agent 看板阶段轨", () => {
     expand();
     // 已完成且改动已合并的子会话被折叠进「已完成的 N 个子会话」历史行。
     const foldedToggle = document.body.querySelector<HTMLButtonElement>(
-      'button[aria-label="展开已完成的子会话"]',
+      'button[aria-label="展开已完成的超流体"]',
     );
     expect(foldedToggle).toBeTruthy();
     act(() => foldedToggle!.click());
@@ -442,7 +442,7 @@ describe("Super Agent 看板阶段轨", () => {
   });
 });
 
-describe("Super Agent 看板时间轴 · 子会话 todolist", () => {
+describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
   const longTodo =
     "复核并汇报这一条特别长的中文任务描述，确认最后一条节点文本在任何窄屏下都完整可见而不是被硬裁掉";
   const todos = [
@@ -500,7 +500,7 @@ describe("Super Agent 看板时间轴 · 子会话 todolist", () => {
   });
 });
 
-describe("Super Agent 看板子会话行 hover 表面", () => {
+describe("Super Agent 看板超流体行 hover 表面", () => {
   function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
     const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
       (b.textContent ?? "").includes(title),
@@ -536,7 +536,7 @@ describe("Super Agent 看板子会话行 hover 表面", () => {
     expand();
 
     const row = rowTrigger().parentElement as HTMLElement;
-    const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="中断这个子会话"]');
+    const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="中断这个超流体"]');
     expect(cancel).toBeTruthy();
     // 不出现第三层底色（danger 的 destructive/10 或任何 hover 背景）。
     expect(cls(cancel!)).not.toContain("hover:bg-");
@@ -621,9 +621,9 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
   }
 
   const boardControl = (): HTMLButtonElement | null =>
-    container.querySelector<HTMLButtonElement>('button[aria-label="子会话看板"]');
+    container.querySelector<HTMLButtonElement>('button[aria-label="超流体看板"]');
 
-  it("没有子会话时顶栏不渲染看板控件", () => {
+  it("没有超流体时顶栏不渲染看板控件", () => {
     renderApp([]);
     expect(boardControl()).toBeNull();
   });
@@ -637,13 +637,13 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
     // 旧的转录 overlay 壳（pointer-events-none absolute inset-x-0 top-0）已删除。
     expect(container.querySelector(".pointer-events-none.absolute.inset-x-0.top-0")).toBeNull();
     // 折叠态不渲染面板（整个文档里都没有）。
-    expect(document.body.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
+    expect(document.body.querySelector('[role="region"][aria-label="超流体"]')).toBeNull();
   });
 
   it("点击折叠控件展开面板，Esc 关闭面板", () => {
     renderApp([session()]);
     act(() => boardControl()!.click());
-    const panel = document.body.querySelector<HTMLElement>('[role="region"][aria-label="子会话"]');
+    const panel = document.body.querySelector<HTMLElement>('[role="region"][aria-label="超流体"]');
     expect(panel).toBeTruthy();
     // 面板 portal 到 body：不在 header 的子树里（header 的 backdrop root
     // 会让面板自己的 blur 采到 header 子树，背后的转录文字原样透出）。
@@ -657,15 +657,15 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
     act(() => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
-    expect(document.body.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
+    expect(document.body.querySelector('[role="region"][aria-label="超流体"]')).toBeNull();
     // 控件本身仍在顶栏里（只收起，不消失）。
     expect(boardControl()).toBeTruthy();
   });
 
-  it("窄屏只隐藏「子会话」文案，控件本身保留", () => {
+  it("窄屏只隐藏「超流体」文案，控件本身保留", () => {
     renderApp([session()]);
     const control = boardControl()!;
-    const label = [...control.querySelectorAll("span")].find((span) => span.textContent === "子会话");
+    const label = [...control.querySelectorAll("span")].find((span) => span.textContent === "超流体");
     expect(label).toBeTruthy();
     expect(label!.className).toContain("@max-[380px]:hidden");
   });
@@ -680,7 +680,7 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
     Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
       configurable: true,
       get(this: HTMLElement) {
-        if (this.getAttribute("aria-label") === "子会话待答问题") return 120;
+        if (this.getAttribute("aria-label") === "超流体待答问题") return 120;
         if (this.id === "super-board-panel") return 240;
         return 0;
       },
@@ -721,7 +721,7 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
       renderApp([askingSession()]);
       // 有待答子会话时看板自行展开；手动收起后待答条挂在 header 下方。
       act(() => boardControl()!.click());
-      expect(document.body.querySelector('[role="region"][aria-label="子会话待答问题"]')).toBeTruthy();
+      expect(document.body.querySelector('[role="region"][aria-label="超流体待答问题"]')).toBeTruthy();
 
       // 折叠态的 strip 同样镜像高度（旧实现为 0，转录首条与主会话提问卡
       // 因此无预留地盖住它）。
@@ -753,7 +753,7 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
       // 最后一个子会话消失（被清理 / 会话切换）→ 看板整体不渲染。
       renderApp([]);
       expect(boardControl()).toBeNull();
-      expect(document.body.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
+      expect(document.body.querySelector('[role="region"][aria-label="超流体"]')).toBeNull();
       // 卸载必须清掉变量：否则转录会一直留一条 334px 的空白。
       expect(barHosts()).toHaveLength(0);
     });
@@ -830,9 +830,9 @@ describe("Super Agent 看板清理动作", () => {
 
   /** 清理确认框（ConfirmDialog 走 portal 挂在 document.body 上）。 */
   const cleanupDialog = (): HTMLElement | null =>
-    document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="清理子会话"]');
+    document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="清理超流体"]');
 
-  it("运行中的子会话不能清理：aria-disabled 且点击不弹确认框", () => {
+  it("运行中的超流体不能清理：aria-disabled 且点击不弹确认框", () => {
     render([session({ status: "running", startedAt: 2000, updatedAt: 3000 })]);
     expand();
     act(() => rowTrigger().click());
@@ -840,32 +840,32 @@ describe("Super Agent 看板清理动作", () => {
     const btn = cleanupButton();
     // 与合并按钮同一范式：aria-disabled（不是 disabled，否则理由读不到）。
     expect(btn.getAttribute("aria-disabled")).toBe("true");
-    expect(btn.getAttribute("aria-label")).toBe("子会话还在运行，请先中断再清理");
-    expect(btn.getAttribute("title")).toBe("子会话还在运行，请先中断再清理");
+    expect(btn.getAttribute("aria-label")).toBe("超流体还在运行，请先中断再清理");
+    expect(btn.getAttribute("title")).toBe("超流体还在运行，请先中断再清理");
     expect(btn.className).toContain("cursor-not-allowed");
     expect(btn.className).toContain("opacity-40");
     // 理由不再逐行重复：行首状态 chip 已说明子会话还在运行，规则统一
     // 收在看板头的帮助按钮里（见「看板帮助说明」那组用例）。
-    expect(document.body.textContent).not.toContain("子会话还在运行，请先中断再清理");
+    expect(document.body.textContent).not.toContain("超流体还在运行，请先中断再清理");
 
     act(() => btn.click());
     expect(cleanupDialog()).toBeNull();
-    expect(document.body.textContent).not.toContain("删除子会话");
+    expect(document.body.textContent).not.toContain("删除超流体");
   });
 
-  it("已完成的子会话仍可清理：点击后弹出确认框", () => {
+  it("已完成的超流体仍可清理：点击后弹出确认框", () => {
     render([session({ status: "completed", startedAt: 2000, endedAt: 4000 })]);
     expand();
     act(() => rowTrigger().click());
 
     const btn = cleanupButton();
     expect(btn.getAttribute("aria-disabled")).toBeNull();
-    expect(document.body.textContent).not.toContain("子会话还在运行，请先中断再清理");
+    expect(document.body.textContent).not.toContain("超流体还在运行，请先中断再清理");
 
     act(() => btn.click());
     const dialog = cleanupDialog();
     expect(dialog).toBeTruthy();
-    expect(dialog!.textContent).toContain("删除子会话「修复登录跳转」的工作目录？");
+    expect(dialog!.textContent).toContain("删除超流体「修复登录跳转」的工作目录？");
   });
 
   /** 确认框里的确认按钮（文案与操作同名，与「取消」区分）。 */
@@ -950,7 +950,7 @@ describe("Super Agent 看板清理动作", () => {
     expect(cleanupButton().getAttribute("aria-label")).toBe("清理");
   });
 
-  it("host 移除子会话后进行态自然消失，不残留到别的会话", () => {
+  it("host 移除超流体后进行态自然消失，不残留到别的会话", () => {
     render([session({ id: "super-a", status: "completed", startedAt: 2000, endedAt: 4000 })]);
     expand();
     act(() => rowTrigger().click());
@@ -998,12 +998,12 @@ describe("Super Agent 看板帮助说明", () => {
     const bubble = document.querySelector<HTMLElement>('[role="tooltip"]');
     expect(bubble).toBeTruthy();
     // 免确认 / 合并规则 / 清理规则，一条一行，都在同一个气泡里。
-    expect(bubble!.textContent).toContain("子会话里的工具调用（包括运行命令）会直接执行");
-    expect(bubble!.textContent).toContain("子会话结束之后才能合并");
-    expect(bubble!.textContent).toContain("子会话还在运行时不能清理");
+    expect(bubble!.textContent).toContain("超流体里的工具调用（包括运行命令）会直接执行");
+    expect(bubble!.textContent).toContain("超流体结束之后才能合并");
+    expect(bubble!.textContent).toContain("超流体还在运行时不能清理");
     // 规则只在这里说一次：行内不再重复那两句禁用原因。
-    expect(document.body.textContent).not.toContain("子会话还没结束，等它完成再合并");
-    expect(document.body.textContent).not.toContain("子会话还在运行，请先中断再清理");
+    expect(document.body.textContent).not.toContain("超流体还没结束，等它完成再合并");
+    expect(document.body.textContent).not.toContain("超流体还在运行，请先中断再清理");
   });
 });
 
@@ -1034,7 +1034,7 @@ function askingSession(overrides: Partial<SuperSessionUi> = {}): SuperSessionUi 
 describe("Super Agent 看板折叠态不隐藏待答问题", () => {
   /** 折叠态专用的紧凑待答条（与展开面板是两个不同的 region）。 */
   const pendingStrip = () =>
-    document.body.querySelector<HTMLElement>('[role="region"][aria-label="子会话待答问题"]');
+    document.body.querySelector<HTMLElement>('[role="region"][aria-label="超流体待答问题"]');
   const submitButtons = () =>
     [...document.body.querySelectorAll<HTMLButtonElement>("button")].filter(
       (b) => b.getAttribute("aria-label") === "提交回答",
@@ -1088,7 +1088,7 @@ describe("Super Agent 看板折叠态不隐藏待答问题", () => {
     });
   });
 
-  it("没有待答子会话时折叠态不渲染待答条", () => {
+  it("没有待答超流体时折叠态不渲染待答条", () => {
     render([session()]);
     expect(pendingStrip()).toBeNull();
   });
@@ -1098,15 +1098,15 @@ describe("Super Agent 看板面板的收起通道", () => {
   it("aria-expanded 随点击翻转，可访问名保持静态", () => {
     render();
     expect(control().getAttribute("aria-expanded")).toBe("false");
-    expect(control().getAttribute("aria-label")).toBe("子会话看板");
+    expect(control().getAttribute("aria-label")).toBe("超流体看板");
     expect(control().getAttribute("aria-controls")).toBeNull();
 
     expand();
     expect(control().getAttribute("aria-expanded")).toBe("true");
     // 名字不随状态变化：读屏只念「子会话看板」，展开态由 aria-expanded 表达。
-    expect(control().getAttribute("aria-label")).toBe("子会话看板");
+    expect(control().getAttribute("aria-label")).toBe("超流体看板");
     // 悬停文案仍说明当前动作。
-    expect(control().getAttribute("title")).toBe("收起子会话看板");
+    expect(control().getAttribute("title")).toBe("收起超流体看板");
     expect(control().getAttribute("aria-controls")).toBe(panelRoot().id);
     expect(panelRoot().id).toBe("super-board-panel");
 
@@ -1156,7 +1156,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
 
   /** 批量清理确认框（ConfirmDialog 走 portal 挂在 document.body 上）。 */
   const bulkDialog = (): HTMLElement | null =>
-    document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="清理已结束的子会话"]');
+    document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="清理已结束的超流体"]');
 
   /** 已释放的隔离记录；recycled=true 表示目录已回收、分支仍保留。 */
   function releasedIsolation(recycled: boolean): SuperSessionUi["isolation"] {
@@ -1186,7 +1186,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
 
     const dialog = bulkDialog();
     expect(dialog).toBeTruthy();
-    expect(dialog!.textContent).toContain("将删除 2 个子会话的工作目录");
+    expect(dialog!.textContent).toContain("将删除 2 个超流体的工作目录");
     expect(dialog!.textContent).toContain("它们的分支都会保留");
 
     const confirm = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
@@ -1206,7 +1206,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     expect(bulkDialog()).toBeNull();
   });
 
-  it("运行中的子会话不计入可回收，也不出现「清理已结束」按钮", () => {
+  it("运行中的超流体不计入可回收，也不出现「清理已结束」按钮", () => {
     render([session({ status: "running", startedAt: 2000, updatedAt: 3000 })]);
     expand();
 
@@ -1232,7 +1232,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     expect(bulkButton()).toBeNull();
   });
 
-  it("recycled 的子会话展开后说「工作目录已回收，分支保留」", () => {
+  it("recycled 的超流体展开后说「工作目录已回收，分支保留」", () => {
     render([
       session({
         status: "completed",
@@ -1405,7 +1405,7 @@ describe("Super Agent 看板合并 / 重试进行态", () => {
 
   /** 合并确认框（ConfirmDialog 走 portal 挂在 document.body 上）。 */
   const mergeDialog = (): HTMLElement | null =>
-    document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="合并子会话分支"]');
+    document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="合并超流体分支"]');
 
   function dialogButton(dialog: HTMLElement, label: string): HTMLButtonElement {
     const el = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
@@ -1500,7 +1500,7 @@ describe("Super Agent 看板合并 / 重试进行态", () => {
     expand();
     // 已合并的行折叠进「已完成的 N 个子会话」：展开后读到真实结果。
     const foldedToggle = document.body.querySelector<HTMLButtonElement>(
-      'button[aria-label="展开已完成的子会话"]',
+      'button[aria-label="展开已完成的超流体"]',
     );
     expect(foldedToggle).toBeTruthy();
     act(() => foldedToggle!.click());
@@ -1526,7 +1526,7 @@ describe("Super Agent 看板合并 / 重试进行态", () => {
     expect(mergeButton().getAttribute("aria-disabled")).toBeNull();
   });
 
-  it("请求未被受理（没有合并子会话）时兜底超时解锁，不永久转圈", () => {
+  it("请求未被受理（没有合并超流体）时兜底超时解锁，不永久转圈", () => {
     vi.useFakeTimers();
     try {
       render([mergeableSession()]);
@@ -1619,7 +1619,7 @@ describe("Super Agent 看板入口运行态炫光", () => {
   const glow = (): HTMLElement | null =>
     control().querySelector<HTMLElement>(".super-entry-glow");
 
-  it("至少一个非终态子会话：渲染纯装饰层，可访问名/aria-expanded/点击区不变", () => {
+  it("至少一个非终态超流体：渲染纯装饰层，可访问名/aria-expanded/点击区不变", () => {
     render([session({ status: "running" })]);
 
     const el = glow();
@@ -1629,7 +1629,7 @@ describe("Super Agent 看板入口运行态炫光", () => {
     expect(el!.textContent).toBe("");
     expect(el!.childElementCount).toBe(0);
     // 装饰层不改变按钮本身的可访问语义与展开状态。
-    expect(control().getAttribute("aria-label")).toBe("子会话看板");
+    expect(control().getAttribute("aria-label")).toBe("超流体看板");
     expect(control().getAttribute("aria-expanded")).toBe("false");
     // 定位/层叠上下文挂在按钮上，装饰层自己不引入新控件。
     expect(control().className).toContain("relative");
@@ -1666,7 +1666,7 @@ describe("Super Agent 看板入口运行态炫光", () => {
       render(statuses.map((status, i) => session({ id: `s${i}`, status })));
       expect(glow()).toBeNull();
       // 控件本身仍在（只是没有多余装饰层与动画）。
-      expect(control().getAttribute("aria-label")).toBe("子会话看板");
+      expect(control().getAttribute("aria-label")).toBe("超流体看板");
     }
   });
 

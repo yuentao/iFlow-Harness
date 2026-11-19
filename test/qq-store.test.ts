@@ -321,7 +321,7 @@ describe("QqTaskStore — 清理与原子写", () => {
     }
   });
 
-  it("终态词表覆盖子会话上报的别名（与 waitForSettle 同口径）", () => {
+  it("终态词表覆盖超流体上报的别名（与 waitForSettle 同口径）", () => {
     const store = makeStore();
     for (const status of ["done", "error", "aborted", "interrupted", "merged", "cancelled"]) {
       expect(DEFAULT_TERMINAL_STATUSES).toContain(status);

@@ -172,7 +172,7 @@ type PanelInternals = {
   };
 };
 
-describe("子会话汇报 · 归属与投递时机", () => {
+describe("超流体汇报 · 归属与投递时机", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let storageDir: string;
@@ -222,7 +222,7 @@ describe("子会话汇报 · 归属与投递时机", () => {
     await new Promise((r) => setTimeout(r, 0));
   }
 
-  it("会话 A 开着时，会话 B 的子会话收尾 —— 它的汇报不投进 A 的对话", async () => {
+  it("会话 A 开着时，会话 B 的超流体收尾 —— 它的汇报不投进 A 的对话", async () => {
     // B 的子会话结束了，A 才是用户当前所在的会话。
     const bChild = child({
       id: "super-b",
@@ -265,17 +265,17 @@ describe("子会话汇报 · 归属与投递时机", () => {
     expect(calls[0]!.prompt[0]!.text).toContain("B 的孩子");
   });
 
-  it("「等待 N 个子会话汇报」只数当前主会话的子会话", async () => {
+  it("「等待 N 个超流体汇报」只数当前主会话的超流体", async () => {
     const mine = child({ id: "super-a", status: "running", mainSessionId: "session-A" });
     const theirs = child({ id: "super-b", status: "running", mainSessionId: "session-B" });
     manager.list = () => [mine, theirs];
     p.store.setSuperSessions([mine, theirs]);
     p.refreshSuperWaitHeartbeat();
 
-    const waiting = toasts.filter((t) => t.message.includes("子会话汇报"));
+    const waiting = toasts.filter((t) => t.message.includes("超流体汇报"));
     expect(waiting.length).toBeGreaterThan(0);
     // 只有 A 的那个孩子在等 → 数字是 1，不是 2。
-    expect(waiting[waiting.length - 1]!.message).toContain("1 个子会话汇报");
+    expect(waiting[waiting.length - 1]!.message).toContain("1 个超流体汇报");
   });
 
   it("用户回合进行中时到达的汇报排到用户回合之后，不并发插入", async () => {
@@ -400,7 +400,7 @@ describe("子会话汇报 · 归属与投递时机", () => {
     expect(toasts.some((t) => t.message.includes("无法解析"))).toBe(false);
   });
 
-  it("思考块与正文块载荷相同 → 只派发 1 个子会话（不发「已派发 0 个」）", () => {
+  it("思考块与正文块载荷相同 → 只派发 1 个超流体（不发「已派发 0 个」）", () => {
     const payload = directive("改登录", "修好 src/auth.ts");
     chunk("agent_thought_chunk", payload);
     chunk("agent_message_chunk", payload);
@@ -408,7 +408,7 @@ describe("子会话汇报 · 归属与投递时机", () => {
     // 全部命中重复时没有可报的派发数量 —— 不能发「已派发 0 个」。
     expect(toasts.some((t) => t.message.includes("已派发 0"))).toBe(false);
     // 首次派发的那一条照常存在（重复条目既不计数也不额外提示）。
-    expect(toasts.filter((t) => t.message.includes("已派发 1 个子会话"))).toHaveLength(1);
+    expect(toasts.filter((t) => t.message.includes("已派发 1 个超流体"))).toHaveLength(1);
   });
 
   it("思考块与正文块载荷不同 → 只有正文通道的那一份派发", () => {
@@ -417,7 +417,7 @@ describe("子会话汇报 · 归属与投递时机", () => {
     chunk("agent_message_chunk", directive("改注册", "修好 src/register.ts"));
     expect(manager.spawn).toHaveBeenCalledTimes(1);
     // 主通道派发照常提示；思考通道既不派发也不拖出「无法解析」提示。
-    expect(toasts.filter((t) => t.message.includes("已派发 1 个子会话"))).toHaveLength(1);
+    expect(toasts.filter((t) => t.message.includes("已派发 1 个超流体"))).toHaveLength(1);
     expect(toasts.some((t) => t.message.includes("无法解析"))).toBe(false);
   });
 

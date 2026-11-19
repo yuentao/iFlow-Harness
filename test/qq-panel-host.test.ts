@@ -387,7 +387,7 @@ describe("createQqServiceHost — readTaskOutcome", () => {
     expect(outcomeOf(host, "super-1")!.merged).toBe(true);
   });
 
-  it("子会话终态映射成可核对的 stopReason（完成/失败/被中断）", () => {
+  it("超流体终态映射成可核对的 stopReason（完成/失败/被中断）", () => {
     const samples: Array<[string, string]> = [
       ["completed", "end_turn"],
       ["failed", "error"],

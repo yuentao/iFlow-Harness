@@ -36,7 +36,7 @@ const REQUEST = {
   type: "superResidueConfirm" as const,
   requestId: "super-residue-test-1",
   title: "清空并新建会话？",
-  message: "检测到 3 个历史子会话残留：未合并 worktree 的未提交改动将永久丢失且不可恢复。",
+  message: "检测到 3 个历史超流体残留：未合并 worktree 的未提交改动将永久丢失且不可恢复。",
   confirmLabel: "清空并新建",
   cancelLabel: "取消",
 };
