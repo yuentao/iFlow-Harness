@@ -125,6 +125,7 @@ type PanelInternals = {
   qqMainFinalAwaiterSince: Map<string, number>;
   qqFinalRescueText: Map<string, string>;
   qqReportFallbackText: Map<string, string>;
+  qqTaskFinalText: Map<string, string>;
   qqFinalRescueMs: number;
   qqFinalHardRescueMs: number;
   superReportRunning: boolean;
@@ -872,6 +873,111 @@ describe("QQ 注入轮与最终答复轮的衔接", () => {
 
     await p.deliverQqMainFinalAnswer("main-session", "再来的结论", "end_turn");
     expect(complete).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 回归：同会话多任务按 task 归属投递，杜绝「摘要相同、id 不同」重复卡
+// ---------------------------------------------------------------------------
+
+describe("QQ 最终答复按 task 归属投递（同会话多任务不串台）", () => {
+  let panel: ChatPanel;
+  let p: PanelInternals;
+  let storageDir: string;
+  let iflowHome: string;
+
+  beforeEach(async () => {
+    iflowHome = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-attr-home-"));
+    process.env.IFLOW_HOME = iflowHome;
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-attr-storage-"));
+    setConfigOverrides({});
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as PanelInternals;
+    const state = p.store.getState();
+    state.sessionId = "main-session";
+    state.status = "idle";
+    state.initializing = false;
+    state.replaying = false;
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    delete process.env.IFLOW_HOME;
+    fs.rmSync(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  it("同会话两 task 各收自己那份结论，互不串台、不共享汇总文本", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    p.qqMainFinalAwaiters.set("T-A", "main-session");
+    p.qqMainFinalAwaiters.set("T-B", "main-session");
+    p.qqTaskFinalText.set("T-A", "任务A结论：登录跳转已修好");
+    p.qqTaskFinalText.set("T-B", "任务B结论：镜像源已切换");
+
+    // 一轮汇总结论不能广播给两个 task。
+    await p.deliverQqMainFinalAnswer("main-session", "汇总结论：A 与 B 都完成了", "end_turn");
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    const byTask = new Map(
+      complete.mock.calls.map(([input]) => [input!.taskId, input!.text]),
+    );
+    expect(byTask.get("T-A")).toBe("任务A结论：登录跳转已修好");
+    expect(byTask.get("T-B")).toBe("任务B结论：镜像源已切换");
+    // 共享汇总文本绝不出现在任一份里（重复卡根因）。
+    expect(byTask.get("T-A")).not.toContain("汇总结论");
+    expect(byTask.get("T-B")).not.toContain("汇总结论");
+    expect(p.qqMainFinalAwaiters.size).toBe(0);
+    expect(p.qqTaskFinalText.size).toBe(0);
+  });
+
+  it("同会话中无归属的 awaiter 走如实兜底，不共享别人的结论", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    p.qqMainFinalAwaiters.set("T-A", "main-session");
+    p.qqMainFinalAwaiters.set("T-B", "main-session");
+    // 只有 A 有归属正文；B 派生子会话的汇报没被记账。
+    p.qqTaskFinalText.set("T-A", "任务A结论：登录跳转已修好");
+
+    await p.deliverQqMainFinalAnswer(
+      "main-session",
+      "汇总结论：A 与 B 都完成了",
+      "end_turn",
+      undefined,
+      "B的子会话汇报正文",
+    );
+
+    const byTask = new Map(
+      complete.mock.calls.map(([input]) => [input!.taskId, input!.text]),
+    );
+    expect(byTask.get("T-A")).toBe("任务A结论：登录跳转已修好");
+    // B 拿如实兜底，既不共享 A 的结论，也不共享共享汇总/兜底正文。
+    expect(byTask.get("T-B")).toBe("超流体任务已完成，但未产生可转发的正文摘要。");
+    expect(byTask.get("T-B")).not.toContain("任务A结论");
+    expect(byTask.get("T-B")).not.toContain("汇总结论");
+    expect(byTask.get("T-B")).not.toContain("B的子会话汇报正文");
+  });
+
+  it("汇总轮投递后补发再命中同一 task 不重复投递", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    p.qqMainFinalAwaiters.set("T-A", "main-session");
+    p.qqMainFinalAwaiters.set("T-B", "main-session");
+    p.qqTaskFinalText.set("T-A", "任务A结论");
+    p.qqTaskFinalText.set("T-B", "任务B结论");
+
+    // 汇总轮：每 task 一次。
+    await p.deliverQqMainFinalAnswer("main-session", "汇总结论", "end_turn");
+    expect(complete).toHaveBeenCalledTimes(2);
+
+    // 迟到补发精确命中 T-A：awaiter 已被汇总轮摘除，不应再投一次。
+    await p.deliverQqMainFinalAnswer(
+      "main-session",
+      "补发结论",
+      "end_turn",
+      new Set(["T-A"]),
+    );
+    expect(complete).toHaveBeenCalledTimes(2);
   });
 });
 

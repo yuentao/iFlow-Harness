@@ -118,6 +118,8 @@ type PanelInternals = {
   qqMainFinalAwaiterSince: Map<string, number>;
   qqFinalRescueText: Map<string, string>;
   qqReportFallbackText: Map<string, string>;
+  qqTaskFinalText: Map<string, string>;
+  qqTaskBySuperSession: Map<string, string>;
   qqFinalRescueDefers: Map<string, number>;
   qqFinalRescueMs: number;
   qqFinalHardRescueMs: number;
@@ -482,6 +484,42 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
       stopReason: "end_turn",
     });
     expect(p.qqMainFinalAwaiters.has("T-qq")).toBe(false);
+  });
+
+  it("同会话两个 QQ task 的子会话汇报按归属分别投递，不广播同一份汇总", async () => {
+    const complete = vi.fn(async () => undefined);
+    p.qq = { service: { completeMainFinalAnswer: complete } };
+    p.qqMainFinalAwaiters.set("T-A", "lane-session");
+    p.qqMainFinalAwaiters.set("T-B", "lane-session");
+    // 两个子会话分别归属两个 QQ 主任务（与派发时的 qqTaskBySuperSession 一致）。
+    p.qqTaskBySuperSession.set("super-a", "T-A");
+    p.qqTaskBySuperSession.set("super-b", "T-B");
+    const doneA = child({ id: "super-a", status: "completed" });
+    const doneB = child({ id: "super-b", status: "completed" });
+    manager.list = () => [doneA, doneB];
+
+    p.queueSuperReport([
+      { session: doneA, report: { state: "ready", summary: "A的结论：登录修好", at: 1 } },
+      { session: doneB, report: { state: "ready", summary: "B的结论：镜像切换完成", at: 2 } },
+    ]);
+    await flush();
+
+    // final 汇总轮：promptWithRetry 不流文本，real answer 走兜底。
+    const call = calls[calls.length - 1]!;
+    call.resolve({ stopReason: "end_turn" });
+    await flush();
+    await flush();
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    const byTask = new Map(
+      complete.mock.calls.map(([input]) => [input!.taskId, input!.text]),
+    );
+    expect(byTask.get("T-A")).toContain("A的结论");
+    expect(byTask.get("T-B")).toContain("B的结论");
+    // 每份只含自己的结论，不串台、不共享拼接后的汇总结论。
+    expect(byTask.get("T-A")).not.toContain("B的结论");
+    expect(byTask.get("T-B")).not.toContain("A的结论");
+    expect(p.qqMainFinalAwaiters.size).toBe(0);
   });
 
   it("finalReport 锚点失效时经 finalFallbackText 投递，不再静默放弃滑向空缓存补发", async () => {
