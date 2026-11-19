@@ -11,7 +11,7 @@ import {
   Save,
   Trash2,
 } from "lucide-react";
-import type { KnowledgeDocUi, MemoryFactUi, MemoryFileUi, MemoryScope, MemoryStateUi } from "../../../shared/messages";
+import type { KnowledgeDocUi, MemoryFactUi, MemoryFileUi, MemoryScope, MemoryStateUi, WebviewToHost } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import { ActionRow, Button, Chip, Hint, ICON_INLINE, IconButton, Segmented, Select, SettingsDisclosure, TextArea } from "./ui";
@@ -227,6 +227,12 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
   const [editLoading, setEditLoading] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState<string | null>(null);
+  // Dedicated write-failure state: `loadError` is clobbered by every
+  // `memoryState` broadcast, which used to erase a failed save instantly and
+  // leave the edit view (which never rendered loadError anyway) with zero
+  // feedback. Keeping writes separate makes failure visible until the user
+  // retries or succeeds, with a concrete message and an inline retry action.
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState<string | null>(null);
   const [factText, setFactText] = useState("");
   const [factScope, setFactScope] = useState<MemoryScope>("global");
@@ -241,6 +247,9 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
   const knowledgeJobRef = useRef<string | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pendingPath = useRef<string | null>(null);
+  // The last write request, kept so an inline "重试" can resend it verbatim
+  // (append / delete / save all carry different payloads).
+  const lastWriteRef = useRef<WebviewToHost | null>(null);
   const editRequestRef = useRef<string | null>(null);
   const editingPathRef = useRef<string | null>(null);
   useEffect(() => {
@@ -306,10 +315,13 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
       setSaving(false);
       pendingPath.current = null;
       if (!msg.ok) {
-        if (msg.conflict) setConflict(msg.error ?? t("文件已在磁盘上发生变化，请重新加载后再保存"));
-        else setLoadError(msg.error ?? t("保存失败"));
+        const detail = msg.error ?? t("保存失败");
+        if (msg.conflict) setConflict(detail);
+        else setSaveError(detail);
         return;
       }
+      setSaveError(null);
+      lastWriteRef.current = null;
       if (msg.file) {
         const file = msg.file;
         setState((prev) =>
@@ -380,6 +392,23 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
     send({ type: "listMemory" });
   }
 
+  /** Every memory write goes through here so the request is remembered for
+   * the inline retry action and a new attempt clears the previous failure. */
+  function sendWrite(msg: WebviewToHost, path: string | null) {
+    lastWriteRef.current = msg;
+    setSaveError(null);
+    setConflict(null);
+    setSaving(true);
+    pendingPath.current = path;
+    send(msg);
+  }
+
+  function retryWrite() {
+    const msg = lastWriteRef.current;
+    if (!msg || saving) return;
+    sendWrite(msg, "path" in msg ? (msg.path ?? null) : null);
+  }
+
   function open(file: MemoryFileUi) {
     send({ type: "openMemoryFile", path: file.path });
   }
@@ -419,45 +448,43 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
 
   function saveEdit() {
     if (!editing || saving) return;
-    setConflict(null);
-    setSaving(true);
-    pendingPath.current = editing.path;
-    send({
-      type: "saveMemoryFile",
-      path: editing.path,
-      content: editing.content,
-      expectedHash: editing.hash,
-    });
+    sendWrite(
+      {
+        type: "saveMemoryFile",
+        path: editing.path,
+        content: editing.content,
+        expectedHash: editing.hash,
+      },
+      editing.path,
+    );
   }
 
   function appendFact() {
     const fact = factText.trim();
     if (!fact || saving) return;
     setLoadError(null);
-    setSaving(true);
-    pendingPath.current = factTarget || null;
-    send({
-      type: "appendMemoryFact",
-      scope: factScope,
-      fact,
-      ...(factTarget ? { path: factTarget } : {}),
-    });
+    sendWrite(
+      {
+        type: "appendMemoryFact",
+        scope: factScope,
+        fact,
+        ...(factTarget ? { path: factTarget } : {}),
+      },
+      factTarget || null,
+    );
   }
 
   function removeFact(file: MemoryFileUi, id: string) {
     if (saving) return;
-    setSaving(true);
-    pendingPath.current = file.path;
-    send({ type: "deleteMemoryFacts", path: file.path, factIds: [id] });
+    sendWrite({ type: "deleteMemoryFacts", path: file.path, factIds: [id] }, file.path);
   }
 
   function createProject(fileName: "AGENTS.md" | "IFLOW.md") {
     if (saving) return;
     setCreating(true);
-    setSaving(true);
-    pendingPath.current = null;
-    send({ type: "createProjectMemory", fileName });
-    // The host replies with a fresh memoryState; clear the spinner there.
+    // The host replies with a fresh memoryState on success; a failure comes
+    // back as memorySaved{ok:false}, which now surfaces inline with retry.
+    sendWrite({ type: "createProjectMemory", fileName }, null);
   }
 
   if (editing) {
@@ -469,7 +496,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           </div>
                       <Hint className="mt-1">{t("记忆只在新会话或恢复会话时读取。当前会话要重启内核才会用上新内容。")}</Hint>        </div>
         {conflict && (
-          <div className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-warning">
+          <div role="alert" className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-warning">
             <AlertTriangle className="mt-0.5 size-3 shrink-0" />
             <div className="min-w-0 flex-1">
               <div>{conflict}</div>
@@ -482,6 +509,17 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                 }}
               >
                 {t("重新加载")}
+              </button>
+            </div>
+          </div>
+        )}
+        {saveError && (
+          <div role="alert" className="flex items-start gap-1.5 rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-destructive">
+            <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div>{saveError}</div>
+              <button className="mt-1 underline" disabled={saving} onClick={retryWrite}>
+                {t("重试")}
               </button>
             </div>
           </div>
@@ -509,13 +547,24 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
   return (
     <div className="space-y-3">
       {loadError && (
-        <div className="flex items-start gap-1.5 rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-destructive">
+        <div role="alert" className="flex items-start gap-1.5 rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-destructive">
           <AlertTriangle className="mt-0.5 size-3 shrink-0" />
           <span className="min-w-0 flex-1">{loadError}</span>
         </div>
       )}
+      {saveError && (
+        <div role="alert" className="flex items-start gap-1.5 rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-destructive">
+          <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div>{saveError}</div>
+            <button className="mt-1 underline" disabled={saving} onClick={retryWrite}>
+              {t("重试")}
+            </button>
+          </div>
+        </div>
+      )}
       {savedFlash && (
-        <div className="flex items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-ui-label text-success">
+        <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-ui-label text-success">
           <Check className="size-3 shrink-0" />
           <span className="min-w-0 flex-1">{savedFlash}</span>
           <span className="text-success/80">{t("新建会话或重启内核后生效")}</span>
@@ -690,7 +739,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                 </div>
               )}
               {knowledgeError && (
-                <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label text-destructive">
+                <div role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label text-destructive">
                   {knowledgeError}
                 </div>
               )}

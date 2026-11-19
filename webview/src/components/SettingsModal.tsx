@@ -976,6 +976,15 @@ function ApiConfigSection({
   const [editing, setEditing] = useState<{ name: string | null } | null>(null);
   const [form, setForm] = useState({ profileName: "", baseUrl: "", apiKey: "", modelName: "" });
   const [formError, setFormError] = useState<string | null>(null);
+  // A save keeps the editor OPEN until the host replies with an explicit
+  // `saveAuthResult`. Optimistic close used to destroy the typed values on a
+  // failed save (validation, duplicate name, kernel-write failure). `saving`
+  // disables submit and shows progress; `pendingSaveRef` correlates the reply
+  // so a receipt from another save (onboarding wizard / other tab) can neither
+  // close this form nor stamp an unrelated error onto it.
+  const [saving, setSaving] = useState(false);
+  const pendingSaveRef = useRef<number | null>(null);
+  const nextSaveIdRef = useRef(0);
   // Selected onboarding preset (null = custom endpoint). Kept separate from
   // the form so editing the URL by hand never silently re-labels the form.
   const [presetId, setPresetId] = useState<string | null>(null);
@@ -1013,6 +1022,36 @@ function ApiConfigSection({
     };
   }, [deletingProfile]);
 
+  // saveAuth receipt: the form stays open until the host actually confirms
+  // the write. Only a matching requestId may settle this editor — the wizard
+  // and other tabs send saveAuth too, and a stale/foreign receipt must not
+  // discard what the user just typed.
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      const msg = event.data as {
+        type?: string;
+        requestId?: number;
+        ok?: boolean;
+        error?: string;
+      };
+      if (msg?.type !== "saveAuthResult") return;
+      if (pendingSaveRef.current === null || msg.requestId !== pendingSaveRef.current) return;
+      pendingSaveRef.current = null;
+      setSaving(false);
+      if (msg.ok) {
+        setEditing(null);
+        setFormError(null);
+        setPresetId(null);
+      } else {
+        // Keep every field as typed; surface the host's concrete reason
+        // inline (not just a toast the user can miss).
+        setFormError(msg.error ?? t("保存失败，请稍后重试"));
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, []);
+
   const editingProfile = editing?.name ? auth.profiles.find((p) => p.name === editing.name) : undefined;
   // Saving the profile the panel is actually running on re-authenticates the
   // live session, so it must wait for a free turn. Adding a new profile also
@@ -1027,6 +1066,8 @@ function ApiConfigSection({
   })();
 
   const back = useCallback(() => {
+    pendingSaveRef.current = null;
+    setSaving(false);
     setEditing(null);
     setFormError(null);
     setPresetId(null);
@@ -1088,6 +1129,9 @@ function ApiConfigSection({
       return;
     }
     setFormError(null);
+    const requestId = ++nextSaveIdRef.current;
+    pendingSaveRef.current = requestId;
+    setSaving(true);
     send({
       type: "saveAuth",
       baseUrl: form.baseUrl.trim(),
@@ -1098,10 +1142,12 @@ function ApiConfigSection({
       // user renamed it (or cleared the name) — otherwise the old row lingers
       // next to the new one. A new profile has no previous name.
       replaceName: editing?.name ?? null,
+      requestId,
     });
-    // Stay in the modal: the list re-renders with the new active profile once
-    // the host's re-auth snapshot lands (the switch chip covers the wait).
-    setEditing(null);
+    // Do NOT close here. The host owns persistence (SecretStorage + kernel
+    // settings.json + possible re-auth); only its `saveAuthResult` may settle
+    // this form. On failure every field stays exactly as typed and the inline
+    // error explains why. `saving` disables the button meanwhile.
   }
 
   if (editing) {
@@ -1186,10 +1232,14 @@ function ApiConfigSection({
           </div>
         )}
         <ActionRow>
-          <Button variant="primary" disabled={saveBlocked} onClick={submit}>
-            {t("保存")}
+          <Button variant="primary" disabled={saveBlocked || saving} onClick={submit}>
+            {saving ? t("保存中…") : t("保存")}
           </Button>
-          {formError && <span className="text-ui-label text-destructive">{formError}</span>}
+          {formError && (
+            <span role="alert" aria-live="assertive" className="text-ui-label text-destructive">
+              {formError}
+            </span>
+          )}
         </ActionRow>
         {saveBlocked && editingActiveProfile && (
           <Hint>{t("这是正在使用的配置。正在生成或有超流体在跑，暂时不能保存。")}</Hint>
