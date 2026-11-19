@@ -30,8 +30,13 @@ Object.defineProperty(HTMLElement.prototype, "offsetParent", {
   get: () => document.body,
 });
 
+/**
+ * 默认夹具为「已启用」：一键接入 / 访问控制 / 执行策略 / 高级都跟随总开关
+ * 渲染（关闭时完全不显示，见 AGENTS.md 的从属配置硬约束），而多数用例
+ * 针对的正是这些从属区域。关闭态由专门用例覆盖。
+ */
 const VALUE: QqSettingsValue = {
-  enabled: false,
+  enabled: true,
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -210,7 +215,7 @@ describe("QqSettings", () => {
   });
 
   it("reports the enabled switch and offers no credential inputs", () => {
-    render(<Harness />);
+    render(<Harness initial={{ enabled: false }} />);
     const toggle = container.querySelector<HTMLButtonElement>("button[role='switch'][aria-label='启用 QQ 远程任务']")!;
     act(() => toggle.click());
     expect(onChange).toHaveBeenCalledWith({ enabled: true });
@@ -885,10 +890,96 @@ describe("QqSettings", () => {
   it("已授权时显示重新扫码授权 / 测试连接 / 解除绑定并接线", () => {
     render(<Harness initial={{ enabled: true }} />);
     clickText("测试连接");
-    clickText("解除绑定");
     clickText("重新扫码授权");
     expect(onTestConnection).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("解除绑定");
+  });
+
+  it("解除绑定需要二次确认：取消不发送，确认后才调用 onUnbind", () => {
+    render(<Harness initial={{ enabled: true }} />);
+
+    clickText("解除绑定");
+    // 未确认前绝不发解绑请求。
+    expect(onUnbind).not.toHaveBeenCalled();
+    const dialog = confirmDialog();
+    expect(dialog, "解除绑定确认框").toBeTruthy();
+    // 文案说明影响：远程任务与消息接入停止，需要重新扫码。
+    expect(dialog!.textContent).toContain("QQ 远程任务与消息接入都会停止");
+    expect(dialog!.textContent).toContain("重新扫码授权");
+    const confirm = [...dialog!.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "解除绑定",
+    )!;
+    expect(confirm, "确认解绑按钮").toBeTruthy();
+    // 危险动作按钮用 kit 的 danger 变体（text-destructive）。
+    expect(confirm.className).toContain("text-destructive");
+
+    // 取消：弹框关闭、仍未发请求。
+    const cancel = [...dialog!.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "取消",
+    )!;
+    act(() => cancel.click());
+    expect(confirmDialog()).toBeNull();
+    expect(onUnbind).not.toHaveBeenCalled();
+
+    // 再次打开并确认：此时才真正解绑一次。
+    clickText("解除绑定");
+    const again = [...confirmDialog()!.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "解除绑定",
+    )!;
+    act(() => again.click());
     expect(onUnbind).toHaveBeenCalledTimes(1);
+    expect(confirmDialog()).toBeNull();
+  });
+
+  it("关闭总开关时从属配置完全不显示，只留开关与说明", () => {
+    render(<Harness initial={{ enabled: false }} />);
+    const text = container.textContent ?? "";
+    // 开关本身与关闭态说明保留。
+    expect(text).toContain("启用 QQ 远程任务");
+    expect(text).toContain("启用后可配置一键接入、白名单与执行策略");
+    // 远程任务专属的配置块整块消失（不是禁用）。
+    for (const label of [
+      "一键接入 QQ 机器人",
+      "官方合规通道",
+      "访问控制",
+      "允许的用户",
+      "允许的群",
+      "远程任务策略",
+      "结果详细度",
+      "同时运行的任务数",
+      "每分钟任务上限",
+      "完成后自动合并",
+      "工作区目录",
+    ]) {
+      expect(text, label).not.toContain(label);
+    }
+    // 分组标题（执行策略 / 高级）整块不渲染。
+    const headings = [...container.querySelectorAll("h3")].map((node) => node.textContent);
+    expect(headings).not.toContain("访问控制");
+    expect(headings).not.toContain("执行策略");
+    expect(headings).not.toContain("高级");
+    expect(container.querySelector("button[aria-label='远程任务策略']")).toBeNull();
+    expect(container.querySelector("input[aria-label='同时运行的任务数']")).toBeNull();
+    expect(container.querySelector("table[aria-label='允许的用户']")).toBeNull();
+  });
+
+  it("开关关掉后从属配置立即整块消失（先开后关）", () => {
+    render(<Harness />);
+    expect(container.textContent).toContain("允许的用户");
+    expect(container.textContent).toContain("一键接入 QQ 机器人");
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      "button[role='switch'][aria-label='启用 QQ 远程任务']",
+    )!;
+    act(() => toggle.click());
+    expect(onChange).toHaveBeenCalledWith({ enabled: false });
+
+    // Harness 会把补丁回灌：从属块消失，只剩开关与说明。
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("一键接入 QQ 机器人");
+    expect(text).not.toContain("允许的用户");
+    expect(text).toContain("启用后可配置一键接入、白名单与执行策略");
+    expect(container.querySelector("input[aria-label='同时运行的任务数']")).toBeNull();
   });
 
   it("待审核用户列表：脱敏 openid、来源、次数、预览与时间", () => {
@@ -1011,7 +1102,8 @@ describe("QqSettings", () => {
 
     // 2) UI：只改第二条的备注；onChange 交回全量数组（对象形态，与宿主语义一致）。
     function IoHarness() {
-      const [value, setValue] = useState<QqSettingsValue>({ ...initial });
+      // 从属配置跟随总开关渲染：这里验证的是启用态下的白名单编辑。
+      const [value, setValue] = useState<QqSettingsValue>({ ...initial, enabled: true });
       return (
         <QqSettings
           value={value}
@@ -1070,7 +1162,8 @@ describe("QqSettings", () => {
     ]);
 
     function IoHarness() {
-      const [value, setValue] = useState<QqSettingsValue>({ ...initial });
+      // 从属配置跟随总开关渲染：这里验证的是启用态下的群白名单编辑。
+      const [value, setValue] = useState<QqSettingsValue>({ ...initial, enabled: true });
       return (
         <QqSettings
           value={value}

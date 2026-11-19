@@ -131,7 +131,9 @@ beforeEach(() => {
   postMessage.mockClear();
   useChat.setState({
     state: null,
-    qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
+    // 一键接入卡（含扫码区）与白名单跟随总开关渲染：这些用例覆盖的正是
+    // 启用态下的扫码/托管界面，因此夹具默认启用。
+    qqSettings: pickQqSettingsUi({ enabled: true }, { hasAppSecret: false }),
     qqStatus: null,
     qqPendingUsers: [],
     qqLoginQr: null,
