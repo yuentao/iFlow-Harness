@@ -175,7 +175,14 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
   it("扫码成功：写官方凭据（appId/appSecret）、自动启用并启动 adapter", async () => {
     await p.handleQqManagedSetup("start");
     protocolCbs!.onSuccess({ appId: "app-1", appSecret: "sec-1" });
-    await tick();
+    // onSuccess 里 `void this.onQqBotBound(...)` 是 fire-and-forget，且
+    // `{ enabled: true }` 的落盘在整条链（含 QqService.start() 的真实磁盘 IO）
+    // 末尾才发生。固定 25ms tick 在慢速 CI runner 上不够，assert 时 writes 还
+    // 是空的 —— 用 waitFor 等实际副作用到位，消除时序 flake。
+    await vi.waitFor(() => {
+      expect(ioHarness.writes).toContainEqual({ enabled: true });
+      expect(p.qq?.qqbot?.adapter).toBeTruthy();
+    });
     expect(ioHarness.secrets.get(QQBOT_APP_ID_SECRET_KEY)).toBe("app-1");
     expect(ioHarness.secrets.get(QQ_SECRET_KEYS.appSecret)).toBe("sec-1");
     // 首次绑定（原本未启用）必须自动开启远程任务。
