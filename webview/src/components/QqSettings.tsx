@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   AlertTriangle,
   Check,
@@ -42,6 +42,7 @@ import {
   Select,
   SettingsDisclosure,
   SettingsGroup,
+  SettingsRow,
   Switch,
   TextInput,
 } from "./ui";
@@ -97,30 +98,6 @@ export interface QqSettingsProps {
   qqLoginQr?: QqLoginQr | null;
   /** 当前托管阶段进度；null = 未开始托管。 */
   qqManagedStatus?: QqManagedStatus | null;
-}
-
-/** Label + description on the left, one control on the right — the same row
- * rhythm the other settings sections use (SettingsModal's SettingRow). */
-function Row({
-  label,
-  description,
-  wide = false,
-  children,
-}: {
-  label: string;
-  description?: string;
-  wide?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-3 px-4 py-4 @min-[600px]:flex-row @min-[600px]:items-start @min-[600px]:gap-5">
-      <div className="min-w-0 flex-1">
-        <div className="text-ui-body font-medium leading-snug text-foreground">{label}</div>
-        {description && <Hint className="mt-1">{description}</Hint>}
-      </div>
-      <div className={wide ? "w-full shrink-0 @min-[600px]:w-auto" : "shrink-0"}>{children}</div>
-    </div>
-  );
 }
 
 /**
@@ -889,7 +866,7 @@ export function QqSettings({
       )}
 
       <SettingsGroup title={t("连接")}>
-        <Row
+        <SettingsRow
           label={t("启用 QQ 远程任务")}
           description={t(
             "从 QQ 私聊或群聊接收任务，在独立分支上执行。关闭面板不会停止 QQ 通道（通道随扩展宿主存活，重开面板可继续查看）。",
@@ -900,7 +877,7 @@ export function QqSettings({
             label={t("启用 QQ 远程任务")}
             onChange={(enabled) => onChange({ enabled })}
           />
-        </Row>
+        </SettingsRow>
         {/*
          * 关闭态只留开关本身 + 这一行说明：一键接入、访问控制、执行策略、
          * 高级都是远程任务专属配置，总开关关掉就没有可配置的对象。
@@ -939,23 +916,23 @@ export function QqSettings({
       </SettingsGroup>
 
       <SettingsGroup title={t("执行策略")}>
-        <Row label={t("远程任务策略")} description={policy.description} wide>
+        <SettingsRow label={t("远程任务策略")} description={policy.description} wide>
           <Select
             ariaLabel={t("远程任务策略")}
             value={value.remotePolicy}
             options={POLICY_OPTIONS}
             onChange={(next) => onChange({ remotePolicy: next as QqRemotePolicy })}
           />
-        </Row>
-        <Row label={t("结果详细度")} description={detail.description} wide>
+        </SettingsRow>
+        <SettingsRow label={t("结果详细度")} description={detail.description} wide>
           <Select
             ariaLabel={t("结果详细度")}
             value={value.resultDetail}
             options={DETAIL_OPTIONS}
             onChange={(next) => onChange({ resultDetail: next as QqResultDetail })}
           />
-        </Row>
-        <Row label={t("同时运行的任务数")} description={t("范围 1–10，超出后排队等待。")}>
+        </SettingsRow>
+        <SettingsRow label={t("同时运行的任务数")} description={t("范围 1–10，超出后排队等待。")}>
           <CommitNumberInput
             label={t("同时运行的任务数")}
             value={value.maxConcurrentTasks}
@@ -963,8 +940,8 @@ export function QqSettings({
             max={10}
             onCommit={(maxConcurrentTasks) => onChange({ maxConcurrentTasks })}
           />
-        </Row>
-        <Row label={t("每分钟任务上限")} description={t("范围 1–60，超过上限的任务会被拒绝。")}>
+        </SettingsRow>
+        <SettingsRow label={t("每分钟任务上限")} description={t("范围 1–60，超过上限的任务会被拒绝。")}>
           <CommitNumberInput
             label={t("每分钟任务上限")}
             value={value.rateLimitPerMin}
@@ -972,14 +949,14 @@ export function QqSettings({
             max={60}
             onCommit={(rateLimitPerMin) => onChange({ rateLimitPerMin })}
           />
-        </Row>
-        <Row label={t("完成后自动合并")} description={t("任务成功后把分支自动合并回当前分支。")}>
+        </SettingsRow>
+        <SettingsRow label={t("完成后自动合并")} description={t("任务成功后把分支自动合并回当前分支。")}>
           <Switch checked={value.autoMerge} label={t("完成后自动合并")} onChange={(autoMerge) => onChange({ autoMerge })} />
-        </Row>
+        </SettingsRow>
       </SettingsGroup>
 
       <SettingsDisclosure title={t("高级")}>
-        <Row label={t("工作区目录")} description={t("远程任务运行的工作区；留空表示当前工作区根目录。")} wide>
+        <SettingsRow label={t("工作区目录")} description={t("远程任务运行的工作区；留空表示当前工作区根目录。")} wide>
           <Field label={t("工作区目录")}>
             <CommitTextInput
               mono
@@ -989,7 +966,7 @@ export function QqSettings({
               onCommit={(workspace) => onChange({ workspace })}
             />
           </Field>
-        </Row>
+        </SettingsRow>
       </SettingsDisclosure>
         </>
       )}

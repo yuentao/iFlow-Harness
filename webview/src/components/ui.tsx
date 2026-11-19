@@ -1175,6 +1175,64 @@ export function SettingsGroup({
 }
 
 /**
+ * One label/control row inside a SettingsGroup. Single home for the setting
+ * row rhythm (`px-4 py-4`, a shrinking label column, 600px two-column switch)
+ * so MCP / QQ / modal pages stop re-declaring their own drifted copy.
+ *
+ * `description` is the short "what this changes" line; long caveats go in
+ * `detail`, surfaced as an ⓘ tooltip. `wide` lets the control fill the row on
+ * narrow viewports, `stacked` puts the label above a repeated-control body
+ * (arg / env / header lists), and `action` is a trailing slot for the list's
+ * 添加 button.
+ */
+export function SettingsRow({
+  label,
+  description,
+  detail,
+  required = false,
+  wide = false,
+  stacked = false,
+  action,
+  className = "",
+  children,
+}: {
+  label: string;
+  description?: string;
+  detail?: string;
+  required?: boolean;
+  wide?: boolean;
+  stacked?: boolean;
+  action?: ReactNode;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={`flex min-w-0 px-4 py-4 ${
+        stacked ? "flex-col gap-2" : "flex-col gap-3 @min-[600px]:flex-row @min-[600px]:items-start @min-[600px]:gap-5"
+      }${className ? ` ${className}` : ""}`}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="text-ui-body font-medium leading-snug text-foreground">{label}</span>
+          {required && <span className="text-destructive" aria-hidden="true">*</span>}
+          {detail && (
+            <HelpTip label={t("详细说明")} align="left">
+              {detail}
+            </HelpTip>
+          )}
+        </div>
+        {description && <Hint className="mt-1">{description}</Hint>}
+      </div>
+      <div className={wide ? "flex min-w-0 w-full shrink-0 flex-col gap-2 @min-[600px]:w-auto" : "flex min-w-0 shrink-0 items-center gap-2"}>
+        {children}
+        {action}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Collapsible SettingsGroup for advanced, rarely-touched fields. Keeping
  * these closed by default is what stops a tab from reading as a dense wall of
  * inputs; the summary keeps the same header rhythm as SettingsGroup.

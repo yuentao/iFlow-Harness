@@ -358,6 +358,7 @@ describe("ui kit guard", () => {
       "export function Dropdown(",
       "export function MenuItem(",
       "export function SettingsGroup(",
+      "export function SettingsRow(",
       "export function SettingsDisclosure(",
       "export const WARNING_SOFT =",
       "export const DANGER_SOFT =",
