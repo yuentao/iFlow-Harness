@@ -1979,8 +1979,10 @@ describe("session usage split & real-time refresh", () => {
     refreshSessionUsage(state);
     const first = state.usage;
     expect(first).not.toBeNull();
+    expect(first!.sources?.contextUsed).toBe("transcript-estimate");
     // No content moved between refreshes → the SAME object is kept (lets the
-    // webview's Object.is selector skip a re-render).
+    // webview's Object.is selector skip a re-render). `capturedAt` is stamped
+    // every estimate but deliberately excluded from the stability compare.
     refreshSessionUsage(state);
     expect(state.usage).toBe(first);
   });
@@ -2012,6 +2014,21 @@ describe("session usage split & real-time refresh", () => {
     const fresh = newSessionState(state);
     expect(fresh.usage).not.toBeNull();
     expect(fresh.usage!.totalTokens).toBe(0);
+  });
+
+  it("U1: a plain transcript estimate is labelled transcript-estimate", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答" } }));
+    completePrompt(state, "end_of_turn");
+    const usage = state.usage!;
+    // No Mod report and no compression card: occupancy is the host BPE fold.
+    expect(usage.contextUsed).toBe(usage.totalTokens);
+    expect(usage.sources?.contextUsed).toBe("transcript-estimate");
+    expect(usage.sources?.split).toBe("transcript-estimate");
+    expect(usage.usageAuthoritative).toBeUndefined();
+    expect(typeof usage.capturedAt).toBe("number");
+    expect(usage.capturedAt!).toBeGreaterThan(0);
   });
 
   it("drops the context counter to the compressed context after /compress", { timeout: 30_000 }, () => {
@@ -2069,6 +2086,11 @@ describe("session usage split & real-time refresh", () => {
     expect(usage.inputTokens).toBe(7855 + estimateTokens("继续修复"));
     // The pre-compression assistant output is out of context too.
     expect(usage.outputTokens).toBe(0);
+    // U1: the isCompactSummary card's newTokenCount is a CLI lower-bound floor
+    // folded into this host estimate; the split remains a pure estimate.
+    expect(usage.sources?.contextUsed).toBe("lower-bound");
+    expect(usage.sources?.split).toBe("transcript-estimate");
+    expect(typeof usage.capturedAt).toBe("number");
   });
 
   it("P0-6: contextUsed mirrors the post-fold total and breakdown sums by kind", () => {
@@ -2152,6 +2174,21 @@ describe("session usage split & real-time refresh", () => {
   });
 
   describe("authoritative occupancy overlay (P2-7 usage report)", () => {
+    // U1 invariant: the occupancy label and the legacy flag must never
+    // disagree — `kernel-report` iff the number is fully authoritative; the
+    // split is always a host estimate (wire carries no input/output split).
+    type UsageLike = {
+      sources?: { contextUsed?: string; split?: string };
+      usageAuthoritative?: boolean;
+      capturedAt?: number;
+    };
+    const expectProvenanceConsistent = (u: UsageLike): void => {
+      expect(u.sources?.contextUsed === "kernel-report").toBe(u.usageAuthoritative === true);
+      expect(u.sources?.split).toBe("transcript-estimate");
+      expect(typeof u.capturedAt).toBe("number");
+      expect(u.capturedAt!).toBeGreaterThan(0);
+    };
+
     it("completePrompt overlays the reported occupancy and flags it authoritative", () => {
       const state = initialSessionState();
       beginUserPrompt(state, "问题");
@@ -2160,6 +2197,10 @@ describe("session usage split & real-time refresh", () => {
       const usage = state.usage!;
       expect(usage.contextUsed).toBe(61_000);
       expect(usage.usageAuthoritative).toBe(true);
+      // U1: a bare kernel anchor is honestly labelled; the split stays a host
+      // estimate (the ACP wire carries no input/output split).
+      expect(usage.sources?.contextUsed).toBe("kernel-report");
+      expectProvenanceConsistent(usage);
       // The input/output SPLIT stays estimated (the wire carries no split).
       expect(usage.inputTokens).toBe(estimateTokens("问题"));
       expect(state.usageReport).toEqual({ lastRequestInputTokens: 61_000, atBlockCount: state.blocks.length });
@@ -2170,6 +2211,9 @@ describe("session usage split & real-time refresh", () => {
       beginUserPrompt(state, "问题");
       completePrompt(state, "end_turn", null, null);
       expect(state.usage!.usageAuthoritative).toBeUndefined();
+      // U1: no Mod report → an honest transcript estimate, never kernel-report.
+      expect(state.usage!.sources?.contextUsed).toBe("transcript-estimate");
+      expectProvenanceConsistent(state.usage!);
       expect(state.usageReport ?? null).toBeNull();
     });
 
@@ -2186,6 +2230,8 @@ describe("session usage split & real-time refresh", () => {
       beginUserPrompt(state, "问题");
       completePrompt(state, "end_turn", null, { lastRequestInputTokens: 61_000 });
       expect(state.usage!.usageAuthoritative).toBe(true);
+      expect(state.usage!.sources?.contextUsed).toBe("kernel-report");
+      expectProvenanceConsistent(state.usage!);
       // A new turn appends blocks: the reported number still describes the
       // model's context AT the anchor, and the appended blocks are the only
       // thing that context gained since (the CLI replays assistant parts, so
@@ -2197,10 +2243,16 @@ describe("session usage split & real-time refresh", () => {
       expect(state.usage!.contextUsed).toBe(61_000 + estimateTokens("第二个问题"));
       // Part of the number is now estimated (the streamed delta) → honest flag.
       expect(state.usage!.usageAuthoritative).toBe(false);
+      // U1: even though a kernel anchor exists, the folded delta makes the
+      // occupancy part-estimate — never label it kernel-report here.
+      expect(state.usage!.sources?.contextUsed).toBe("transcript-estimate");
+      expectProvenanceConsistent(state.usage!);
       // The next report lands and re-authorises the overlay.
       completePrompt(state, "end_turn", null, { lastRequestInputTokens: 62_000 });
       expect(state.usage!.contextUsed).toBe(62_000);
       expect(state.usage!.usageAuthoritative).toBe(true);
+      expect(state.usage!.sources?.contextUsed).toBe("kernel-report");
+      expectProvenanceConsistent(state.usage!);
     });
 
     it("the reported completion replays into the next request (prefill term)", () => {
@@ -2243,6 +2295,11 @@ describe("session usage split & real-time refresh", () => {
       refreshSessionUsage(state);
       expect(state.usage!.usageAuthoritative).toBeUndefined();
       expect(state.usage!.contextUsed).toBe(7_855);
+      // U1: with the anchor expired, occupancy is the CLI's post-compression
+      // lower-bound floor — a CLI-derived bound, not a fresh per-request
+      // report, so it must never be labelled kernel-report.
+      expect(state.usage!.sources?.contextUsed).toBe("lower-bound");
+      expectProvenanceConsistent(state.usage!);
     });
 
     it("deleting a user message clears the report (CLI history truncates in lockstep)", () => {

@@ -1936,6 +1936,18 @@ export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
     contextUsed: totalTokens,
     prefillTokens,
     breakdown,
+    // U1 provenance (descriptive only — no number is recomputed from it).
+    // This whole path is a host BPE estimate; the sole CLI-derived term is a
+    // completed compression card's `newTokenCount` folded above, and that is
+    // a LOWER bound (contents only, no system instruction / tool schemas), so
+    // occupancy is honestly labelled `lower-bound` when such a floor exists
+    // and a plain `transcript-estimate` otherwise. The input/output split is
+    // ALWAYS an estimate: the ACP wire carries no split (probed CLI 0.5.19).
+    sources: {
+      contextUsed: contextFloor > 0 ? "lower-bound" : "transcript-estimate",
+      split: "transcript-estimate",
+    },
+    capturedAt: Date.now(),
   };
 }
 
@@ -2194,6 +2206,16 @@ export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext
       next.contextUsed = report.lastRequestInputTokens + (report.completionTokens ?? 0) + delta;
       // The number stays CLI-sourced while nothing had to be estimated onto it.
       next.usageAuthoritative = delta === 0;
+      // U1 provenance kept in lockstep with `usageAuthoritative`: a genuinely
+      // kernel-anchored occupancy (no estimated delta folded on) is
+      // `kernel-report`; once streamed blocks were added the number is part
+      // estimate, so never label it authoritative just because an anchor
+      // exists. The split is untouched by this overlay — it stays the host
+      // estimate stamped by `estimateSessionUsage`.
+      if (next.sources) {
+        next.sources.contextUsed = next.usageAuthoritative ? "kernel-report" : "transcript-estimate";
+      }
+      next.capturedAt = Date.now();
       if (report.cachedReadTokens !== undefined) {
         // Already INSIDE lastRequestInputTokens — surfaced for the cost split,
         // never added to occupancy again (the fork's own saveUsageMetadata
@@ -2216,6 +2238,13 @@ export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext
     prev.contextUsed === next.contextUsed &&
     prev.prefillTokens === next.prefillTokens &&
     prev.usageAuthoritative === next.usageAuthoritative &&
+    // Provenance is derived from the same inputs, but compare it explicitly so
+    // a label flip can never be swallowed by the stable-reference shortcut.
+    // `capturedAt` is intentionally NOT compared: it refreshes only when a
+    // real number/source change adopts the fresh object, keeping no-op
+    // refreshes (500ms cadence mid-stream) reference-stable.
+    prev.sources?.contextUsed === next.sources?.contextUsed &&
+    prev.sources?.split === next.sources?.split &&
     prev.contextWindow === next.contextWindow &&
     prev.estimated === next.estimated &&
     prev.estimatedCost === next.estimatedCost
