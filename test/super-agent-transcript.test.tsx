@@ -193,6 +193,29 @@ describe("超流体实时进度面板", () => {
     });
   });
 
+  it("F1 恢复快照（含宿主已裁剪块）在详情面板照常渲染并如实标注已释放", () => {
+    // 终态落盘写的是 evictBlockPayloads 裁剪后的窗口：旧块 output 为空、
+    // evicted:true。宿主恢复时按 from:0 整份推来，详情面板必须能渲染它，
+    // 而不是把「已裁剪历史转录」当空白或报错。
+    const evictedTool: Block = { ...TOOL_BLOCK, evicted: true, output: "", hadDiff: false };
+    const restoredText: Block = { kind: "text", id: "b-restored", text: "重启恢复后的结论" };
+    render({ "super-1": [evictedTool, restoredText] });
+    clickLabel("超流体看板");
+    clickRow("修复登录跳转");
+    clickText("查看实时进度");
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("重启恢复后的结论");
+    expect(text).toContain("内容已释放"); // 旧载荷如实标注，不假装还在
+    expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+    // Buffer came from the restore push — no needless full pull.
+    expect(send).not.toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "transcript",
+      sessionId: "super-1",
+    });
+  });
+
   it("实时操作里的转录块走极简档：工具卡无卡片表面、状态是纯文字；主转录默认档仍是卡片", () => {
     render({
       "super-1": [

@@ -16,8 +16,9 @@ import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import { setConfigOverrides } from "./vscode-stub.js";
-import { readSuperSessionArchive, writeSuperSessionArchive } from "../src/panel/super-store.js";
+import { readSuperSessionArchive, writeSuperSessionArchive, writeSuperTranscriptSnapshot, readSuperTranscriptSnapshot, superTranscriptFileName } from "../src/panel/super-store.js";
 import { fromPersistedSuperSession, type PersistedSuperSession } from "../shared/super-agent.js";
+import type { Block } from "../shared/messages.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -81,6 +82,7 @@ type PanelInternals = {
   currentMainSessionId: () => string | null;
   publishSuperSessions: () => void;
   getSuperAgent: () => unknown;
+  postToWebview: (msg: unknown) => void;
   superAgent: unknown;
   superHeartbeatTimer: NodeJS.Timeout | null;
   pruneUnrestorableSessions: () => Promise<unknown[]>;
@@ -390,6 +392,83 @@ describe("ChatPanel · 超流体归档的恢复接线", () => {
     } finally {
       fs.rmSync(live, { recursive: true, force: true });
     }
+  });
+
+  // --- F1：子会话转录终态落盘 → 恢复读回 ------------------------------------
+
+  const transcriptBlock = (text: string): Block => ({
+    kind: "text",
+    id: "b1",
+    text,
+  });
+
+  it("F1 恢复时读回终态转录：经 superTranscript(from:0) 推 webview 且非空", async () => {
+    await writeSuperSessionArchive(storageDir, "main-1", [record({ status: "completed" })]);
+    await writeSuperTranscriptSnapshot(storageDir, "super-old", [transcriptBlock("子会话最后的结论")]);
+
+    const posted: { type: string; sessionId?: string; from?: number; blocks?: Block[] }[] = [];
+    const original = p.postToWebview.bind(p);
+    p.postToWebview = (msg: { type: string; sessionId?: string; from?: number; blocks?: Block[] }) => {
+      posted.push(msg);
+      original(msg);
+    };
+
+    await p.restoreSuperSessions("main-1");
+
+    const transcriptMsgs = posted.filter((m) => m.type === "superTranscript");
+    expect(transcriptMsgs).toHaveLength(1);
+    expect(transcriptMsgs[0]?.sessionId).toBe("super-old");
+    expect(transcriptMsgs[0]?.from).toBe(0);
+    expect(transcriptMsgs[0]?.blocks?.length).toBeGreaterThan(0);
+    // 详情面板在 webview 重连 / ready 时还能从管理器再拉一次。
+    const manager = p.getSuperAgent() as { transcriptEntries: () => { sessionId: string; blocks: Block[] }[] };
+    expect(manager.transcriptEntries().some((e) => e.sessionId === "super-old")).toBe(true);
+  });
+
+  it("F1 转录读不出来时静默降级，看板恢复照常完成", async () => {
+    await writeSuperSessionArchive(storageDir, "main-1", [record({ status: "completed" })]);
+    // 手工塞一个损坏的转录快照（JSON 截断）。
+    const dir = path.join(storageDir, "super-sessions", "transcripts");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, superTranscriptFileName("super-old")), "{ 截断", "utf8");
+
+    await expect(p.restoreSuperSessions("main-1")).resolves.toBeUndefined();
+    expect(board()).toHaveLength(1);
+    expect(await readSuperTranscriptSnapshot(storageDir, "super-old")).toEqual([]);
+  });
+
+  it("F1 删除会话：子会话的转录快照跟着归档一起删", async () => {
+    const manager = {
+      forgetMainSession: vi.fn(async () => ({ ids: ["super-x"], worktrees: [] })),
+      list: () => [],
+      archivableMainSessionIds: () => [],
+      archivableSessions: () => [],
+    };
+    p.superAgent = manager;
+    await writeSuperTranscriptSnapshot(storageDir, "super-x", [transcriptBlock("要被删掉的转录")]);
+
+    await p.deleteSession("main-1");
+
+    expect(fs.existsSync(path.join(storageDir, "super-sessions", "transcripts", "super-x-transcript.json"))).toBe(false);
+  });
+
+  it("F1 prune 回收孤儿转录快照，但保留仍归属会话的子会话转录", async () => {
+    await p.persistSessions([{ id: "main-1", label: "main-1" }], "main-1");
+    vi.spyOn(p, "hasPersistedTranscript").mockReturnValue(true);
+    vi.spyOn(p, "migrateLegacyTranscripts").mockResolvedValue(undefined);
+    await writeSuperSessionArchive(storageDir, "main-1", [record({ id: "super-keep" })]);
+
+    const dir = path.join(storageDir, "super-sessions", "transcripts");
+    fs.mkdirSync(dir, { recursive: true });
+    const keepName = superTranscriptFileName("super-keep");
+    const orphanName = superTranscriptFileName("super-orphan");
+    fs.writeFileSync(path.join(dir, keepName), JSON.stringify({ blocks: [transcriptBlock("留") ] }), "utf8");
+    fs.writeFileSync(path.join(dir, orphanName), JSON.stringify({ blocks: [transcriptBlock("删") ] }), "utf8");
+
+    await p.pruneUnrestorableSessions();
+
+    expect(fs.existsSync(path.join(dir, keepName))).toBe(true);
+    expect(fs.existsSync(path.join(dir, orphanName))).toBe(false);
   });
 
   it("S3 · 子会话清理后归档写空，恢复时不再冒出已清理的子会话", async () => {

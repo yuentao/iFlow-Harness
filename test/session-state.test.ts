@@ -52,6 +52,10 @@ import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, EVICT_KEEP_BLOCKS
 import type { SessionNotification } from "../src/acp/protocol";
 import { SuperAgentManager } from "../src/panel/super-agent";
 import type { SuperAgentDeps } from "../src/panel/super-agent";
+import { readSuperTranscriptSnapshot } from "../src/panel/super-store";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 // Mock the tokenizer so we can exercise the heuristic fallback. `vi.hoisted`
 // captures `vi` before the `vi.mock` factory is hoisted above the import, so the
 // factory body itself never references `vi` directly (required when globals are off).
@@ -3628,5 +3632,39 @@ describe("super-transcript payload eviction mirrors the main channel", () => {
     expect(manager.transcriptBlocks("child-3")).toEqual(first);
     // Re-running the same pure eviction on the trimmed snapshot is identity-stable.
     expect(evictBlockPayloads(first, EVICT_KEEP_BLOCKS)).toBe(first);
+  });
+
+  it("终态落盘写的是已裁剪窗口，不是未裁剪的完整载荷", async () => {
+    const sent: Sent[] = [];
+    const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-supersnap-"));
+    try {
+      const manager = new SuperAgentManager({
+        onTranscript: (sessionId: string, from: number, blocks: Block[]) => {
+          sent.push({ sessionId, from, blocks });
+        },
+        superStoreDir: () => storageDir,
+        log: { info: () => {}, warn: () => {}, error: () => {} },
+      } as unknown as SuperAgentDeps);
+      const internals = manager as unknown as MgrInternals & {
+        persistTranscriptSnapshot: (id: string) => Promise<void>;
+      };
+      const entry = internals.transcriptFor("child-4");
+      entry.state.blocks = Array.from({ length: 205 }, (_, i) => toolBlock(`t${i}`, 10));
+      internals.markTranscriptDirty("child-4", 0);
+      internals.flushTranscripts(); // onTranscript first (full), then host eviction
+
+      await internals.persistTranscriptSnapshot("child-4");
+
+      const onDisk = await readSuperTranscriptSnapshot(storageDir, "child-4");
+      expect(onDisk).toHaveLength(205); // eviction drops no blocks (index stays valid)
+      expect((onDisk[0] as ToolBlock).evicted).toBe(true);
+      expect((onDisk[0] as ToolBlock).output).toBe("");
+      expect((onDisk[204] as ToolBlock).output).toBe("x".repeat(10));
+      // 磁盘快照 = 宿主已裁剪的窗口，而不是 webview 收到的完整载荷。
+      expect(onDisk).toEqual(manager.transcriptBlocks("child-4"));
+      expect((sent[0]!.blocks[0] as ToolBlock).output).toBe("x".repeat(10));
+    } finally {
+      fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
   });
 });

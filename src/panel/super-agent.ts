@@ -135,6 +135,10 @@ import {
   worktreeHasUncommittedChanges,
   worktreePathFor,
 } from "./worktree.js";
+import {
+  deleteSuperTranscriptSnapshot,
+  writeSuperTranscriptSnapshot,
+} from "./super-store.js";
 
 /**
  * 提问的自动放行时限（与主会话的审批卡同一纪律：超时就放行/继续，避免 agent
@@ -639,6 +643,12 @@ export interface SuperAgentDeps {
    * 破坏 blockPatch 锚），所以走这条独立通道；节流由管理器负责。
    */
   onTranscript?: (sessionId: string, from: number, blocks: Block[]) => void;
+  /**
+   * 转录快照的落盘目录（扩展存储，不是仓库）。终态时子会话的转录在这里写
+   * 一份旁路快照，重启恢复时由宿主读回；归档仍只存记录，两者互不污染。
+   * 可选：单测 / fixture 不传就只保留内存转录（现有行为不变）。
+   */
+  superStoreDir?: () => string | null;
   /** 需要主会话知道的状态更新（宿主转成给主会话的提示词）。 */
   onReport: (entries: { session: SuperSessionUi; report: SuperReport }[]) => void;
   /**
@@ -980,6 +990,23 @@ export class SuperAgentManager {
   }
 
   /**
+   * 采纳从磁盘读回的终态转录快照（重启恢复时由宿主填入）。
+   *
+   * 只进 `transcripts` Map 供详情面板展示：不进 `sessions` / `archived`、
+   * 不产生任何进程操作 —— 恢复出来的转录是**纯展示数据**，绝不能让历史
+   * 子会话变得可重试。快照是宿主侧 `evictBlockPayloads` 已裁剪的窗口，超长
+   * 子会话的旧载荷不可恢复（块上的 `evicted` 标记如实呈现）。
+   */
+  restoreTranscripts(entries: { sessionId: string; blocks: Block[] }[]): void {
+    for (const { sessionId, blocks } of entries) {
+      this.transcripts.set(sessionId, {
+        state: { ...initialSessionState(), blocks },
+        dirtyFrom: null,
+      });
+    }
+  }
+
+  /**
    * 派发一个子会话。立即返回记录（status = preparing），准备工作异步进行 ——
    * 委派指令一次可能带多个任务，调用方不该被 worktree 创建 + CLI 握手阻塞。
    *
@@ -1214,6 +1241,8 @@ export class SuperAgentManager {
         });
       }
       this.discardQuestionResolver(archived.id);
+      this.transcripts.delete(archived.id);
+      this.discardTranscriptSnapshot(archived.id);
     }
     this.archived.delete(mainSessionId);
     this.archiveOwners.delete(mainSessionId);
@@ -2271,6 +2300,9 @@ export class SuperAgentManager {
       // Flush before the process goes away: the last text/tool chunks must
       // reach the webview even if the throttle timer has not fired yet.
       this.flushTranscripts();
+      // 终态写一次转录快照：重启恢复后详情面板要能读到最后的转录。紧接
+      // flush 之后，块已是裁剪过的窗口；失败静默降级，不挡收尾。
+      await this.persistTranscriptSnapshot(id);
       // 子会话的进程在轮次结束后不再需要 —— 留着只会白占内存。
       // 已被一次重试取代时（attempts 变了），这一轮的进程早就该被清掉，
       // 但客户端槽位已经归新的一次执行，不能再按 id 误杀。
@@ -2757,6 +2789,27 @@ export class SuperAgentManager {
     const blocks = entry.state.blocks;
     const evicted = evictBlockPayloads(blocks, EVICT_KEEP_BLOCKS);
     if (evicted !== blocks) entry.state.blocks = evicted;
+  }
+
+  /**
+   * 终态写一次转录快照，供宿主重启恢复后详情面板读回。
+   *
+   * 调用点在 `prepare()` 的 finally —— 紧接 `flushTranscripts()` 之后，此时
+   * `entry.state.blocks` 已是 `evictBlockPayloads` 裁剪过的窗口（不做第二套
+   * 磁盘保真算法）。写失败/无目录都静默降级（记日志不抛），绝不拖住收尾。
+   * 若子会话在写之前已被删除（`forgetChild` 清了 transcripts），跳过，
+   * 避免把已删子会话的转录复活到磁盘上。
+   */
+  private async persistTranscriptSnapshot(id: string): Promise<void> {
+    const dir = this.deps.superStoreDir?.();
+    if (!dir) return;
+    const entry = this.transcripts.get(id);
+    if (!entry) return;
+    try {
+      await writeSuperTranscriptSnapshot(dir, id, entry.state.blocks.slice());
+    } catch (error) {
+      this.deps.log.warn(`super agent: transcript snapshot write failed: ${errorMessage(error)}`);
+    }
   }
 
   /**
@@ -3734,6 +3787,16 @@ export class SuperAgentManager {
     this.interrupted.delete(id);
     this.transcripts.delete(id);
     this.integrationReasonEn.delete(id);
+    this.discardTranscriptSnapshot(id);
+  }
+
+  /** 旁路转录快照的删除（fire-and-forget + 吞错，绝不挡清理）。 */
+  private discardTranscriptSnapshot(id: string): void {
+    const dir = this.deps.superStoreDir?.();
+    if (!dir) return;
+    void deleteSuperTranscriptSnapshot(dir, id).catch((error: unknown) => {
+      this.deps.log.warn(`super agent: transcript snapshot delete failed: ${errorMessage(error)}`);
+    });
   }
 
   /** 记录子会话实际使用的模型（看板详情要显示它，成本也按它查单价）。 */

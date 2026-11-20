@@ -114,10 +114,14 @@ import {
 import {
   awaitSuperSessionArchiveWrite,
   deleteSuperSessionArchive,
+  deleteSuperTranscriptSnapshot,
   listSuperSessionArchiveFiles,
+  listSuperTranscriptFiles,
   readSuperSessionArchive,
+  readSuperTranscriptSnapshot,
   superSessionFileName,
   superSessionsDir,
+  superTranscriptFileName,
   writeSuperSessionArchive,
 } from "./super-store.js";
 import {
@@ -7519,8 +7523,21 @@ export class ChatPanel implements vscode.Disposable {
       // 再等在飞的写落定，最后才 rm —— 否则一个排队的写会在 rm 之后 rename，
       // 把刚删掉的归档复活。
       await this.persistSuperSessions({ force: true });
-      await awaitSuperSessionArchiveWrite(this.superStoreDir(), sessionId);
+      // 转录快照与归档同一套串行写链：先把这个会话及其子会话已排队的写全部
+      // 收尾，再删，避免终态写在 rm 之后 rename「复活」已删的转录。
+      await awaitSuperSessionArchiveWrite(
+        this.superStoreDir(),
+        sessionId,
+        forgotten?.ids ?? [],
+      );
       await deleteSuperSessionArchive(this.superStoreDir(), sessionId);
+      await Promise.all(
+        (forgotten?.ids ?? []).map((id) =>
+          deleteSuperTranscriptSnapshot(this.superStoreDir(), id).catch((error: unknown) => {
+            this.log.warn(`super agent: transcript snapshot delete failed: ${errorMessage(error)}`);
+          }),
+        ),
+      );
       // M3 P0-1: drop the session's shadow repo + checkpoint index too.
       await this.removeCheckpointsForSession(sessionId);
       // A7: drop the session's staged-attachment dir too — the transcript that
@@ -8065,6 +8082,11 @@ export class ChatPanel implements vscode.Disposable {
       );
       this.log.info(`super agent: restored ${restored.length} historical child session(s) for ${mainSessionId}`);
       this.getSuperAgent()?.restoreSessions(mainSessionId, restored);
+      // 终态转录是旁路展示数据：读回填充详情面板。只读小 JSON、读失败静默
+      // 跳过，绝不因它挡住看板恢复（与 sweepStaleWorktrees 改后台同一纪律：
+      // 启动序列不可被重 IO 拖住）。恢复出来的转录只进管理器展示缓存，不进
+      // 归档记录、不让历史子会话变得可重试。
+      await this.restoreSuperTranscriptSnapshots(records.map((record) => record.id));
     }
     // 恢复归档时顺带清扫磁盘上的残留 worktree（只在恢复时触发，不是每次
     // 快照都跑）：上次运行遗留的、已经并入当前分支的空 worktree 与分支，
@@ -8077,6 +8099,40 @@ export class ChatPanel implements vscode.Disposable {
     // 会话又要先等在飞的恢复 settle —— 串起来就是用户实测的「点新建会话
     // 毫无反应，只在控制台反复打 new session: joining the in-flight run」。
     this.sweepStaleWorktreesInBackground();
+  }
+
+  /**
+   * 读回终态转录快照并推给 webview 的详情面板。
+   *
+   * 只读小 JSON，读失败静默跳过 —— 转录是旁路展示数据，绝不因它挡住看板
+   * 恢复。恢复出来的转录只进管理器展示缓存，不进归档记录、不让历史子会话
+   * 变得可重试（见 {@link SuperAgentManager.restoreTranscripts}）。
+   */
+  private async restoreSuperTranscriptSnapshots(childIds: string[]): Promise<void> {
+    if (childIds.length === 0) return;
+    const manager = this.superAgent;
+    if (!manager) return;
+    const dir = this.superStoreDir();
+    // 并行读小文件：一个会话可能有多个子会话，串行读会让启动序列无谓变慢。
+    const snapshots = await Promise.all(
+      childIds.map(async (id) => {
+        try {
+          const blocks = await readSuperTranscriptSnapshot(dir, id);
+          return blocks.length > 0 ? { sessionId: id, blocks } : null;
+        } catch (error) {
+          // readSuperTranscriptSnapshot 自身不抛；这里是防御性兜底。
+          this.log.warn(`super agent: transcript snapshot read failed: ${errorMessage(error)}`);
+          return null;
+        }
+      }),
+    );
+    const present = snapshots.filter((item): item is { sessionId: string; blocks: Block[] } => item !== null);
+    if (present.length === 0) return;
+    // 与实时通道同一条消息、同一起点（from:0 覆盖式写入）。
+    for (const { sessionId, blocks } of present) {
+      this.postToWebview({ type: "superTranscript", sessionId, from: 0, blocks });
+    }
+    manager.restoreTranscripts(present);
   }
 
   /**
@@ -8331,6 +8387,8 @@ export class ChatPanel implements vscode.Disposable {
       // anchor. `from` is the incremental start index.
       onTranscript: (sessionId, from, blocks) =>
         this.postToWebview({ type: "superTranscript", sessionId, from, blocks }),
+      // 转录快照落在扩展存储（与归档同一目录），终态写一次、恢复时读回。
+      superStoreDir: () => this.superStoreDir(),
       onReport: (entries) => this.queueSuperReport(entries),
       // 子会话在等你回答：与主会话的提问卡同一档通知（`question` 属
       // approvals 默认档），只弹系统通知、不发提示音 —— 子会话的汇报回合
@@ -13517,6 +13575,23 @@ export class ChatPanel implements vscode.Disposable {
       const archiveName = isBackup ? name.slice(0, -".corrupt".length) : name;
       if ((isBackup || archiveName.endsWith(".json")) && !keptArchiveNames.has(archiveName)) {
         await rm(path.join(superSessionsDir(this.superStoreDir()), name), { force: true });
+      }
+    }
+    // 转录快照按 childId 放在 transcripts/ 子目录（新文件放子目录必须显式
+    // GC，否则永久残留）。转录按 childId 命名，无法直接与主会话列表比；先从
+    // 仍归属的归档里取出全部子会话 id，再回收不在其中的快照。归档读不出来
+    // 时按空处理（损坏归档已由 restoreSuperSessions 单独提示），绝不误删
+    // 仍归属会话的转录。
+    const keptChildIds = new Set<string>();
+    for (const session of kept) {
+      const archive = await readSuperSessionArchive(this.superStoreDir(), session.id);
+      for (const child of archive.sessions) keptChildIds.add(child.id);
+    }
+    const keptTranscriptNames = new Set([...keptChildIds].map((id) => superTranscriptFileName(id)));
+    const transcriptsDir = path.join(superSessionsDir(this.superStoreDir()), "transcripts");
+    for (const name of await listSuperTranscriptFiles(this.superStoreDir())) {
+      if (name.endsWith("-transcript.json") && !keptTranscriptNames.has(name)) {
+        await rm(path.join(transcriptsDir, name), { force: true });
       }
     }
     // M3 P0-1: same garbage collection for shadow-repo dirs — a checkpoint
