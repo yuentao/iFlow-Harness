@@ -48,8 +48,10 @@ import {
   setPlanEntryStatus,
   MAX_TOOL_OUTPUT_STORE_CHARS,
 } from "../shared/session-state";
-import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, extractCorePrompt, splitSystemPromptSections, splitReportedContextSections, type Block, type PlanEntryUi, type SessionState, type ToolBlock } from "../shared/messages";
+import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, EVICT_KEEP_BLOCKS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, extractCorePrompt, splitSystemPromptSections, splitReportedContextSections, type Block, type PlanEntryUi, type SessionState, type ToolBlock } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
+import { SuperAgentManager } from "../src/panel/super-agent";
+import type { SuperAgentDeps } from "../src/panel/super-agent";
 // Mock the tokenizer so we can exercise the heuristic fallback. `vi.hoisted`
 // captures `vi` before the `vi.mock` factory is hoisted above the import, so the
 // factory body itself never references `vi` directly (required when globals are off).
@@ -3515,5 +3517,116 @@ describe("委派工具调用的任务结构（superTasks）", () => {
     if (block?.kind !== "tool") return;
     expect(block.superTasks).toBeUndefined();
     expect(block.superTasksError).toContain("task 必须是字符串");
+  });
+});
+
+/**
+ * 子会话转录的 payload 释放（与 webview 主通道同口径）。
+ *
+ * SuperAgentManager 的子会话转录只活在宿主内存里（不落盘，归档只存记录），
+ * 它复用 shared/messages 的 evictBlockPayloads + EVICT_KEEP_BLOCKS —— 与主
+ * transcript 及 webview 侧 superTranscript 合并完全相同的窗口。这里固化宿主
+ * 侧路径的纪律：先推完整载荷、再裁 host 内存旧块、双上限、保留最新轮次、
+ * evicted 标记，以及重复 flush 的幂等性。
+ */
+describe("super-transcript payload eviction mirrors the main channel", () => {
+  type Sent = { sessionId: string; from: number; blocks: Block[] };
+  type MgrInternals = {
+    transcriptFor: (id: string) => { state: SessionState; dirtyFrom: number | null };
+    markTranscriptDirty: (id: string, index: number) => void;
+    flushTranscripts: () => void;
+  };
+
+  const toolBlock = (id: string, chars: number): ToolBlock => ({
+    kind: "tool",
+    id,
+    toolCallId: id,
+    toolName: "run_shell_command",
+    title: "Shell",
+    toolKind: "execute",
+    status: "completed",
+    output: "x".repeat(chars),
+    locations: [],
+    diff: { path: "p.ts", oldText: "a", newText: "b" },
+  });
+  // Heavy blocks with no diff so payloadChars === output.length (4M budget math stays exact).
+  const heavy = (id: string, chars: number): ToolBlock => ({ ...toolBlock(id, chars), diff: null });
+
+  function makeManager(sent: Sent[]): SuperAgentManager {
+    // Only onTranscript is touched on this path; the rest of the deps are inert here.
+    return new SuperAgentManager({
+      onTranscript: (sessionId: string, from: number, blocks: Block[]) => {
+        sent.push({ sessionId, from, blocks });
+      },
+    } as unknown as SuperAgentDeps);
+  }
+
+  it("sends full payload first, then evicts only host-side old blocks and marks them", () => {
+    const sent: Sent[] = [];
+    const manager = makeManager(sent);
+    const internals = manager as unknown as MgrInternals;
+    const entry = internals.transcriptFor("child-1");
+    // 205 light blocks: the 200-block cap releases the oldest 5 (budget never binds).
+    entry.state.blocks = Array.from({ length: 205 }, (_, i) => toolBlock(`t${i}`, 10));
+    internals.markTranscriptDirty("child-1", 0);
+    internals.flushTranscripts();
+
+    // onTranscript ran BEFORE eviction: webview received the untrimmed payload.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.sessionId).toBe("child-1");
+    expect(sent[0]!.from).toBe(0);
+    expect(sent[0]!.blocks).toHaveLength(205);
+    expect((sent[0]!.blocks[0] as ToolBlock).output).toBe("x".repeat(10));
+    expect((sent[0]!.blocks[0] as ToolBlock).evicted).toBeUndefined();
+
+    // Host memory trimmed: oldest 5 evicted, newest 200 stay intact.
+    const host = manager.transcriptBlocks("child-1");
+    expect(host).toHaveLength(205); // eviction never drops blocks (incremental index stays valid)
+    expect((host[0] as ToolBlock).evicted).toBe(true);
+    expect((host[0] as ToolBlock).output).toBe("");
+    expect((host[0] as ToolBlock).hadDiff).toBe(true); // revert chip still renders
+    expect((host[4] as ToolBlock).evicted).toBe(true);
+    expect((host[5] as ToolBlock).evicted).toBeUndefined();
+    expect((host[204] as ToolBlock).output).toBe("x".repeat(10));
+    // The pushed slice kept the original block objects; eviction created new ones.
+    expect(host[204]).toBe(sent[0]!.blocks[204]);
+  });
+
+  it("cuts the host keep window by char budget while keeping the newest turns renderable", () => {
+    const sent: Sent[] = [];
+    const manager = makeManager(sent);
+    const internals = manager as unknown as MgrInternals;
+    const entry = internals.transcriptFor("child-2");
+    // 60 monster payloads ≈ 6M chars: the 4M char budget binds before the 200-block cap.
+    entry.state.blocks = Array.from({ length: 60 }, (_, i) => heavy(`m${i}`, 100_000));
+    internals.markTranscriptDirty("child-2", 0);
+    internals.flushTranscripts();
+
+    const host = manager.transcriptBlocks("child-2");
+    expect(host.filter((b) => (b as ToolBlock).evicted)).toHaveLength(20);
+    expect((host[19] as ToolBlock).evicted).toBe(true);
+    expect((host[20] as ToolBlock).evicted).toBeUndefined();
+    expect((host[20] as ToolBlock).output).toBe("x".repeat(100_000));
+    const keptPayload = host.slice(20).reduce((sum, b) => sum + payloadChars(b), 0);
+    expect(keptPayload).toBeLessThanOrEqual(EVICT_BUDGET_CHARS);
+  });
+
+  it("is idempotent: a repeat flush re-sends nothing and re-evicts nothing", () => {
+    const sent: Sent[] = [];
+    const manager = makeManager(sent);
+    const internals = manager as unknown as MgrInternals;
+    const entry = internals.transcriptFor("child-3");
+    entry.state.blocks = Array.from({ length: 205 }, (_, i) => toolBlock(`t${i}`, 10));
+    internals.markTranscriptDirty("child-3", 0);
+    internals.flushTranscripts();
+    const first = manager.transcriptBlocks("child-3");
+    expect(sent).toHaveLength(1);
+
+    // No new dirty index → a second flush is a no-op.
+    internals.flushTranscripts();
+    expect(sent).toHaveLength(1);
+    expect(manager.transcriptBlocks("child-3")).toEqual(first);
+    // Re-running the same pure eviction on the trimmed snapshot is identity-stable.
+    expect(evictBlockPayloads(first, EVICT_KEEP_BLOCKS)).toBe(first);
   });
 });
