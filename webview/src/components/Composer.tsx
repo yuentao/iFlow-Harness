@@ -978,7 +978,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     };
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- listener reads refs + stable setters only
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 增强结果监听只挂载一次；回调仅读 ref 与稳定 setter，重复订阅无意义
   }, []);
 
   function addImages(files: ArrayLike<File>): void {
@@ -1129,7 +1129,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       });
     }
     return rows;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- KEYWORD_SOURCES is a module-level constant shape
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- KEYWORD_SOURCES 为组件内固定常量、t 为模块级稳定函数，仅 mentionQuery 变化需要重算
   }, [mentionQuery]);
   /** Rows the keyboard navigates: source actions first, then file/folder hits. */
   const popupRowCount = sourceActions.length + (mentionKind === "url" ? 0 : mentionHits.length);

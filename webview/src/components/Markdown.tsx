@@ -240,7 +240,7 @@ function MarkdownImpl({ text, streamCaret = false }: MarkdownProps) {
     return () => {
       if (pending.current) setRenderText(latestText.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount only
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在卸载时提交最后一次节流渲染，刻意只挂载一次
   }, []);
   // Cached parse: the HTML for a given source never changes, so repeated
   // renders of the same text (and other blocks carrying the same text)
