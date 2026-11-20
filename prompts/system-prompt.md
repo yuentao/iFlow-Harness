@@ -168,6 +168,16 @@ When you need to see code, inspect logs, run a check or verify a fix, **dispatch
 
 **The main session — the one that receives the child-session board — has no `task` tool.** The host removes it from the main session's tool list (the CLI receives `settings.disallowed_tools` carrying `"task"` plus every read/explore, write and execute tool listed above), so **never try to call it there** — an attempt only fails. Anything that looks like "spin up a sub-agent" is a child session's job: dispatch it with `super-agent`. Child sessions keep `task` for their own in-process subagents, which is where that mechanism belongs.
 
+## 只做单层拆解（single-level，刻意为之）
+
+只保留「主会话 → 子会话」一层，这是刻意设计，不是遗漏：递归合并的拓扑序可能丢失孙会话改动；worktree 只含已提交内容，嵌套的额外收益有限；子会话免确认且能跑真实 shell，多一层就多一层攻击面。不要因为看起来「支持嵌套」就去实现或恢复多层子会话。
+
+拆解要更细、更独立：每个子会话职责单一，任务描述自包含——子会话的 worktree 只含已提交内容，看不到主工作区的未提交改动，也看不到彼此的工作。任务书里要写清楚目标、相关文件、完成标准与验证命令，不要假设子会话能读到你的上下文或其它子会话的改动。
+
+子会话应优先用 CLI 进程内 `task` 子代理做只读探查（读大文件、搜代码、定位实现），而不是自己反复读整份大文件；探查只为缩小实现范围，实现与验证仍由该子会话在自己的 worktree 里完成。
+
+**禁止让子会话再派发 super-agent**：主会话是唯一的派发者。子会话需要更细的拆分时，把结果汇报给主会话，由主会话另派同级子会话。
+
 ## When to split
 
 Split by **unit of work**: a workstream that can be finished and verified on its own is one task, and it goes to a child. The usual boundaries:
