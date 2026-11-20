@@ -2834,18 +2834,42 @@ export interface SuperReportEntry {
 }
 
 /**
+ * 汇报投递去重键：`子会话 id : 执行次数（attempt）`。
+ *
+ * 子会话重试时 `id` 不变、`attempts` +1（见 {@link retrySuperSession}），单用
+ * `id` 作键会让同一子会话不同 attempt 的汇报互相覆盖（只留一条，G13）。按
+ * `id:attempt` 键控后：
+ *  - 缓冲（{@link SuperReportBuffer}）里每个 attempt 的汇报各占一条，不覆盖；
+ *  - 宿主投递队列与 QQ 兜底重投共用这一口径判重 —— 同一条汇报（同 id 同
+ *    attempt）只会被投一次，不会被本链路与兜底链路各投一遍；
+ *  - 取件时按当前会话的 attempt 校验，过期 attempt 的迟到汇报被忽略，不污染
+ *    当前轮。
+ */
+export function superReportKey(session: Pick<SuperSessionUi, "id" | "attempts">): string {
+  return `${session.id}:${session.attempts ?? 1}`;
+}
+
+/**
  * 主会话汇报的缓冲区（**逐个即时上报**语义）。
  *
- * 同一子会话只保留**最后一条**汇报：中途的 blocked（等用户回答）会被随后
- * 的 ready 覆盖，汇报里不该出现互相矛盾的中间状态。
+ * 同一子会话的**同一次 attempt** 只保留最后一条汇报：中途的 blocked（等用户
+ * 回答）会被随后同 attempt 的 ready 覆盖，汇报里不该出现互相矛盾的中间状态。
+ * 不同 attempt 各占一条（键 = {@link superReportKey}），互不覆盖。
  *
  * 取件门槛是**逐个子会话**的：某个子会话一进入终态，它的那条汇报就可以被
  * 取走交给主会话，不必等同一批的其它子会话全部结束。仍在跑的子会话对应的
  * 条目继续留在缓冲里，等它结束再取 —— 于是「谁先结束谁先汇报」，主会话不必
  * 守着最后一个慢子会话。
+ *
+ * 可靠性（G2）：交给宿主的条目**不立即出队**——{@link drainSettled} 把它标成
+ * in-flight，条目仍留在缓冲，直到宿主 {@link confirm} 确认投递成功（主会话
+ * 上的 hidden prompt 真的跑起来）。投递失败 / 主会话忙时宿主不确认，下一拍
+ * 心跳重投，汇报不会因为「取出即丢」而永久丢失。
  */
 export class SuperReportBuffer {
   private readonly pending = new Map<string, SuperReportEntry>();
+  /** 已交给宿主投递队列、但还没确认投递成功的键（{@link superReportKey}）。 */
+  private readonly inFlight = new Set<string>();
 
   /**
    * 还没被取走的汇报条数。
@@ -2858,19 +2882,21 @@ export class SuperReportBuffer {
   }
 
   add(entries: readonly SuperReportEntry[]): void {
-    for (const entry of entries) this.pending.set(entry.session.id, entry);
+    for (const entry of entries) this.pending.set(superReportKey(entry.session), entry);
   }
 
   /**
-   * 取走**来源子会话已经终态**的条目（逐个即时上报）。
+   * 取走**来源子会话已经终态**的条目（逐个即时上报，破坏性）。
    *
    * 状态看的是传入的**当前**会话列表（不是条目里的快照）—— 条目是汇报发生
    * 那一刻的副本，可能还停在 blocked / running。
    *
-   * 仍在跑的子会话：条目**留在缓冲里**，等它结束后再取（同一个子会话的条目
-   * 会被新汇报覆盖，不会重复转述）。来源子会话已经不在列表里（被清理 /
-   * 合并后释放）的条目不取也不删 —— 交由 {@link takeMissing} 处理（把迟到
-   * 结论如实呈现给用户）。
+   * 仍在跑的子会话：条目**留在缓冲里**，等它结束后再取（同一 attempt 的条目
+   * 会被新汇报覆盖，不会重复转述）。来源子会话已经不在列表里（被清理 / 合并
+   * 后释放）的条目不取也不删 —— 交由 {@link takeMissing} 处理。
+   *
+   * **attempt 校验**：当前会话的 {@link superReportKey} 与条目键不一致时说明
+   * 这是过期 attempt 的迟到汇报（子会话已重试到下一次），静默丢弃、不投当前轮。
    *
    * 无可取时返回 null（继续积累）。
    */
@@ -2878,14 +2904,69 @@ export class SuperReportBuffer {
     if (this.pending.size === 0) return null;
     const byId = new Map(sessions.map((session) => [session.id, session]));
     const batch: SuperReportEntry[] = [];
-    for (const [id, entry] of [...this.pending]) {
-      const session = byId.get(id);
-      if (!session) continue; // 来源已消失：交给 dropMissing 清理。
+    for (const [key, entry] of [...this.pending]) {
+      const session = byId.get(entry.session.id);
+      if (!session) continue; // 来源已消失：交给 takeMissing 清理。
+      if (superReportKey(session) !== key) {
+        // 过期 attempt 的迟到汇报：当前会话已重试到别的 attempt，丢弃。
+        this.pending.delete(key);
+        this.inFlight.delete(key);
+        continue;
+      }
       if (!isTerminalSuperStatus(session.status)) continue; // 还在跑：留在缓冲。
       batch.push(entry);
-      this.pending.delete(id);
+      this.pending.delete(key);
+      this.inFlight.delete(key);
     }
     return batch.length > 0 ? batch : null;
+  }
+
+  /**
+   * 取走来源已终态的条目交给宿主投递队列（**非破坏性 + in-flight**，G2）。
+   *
+   * 与 {@link takeSettled} 同门槛，但返回后条目**仍留在缓冲**，并把它的键标成
+   * in-flight —— 于是：
+   *  - 宿主把它排进主会话的 hidden prompt 队列后，心跳/看板刷新再调本方法不会
+   *    重复返回同一条（幂等，去重键 = {@link superReportKey}）；
+   *  - 只有宿主调用 {@link confirm}（sendPrompt 真的跑起来了）才把条目从缓冲
+   *    移除。投递失败 / 主会话忙 → 不确认 → 条目留在缓冲，下一拍心跳重投，
+   *    汇报不会「取出即丢」。
+   *
+   * 仍需重投时用 {@link release} 清掉 in-flight 标记（一般不需要：失败时宿主
+   * 直接沿用已排队的那条，不再从缓冲取）。
+   */
+  drainSettled(sessions: readonly SuperSessionUi[]): SuperReportEntry[] | null {
+    if (this.pending.size === 0) return null;
+    const byId = new Map(sessions.map((session) => [session.id, session]));
+    const batch: SuperReportEntry[] = [];
+    for (const [key, entry] of [...this.pending]) {
+      if (this.inFlight.has(key)) continue; // 已交给投递队列：等 confirm，不重取。
+      const session = byId.get(entry.session.id);
+      if (!session) continue; // 来源已消失：交给 takeMissing 清理。
+      if (superReportKey(session) !== key) {
+        // 过期 attempt 的迟到汇报：静默丢弃，不污染当前轮。
+        this.pending.delete(key);
+        this.inFlight.delete(key);
+        continue;
+      }
+      if (!isTerminalSuperStatus(session.status)) continue; // 还在跑：留在缓冲。
+      batch.push(entry);
+      this.inFlight.add(key);
+    }
+    return batch.length > 0 ? batch : null;
+  }
+
+  /** 确认这些键对应的汇报已成功投递：从缓冲移除并清 in-flight 标记。 */
+  confirm(keys: Iterable<string>): void {
+    for (const key of keys) {
+      this.pending.delete(key);
+      this.inFlight.delete(key);
+    }
+  }
+
+  /** 放弃这些键的 in-flight 标记（条目留在缓冲，允许下次重新取）。 */
+  release(keys: Iterable<string>): void {
+    for (const key of keys) this.inFlight.delete(key);
   }
 
   /**
@@ -2900,12 +2981,19 @@ export class SuperReportBuffer {
    */
   takeMissing(sessions: readonly SuperSessionUi[]): SuperReportEntry[] {
     if (this.pending.size === 0) return [];
-    const liveIds = new Set(sessions.map((session) => session.id));
+    // 按 superReportKey 判活：来源被清理（不在列表）与来源已重试到别的 attempt
+    // （过期 attempt 的迟到汇报）都从缓冲移除。后者不进 dropped —— 过期 attempt
+    // 的结论不该被当成「已归档子会话的迟到结论」提示给用户（会与当前轮矛盾）。
+    const liveKeys = new Set(sessions.map((session) => superReportKey(session)));
     const dropped: SuperReportEntry[] = [];
-    for (const [id, entry] of [...this.pending]) {
-      if (liveIds.has(id)) continue;
-      this.pending.delete(id);
-      dropped.push(entry);
+    for (const [key, entry] of [...this.pending]) {
+      // 已交给投递队列的条目：它会被 hidden prompt 投给主会话，不要再以
+      // 「已归档迟到结论」提示一遍（同一汇报两条通道 = 重复）。
+      if (this.inFlight.has(key)) continue;
+      if (liveKeys.has(key)) continue;
+      this.pending.delete(key);
+      const stillLive = sessions.some((session) => session.id === entry.session.id);
+      if (!stillLive) dropped.push(entry);
     }
     return dropped;
   }
@@ -2922,6 +3010,7 @@ export class SuperReportBuffer {
 
   clear(): void {
     this.pending.clear();
+    this.inFlight.clear();
   }
 }
 

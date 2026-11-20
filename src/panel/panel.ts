@@ -95,6 +95,7 @@ import {
   superDirectiveDedupeKey,
   SuperDirectiveScanner,
   SuperReportBuffer,
+  superReportKey,
   type SuperAction,
   type SuperActionReceipt,
   type SuperAttachment,
@@ -1533,7 +1534,15 @@ export class ChatPanel implements vscode.Disposable {
    * 每条都带**归属主会话**：排队期间用户可能切了会话，A 的汇报不能投进
    * B 的对话（投错会话 = 串台）。
    */
-  private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string; final?: boolean; fallbackText?: string; suppressQqProgress?: boolean }> = [];
+  private pendingSuperReportPrompts: Array<{
+    mainSessionId: string | null;
+    text: string;
+    final?: boolean;
+    fallbackText?: string;
+    suppressQqProgress?: boolean;
+    /** 本条汇报在缓冲里的键（superReportKey）；投递成功后据此 confirm 出队。 */
+    reportKeys?: string[];
+  }> = [];
   /**
    * 已经执行完、等着回执给主会话的子会话管理动作（先进先出）。
    *
@@ -9531,8 +9540,12 @@ export class ChatPanel implements vscode.Disposable {
     const buffer = this.pendingSuperReports.get(this.currentMainSessionId() ?? "");
     if (!buffer || buffer.size === 0) return;
     const mine = live.filter((session) => this.superBelongsToCurrentMain(session));
-    const batch = buffer.takeSettled(mine);
-    if (!batch) return; // 全都还在跑：继续积累。
+    // 非破坏性取件：条目留在缓冲并标记 in-flight，直到投递成功（sendPrompt 跑
+    // 起来）才由 drainSuperReports 调 confirm 出队（G2 投递可靠性）。去重键 =
+    // sessionId:attempt，与 QQ 兜底重投共用，防止同一汇报被两条链路各投一次。
+    const batch = buffer.drainSettled(mine);
+    if (!batch) return; // 全都还在跑（或已 in-flight）：继续积累。
+    const reportKeys = batch.map((entry) => superReportKey(entry.session));
     const manager = this.superAgent;
     // 汇报归属会话：pendingCount 与 QQ awaiter 归属都用它，避免从 entries[0]
     // 推断时因异步归属回填而与 awaiter 漂移（R2）。
@@ -9540,22 +9553,32 @@ export class ChatPanel implements vscode.Disposable {
     // 迟到补发判定必须早于提示词生成：pendingCount>0 却被放宽为 final 的回合，
     // 提示词也要同步改成「本次给最终汇报」，否则模型照常压制最终正文，标记与
     // 提示词自相矛盾（2026-11-19 补发抢跑 bug）。
-    const rescueDue = this.qqFinalRescueDue(reportOwner);
     let text = "";
     let pendingCount: number | undefined;
-    if (manager && typeof manager.reportPromptWithPending === "function") {
-      const prompt = manager.reportPromptWithPending(batch, {
-        pendingOwner: reportOwner,
-        finalOverride: rescueDue,
-      });
-      text = prompt.text;
-      pendingCount = prompt.pendingCount;
-    } else {
-      // 兼容只提供 reportPrompt 的假实现（测试夹具）：文本逐字节照旧，
-      // pendingCount 在下面按同一口径用 list() 重算。
-      text = manager?.reportPrompt(batch) ?? "";
+    let rescueDue = false;
+    try {
+      rescueDue = this.qqFinalRescueDue(reportOwner);
+      if (manager && typeof manager.reportPromptWithPending === "function") {
+        const prompt = manager.reportPromptWithPending(batch, {
+          pendingOwner: reportOwner,
+          finalOverride: rescueDue,
+        });
+        text = prompt.text;
+        pendingCount = prompt.pendingCount;
+      } else {
+        // 兼容只提供 reportPrompt 的假实现（测试夹具）：文本逐字节照旧，
+        // pendingCount 在下面按同一口径用 list() 重算。
+        text = manager?.reportPrompt(batch) ?? "";
+      }
+    } catch (error) {
+      this.log.warn(`super agent: report prompt build failed: ${errorMessage(error)}`);
+      buffer.release(reportKeys);
+      return;
     }
-    if (!text) return;
+    if (!text) {
+      buffer.release(reportKeys);
+      return;
+    }
     if (pendingCount === undefined) {
       const owner = batch[0]?.session.mainSessionId ?? this.currentMainSessionId() ?? null;
       pendingCount = (manager?.list() ?? []).filter(
@@ -9641,6 +9664,7 @@ export class ChatPanel implements vscode.Disposable {
       final: pendingCount === 0,
       fallbackText,
       suppressQqProgress: allDropped,
+      reportKeys,
     });
     this.ensureSuperHeartbeat();
     // 用户按过停止时补一次常驻「继续处理」提示：此后才结束的子会话此前不会
@@ -9762,6 +9786,13 @@ export class ChatPanel implements vscode.Disposable {
         }
         const pos = this.pendingSuperReportPrompts.indexOf(item);
         if (pos !== -1) this.pendingSuperReportPrompts.splice(pos, 1);
+        // 投递确认点（G2）：sendPrompt 真的在主会话上跑起来了（started=true）
+        // 才把这条汇报从缓冲移除。上面 !started 的 break 保留条目与队列项，
+        // 下一拍心跳重投 —— 汇报不会「取出即丢」。reportKeys 是 sessionId:attempt，
+        // 与 QQ 兜底重投共用去重键，同一个键只确认一次、不会被投第二遍。
+        if (item.reportKeys?.length) {
+          this.pendingSuperReports.get(item.mainSessionId ?? "")?.confirm(item.reportKeys);
+        }
         // 本轮 assistant 正文：只含 agent 的 text 块（thought / tool / diff /
         // 子会话卡都不在其中），与最终结果取文本同口径。
         const reportTurnText = this.captureQqReportTurnText(
