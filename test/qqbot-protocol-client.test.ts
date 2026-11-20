@@ -29,7 +29,7 @@ const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 type PostCall = { url: string; body: unknown; timeoutMs: number };
 
-function makeHttp(handler: (url: string, body: any) => unknown): {
+function makeHttp(handler: (url: string, body: unknown) => unknown): {
   http: QqBotHttp;
   calls: PostCall[];
 } {
@@ -464,9 +464,9 @@ describe("QqBotBindSession / M3-A 协议接线", () => {
 // ---------------------------------------------------------------------------
 
 class FakeEmitter {
-  private readonly listeners = new Map<string, Array<(...args: any[]) => void>>();
+  private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>();
 
-  on(event: string, cb: (...args: any[]) => void): this {
+  on(event: string, cb: (...args: unknown[]) => void): this {
     const list = this.listeners.get(event) ?? [];
     list.push(cb);
     this.listeners.set(event, list);
