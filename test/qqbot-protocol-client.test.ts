@@ -22,6 +22,14 @@ import {
   type QqBotQrProtocolOptions,
 } from "../src/qq/qqbot/protocol-client.js";
 import { QR_DATA_URL_PREFIX } from "../shared/messages.js";
+import {
+  buildSendPrivateMsg,
+  buildSendWithFileInfo,
+  buildUploadRequest,
+  guessQqBotContentType,
+  parseUploadResponse,
+  QQBOT_UPLOAD_BOUNDARY,
+} from "../src/qq/qqbot/protocol.js";
 
 const VALID_PNG = QR_DATA_URL_PREFIX + "iVBORw0KGgo=";
 const NOW = 1_700_000_000_000;
@@ -546,5 +554,84 @@ describe("createNodeHttp / 墙钟超时与响应体上限", () => {
     } finally {
       if (drip !== undefined) clearInterval(drip);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 富媒体上传纯函数（端到端另案：端点/字段名/msg_type 均为可覆盖占位值，
+// 这里只验证离线构造与解析，不宣称真实 QQ 开放平台端点或真机送达已打通）
+// ---------------------------------------------------------------------------
+
+describe("QQBot 富媒体上传 / 纯函数", () => {
+  it("buildUploadRequest 构造完整 multipart：字节原样、字段名/文件名/content-type/额外字段/边界", () => {
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+    const request = buildUploadRequest(bytes, "a.png", "image/png", {
+      endpoint: "https://example.test/upload",
+      boundary: "BOUNDARY",
+      fileField: "img",
+      fields: { file_type: "1" },
+    });
+
+    expect(request.endpoint).toBe("https://example.test/upload");
+    expect(request.contentType).toBe("multipart/form-data; boundary=BOUNDARY");
+    const text = request.body.toString("latin1");
+    expect(text).toContain("--BOUNDARY\r\n");
+    expect(text).toContain('Content-Disposition: form-data; name="img"; filename="a.png"');
+    expect(text).toContain("Content-Type: image/png\r\n\r\n");
+    expect(text).toContain('Content-Disposition: form-data; name="file_type"\r\n\r\n1\r\n');
+    expect(text).toContain("--BOUNDARY--\r\n");
+    // 二进制原样嵌入（不被字符串拼接破坏）。
+    expect(request.body.indexOf(bytes)).toBeGreaterThan(-1);
+  });
+
+  it("buildUploadRequest 用默认端点/字段/boundary 时与导出常量一致（占位值，需实际配置覆盖）", () => {
+    const request = buildUploadRequest(Buffer.from("x"), "f.bin", "application/octet-stream");
+    expect(request.endpoint).toBe("https://api.sgroup.qq.com/v2/files/upload");
+    expect(request.contentType).toBe(`multipart/form-data; boundary=${QQBOT_UPLOAD_BOUNDARY}`);
+    expect(request.body.toString("latin1")).toContain('name="file"; filename="f.bin"');
+  });
+
+  it("buildUploadRequest 转义文件名里的引号/换行，防 boundary/头部注入", () => {
+    const request = buildUploadRequest(Buffer.from("x"), 'evil"name\r\ninjected.png', "image/png", {
+      boundary: "B",
+    });
+    const text = request.body.toString("latin1");
+    expect(text).toContain('filename="evil\\"name injected.png"');
+    expect(text).not.toContain("\r\ninjected.png");
+  });
+
+  it("parseUploadResponse 兼容顶层与 data.file_info，业务码非 0 / 缺字段返回 undefined", () => {
+    expect(parseUploadResponse({ file_info: "FI-1" })).toBe("FI-1");
+    expect(parseUploadResponse({ code: 0, data: { file_info: "FI-2" } })).toBe("FI-2");
+    expect(parseUploadResponse({ code: 12001, message: "bad", file_info: "FI-BAD" })).toBeUndefined();
+    expect(parseUploadResponse({ code: 0, data: {} })).toBeUndefined();
+    expect(parseUploadResponse("not-an-object")).toBeUndefined();
+  });
+
+  it("guessQqBotContentType 按后缀推断图片/文件类型，未知退化为 octet-stream", () => {
+    expect(guessQqBotContentType("a.PNG")).toBe("image/png");
+    expect(guessQqBotContentType("a.jpeg")).toBe("image/jpeg");
+    expect(guessQqBotContentType("a.webp")).toBe("image/webp");
+    expect(guessQqBotContentType("doc.pdf")).toBe("application/pdf");
+    expect(guessQqBotContentType("noext")).toBe("application/octet-stream");
+  });
+
+  it("buildSendWithFileInfo 在既有请求上附加 msg_type 与 file_info，保留 msg_id/msg_seq 且字段可覆盖", () => {
+    const base = buildSendPrivateMsg("openid-1", "看这张图", "m-1", 2);
+    const request = buildSendWithFileInfo(base, "FI-9", "image", {
+      imageMsgType: 42,
+      imageField: "custom_image",
+    });
+    expect(request.endpoint).toBe(base.endpoint);
+    expect(request.body).toEqual({
+      content: "看这张图",
+      msg_id: "m-1",
+      msg_seq: 2,
+      msg_type: 42,
+      custom_image: { file_info: "FI-9" },
+    });
+
+    const fileRequest = buildSendWithFileInfo(base, "FI-10", "file");
+    expect(fileRequest.body).toMatchObject({ msg_type: 3, file: { file_info: "FI-10" } });
   });
 });

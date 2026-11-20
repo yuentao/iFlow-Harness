@@ -13,7 +13,10 @@
  *    GROUP_MESSAGE_CREATE；
  *  - 发送走 OpenAPI `/v2/users/{openid}/messages` 与
  *    `/v2/groups/{group_openid}/messages`；
- *  - 富媒体需先上传换 `file_info`（本 M2 不做上传，见 adapter 的 filePath 分支）。
+ *  - 富媒体需先上传换 `file_info`：本层只提供**纯函数**（构造上传请求 /
+ *    解析 file_info / 构造带 file_info 的消息体），真实上传端点、multipart
+ *    字段细节、大小类型限制与真机送达均属「端到端另案」，需按实际 QQ 开放
+ *    平台配置并在真机核实，本任务不把它当既定事实用。
  *
  * 字段形态若随平台版本漂移，只改本文件 + 测试，adapter/service 层不动。
  */
@@ -312,4 +315,190 @@ export function buildSendGroupMsg(
     method: "POST",
     body,
   };
+}
+
+// ---------------------------------------------------------------------------
+// 富媒体上传（离线可验证部分）
+// ---------------------------------------------------------------------------
+//
+// 纪律（务必先读）：
+//  - 本段只做**纯函数**：拼 multipart 字节、解析响应字段、拼消息体；零 IO、
+//    不发起网络、不读磁盘，可由单测直接喂 Buffer / JSON。
+//  - 下面的端点 / multipart 字段名 / msg_type / file_info 字段名都是**可覆盖
+//    的默认占位值**，不是经真机核实的既定事实。真实 QQ 开放平台上传端点、
+//    multipart 字段名、大小与类型限制、富媒体消息体形态需由「端到端另案」
+//    按实际平台文档 + 真机送达验证后，通过调用方注入的配置覆盖。
+//  - 「QQ 入站附件 → 模型」的端到端链路同样不在本任务范围。
+
+/**
+ * 上传端点默认占位值。调用方应通过 {@link QqBotUploadConfig.endpoint} 覆盖为
+ * 实际 QQ 开放平台配置的端点；本任务不做真实网络验证，勿据此宣称已打通。
+ */
+export const QQBOT_UPLOAD_ENDPOINT = "https://api.sgroup.qq.com/v2/files/upload";
+/** multipart 文件字段默认占位名（需按实际平台配置覆盖）。 */
+export const QQBOT_UPLOAD_FILE_FIELD = "file";
+/** multipart boundary 默认值：静态值保证纯函数确定性，生产可注入唯一值。 */
+export const QQBOT_UPLOAD_BOUNDARY = "----iflow-qqbot-upload-boundary";
+/** 图片消息 msg_type 默认占位值（需按实际平台配置覆盖）。 */
+export const QQBOT_IMAGE_MSG_TYPE = 2;
+/** 文件消息 msg_type 默认占位值（需按实际平台配置覆盖）。 */
+export const QQBOT_FILE_MSG_TYPE = 3;
+/** 富媒体消息体承载 file_info 的默认字段名（需按实际平台配置覆盖）。 */
+export const QQBOT_IMAGE_INFO_FIELD = "image";
+export const QQBOT_FILE_INFO_FIELD = "file";
+
+/** 富媒体上传配置；所有字段可注入，避免把猜测值写死成既定事实。 */
+export interface QqBotUploadConfig {
+  /** 上传端点；缺省 {@link QQBOT_UPLOAD_ENDPOINT}（占位值，需按实际配置覆盖）。 */
+  endpoint?: string;
+  /** multipart 文件字段名；缺省 {@link QQBOT_UPLOAD_FILE_FIELD}。 */
+  fileField?: string;
+  /** multipart boundary；缺省 {@link QQBOT_UPLOAD_BOUNDARY}。 */
+  boundary?: string;
+  /** 额外文本字段（平台若要求 file_type 等，由调用方按实际配置给出）。 */
+  fields?: Record<string, string>;
+}
+
+/** 构造好的上传请求：端点 + 完整 multipart body（二进制）+ content-type。 */
+export interface QqBotUploadRequestSpec {
+  endpoint: string;
+  /** `multipart/form-data; boundary=...`，直接作为请求头 content-type。 */
+  contentType: string;
+  /** 已编码的完整 multipart 字节，交给注入的二进制 transport。 */
+  body: Buffer;
+}
+
+/** 富媒体种类：决定 content-type 推断结果与消息体字段。 */
+export type QqBotRichMediaKind = "image" | "file";
+
+/** 富媒体消息体配置；msg_type / file_info 字段名均可按实际平台配置覆盖。 */
+export interface QqBotRichMediaBodyConfig {
+  /** 图片消息 msg_type；缺省 {@link QQBOT_IMAGE_MSG_TYPE}。 */
+  imageMsgType?: number;
+  /** 文件消息 msg_type；缺省 {@link QQBOT_FILE_MSG_TYPE}。 */
+  fileMsgType?: number;
+  /** 图片 file_info 承载字段名；缺省 {@link QQBOT_IMAGE_INFO_FIELD}。 */
+  imageField?: string;
+  /** 文件 file_info 承载字段名；缺省 {@link QQBOT_FILE_INFO_FIELD}。 */
+  fileField?: string;
+}
+
+function escapeMultipartText(value: string): string {
+  // multipart 头部字段名 / 文件名里的引号与换行必须转义，否则 boundary 会被
+  // 注入伪造（调用方可能是用户可控文件名）。
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, " ");
+}
+
+/**
+ * 纯函数：把字节编码成 multipart/form-data 请求。
+ *
+ * 只做字节拼接，不做任何 IO；boundary / 字段名 / 端点全部来自参数或配置。
+ * 额外文本字段按 Object.keys 顺序稳定输出，便于测试断言。
+ */
+export function buildUploadRequest(
+  bytes: Buffer,
+  fileName: string,
+  contentType: string,
+  config: QqBotUploadConfig = {},
+): QqBotUploadRequestSpec {
+  const boundary = config.boundary ?? QQBOT_UPLOAD_BOUNDARY;
+  const fileField = config.fileField ?? QQBOT_UPLOAD_FILE_FIELD;
+  const chunks: Buffer[] = [];
+  const pushText = (text: string): void => {
+    chunks.push(Buffer.from(text, "utf8"));
+  };
+
+  pushText(`--${boundary}\r\n`);
+  pushText(
+    `Content-Disposition: form-data; name="${escapeMultipartText(fileField)}"; filename="${escapeMultipartText(fileName)}"\r\n`,
+  );
+  pushText(`Content-Type: ${contentType}\r\n\r\n`);
+  chunks.push(bytes);
+  pushText("\r\n");
+  if (config.fields) {
+    for (const [key, value] of Object.entries(config.fields)) {
+      pushText(`--${boundary}\r\n`);
+      pushText(`Content-Disposition: form-data; name="${escapeMultipartText(key)}"\r\n\r\n`);
+      pushText(`${value}\r\n`);
+    }
+  }
+  pushText(`--${boundary}--\r\n`);
+
+  return {
+    endpoint: config.endpoint ?? QQBOT_UPLOAD_ENDPOINT,
+    contentType: `multipart/form-data; boundary=${boundary}`,
+    body: Buffer.concat(chunks),
+  };
+}
+
+/**
+ * 纯函数：从上传响应里提取 `file_info`。
+ *
+ * 兼容两种常见承载形态：`{file_info}` 与 `{data:{file_info}}`；带非零业务码
+ * （code / errcode / retcode）视为失败返回 undefined。字段形态若随平台版本
+ * 漂移，只改这里 + 测试。缺 file_info 一律返回 undefined，不伪造。
+ */
+export function parseUploadResponse(raw: unknown): string | undefined {
+  if (!isRecord(raw)) return undefined;
+  for (const key of ["code", "errcode", "retcode"] as const) {
+    const code = toFiniteNumber(raw[key]);
+    if (code !== undefined && code !== 0) return undefined;
+  }
+  const direct = toStringOrUndefined(raw["file_info"]);
+  if (direct) return direct;
+  const data = isRecord(raw["data"]) ? raw["data"] : null;
+  if (!data) return undefined;
+  return toStringOrUndefined(data["file_info"]);
+}
+
+/** 纯函数：按文件名后缀推断 content-type；未知后缀退化为 octet-stream。 */
+export function guessQqBotContentType(fileName: string): string {
+  const ext = fileName.toLowerCase().split(".").pop() ?? "";
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "bmp":
+      return "image/bmp";
+    case "pdf":
+      return "application/pdf";
+    case "txt":
+      return "text/plain";
+    case "json":
+      return "application/json";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+/**
+ * 纯函数：在既有发送请求（含 endpoint / msg_id / msg_seq）上附加 file_info，
+ * 得到「带富媒体」的消息体。复用 {@link buildSendPrivateMsg} /
+ * {@link buildSendGroupMsg} 生成 base，因而被动回复的 msg_seq 语义不变。
+ *
+ * msg_type / 字段名用可覆盖配置，默认占位值需按实际平台配置核实。
+ */
+export function buildSendWithFileInfo(
+  base: QqBotRequestSpec,
+  fileInfo: string,
+  kind: QqBotRichMediaKind,
+  config: QqBotRichMediaBodyConfig = {},
+): QqBotRequestSpec {
+  const body: Record<string, unknown> = { ...base.body };
+  if (kind === "image") {
+    body["msg_type"] = config.imageMsgType ?? QQBOT_IMAGE_MSG_TYPE;
+    const field = config.imageField ?? QQBOT_IMAGE_INFO_FIELD;
+    body[field] = { file_info: fileInfo };
+  } else {
+    body["msg_type"] = config.fileMsgType ?? QQBOT_FILE_MSG_TYPE;
+    const field = config.fileField ?? QQBOT_FILE_INFO_FIELD;
+    body[field] = { file_info: fileInfo };
+  }
+  return { endpoint: base.endpoint, method: base.method, body };
 }

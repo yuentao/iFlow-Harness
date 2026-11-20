@@ -37,6 +37,11 @@ export interface NodeQqBotTransportDeps {
   log?: (line: string) => void;
   /** 保留字段：与 adapter 工厂签名一致的注入时钟（transport 本身不读时间）。 */
   now?: () => number;
+  /**
+   * 富媒体上传的二进制 multipart POST 能力；缺省用 node:http(s) 直连实现。
+   * 测试可注入假实现，完全离线验证上传链路。真实端点 / 字段细节属端到端另案。
+   */
+  multipartPoster?: QqBotMultipartPoster;
 }
 
 export const DEFAULT_QQBOT_HTTP_TIMEOUT_MS = 15_000;
@@ -351,10 +356,16 @@ export function createNodeQqBotTransport(deps: NodeQqBotTransportDeps = {}): QqB
       ? deps.maxPendingFrames
       : DEFAULT_QQBOT_MAX_PENDING_FRAMES;
   const warn = deps.log ?? ((line: string) => console.warn(line));
+  const multipart =
+    deps.multipartPoster ?? createNodeQqBotMultipartPoster({ timeoutMs, maxResponseBytes });
 
   return {
     connect(url: string, headers: Record<string, string>): Promise<QqBotSocket> {
       return buildSocket(injected, url, headers, timeoutMs, maxPendingFrames, warn);
+    },
+
+    postMultipart(endpoint, headers, body) {
+      return multipart.postMultipart(endpoint, headers, body);
     },
 
     async post(
@@ -477,6 +488,154 @@ export function createNodeQqBotTransport(deps: NodeQqBotTransportDeps = {}): QqB
         timer.unref?.();
 
         req.end(payload);
+      });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 富媒体上传：二进制 multipart/form-data POST（端到端另案的实施点）
+// ---------------------------------------------------------------------------
+//
+// 与 post 一样的 IO 纪律：node:http(s) 直连（禁全局 fetch）、仅 2xx 解析 JSON、
+// 超时 / 响应体上限护栏、错误不回显响应体。区别只在 body 是调用方已编码好的
+// multipart 二进制 Buffer，content-type 由调用方（protocol.ts 纯函数）给出。
+// 真实上传端点 / 字段形态未在真机核实，见 protocol.ts 的富媒体注释。
+
+/** 富媒体上传用的二进制 POST 能力；可注入假实现离线验证。 */
+export interface QqBotMultipartPoster {
+  postMultipart(
+    endpoint: string,
+    headers: Record<string, string>,
+    body: Buffer,
+  ): Promise<unknown>;
+}
+
+/** createNodeQqBotMultipartPoster 的工厂依赖；全部可选，便于测试注入。 */
+export interface NodeQqBotMultipartDeps {
+  /** 注入 http(s).request（测试用假实现），缺省按 URL 协议选 node:http(s)。 */
+  request?: typeof httpRequest;
+  /** 请求超时（毫秒）；缺省 {@link DEFAULT_QQBOT_HTTP_TIMEOUT_MS}。 */
+  timeoutMs?: number;
+  /** 响应体字节上限；缺省 {@link DEFAULT_QQBOT_MAX_RESPONSE_BYTES}。 */
+  maxResponseBytes?: number;
+}
+
+/** node:http(s) 直连的 multipart 二进制 POST 实现。 */
+export function createNodeQqBotMultipartPoster(
+  deps: NodeQqBotMultipartDeps = {},
+): QqBotMultipartPoster {
+  const timeoutMs =
+    typeof deps.timeoutMs === "number" && deps.timeoutMs > 0
+      ? deps.timeoutMs
+      : DEFAULT_QQBOT_HTTP_TIMEOUT_MS;
+  const maxResponseBytes =
+    typeof deps.maxResponseBytes === "number" && deps.maxResponseBytes > 0
+      ? deps.maxResponseBytes
+      : DEFAULT_QQBOT_MAX_RESPONSE_BYTES;
+
+  return {
+    postMultipart(endpoint, headers, body) {
+      const url = new URL(endpoint);
+      const https = url.protocol === "https:";
+      if (!https && url.protocol !== "http:") {
+        throw new Error(`QQBot: 不支持的协议 ${url.protocol}`);
+      }
+      const options: RequestOptions = {
+        method: "POST",
+        hostname: url.hostname,
+        port: url.port ? Number(url.port) : undefined,
+        path: `${url.pathname}${url.search}`,
+        // content-type 由调用方（protocol.buildUploadRequest）给出，含 boundary。
+        headers: { ...headers, "content-length": body.length },
+      };
+
+      return new Promise<unknown>((resolve, reject) => {
+        const send = deps.request ?? (https ? httpsRequest : httpRequest);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let responseBytes = 0;
+        let overLimit = false;
+        let responseBroken = false;
+
+        const clearTimer = (): void => {
+          if (timer !== undefined) {
+            clearTimeout(timer);
+            timer = undefined;
+          }
+        };
+
+        const req = send(options, (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer | string) => {
+            if (overLimit) return;
+            responseBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+            if (responseBytes > maxResponseBytes) {
+              overLimit = true;
+              clearTimer();
+              reject(
+                new Error(
+                  `QQBot: 上传响应体超过上限（${maxResponseBytes} 字节）from ${url.pathname}`,
+                ),
+              );
+              try {
+                req.destroy();
+              } catch {
+                // destroy 失败不影响已 reject 的结果
+              }
+              return;
+            }
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          });
+          res.on("error", (error: Error) => {
+            responseBroken = true;
+            clearTimer();
+            reject(new Error(`QQBot: 上传响应中断 from ${url.pathname}: ${error.message}`));
+          });
+          res.on("aborted", () => {
+            responseBroken = true;
+            clearTimer();
+            reject(new Error(`QQBot: 上传响应中断（连接被对端提前关闭）: ${url.pathname}`));
+          });
+          res.on("end", () => {
+            if (overLimit) return;
+            clearTimer();
+            const status = res.statusCode ?? 0;
+            const text = Buffer.concat(chunks).toString("utf8");
+            if (status < 200 || status >= 300) {
+              // 上传端点不是 token 端点：带业务 code/message 便于诊断，但仍只取
+              // 截断的诊断字段，绝不回显整段响应体。
+              reject(new QqBotHttpError(status, url.pathname, describeHttpFailureBody(text)));
+              return;
+            }
+            if (text.trim() === "") {
+              resolve(undefined);
+              return;
+            }
+            try {
+              resolve(JSON.parse(text) as unknown);
+            } catch {
+              reject(new Error(`QQBot: 上传响应不是合法 JSON from ${url.pathname}`));
+            }
+          });
+        });
+
+        req.on("error", (error: Error) => {
+          clearTimer();
+          if (responseBroken) return; // res 通道已给出更准确的中断文案
+          reject(error);
+        });
+
+        timer = setTimeout(() => {
+          reject(new Error(`QQBot: 上传请求超时（${timeoutMs}ms）: ${url.pathname}`));
+          try {
+            req.destroy();
+          } catch {
+            // destroy 失败不影响已 reject 的结果
+          }
+        }, timeoutMs);
+        timer.unref?.();
+
+        req.end(body);
       });
     },
   };
