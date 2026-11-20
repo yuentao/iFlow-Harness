@@ -206,8 +206,8 @@ function entryIsGrounded(entry: ModelMetadataEntry, sources: readonly MetadataSo
   const needle = looseKey(entry.name);
   if (!needle || !haystack.includes(needle)) return false;
   if (entry.contextWindow !== undefined && !contextWindowAppears(entry.contextWindow, text)) return false;
-  if (entry.inputPrice !== undefined && !priceAppears(entry.inputPrice, text)) return false;
-  if (entry.outputPrice !== undefined && !priceAppears(entry.outputPrice, text)) return false;
+  if (entry.inputPrice !== undefined && !priceAppears(entry.inputPrice, text, "input")) return false;
+  if (entry.outputPrice !== undefined && !priceAppears(entry.outputPrice, text, "output")) return false;
   return true;
 }
 
@@ -223,12 +223,127 @@ function contextWindowAppears(value: number, text: string): boolean {
   return [...candidates].some((candidate) => haystack.includes(candidate.toLowerCase()));
 }
 
-/** "0.6" must be findable as 0.6 / 0.60 / $0.6 / 0.600. */
-function priceAppears(value: number, text: string): boolean {
+type PriceKind = "input" | "output";
+
+/** Currency / billing / role markers used by `priceAppears` below. */
+const USD_MARKERS = ["$", "us$", "usd", "美元", "美金"];
+const NON_USD_MARKERS = ["¥", "￥", "人民币", "rmb", "cny", "元"];
+const RECURRING_MARKERS = [
+  "月费", "每月", "包月", "包年", "订阅", "/月", "/年",
+  "monthly", "annual", "per month", "per year", "/mo", "/yr",
+];
+const INPUT_LABELS = ["input", "输入", "prompt"];
+const OUTPUT_LABELS = ["output", "输出", "completion", "生成"];
+
+function hasAny(text: string, markers: readonly string[]): boolean {
+  return markers.some((marker) => text.includes(marker));
+}
+
+/**
+ * All positions where the price number is written in the text. Candidates are
+ * tried longest-first so `0.600` wins over `0.6`, and a match embedded in a
+ * longer number (`0.6` inside `0.60`, `2` inside `200000`) is ignored via a
+ * digit/dot boundary check — this preserves the original unit-aware grounding
+ * without weakening it.
+ */
+function priceOccurrences(value: number, text: string): Array<{ index: number; length: number }> {
   const haystack = text.toLowerCase();
-  const candidates = new Set<string>([String(value)]);
-  for (const digits of [1, 2, 3, 4]) candidates.add(value.toFixed(digits));
-  return [...candidates].some((candidate) => haystack.includes(candidate));
+  const candidates: string[] = [];
+  const add = (candidate: string): void => {
+    if (!candidates.includes(candidate)) candidates.push(candidate);
+  };
+  add(String(value));
+  for (const digits of [1, 2, 3, 4]) add(value.toFixed(digits));
+  candidates.sort((a, b) => b.length - a.length);
+  const found: Array<{ index: number; length: number }> = [];
+  const seen = new Set<number>();
+  for (const candidate of candidates) {
+    let from = 0;
+    while (from <= haystack.length - candidate.length) {
+      const index = haystack.indexOf(candidate, from);
+      if (index < 0) break;
+      const before = index > 0 ? haystack[index - 1]! : "";
+      const after = index + candidate.length < haystack.length ? haystack[index + candidate.length]! : "";
+      if (!/[0-9.]/.test(before) && !/[0-9]/.test(after) && !seen.has(index)) {
+        seen.add(index);
+        found.push({ index, length: candidate.length });
+      }
+      from = index + candidate.length;
+    }
+  }
+  return found;
+}
+
+/**
+ * Which role label owns a number: only a label directly adjacent to it (gap
+ * made of currency symbols / spaces / punctuation) counts. In
+ * `input $0.6 output $2.4` the `input` label owns 0.6 and `output` owns 2.4 —
+ * a following `output` does not own the number that precedes it. When neither
+ * side is adjacent (e.g. a bare table cell) we defer rather than reject, so a
+ * legitimate price is never dropped over a distant header.
+ */
+function adjacentPriceRole(text: string, index: number, length: number): PriceKind | null {
+  const lower = text.toLowerCase();
+  const beforeRel = lower.slice(Math.max(0, index - 20), index);
+  const newline = beforeRel.lastIndexOf("\n");
+  const before = newline >= 0 ? beforeRel.slice(newline + 1) : beforeRel;
+  const after = lower.slice(index + length, index + length + 20);
+  const groups: ReadonlyArray<readonly [readonly string[], PriceKind]> = [
+    [INPUT_LABELS, "input"],
+    [OUTPUT_LABELS, "output"],
+  ];
+  for (const [labels, role] of groups) {
+    for (const label of labels) {
+      const at = before.lastIndexOf(label);
+      if (at >= 0 && /^[$:：\s]{0,3}$/.test(before.slice(at + label.length))) return role;
+    }
+  }
+  for (const [labels, role] of groups) {
+    for (const label of labels) {
+      const at = after.indexOf(label);
+      if (at >= 0 && /^[\s():，,、]{0,3}$/.test(after.slice(0, at))) return role;
+    }
+  }
+  return null;
+}
+
+/** Is one written occurrence of the number a legitimate per-token USD price? */
+function priceOccurrenceUsable(
+  text: string,
+  occurrence: { index: number; length: number },
+  kind: PriceKind,
+): boolean {
+  const lower = text.toLowerCase();
+  const beforeRel = lower.slice(Math.max(0, occurrence.index - 34), occurrence.index);
+  const newline = beforeRel.lastIndexOf("\n");
+  const before = newline >= 0 ? beforeRel.slice(newline + 1) : beforeRel;
+  const after = lower.slice(occurrence.index + occurrence.length);
+
+  // Currency: a CNY/non-USD marker without any USD marker means the number is
+  // a local-currency price (settings are USD-denominated, no conversion).
+  // A USD marker wins when both appear, e.g. in a mixed comparison table.
+  const near = before.slice(-18) + after.slice(0, 8);
+  if (hasAny(near, NON_USD_MARKERS) && !hasAny(near, USD_MARKERS)) return false;
+
+  // A monthly / annual / subscription fee is not a per-token unit price.
+  if (hasAny(before.slice(-26) + after.slice(0, 14), RECURRING_MARKERS)) return false;
+
+  // Role: reject when an adjacent role label contradicts the field being
+  // validated (e.g. an "output" price reported as inputPrice).
+  const role = adjacentPriceRole(text, occurrence.index, occurrence.length);
+  if (role !== null && role !== kind) return false;
+
+  return true;
+}
+
+/**
+ * "0.6" must be findable as 0.6 / 0.60 / $0.6 / 0.600 — AND at least one such
+ * occurrence must be a USD (or unlabelled, but USD-context) per-token price
+ * for the correct input/output role. CNY prices, subscription fees and numbers
+ * belonging to the opposite role never ground a price field.
+ */
+function priceAppears(value: number, text: string, kind: PriceKind): boolean {
+  return priceOccurrences(value, text).some((occurrence) => priceOccurrenceUsable(text, occurrence, kind));
 }
 
 function escapeRegExp(value: string): string {
