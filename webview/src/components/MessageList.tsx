@@ -1881,14 +1881,14 @@ function MessageListInner() {
   // the previous session left windowStart larger than the new block count.
   useLayoutEffect(() => {
     setWindowStart(Math.max(0, visibleBlocks.length - TAIL_WINDOW));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset on identity change only
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在会话/回放/焦点视图切换时重置窗口，不随消息块数量变化重触发
   }, [state.activeSessionId, state.replaying, focusMode]);
 
-  function expandOlder() {
+  const expandOlder = useCallback(() => {
     const el = scrollRef.current;
     if (el) bottomDistance.current = el.scrollHeight - el.scrollTop;
     setWindowStart((s) => Math.max(0, s - MOUNT_STEP));
-  }
+  }, []);
 
   useLayoutEffect(() => {
     const dist = bottomDistance.current;
@@ -1914,10 +1914,9 @@ function MessageListInner() {
     );
     io.observe(el);
     return () => io.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- expandOlder reads refs only
-  }, [start]);
+  }, [start, expandOlder]);
 
-  function scrollToBottom(smooth = false) {
+  const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current;
     if (!el) return;
     if (smooth && "scrollTo" in el) {
@@ -1933,7 +1932,7 @@ function MessageListInner() {
     }
     el.scrollTop = el.scrollHeight;
     programmaticTop.current = el.scrollTop; // post-clamp actual value
-  }
+  }, []);
 
   const [showJump, setShowJump] = useState(false);
   // M4 P1-9: the user bubble whose inline editor is open (at most one at a
@@ -1973,7 +1972,7 @@ function MessageListInner() {
     // stickToBottom flipped false right after the first trim). scrollToBottom
     // stamps programmaticTop, so the async scroll event is consumed instead.
     scrollToBottom();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- refs + stable fns
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意不写依赖数组：每次提交都要重跑裁剪守卫；回调仅读 ref 与稳定函数
   });
   // Follow-scroll trigger: a ResizeObserver on the content wrapper catches
   // EVERY growth path — streamed text, tool-card status/output flips,
@@ -2000,7 +1999,7 @@ function MessageListInner() {
     ro.observe(el, { box: "border-box" });
     if (scroller) ro.observe(scroller);
     return () => ro.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom/syncHeaderScrolled read refs only
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 观察器只挂载一次；回调仅读 ref 并调用滚动/头部同步函数，重复订阅无意义
   }, []);
 
   // Session switch / history restore: jump to the end of the recovered
@@ -2023,8 +2022,7 @@ function MessageListInner() {
     stickToBottom.current = true;
     setShowJump(false);
     scrollToBottom();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom reads refs only
-  }, [promptSeq]);
+  }, [promptSeq, scrollToBottom]);
 
   // Approval / question cards render OUTSIDE the scroll area (App.tsx), so
   // unmounting either of them never touches the content RO — the scroll
@@ -2045,9 +2043,8 @@ function MessageListInner() {
     stickToBottom.current = true;
     setShowJump(false);
     const raf = requestAnimationFrame(() => scrollToBottom());
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom reads refs only
     return () => cancelAnimationFrame(raf);
-  }, [state.pendingApproval, state.pendingQuestions]);
+  }, [state.pendingApproval, state.pendingQuestions, scrollToBottom]);
 
   /** Re-sync the header shadow flag from the current scroll position.
    * Scroll events alone miss resizes: when the panel is resized (or a card
@@ -2089,10 +2086,8 @@ function MessageListInner() {
       if (b.kind === "user") return b.text;
     }
     return null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on total only:
-    // user blocks are always APPENDED (beginUserPrompt/replay), so a new user
-    // text implies total grew; the blocks reference changes on every patch
-    // and must not re-trigger this reverse scan.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅以 total 为键：用户消息只会追加，新文本必然伴随 total 增长；
+    // blocks 引用每次 patch 都会变，若作依赖会让反向扫描被反复触发
   }, [total]);
 
   const canRegenerate =
