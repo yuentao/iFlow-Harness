@@ -21,7 +21,7 @@ import {
   SUPER_ATTACHMENT_MAX_AGE_MS,
   type SuperAgentDeps,
 } from "../src/panel/super-agent.js";
-import { superIsolationDir } from "../src/panel/worktree.js";
+import { comparisonPathKey, superIsolationDir } from "../src/panel/worktree.js";
 import type { SuperSessionUi } from "../shared/super-agent.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
@@ -330,5 +330,119 @@ describe("ChatPanel · 新建会话的残留确认", () => {
     await p.confirmAndPurgeSuperResidue();
     expect(posted).toHaveLength(0);
     expect(purgeSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S3 · 残留清扫幂等性（3.5.0）
+//
+// 3.2.1 修复：sweepStaleWorktrees 用 realpath 归一键比较 git 注册表里的路径与
+// 目录枚举结果。symlink / junction 形式的 repoRoot 下，git 报真实路径、枚举报
+// 别名路径，只做词法归一会把全部 worktree 判成孤儿（清扫恒 0）。这里用别名路径
+// 交叉验证：重复扫不漏删可回收、不误删未合并/活跃项，且不触碰主仓工作区。
+// ---------------------------------------------------------------------------
+
+describe("S3 · junction/realpath 混合路径下清扫幂等", () => {
+  let realRepo: string;
+  let aliasRepo: string;
+
+  function git(cwd: string, ...args: string[]): string {
+    return execFileSync("git", args, {
+      cwd,
+      windowsHide: true,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  }
+
+  /** 在隔离子树下造一个 worktree：分支停在 HEAD（已并入、干净 → 可回收）。 */
+  function makeWorktreeAtHead(slug: string): string {
+    const branch = `iflow/super/${slug}`;
+    const wt = path.join(superIsolationDir(realRepo, "worktrees"), slug);
+    git(realRepo, "branch", branch);
+    git(realRepo, "worktree", "add", "-q", wt, branch);
+    return wt;
+  }
+
+  beforeEach(() => {
+    setConfigOverrides({ checkpoints: false, autoTitle: false, autoMemoryCapture: false });
+    realRepo = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-s3-real-"));
+    git(realRepo, "init", "-q");
+    git(realRepo, "config", "user.email", "t@e.st");
+    git(realRepo, "config", "user.name", "t");
+    fs.writeFileSync(path.join(realRepo, "base.txt"), "base\n");
+    git(realRepo, "add", "-A");
+    git(realRepo, "commit", "-qm", "base");
+
+    // 别名路径：Windows 用 junction（免管理员权限），POSIX 用目录符号链接。
+    aliasRepo = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-s3-alias-"));
+    fs.rmdirSync(aliasRepo);
+    fs.symlinkSync(realRepo, aliasRepo, process.platform === "win32" ? "junction" : "dir");
+  });
+
+  afterEach(() => {
+    // 只移除别名本身（lstat 语义，绝不跟随进 realRepo）。
+    try {
+      if (process.platform === "win32") fs.rmdirSync(aliasRepo);
+      else fs.unlinkSync(aliasRepo);
+    } catch {
+      // 别名可能已被测试清理，忽略。
+    }
+    fs.rmSync(realRepo, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  it("realpath 归一把 junction 别名路径与真实路径归一到同一键", async () => {
+    expect(await comparisonPathKey(aliasRepo)).toBe(await comparisonPathKey(realRepo));
+    expect(await comparisonPathKey(path.join(aliasRepo, ".iflow", "super"))).toBe(
+      await comparisonPathKey(path.join(realRepo, ".iflow", "super")),
+    );
+  });
+
+  it("别名路径下重复清扫幂等：可回收不漏删，未合并与活跃 worktree 不误删", async () => {
+    // 可回收：分支停在 HEAD、目录干净。
+    const stale = makeWorktreeAtHead("merged-clean");
+    // 保留一：分支比 HEAD 多一笔提交（未合并）。
+    const unmerged = makeWorktreeAtHead("unmerged-keep");
+    fs.writeFileSync(path.join(unmerged, "extra.txt"), "x\n");
+    git(unmerged, "add", "-A");
+    git(unmerged, "commit", "-qm", "extra");
+    // 保留二：活着的子会话正在用（即便分支已并入也不能删）。
+    const live = makeWorktreeAtHead("live-keep");
+
+    // 管理器用别名路径打开仓库：注册表里 git 报真实路径、枚举报别名路径。
+    const mgr = makeManager(aliasRepo);
+    (mgr as unknown as { sessions: Map<string, SuperSessionUi> }).sessions.set("live-child", {
+      id: "live-child",
+      title: "t",
+      task: "t",
+      status: "running",
+      isolation: {
+        kind: "git_worktree",
+        path: live,
+        branch: "iflow/super/live-keep",
+        baseRef: git(realRepo, "rev-parse", "HEAD"),
+      },
+      createdAt: 0,
+      updatedAt: 0,
+      reports: [],
+    });
+
+    const first = await mgr.sweepStaleWorktrees();
+    expect(first.removed).toBe(1); // 可回收的那个真的被删了（不漏删）
+    expect(fs.existsSync(stale)).toBe(false);
+    // 未合并 / 活跃的两个都还在（不误删）。
+    expect(fs.existsSync(unmerged)).toBe(true);
+    expect(fs.existsSync(live)).toBe(true);
+    expect(git(realRepo, "branch", "--list", "iflow/super/unmerged-keep")).toContain(
+      "iflow/super/unmerged-keep",
+    );
+
+    // 再扫一次：可回收的已不在，其余仍受保护 → 0 删除，现场不变（幂等）。
+    const second = await mgr.sweepStaleWorktrees();
+    expect(second.removed).toBe(0);
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(unmerged)).toBe(true);
+    expect(fs.existsSync(live)).toBe(true);
+    await mgr.dispose();
   });
 });
