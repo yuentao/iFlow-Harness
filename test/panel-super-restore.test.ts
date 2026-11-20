@@ -391,4 +391,36 @@ describe("ChatPanel · 超流体归档的恢复接线", () => {
       fs.rmSync(live, { recursive: true, force: true });
     }
   });
+
+  it("S3 · 子会话清理后归档写空，恢复时不再冒出已清理的子会话", async () => {
+    // 归档一条历史子会话（released=true → 清理只删记录，不做磁盘操作）。
+    await writeSuperSessionArchive(storageDir, "main-1", [
+      record({
+        status: "completed",
+        isolation: {
+          kind: "git_worktree",
+          path: "/tmp/wt-old",
+          branch: "iflow/super/old",
+          released: true,
+        },
+      }),
+    ]);
+    await p.restoreSuperSessions("main-1");
+    expect(board()).toHaveLength(1);
+
+    const mgr = p.getSuperAgent() as { cleanup: (id: string) => Promise<{ ok: boolean }> };
+    expect((await mgr.cleanup("super-old")).ok).toBe(true);
+    expect(board()).toEqual([]);
+
+    // 关键不变量：清理后落盘的是空数组（归属 main-1 仍在），不是把旧记录留在
+    // 磁盘上等下次恢复复活。
+    await p.persistSuperSessions({ force: true });
+    const loaded = await readSuperSessionArchive(storageDir, "main-1");
+    expect(loaded.damaged).toBe(false);
+    expect(loaded.sessions).toEqual([]);
+
+    // 再恢复一次：已清理的子会话不会再出现。
+    await p.restoreSuperSessions("main-1");
+    expect(board()).toEqual([]);
+  });
 });
