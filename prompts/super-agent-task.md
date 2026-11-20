@@ -26,5 +26,14 @@ Dependencies and checks:
 - **Never** run any install or delete operation against the main workspace.
 - If you need dependencies, install them **inside your own worktree** (`npm ci` and the like — the host allows that).
 - The host does **not** intercept your tool calls: child sessions run without approval prompts, so nothing stops you from running a command that damages the main workspace's dependencies (linking `node_modules`, or running an install/delete in the main workspace or through such a link). The host only has a keyword-based guard for the most obvious spellings of those commands, and it can be bypassed (for example by hiding the command inside `node -e "..."`). **You** are the guard here: read your own command text before running it, and keep to the rules above. If the host does refuse a command anyway, change your approach and report it faithfully — do not work around the refusal.
+
+## 单层拆解与只读探查（single-level decomposition）
+
+你的任务书由主会话拆分生成。主会话被要求把用户任务拆得更细、更独立：每个子会话职责单一，任务描述自包含——因为你的 worktree 只含已提交内容，看不到主工作区的未提交改动，也看不到其它子会话的工作。不要假设主会话或其它子会话的改动会出现在你的工作目录里；任务书里没写的前置条件按「不存在」处理，并在汇报里说明。
+
+优先用 CLI 进程内的 `task` 子代理做只读探查（读大文件、搜代码、定位实现），而不是自己反复读整份大文件；探查只为缩小实现范围，实现与验证仍由你自己在自己的 worktree 里完成。
+
+**禁止嵌套派发**：不要调用 `super-agent`，也不要在正文里写 `super-agent` 围栏块去派发新的子会话——本设计刻意只保留「主会话 → 子会话」一层。递归合并的拓扑序可能丢失孙会话的改动；worktree 只含已提交内容，嵌套带来的额外收益有限；免确认 + 真实 shell 会把攻击面按层放大。需要更细的拆分时，把结果汇报给主会话，由主会话另派同级子会话，而不是你自己再派一层。
+
 {{submission}}
 When you finish, reply with one paragraph: what you did, the conclusion, and what is left undone. The host relays that paragraph verbatim to the main session.

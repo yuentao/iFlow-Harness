@@ -823,6 +823,33 @@ describe("prompt templates (prompts/)", () => {
     expect(text).toContain("`super-agent` is your dispatch channel");
   });
 
+  it("keeps single-level decomposition, finer self-contained tasks and task-based read-only probing", () => {
+    // 3.9.0 F3 决策：多层嵌套被刻意拒绝（递归合并拓扑序可能丢孙会话改动、
+    // worktree 只含已提交内容使嵌套收益受限、免确认 + 真实 shell 攻击面放大），
+    // 改为细化单层拆解 + 子会话用 in-process `task` 做只读探查。两份 prompt
+    // 都必须写明，防止后续 agent 误以为嵌套是遗漏而重新实现。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).toContain("## 只做单层拆解（single-level，刻意为之）");
+    expect(text).toContain("这是刻意设计，不是遗漏");
+    expect(text).toContain("递归合并的拓扑序可能丢失孙会话改动");
+    expect(text).toContain("worktree 只含已提交内容，嵌套的额外收益有限");
+    expect(text).toContain("免确认且能跑真实 shell");
+    expect(text).toContain("**禁止让子会话再派发 super-agent**");
+    expect(text).toContain("主会话是唯一的派发者");
+    expect(text).toContain("每个子会话职责单一，任务描述自包含");
+    expect(text).toContain("看不到主工作区的未提交改动，也看不到彼此的工作");
+    expect(text).toContain("优先用 CLI 进程内 `task` 子代理做只读探查");
+
+    const brief = readFileSync(path.join(here, "..", "prompts", "super-agent-task.md"), "utf8");
+    expect(brief).toContain("## 单层拆解与只读探查（single-level decomposition）");
+    expect(brief).toContain("每个子会话职责单一，任务描述自包含");
+    expect(brief).toContain("看不到主工作区的未提交改动，也看不到其它子会话的工作");
+    expect(brief).toContain("优先用 CLI 进程内的 `task` 子代理做只读探查");
+    expect(brief).toContain("**禁止嵌套派发**");
+    expect(brief).toContain("本设计刻意只保留「主会话 → 子会话」一层");
+    expect(brief).toContain("递归合并的拓扑序可能丢失孙会话的改动");
+  });
+
   it("keeps the child-session concurrency limit configurable instead of hard-coding 4", () => {
     // 模型会照着提示词里的数字自我约束：写死的 "At most 4 child sessions" 曾让
     // 用户把 iflow.superAgent.maxConcurrent 设成 10 后仍只派 4 个任务
