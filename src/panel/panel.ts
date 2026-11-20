@@ -2237,6 +2237,112 @@ export class ChatPanel implements vscode.Disposable {
       await this.handleQqConfigAction(qqAction.action);
       return;
     }
+    // 阶段 7（行为不变等价重构）：消息路由按职责拆到 4 个分域分派函数。
+    // 本 switch 只做域选择；每个 case 的处理代码逐字保留在对应分派函数内。
+    // test/panel-message-routing.test.ts 固化了全部 case 类型的完整清单。
+    switch (msg.type) {
+      // --- 会话 / 宿主通用（含设置、MCP、资源、记忆、附件、模型与 Profile） ---
+      case "ready":
+      case "sendPrompt":
+      case "queueAction":
+      case "resolveContext":
+      case "cancel":
+      case "newSession":
+      case "setModel":
+      case "setThink":
+      case "openLocation":
+      case "openExternal":
+      case "runInTerminal":
+      case "searchFiles":
+      case "stageFiles":
+      case "pickAttachments":
+      case "openImage":
+      case "saveAuth":
+      case "clearAuth":
+      case "activateProfile":
+      case "deleteProfile":
+      case "setOnboardingDismissed":
+      case "loadSession":
+      case "deleteSession":
+      case "setSessionFlags":
+      case "renameSession":
+      case "refreshAuth":
+      case "refreshModels":
+      case "restartCli":
+      case "openSettings":
+      case "setHostSettings":
+      case "listMcpServers":
+      case "saveMcpServers":
+      case "mcpStatus":
+      case "fetchModelMetadata":
+      case "cancelModelMetadata":
+      case "listAssets":
+      case "readAsset":
+      case "saveAsset":
+      case "createAsset":
+      case "deleteAsset":
+      case "generateAsset":
+      case "listMemory":
+      case "readMemoryFile":
+      case "saveMemoryFile":
+      case "appendMemoryFact":
+      case "deleteMemoryFacts":
+      case "createProjectMemory":
+      case "applyMemoryCandidates":
+      case "dismissMemoryCandidates":
+      case "openMemoryFile":
+      case "generateKnowledge":
+      case "setKnowledgeInjection":
+      case "openKnowledgeFile":
+      case "regenerate":
+      case "deleteUserMessage":
+      case "editAndResend":
+      case "exportSession":
+      case "enhancePrompt":
+      case "cancelEnhance":
+      case "toastAction":
+      case "exportToolOutput":
+        await this.handleSessionMessage(msg);
+        break;
+      // --- 审批 / 提问 / Plan / diff 回退确认 ---
+      case "respondApproval":
+      case "answerQuestions":
+      case "respondProfileSwitch":
+      case "revertTool":
+      case "applyHunkSelection":
+      case "restoreCheckpoint":
+      case "requestTurnChanges":
+      case "revertTurnFile":
+      case "openDiff":
+      case "togglePlanItem":
+        await this.handleApprovalMessage(msg);
+        break;
+      // --- Super Agent 看板 / 动作 ---
+      case "stopSubagent":
+      case "superAgent":
+      case "respondSuperResidueConfirm":
+        await this.handleSuperMessage(msg);
+        break;
+      // --- QQ ---
+      case "qqSettingsPatch":
+      case "qqTaskAction":
+      case "qqConfigAction":
+      case "qqUserAction":
+      case "qqManagedSetup":
+      case "qqTakeover":
+        await this.handleQqMessage(msg);
+        break;
+      default:
+        // C10: version-mismatch tripwire — a webview built from a different
+        // commit can send message kinds this host does not know; without a
+        // default they would be dropped silently.
+        this.log.warn(`webview → host: unknown message type "${(msg as { type?: string }).type}"`);
+        break;
+    }
+  }
+
+  /** 会话 / 宿主通用消息域：会话生命周期、prompt、模型/思考、附件、设置、MCP、资源与记忆等宿主能力。 */
+  private async handleSessionMessage(msg: WebviewToHost): Promise<void> {
     switch (msg.type) {
       case "ready":
         // The webview (re)booted and lost its transcript anchor: resync()
@@ -2277,30 +2383,6 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "resolveContext":
         void this.resolveContext(msg.requestId, msg.kind, msg.query);
-        break;
-      case "stopSubagent": {
-        if (!canStopSubAgent(this.store.getState(), msg.sessionId, msg.agentId)) break;
-        const agentClient = this.client;
-        if (!agentClient) break;
-        try {
-          // agent-cancel-refactor Mod (vendored fork): aborts ONLY this
-          // agent's signal chain; the parent turn keeps running with an
-          // interrupted-task result (verified on wire, probe 2026-10-12).
-          const res = await agentClient.cancelAgent(msg.sessionId, msg.agentId);
-          if (res?.stopped) {
-            this.store.markSubagentStopped(msg.agentId);
-          } else if (res?.reason === "not_found") {
-            this.store.sendToast("info", vscode.l10n.t("该子代理已结束"));
-          } else {
-            this.store.sendToast("warning", vscode.l10n.t("停止子代理失败"));
-          }
-        } catch {
-          this.store.sendToast("warning", vscode.l10n.t("停止子代理失败"));
-        }
-        break;
-      }
-      case "superAgent":
-        await this.handleSuperAgentAction(msg);
         break;
       case "cancel":
         this.cancelCurrentTurn();
@@ -2354,42 +2436,6 @@ export class ChatPanel implements vscode.Disposable {
         if (/^https?:\/\//.test(msg.uri)) {
           await vscode.env.openExternal(vscode.Uri.parse(msg.uri));
         }
-        break;
-      case "respondApproval":
-        this.handleApprovalResponse(msg.id, msg.optionId);
-        break;
-      case "answerQuestions":
-        this.handleQuestionAnswers(msg.id, msg.answers);
-        break;
-      case "respondProfileSwitch":
-        this.handleProfileSwitchResponse(msg.id, msg.keepSession);
-        break;
-      case "respondSuperResidueConfirm":
-        this.handleSuperResidueConfirmResponse(msg.requestId, msg.confirmed);
-        break;
-      case "revertTool":
-        await this.revertToolDiff(msg.toolCallId);
-        break;
-      case "applyHunkSelection":
-        await this.applyHunkSelection(msg.toolCallId, msg.keep);
-        break;
-      case "restoreCheckpoint":
-        await this.restoreCheckpoint(msg.userBlockId, msg.mode);
-        break;
-      case "requestTurnChanges": {
-        const state = this.store.getState();
-        const available = state.sessionId === msg.sessionId && canReviewTurn(state, msg.userBlockId);
-        this.postToWebview({ type: "turnChanges", sessionId: msg.sessionId,
-          userBlockId: msg.userBlockId, requestId: msg.requestId,
-          records: available ? collectTurnChanges(state.blocks, msg.userBlockId) : [], unavailable: !available });
-        break;
-      }
-      case "revertTurnFile":
-        await this.revertTurnFile(msg.sessionId, msg.userBlockId, msg.key);
-        break;
-      case "openDiff":
-        if (msg.sessionId !== undefined && msg.sessionId !== this.store.getState().sessionId) break;
-        await this.openToolDiff(msg.toolCallId);
         break;
       case "runInTerminal":
         this.runToolInTerminal(msg.toolCallId, msg.execute);
@@ -2692,12 +2738,90 @@ export class ChatPanel implements vscode.Disposable {
       case "toastAction":
         this.handleToastAction(msg.actionId, msg.toastId);
         break;
-      case "togglePlanItem":
-        this.store.togglePlanItem(msg.blockId, msg.index);
-        break;
       case "exportToolOutput":
         await this.exportToolOutput(msg.blockId);
         break;
+    }
+  }
+
+  /** 审批 / 提问 / Plan / diff 回退确认消息域：所有需要用户决策的卡片回包。 */
+  private async handleApprovalMessage(msg: WebviewToHost): Promise<void> {
+    switch (msg.type) {
+      case "respondApproval":
+        this.handleApprovalResponse(msg.id, msg.optionId);
+        break;
+      case "answerQuestions":
+        this.handleQuestionAnswers(msg.id, msg.answers);
+        break;
+      case "respondProfileSwitch":
+        this.handleProfileSwitchResponse(msg.id, msg.keepSession);
+        break;
+      case "revertTool":
+        await this.revertToolDiff(msg.toolCallId);
+        break;
+      case "applyHunkSelection":
+        await this.applyHunkSelection(msg.toolCallId, msg.keep);
+        break;
+      case "restoreCheckpoint":
+        await this.restoreCheckpoint(msg.userBlockId, msg.mode);
+        break;
+      case "requestTurnChanges": {
+        const state = this.store.getState();
+        const available = state.sessionId === msg.sessionId && canReviewTurn(state, msg.userBlockId);
+        this.postToWebview({ type: "turnChanges", sessionId: msg.sessionId,
+          userBlockId: msg.userBlockId, requestId: msg.requestId,
+          records: available ? collectTurnChanges(state.blocks, msg.userBlockId) : [], unavailable: !available });
+        break;
+      }
+      case "revertTurnFile":
+        await this.revertTurnFile(msg.sessionId, msg.userBlockId, msg.key);
+        break;
+      case "openDiff":
+        if (msg.sessionId !== undefined && msg.sessionId !== this.store.getState().sessionId) break;
+        await this.openToolDiff(msg.toolCallId);
+        break;
+      case "togglePlanItem":
+        this.store.togglePlanItem(msg.blockId, msg.index);
+        break;
+    }
+  }
+
+  /** Super Agent 看板 / 动作消息域：子会话派发、停止与残留清理确认。 */
+  private async handleSuperMessage(msg: WebviewToHost): Promise<void> {
+    switch (msg.type) {
+      case "stopSubagent": {
+        if (!canStopSubAgent(this.store.getState(), msg.sessionId, msg.agentId)) break;
+        const agentClient = this.client;
+        if (!agentClient) break;
+        try {
+          // agent-cancel-refactor Mod (vendored fork): aborts ONLY this
+          // agent's signal chain; the parent turn keeps running with an
+          // interrupted-task result (verified on wire, probe 2026-10-12).
+          const res = await agentClient.cancelAgent(msg.sessionId, msg.agentId);
+          if (res?.stopped) {
+            this.store.markSubagentStopped(msg.agentId);
+          } else if (res?.reason === "not_found") {
+            this.store.sendToast("info", vscode.l10n.t("该子代理已结束"));
+          } else {
+            this.store.sendToast("warning", vscode.l10n.t("停止子代理失败"));
+          }
+        } catch {
+          this.store.sendToast("warning", vscode.l10n.t("停止子代理失败"));
+        }
+        break;
+      }
+      case "superAgent":
+        await this.handleSuperAgentAction(msg);
+        break;
+      case "respondSuperResidueConfirm":
+        this.handleSuperResidueConfirmResponse(msg.requestId, msg.confirmed);
+        break;
+    }
+  }
+
+  /** QQ 消息域：设置、任务、授权码登录、用户动作与托管/接管。 */
+  private async handleQqMessage(msg: WebviewToHost): Promise<void> {
+    switch (msg.type) {
       case "qqSettingsPatch":
         await this.handleQqSettingsPatch(msg.patch);
         break;
@@ -2715,12 +2839,6 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "qqTakeover":
         this.handleQqTakeover(msg.action);
-        break;
-      default:
-        // C10: version-mismatch tripwire — a webview built from a different
-        // commit can send message kinds this host does not know; without a
-        // default they would be dropped silently.
-        this.log.warn(`webview → host: unknown message type "${(msg as { type?: string }).type}"`);
         break;
     }
   }
