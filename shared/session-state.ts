@@ -9,6 +9,9 @@ import type {
   SessionUpdate,
   SlashCommand,
   StopReason,
+  ToolCallStatus,
+  ToolKind,
+  ToolLocation,
   TurnUsageReport,
   McpToolView,
 } from "../src/acp/protocol.js";
@@ -368,9 +371,35 @@ function recordToolBlock(blocks: Block[], toolCallId: string, index: number): vo
   toolIndexCache.get(blocks)?.set(toolCallId, index);
 }
 
+/**
+ * A tool-block patch as it arrives on the wire.
+ *
+ * WHY the fields are optional: ACP's `tool_call_update` carries ONLY the
+ * fields that changed — `status` is explicitly optional in the protocol
+ * (`ToolCallBase.status?`, src/acp/protocol.ts) and a content-only update
+ * (output / diff, no status) is the common case. A patch is therefore a
+ * PARTIAL description of the block, never a full replacement: a field the
+ * frame did not carry means "unchanged", NOT "reset to the default".
+ *
+ * The defect this type exists to prevent: the call sites used to turn a
+ * missing `status` into `"pending"` (`update.status ?? "pending"`), and the
+ * merge spread then overwrote an already-terminal card — a `completed` /
+ * `failed` tool was dragged back to 「正在处理」 by a later status-less
+ * update, and the turn-end zombie close (`closeOpenToolBlocks`) then
+ * stamped it `failed` (user report: the tool card hung at 「正在处理」 and
+ * never ended).
+ */
+type ToolBlockPatch = Omit<ToolBlock, "status" | "toolName" | "title" | "toolKind" | "locations"> & {
+  status?: ToolCallStatus;
+  toolName?: string;
+  title?: string;
+  toolKind?: ToolKind;
+  locations?: ToolLocation[];
+};
+
 /** Upsert the tool block for `patch.toolCallId`. Returns the index of the
  * mutated/appended block (P-1 change reporting). */
-function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
+function upsertToolBlock(blocks: Block[], patch: ToolBlockPatch): number {
   let output = patch.output || "";
   let truncatedChars: number | undefined;
   if (output.length > MAX_TOOL_OUTPUT_STORE_CHARS) {
@@ -397,6 +426,23 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
     const merged: ToolBlock = {
       ...block,
       ...patch,
+      // The wire only carries the fields that CHANGED — a field the frame
+      // did not bring means "unchanged", so the existing value survives.
+      // `status` is the load-bearing one: an update WITHOUT status must
+      // NOT drag a terminal card (completed / failed) back to 「正在处理」
+      // (that is what left the card spinning forever, and what made the
+      // turn-end sweep stamp it `failed`).
+      status: patch.status ?? block.status,
+      // The tool name is the card's IDENTITY — it drives the label, the
+      // icon and the turn-end settle classification
+      // (`isSuccessSettledTool`). It must never be erased by a frame that
+      // simply did not repeat it.
+      toolName: patch.toolName || block.toolName,
+      // Same discipline for the display fields: absent on the wire ⇒
+      // unchanged, not blanked.
+      title: patch.title ?? block.title,
+      toolKind: patch.toolKind ?? block.toolKind,
+      locations: patch.locations ?? block.locations,
       output: output || block.output,
       // An update without fresh output keeps the previous truncation marker.
       truncatedChars: output ? truncatedChars : block.truncatedChars,
@@ -437,7 +483,22 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
     blocks[i] = merged;
     return i;
   }
-  blocks.push({ ...patch, output, truncatedChars, id: nextBlockId() });
+  // A NEW block: the wire may not have carried a status at all (the CLI
+  // stamps `tool_call(pending)` when the functionCall streams, but an
+  // update for an unknown toolCallId creates the card on its own). A call
+  // with no terminal frame yet is pending — the turn-end sweep decides the
+  // real outcome later (`closeOpenToolBlocks`).
+  blocks.push({
+    ...patch,
+    status: patch.status ?? "pending",
+    toolName: patch.toolName ?? "",
+    title: patch.title ?? "",
+    toolKind: patch.toolKind ?? "other",
+    locations: patch.locations ?? [],
+    output,
+    truncatedChars,
+    id: nextBlockId(),
+  });
   recordToolBlock(blocks, patch.toolCallId, blocks.length - 1);
   return blocks.length - 1;
 }
@@ -827,36 +888,44 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
       // isTodoToolName) — never as a generic tool card.
       if (isTodoToolName(update.toolName)) return null;
       const delegation = superTaskParseForTool(update.toolName, update.args);
+      // The wire fields are passed AS THEY ARE (no `?? "pending"` /
+      // `?? ""` fill-ins): ACP marks `status` optional and a
+      // `tool_call_update` carries only the fields that changed. A missing
+      // field means "not carried" — `upsertToolBlock` keeps the existing
+      // value for an existing block and only defaults a NEW block to
+      // pending.
       return upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
-        toolName: update.toolName ?? "",
-        title: update.title ?? "",
-        toolKind: update.kind ?? "other",
-        status: update.status ?? "pending",
+        toolName: update.toolName,
+        title: update.title,
+        toolKind: update.kind,
+        status: update.status,
         output: "",
         input: formatToolInput(update.args),
         ...(delegation?.tasks ? { superTasks: delegation.tasks } : {}),
         ...(delegation?.error ? { superTasksError: delegation.error } : {}),
-        locations: update.locations ?? [],
+        locations: update.locations,
         diff: extractDiff(update.content),
       });
     }
     case "tool_call_update": {
       if (isTodoToolName(update.toolName)) return null;
       const delegation = superTaskParseForTool(update.toolName, update.args);
+      // Same discipline as `tool_call` above: no default fill-ins — a
+      // status-less update must not resurrect a terminal card.
       return upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
-        toolName: update.toolName ?? "",
-        title: update.title ?? "",
-        toolKind: update.kind ?? "other",
-        status: update.status ?? "pending",
+        toolName: update.toolName,
+        title: update.title,
+        toolKind: update.kind,
+        status: update.status,
         output: extractTextOutput(update.content),
         input: formatToolInput(update.args),
         ...(delegation?.tasks ? { superTasks: delegation.tasks } : {}),
         ...(delegation?.error ? { superTasksError: delegation.error } : {}),
-        locations: update.locations ?? [],
+        locations: update.locations,
         diff: extractDiff(update.content),
       });
     }
