@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { ChatPanel, DisposedError } from "../src/panel/panel.js";
 import { acpSessionFilePath } from "../src/acp/models-query.js";
 import type { PanelServices } from "../src/panel/panel.js";
+import type { SessionState } from "../shared/messages.js";
 import type * as vscode from "vscode";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -97,7 +98,7 @@ describe("ChatPanel delete-user-message transaction", () => {
   function harness(loadSession: () => Promise<void> | void) {
     const p = panel as unknown as {
       client: unknown;
-      store: { getState: () => any; userPrompt: (text: string) => void; sessionStarted: (meta: any) => void };
+      store: { getState: () => SessionState; userPrompt: (text: string) => void; sessionStarted: (meta: unknown) => void };
       deleteUserMessage: (id: string) => Promise<void>;
       sendPrompt: (text: string) => Promise<void>;
       historySyncBusy: boolean;
