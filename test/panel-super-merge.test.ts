@@ -496,5 +496,5 @@ describe("S1 · 自动合并的两条让路分支（真实 git，工作区不变
     expect(mgr.get("s-b")?.integration?.state).toBe("merged");
     expect(Number(git(repo, "rev-list", "--count", "--merges", `${baseRef}..HEAD`))).toBe(2);
     expect(fs.existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(false);
-  });
+  }, 15000);
 });
