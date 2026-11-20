@@ -1381,9 +1381,11 @@ function evictOneBlock(block: Block): Block {
  * `childConnected` 以 broker 的 `statuses()` 为权威覆盖:
  *   - `childConnected: true`  → 子会话已连通(即使 `blocked` 仍为 true);
  *   - `childConnected: false` → 子会话连接确实失败(带 `error`);
- *   - `childConnected: undefined` → broker 未就绪 / 无上报,只能退回 `blocked`
- *     展示「主会话未加载」,绝不能读成「服务器坏了」。
- * 详情子页仍消费 CLI 视图的 tools/schema/prompts(被屏蔽时为空),不丢字段。
+ *   - `childConnected: undefined` → broker 未就绪 / 正在连接 / 无上报,退回
+ *     `status:"connecting"`(蓝点)或 `blocked` 展示「主会话未加载」,绝不读成
+ *     「服务器坏了」。
+ * 详情子页的 `tools` 优先取 broker 缓存的 `tools/list`(主会话禁用 MCP 时 CLI
+ * 视图恒为空),`errorKind` 保留 CLI 捕获值(失败时仅缺值才补 "unknown")。
  */
 export interface McpStatusUi {
   discoveryState?: string;

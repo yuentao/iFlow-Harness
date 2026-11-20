@@ -211,15 +211,18 @@ function fmtTokens(n: number): string {
  * `childConnected` (host-computed from the shared MCP broker) is the authority:
  * the main session never loads MCP under Super Agent, so the CLI's `blocked`
  * flag is a design decision, not a broken server. */
-function statusLabel(view: McpServerStatusView & { contextTokens?: number; childConnected?: boolean } | undefined): string {
+function statusLabel(view: McpServerStatusView & { contextTokens?: number; childConnected?: boolean } | undefined, discovering = false): string {
   if (!view) return t("状态未知");
   if (view.childConnected === true) return t("已在超流体连接");
   if (view.childConnected === false) return t("超流体连接失败");
   if (view.disabled) return t("已禁用");
+  // A broker handshake / tool discovery still in flight is a blue "connecting"
+  // state — never a red failure, and never the neutral "main session does not
+  // load MCP" verdict (that only applies once discovery is settled).
+  if (view.status === "connecting" || (discovering && (view.tools?.length ?? 0) === 0 && !view.error)) return t("连接中…");
   if (view.blocked) return t("主会话未加载 MCP");
   switch (view.status) {
     case "connected": return t("已连接");
-    case "connecting": return t("连接中…");
     default: return t("未连接");
   }
 }
@@ -261,6 +264,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
   // Mod missing) → rows render a hollow dot instead of a wrong-colored one.
   const [status, setStatus] = useState<McpStatusUi | null | undefined>(undefined);
   const [refreshing, setRefreshing] = useState(false);
+  /** CLI discovery is still reading tool lists. With the main session MCP-
+   * disabled this is the only hint that an empty tools[] is "in progress"
+   * rather than "no tools" — drive the blue dot / label from it. */
+  const discovering = status?.discoveryState === "in_progress";
   // 「模板目录」 browse + install form (values keyed by catalog field key;
   // entryId indirection keeps the form serializable across setState).
   const [catalogBrowse, setCatalogBrowse] = useState(false);
@@ -647,22 +654,21 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                         ? "shrink-0 size-1.5 rounded-full bg-muted-foreground"
                         : view.childConnected === true
                           ? "shrink-0 size-1.5 rounded-full bg-success"
-                          : view.childConnected === false
-                            ? "shrink-0 size-1.5 rounded-full bg-destructive"
-                            : view.disabled || view.blocked
-                              ? "shrink-0 size-1.5 rounded-full bg-muted-foreground"
-                              : view.status === "connected"
-                                ? "shrink-0 size-1.5 rounded-full bg-success"
-                                : view.status === "connecting"
-                                  ? "shrink-0 size-1.5 rounded-full bg-info"
-                                  : "shrink-0 size-1.5 rounded-full bg-destructive";
-                const dotTitle =
-                  view === undefined
-                    ? status === null
-                      ? t("拿不到连接状态（内核未连接，或没有开启状态上报）")
-                      : t("连接状态读取中…")
-                    : statusLabel(view) + (view.error ? ` — ${view.error}` : "");
-                return (
+                                                  : view.childConnected === false
+                                                    ? "shrink-0 size-1.5 rounded-full bg-destructive"
+                                                    : view.status === "connecting" || (discovering && (view.tools?.length ?? 0) === 0 && !view.error)
+                                                      ? "shrink-0 size-1.5 rounded-full bg-info"
+                                                      : view.disabled || view.blocked
+                                                        ? "shrink-0 size-1.5 rounded-full bg-muted-foreground"
+                                                        : view.status === "connected"
+                                                          ? "shrink-0 size-1.5 rounded-full bg-success"
+                                                          : "shrink-0 size-1.5 rounded-full bg-destructive";
+                                          const dotTitle =
+                                            view === undefined
+                                              ? status === null
+                                                ? t("拿不到连接状态（内核未连接，或没有开启状态上报）")
+                                                : t("连接状态读取中…")
+                                              : statusLabel(view, discovering) + (view.error ? ` — ${view.error}` : "");                return (
                   <div key={i} className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card">
                     <div className="flex items-center gap-1.5">
                       {dot && (
@@ -789,15 +795,15 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     className={
                       view?.childConnected === true || view?.status === "connected"
                         ? "ml-1.5 shrink-0 rounded-full bg-success/15 border border-success/50 px-1.5 py-px text-ui-label font-medium text-success"
-                        : view?.status === "connecting"
+                        : view?.status === "connecting" || (discovering && (view?.tools?.length ?? 0) === 0 && !view?.error)
                           ? "ml-1.5 shrink-0 rounded-full bg-info/15 border border-info/50 px-1.5 py-px text-ui-label font-medium text-info"
                           : view?.childConnected === false || (view && !view.disabled && !view.blocked)
                             ? "ml-1.5 shrink-0 rounded-full bg-destructive/15 border border-destructive/50 px-1.5 py-px text-ui-label font-medium text-destructive"
                             : "ml-1.5 shrink-0 rounded-full bg-muted-foreground/10 border border-muted-foreground/40 px-1.5 py-px text-ui-label font-medium text-muted-foreground"
                     }
-                    title={view ? statusLabel(view) + (view.error ? ` — ${view.error}` : "") : t("连接状态不可获取（内核未连接或状态上报未启用）")}
+                    title={view ? statusLabel(view, discovering) + (view.error ? ` — ${view.error}` : "") : t("连接状态不可获取（内核未连接或状态上报未启用）")}
                   >
-                    {view ? statusLabel(view) : t("状态不可获取")}
+                    {view ? statusLabel(view, discovering) : t("状态不可获取")}
                   </span>
                   {view?.scope === "both" && (
                     <Chip tone="warning" title={t("项目级和全局有同名服务器时，内核会用项目级那份整体替换全局的（不会合并字段）")}>
@@ -843,15 +849,17 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
 
                 {tools.length === 0 && prompts.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-border px-2 py-2 text-center text-ui-label text-muted-foreground">
-                    {!view || view.status === "disconnected" || view.disabled || view.blocked
-                      ? view?.blocked && view.childConnected === undefined
-                        ? t("主会话不加载 MCP，新建超流体并连接后才会上报工具列表")
-                        : t("拿不到工具列表（未连接，或没有开启状态上报）")
-                      : view.childConnected === true
-                        ? t("主会话不加载 MCP，工具由超流体通过共享代理使用")
-                        : view.status === "connected"
-                          ? t("这个服务器没有提供工具或提示")
-                          : t("正在读取工具列表…")}
+                    {discovering && !view?.error
+                      ? t("正在读取工具列表…")
+                      : !view || view.status === "disconnected" || view.disabled || view.blocked
+                        ? view?.blocked && view.childConnected === undefined
+                          ? t("主会话不加载 MCP，新建超流体并连接后才会上报工具列表")
+                          : t("拿不到工具列表（未连接，或没有开启状态上报）")
+                        : view.childConnected === true
+                          ? t("主会话不加载 MCP，工具由超流体通过共享代理使用")
+                          : view.status === "connected"
+                            ? t("这个服务器没有提供工具或提示")
+                            : t("正在读取工具列表…")}
                   </div>
                 ) : (
                   <div className="space-y-2">

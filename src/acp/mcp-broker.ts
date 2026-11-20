@@ -57,7 +57,7 @@ import { existsSync } from "node:fs";
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import path from "node:path";
-import type { McpServer } from "./protocol.js";
+import type { McpServer, McpToolView } from "./protocol.js";
 
 /** Header the child's CLI must present — keeps other local processes out. */
 export const MCP_BROKER_TOKEN_HEADER = "x-iflow-mcp-broker";
@@ -97,12 +97,24 @@ export interface McpBrokerOptions {
   requestTimeoutMs?: number;
   host?: string;
   port?: number;
+  /** Fired (debounced) when a connection state/tool declaration actually
+   * changes, so the panel can push a fresh `mcpStatus` reply without waiting
+   * for the webview to open the card and press 刷新. */
+  onStatusChange?: () => void;
 }
 
 export interface McpBrokerStatus {
   name: string;
   type: string;
   connected: boolean;
+  /** True between `ensure()` starting and the upstream handshake settling.
+   * The panel maps this to the webview's "connecting" blue dot instead of a
+   * false red "connection failed" light. */
+  connecting: boolean;
+  /** Tool declarations cached from the shared upstream `tools/list`. This is
+   * the honest source of the `≈N tokens` chip: the main session disables MCP
+   * so the CLI report carries an empty `tools[]`. */
+  tools: McpToolView[];
   error?: string;
 }
 
@@ -128,6 +140,9 @@ interface UpstreamState {
   client: UpstreamClient | null;
   connecting: Promise<UpstreamClient> | null;
   error: string | null;
+  /** Tool declarations from the shared upstream `tools/list`, cached once.
+   * Empty until the handshake succeeds and the listing completes. */
+  tools: McpToolView[];
 }
 
 interface HttpRawResponse {
@@ -178,6 +193,31 @@ function normalizeHeaders(value: unknown): Record<string, string> {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+/**
+ * Normalize a raw upstream `tools/list` result into the same shape the CLI's
+ * mcp-status Mod reports (`McpToolView`). The schema key differs by producer:
+ * the CLI loader picks `parametersJsonSchema ?? parameters`, while a plain
+ * MCP server's tools/list carries `inputSchema`. Prefer the loader's key,
+ * accept the others as fallbacks — the token estimate then counts the same
+ * JSON the model actually sees.
+ */
+function toolViewsFromListing(result: unknown): McpToolView[] {
+  const record = asRecord(result);
+  const rawTools = Array.isArray(record?.tools) ? record.tools : [];
+  const views: McpToolView[] = [];
+  for (const raw of rawTools) {
+    const tool = asRecord(raw);
+    if (!tool || typeof tool.name !== "string") continue;
+    const schema = tool.parametersJsonSchema ?? tool.inputSchema ?? tool.parameters;
+    views.push({
+      name: tool.name,
+      ...(typeof tool.description === "string" ? { description: tool.description } : {}),
+      ...(schema !== undefined && schema !== null ? { schema } : {}),
+    });
+  }
+  return views;
 }
 
 /**
@@ -822,6 +862,7 @@ export class McpBroker {
   private server: Server | null = null;
   private port = 0;
   private closed = false;
+  private statusTimer: ReturnType<typeof setTimeout> | null = null;
 
   private constructor(
     private readonly configs: McpBrokerServerConfig[],
@@ -834,6 +875,7 @@ export class McpBroker {
         client: null,
         connecting: null,
         error: null,
+        tools: [],
       });
     }
   }
@@ -872,9 +914,29 @@ export class McpBroker {
         name: config.name,
         type: config.type,
         connected: Boolean(state?.client),
+        connecting: Boolean(state?.connecting && !state?.client),
+        // Copy: callers (the panel) mutate their own view objects and must not
+        // be able to reach the broker's cached declarations.
+        tools: [...(state?.tools ?? [])],
         ...(state?.error ? { error: state.error } : {}),
       };
     });
+  }
+
+  /** Coalesce the burst of ensure() transitions (start → connected/failed →
+   * tools cached) into one panel refresh so the card updates proactively
+   * without flooding the webview with a message per micro-state. */
+  private scheduleStatusChange(): void {
+    if (this.closed || this.statusTimer) return;
+    this.statusTimer = setTimeout(() => {
+      this.statusTimer = null;
+      try {
+        this.options.onStatusChange?.();
+      } catch {
+        // A failing panel callback must never destabilize the broker.
+      }
+    }, 50);
+    this.statusTimer.unref?.();
   }
 
   /**
@@ -895,6 +957,10 @@ export class McpBroker {
   async dispose(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this.statusTimer) {
+      clearTimeout(this.statusTimer);
+      this.statusTimer = null;
+    }
     const closes = [...this.upstreams.values()].map(async (state) => {
       const client = state.client;
       state.client = null;
@@ -927,16 +993,30 @@ export class McpBroker {
     if (!state) return Promise.reject(new Error(`未知的 MCP 服务器 "${name}"`));
     if (state.client) return Promise.resolve(state.client);
     if (!state.connecting) {
+      // Announce "connecting" right away so the card shows a blue dot during
+      // a slow handshake instead of a false red failure light.
+      this.scheduleStatusChange();
       state.connecting = (async () => {
         const client = createUpstreamClient(state.config, this.timeoutMs, this.options.cwd);
         await client.initialize();
+        // Cache the shared upstream's tool declarations ONCE. A `tools/list`
+        // failure must not turn a healthy connection into a failure — keep the
+        // connection with an honest empty listing (≈0 tokens) and log it.
+        try {
+          state.tools = toolViewsFromListing(await client.request("tools/list", {}));
+        } catch (error) {
+          this.options.log?.("warn", `MCP broker: ${name} tools/list 失败：${messageOf(error)}`);
+          state.tools = [];
+        }
         state.client = client;
         state.error = null;
+        this.scheduleStatusChange();
         return client;
       })()
         .catch((error: unknown) => {
           state.connecting = null;
           state.error = messageOf(error);
+          this.scheduleStatusChange();
           throw error instanceof Error ? error : new Error(state.error);
         });
     }
