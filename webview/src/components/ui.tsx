@@ -605,17 +605,6 @@ export function ToolbarRow({ children, className = "" }: { children: ReactNode; 
   );
 }
 
-/** Secondary convenience-action row under a primary toolbar (catalog /
- * refresh): quieter than ToolbarRow — wider optical gap for ghost buttons,
- * still closes with a divider. */
-export function SecondaryRow({ children, className = "" }: { children: ReactNode; className?: string }) {
-  return (
-    <div className={`mt-2 flex flex-wrap items-center gap-3 border-b border-border/50 pb-3${className ? ` ${className}` : ""}`}>
-      {children}
-    </div>
-  );
-}
-
 /** Segmented axis selector at the top of a settings section (MCP scope /
  * asset kind). One home for the two cards' tab strips so surface, padding and
  * active-state stay in lockstep; options may carry `disabled`/`title`.

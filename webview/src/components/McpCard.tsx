@@ -4,7 +4,7 @@ import { useChat } from "../store";
 import { entriesToServers, sameMcpServers, serversToEntries, type McpEntry } from "./mcp-servers";
 import { MCP_CATALOG, buildCatalogConfig, catalogFieldLabel } from "../../../shared/mcp-catalog";
 import { t } from "../i18n";
-import { ActionRow, Button, Chip, ConfirmDialog, Dropdown, Field, Hint, ICON_INLINE, IconButton, SecondaryRow, Segmented, SettingsGroup, SettingsRow, TextArea, TextInput, ToolbarRow } from "./ui";
+import { ActionRow, Button, Chip, ConfirmDialog, Dropdown, Field, Hint, ICON_INLINE, IconButton, Segmented, SettingsGroup, SettingsRow, TextArea, TextInput, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 import type { McpScope, McpStatusUi, McpServerStatusView, McpToolView, McpPromptView } from "../../../shared/messages";
 
@@ -521,10 +521,18 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           </div>
 
           {/* Catalog browsing is a sub-page (shell header carries the back
-              arrow) — the list-page toolbar/secondary rows do not belong to
-              it, and the entry button only ever *opens* the catalog. */}
+              arrow) — the list-page toolbar does not belong to it, and the
+              entry button only ever *opens* the catalog. */}
           {!catalogBrowse && (
             <>
+              {/* ONE action row: 添加/保存 (the primary flow) stay left, the
+                  catalog/refresh conveniences ride the same row but are
+                  pushed to the right with `ml-auto` — the panel's utility
+                  convention (settings header 「重启内核」, memory card
+                  「重新扫描」). They keep their ghost variant so they never
+                  read as peers of the primary button, and the single
+                  ToolbarRow divider closes the strip (the old second row
+                  left a dangling divider and split the block in two). */}
               <ToolbarRow>
                 <Button
                   variant="secondary"
@@ -545,13 +553,9 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 {/* Button label changes are not announced; keep a dedicated live region. */}
                 <span className="sr-only" role="status" aria-live="polite">{savedFlash ? t("已保存") : ""}</span>
                 {editError && <span role="alert" className="text-ui-body text-destructive">{editError}</span>}
-              </ToolbarRow>
-
-              {/* Secondary actions: catalog browsing and refresh are conveniences,
-                  not the primary flow — they must not read as peers of 添加/保存. */}
-              <SecondaryRow>
                 <Button
                   variant="ghost"
+                  className="ml-auto"
                   icon={<Sparkles className={ICON_INLINE} />}
                   disabled={busy || saving || entries === null || !!loadError}
                   onClick={() => setCatalogBrowse(true)}
@@ -566,7 +570,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 >
                   {refreshing ? t("刷新中…") : t("刷新")}
                 </Button>
-              </SecondaryRow>
+              </ToolbarRow>
 
               <Hint className="mt-2">
                 {t("这些 MCP server 仅供超流体使用，主会话不加载 MCP。")}

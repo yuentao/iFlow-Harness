@@ -276,6 +276,8 @@
   "超流体「{0}」已失败": "Child session “{0}” failed.",
   "超流体「{0}」已中断": "Child session “{0}” was interrupted.",
   "主会话已汇报超流体结果": "The main session reported the child-session results.",
+  "（完整结果请在面板查看）": "(See the panel for the full result.)",
+  "超流体任务已完成，但未产生可转发的正文摘要。": "The child-session task finished, but produced no forwardable summary.",
   "超流体「{0}」在等你回答": "Child session “{0}” is waiting for your answer.",
   "超流体": "Child session",
   "待办": "To do",

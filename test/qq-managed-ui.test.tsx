@@ -271,6 +271,35 @@ describe("纯 QQBot 界面文案", () => {
     expect(button, "一键接入 QQ 机器人 button").toBeTruthy();
   });
 
+  it("已连接时不再渲染「一键接入」引导卡（与已连接状态互斥）", () => {
+    status(true, "QQBot 官方网关已连接");
+    render();
+    const text = container.textContent ?? "";
+    // 引导卡整块不渲染（不是 CSS 隐藏）：入口按钮根本不在 DOM 里。
+    expect(text).not.toContain("一键接入");
+    expect(
+      [...container.querySelectorAll("button")].some(
+        (b) => b.textContent?.trim() === "一键接入 QQ 机器人",
+      ),
+    ).toBe(false);
+    // 已连接状态与三个操作按钮保留。
+    expect(text).toContain("已连接");
+    expect(text).toContain("QQBot 官方网关已连接");
+    expect(text).toContain("重新扫码授权");
+    expect(text).toContain("测试连接");
+    expect(text).toContain("解除绑定");
+  });
+
+  it("连接中（托管阶段机在跑）引导卡仍在，并显示「停止托管」", () => {
+    managed("waiting_login", "请用 QQ 扫码绑定机器人");
+    render();
+    const text = container.textContent ?? "";
+    expect(text).toContain("一键接入");
+    expect(text).toContain("停止托管");
+    // 中间态不得被当成「已连接」而隐藏入口。
+    expect(text).toContain("请用手机 QQ 扫描二维码完成授权");
+  });
+
   it("阶段文案用官方授权语义，准备中阶段用通用说法", () => {
     managed("downloading", "准备环境", 42);
     render();

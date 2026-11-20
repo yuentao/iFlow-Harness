@@ -441,3 +441,39 @@ it("opens the editor directly from the detail header", () => {
   expect(header.mock.calls.some(([h]) => h !== null && h.title === "编辑 MCP 服务器")).toBe(true);
   expect(container.textContent).toContain("服务器信息");
 });
+
+it("keeps the list-page actions on a single row (primary left, conveniences right)", () => {
+  // User feedback 2026-11-20: the block used to be TWO stacked strips
+  // (添加/保存 above a divider, 模板目录/刷新 below a second one). All four
+  // actions must share ONE row container now, or the block reads as two
+  // unrelated toolbars.
+  reply({ a: { command: "node" } });
+  const byText = (text: string) =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent === text);
+  const add = byText("添加")!;
+  const save = byText("保存")!;
+  const catalog = byText("模板目录")!;
+  const refresh = byText("刷新")!;
+  expect(add && save && catalog && refresh).toBeTruthy();
+
+  const row = add.closest("div.flex-wrap");
+  expect(row).toBeTruthy();
+  expect(row!.contains(save)).toBe(true);
+  expect(row!.contains(catalog)).toBe(true);
+  expect(row!.contains(refresh)).toBe(true);
+
+  // Exactly one divider closes that row — the second strip's divider is gone.
+  const strips = [...container.querySelectorAll("div")].filter((d) =>
+    d.className.includes("border-b border-border/50"),
+  );
+  expect(strips).toHaveLength(1);
+  expect(strips[0]).toBe(row);
+
+  // Semantic layering survives the merge: 保存 stays the primary button, the
+  // two conveniences stay ghost (never peers of it) and ride the row's right
+  // edge — the panel convention (primary flow left, utility action right).
+  expect(save.className).toContain("from-primary");
+  expect(catalog.className).toContain("ml-auto");
+  expect(catalog.className).not.toContain("from-primary");
+  expect(refresh.className).not.toContain("from-primary");
+});

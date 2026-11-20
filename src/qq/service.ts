@@ -2208,6 +2208,42 @@ export class QqService {
   }
 
   /**
+   * 远程接管态下的宿主完成提示投递（宿主 → 绑定者私聊）。
+   *
+   * 接管期间用户已离开本机，本机完成提示被宿主静音（`panel.announceCue`），
+   * 反馈必须走 QQ。QQ 任务的进度 / 结果有自己的通道
+   * （{@link deliverMainTurnText} / {@link completeMainFinalAnswer}），但
+   * **本地发起的任务没有 QQ 任务可归属** —— 旧实现因此把提示彻底丢掉，用户在
+   * QQ 上一条通知都收不到（2026-11-20 用户实测：任务进行中才开启远程接续，
+   * 此后的通知全部消失）。
+   *
+   * 纪律：
+   *  - 只发文本：不建任务、不改状态机、不参与任务的幂等锚点 / 分片记账 /
+   *    短窗相似去重（那些都按 taskId 记账，这条提示没有任务可挂）；
+   *  - 目标固定为绑定者私聊（扫码者 openid；服务层读不到 SecretStorage 时
+   *    以白名单首项保守推导，见构造函数）；
+   *  - 未启动 / 无绑定者 / 空文本 → 静默返回 false，绝不抛错；
+   *  - 走 {@link deliverOutcome} 同一条 adapter 通道，失败只记日志并如实返回。
+   */
+  async notifyBoundUser(text: string): Promise<boolean> {
+    const trimmed = (text ?? "").trim();
+    if (trimmed.length === 0) return false;
+    // 通道没起（start() 未完成 / 已 stop）时不投：此时 adapter 可能已断开，
+    // 硬发只会得到一条无意义的失败日志。
+    if (this.stopped || !this.ready) return false;
+    const openid = this.binderOpenid;
+    if (openid.length === 0) {
+      this.log("QQ 远程接管提示未发送：没有可用的绑定者私聊");
+      return false;
+    }
+    const outcome = await this.deliverOutcome({ chatType: "private", chatId: openid }, trimmed);
+    if (!outcome.ok) {
+      this.log(`QQ 远程接管提示未送达：${outcome.error ?? "未知原因"}`);
+    }
+    return outcome.ok;
+  }
+
+  /**
    * 这段正文在短窗内是否已有高度相似的出站（用于拦「同一件事被转述多次」）。
    *
    * 用单调时钟，避免系统时间回拨让窗口判定失真；只比同一任务，跨任务不互相

@@ -8,7 +8,7 @@ import type {
 } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { ActionRow, Button, Chip, ConfirmDialog, Field, Hint, IconButton, ICON_INLINE, Segmented, TextArea, TextInput, SecondaryRow, ToolbarRow } from "./ui";
+import { ActionRow, Button, Chip, ConfirmDialog, Field, Hint, IconButton, ICON_INLINE, Segmented, TextArea, TextInput, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -393,6 +393,11 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             onChange={setKind}
             options={KIND_TABS.map((tab) => ({ value: tab.kind, label: tab.label }))}
           />
+          {/* 动作并为一行：新建（主操作，secondary 实心描边）+ 刷新（便利动作，
+              ghost 无边框），顺序与设置面板其它区块一致（主操作在前、便利动作在后）。
+              此前拆成 ToolbarRow + SecondaryRow 两行、两条分隔线，视觉上像两段互不
+              相干的工具条（用户反馈）；合并后只留一条收尾分隔线。行容器仍是 kit 的
+              ToolbarRow（flex-wrap：窄面板放不下时允许换行，不会横向溢出）。 */}
           <ToolbarRow>
             <Button
               variant="secondary"
@@ -406,6 +411,14 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             >
               {t("新建")}
             </Button>
+            <Button
+              variant="ghost"
+              icon={<RefreshCw className={ICON_INLINE} />}
+              disabled={saving || (state === null && !loadError)}
+              onClick={refresh}
+            >
+              {refreshing ? t("刷新中…") : t("刷新")}
+            </Button>
             {editError && <span role="alert" className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
               <span role="alert" className="ml-auto text-ui-label text-warning">
@@ -416,16 +429,6 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               <span role="status" aria-live="polite" className="ml-auto text-ui-label text-success">{savedFlash}</span>
             )}
           </ToolbarRow>
-          <SecondaryRow>
-            <Button
-              variant="ghost"
-              icon={<RefreshCw className={ICON_INLINE} />}
-              disabled={saving || (state === null && !loadError)}
-              onClick={refresh}
-            >
-              {refreshing ? t("刷新中…") : t("刷新")}
-            </Button>
-          </SecondaryRow>
           {state === null ? (
             <div className="py-4 text-center text-ui-body text-muted-foreground">{t("读取中…")}</div>
           ) : (

@@ -259,6 +259,28 @@ it("refresh falls back to the scan skeleton and re-requests the state", () => {
       expect(container.textContent).toContain("读取中…");  expect(send.mock.calls.filter(([m]) => m.type === "listAssets")).toHaveLength(2);
 });
 
+it("新建与刷新并为一行（同一行动作容器，只留一条收尾分隔线）", () => {
+  stateReply([CMD], [], []);
+  const create = [...container.querySelectorAll("button")].find((b) => b.textContent === "新建");
+  const refresh = [...container.querySelectorAll("button")].find((b) => b.textContent === "刷新");
+  expect(create, "新建 button").toBeTruthy();
+  expect(refresh, "刷新 button").toBeTruthy();
+  // 关键回归：两个动作在同一个行容器里（此前是 ToolbarRow + SecondaryRow 两行）。
+  expect(create!.parentElement).toBe(refresh!.parentElement);
+  const row = create!.parentElement as HTMLElement;
+  expect(row.className).toContain("flex-wrap");
+  expect(row.className).toContain("items-center");
+  expect(row.className).toContain("border-b");
+  // 合并后只剩一条收尾分隔线（原两行各有一条，视觉上像两段工具条）。
+  const dividers = [...container.querySelectorAll<HTMLElement>("div")].filter(
+    (node) => node.className.includes("border-b") && node.className.includes("border-border/50"),
+  );
+  expect(dividers).toHaveLength(1);
+  // 语义分层保留：主操作是描边次级按钮，便利动作是无边框 ghost。
+  expect(create!.className).toContain("border-border");
+  expect(refresh!.className).not.toContain("border-border");
+});
+
 function taValueOK(ta: HTMLTextAreaElement): boolean {
   return ta.value === "old content\n";
 }

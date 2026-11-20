@@ -1111,6 +1111,16 @@ function sanitizeQqReportFallback(raw: string | undefined): string {
     : text;
 }
 
+/**
+ * 远程接管提示的单条正文截断：复用 QQ 汇报兜底的字符预算，保留结论前缀，
+ * 超长时省略尾部并在调用处补「完整结果请在面板查看」。不新增任意数值。
+ */
+function clipQqTakeoverReport(text: string): string {
+  return text.length > QQ_REPORT_FALLBACK_MAX_CHARS
+    ? `${text.slice(0, QQ_REPORT_FALLBACK_MAX_CHARS - 1)}…`
+    : text;
+}
+
 export class DisposedError extends Error {
   constructor(message = "panel disposed") {
     super(message);
@@ -3329,6 +3339,24 @@ export class ChatPanel implements vscode.Disposable {
    */
   private notifyOsDecision(event: OsNotifyEvent, text: string): OsNotifyDecision {
     const setting = vscode.workspace.getConfiguration("iflow").get<string>("osNotifications", "approvals");
+    const decision = this.evaluateOsNotification(event, text, setting);
+    if (!decision.fire) return decision;
+    void this.deliverOsNotification(text);
+    return decision;
+  }
+
+  /**
+   * Pure gate evaluation + gate bookkeeping — shared by the local OS toast and
+   * the remote-takeover QQ cue. The takeover cue borrows the same throttle and
+   * content cooldown (a burst of child completions must not spam QQ) but must
+   * NOT deliver a local toast, which is why the decision and the delivery are
+   * separated here.
+   */
+  private evaluateOsNotification(
+    event: OsNotifyEvent,
+    text: string,
+    setting: string,
+  ): OsNotifyDecision {
     const gate = gateOsNotification({
       event,
       setting,
@@ -3341,9 +3369,7 @@ export class ChatPanel implements vscode.Disposable {
       // identical text within the cooldown window is dropped.
       contentKey: text,
     });
-    if (!gate.fire) return gate;
-    this.osNotifyGate = gate.gate;
-    void this.deliverOsNotification(text);
+    if (gate.fire) this.osNotifyGate = gate.gate;
     return gate;
   }
 
@@ -3369,18 +3395,85 @@ export class ChatPanel implements vscode.Disposable {
    * Host bookkeeping turns that are NOT reports (action receipts, delegated
    * user-turn backfill) never call any of these — they stay silent.
    *
-   * QQ 远程接管态本机静音(2026-11-19):接管时用户已离开本机、反馈只走 QQ 转发
-   * (`deliverQqMainFinalAnswer` / 子会话 QQ 回执)。这里是最小的统一出口 —— 在入口
-   * 一步挡住 OS 原生通知 + done/child 提示音,同时覆盖 turnDone / superReport /
-   * childDone 三类完成提示。切勿上移到 sendPrompt 收尾的 finalReport 块:那里还放着
-   * QQ 转发调用,误伤会让远程用户永远收不到最终答复。错误音 `postSound("error")`
-   * 不经此出口,保持原样。
+   * QQ 远程接管态(2026-11-19 静音 / 2026-11-20 改投 QQ):接管时用户已离开本机,
+   * 本机不再弹 OS toast、不响 done/child 音 —— 但提示不能就此消失:QQ 任务自己的
+   * 回执有专属通道(`deliverQqMainFinalAnswer` / 中间正文),而**本地发起的任务**
+   * 没有 QQ 任务归属,只静音就等于一条通知都收不到(用户实测)。因此接管态下
+   * 这条统一出口把提示改投到绑定者私聊({@link forwardTakeoverCue})。
+   * 切勿上移到 sendPrompt 收尾的 finalReport 块:那里还放着 QQ 转发调用,误伤会让
+   * 远程用户永远收不到最终答复。错误音 `postSound("error")` 不经此出口,保持原样。
    */
   private announceCue(event: OsNotifyEvent, text: string, kind: "done" | "child"): void {
-    if (this.qqTakeoverActive) return;
+    // 远程接管态：本机静音，反馈只走 QQ（用户已离开本机）。
+    //
+    // 旧实现在这里直接 return —— 本机确实静音了，但「QQ 转发」只覆盖 QQ 任务
+    // 自己的回执；**本地发起的任务没有 QQ 任务可归属**，于是接管期间一条通知
+    // 都收不到（2026-11-20 用户实测：任务进行中才开启远程接续，此后的通知在
+    // QQ 上全部消失）。现在把这条完成提示改投到绑定者私聊，本机仍然不发
+    // toast、不响铃。
+    //
+    // 去重沿用同一道 OS 通知闸门，但以 `all` 档评估：`osNotifications` 档位管
+    // 的是本机 OS toast，与 QQ 提示无关；这里只借闸门的节流 + 内容冷却两条
+    // 去重规则。判定与 chime 同源 —— **只有重复才丢弃**：watching / focus 在
+    // 本机只是「不弹 toast」，chime 照响；接管态下 QQ 就是那条唯一的提示通道，
+    // 若因为「窗口有焦点」就吞掉，用户会彻底静默。
+    if (this.qqTakeoverActive) {
+      const decision = this.evaluateOsNotification(event, text, "all");
+      if (!decision.fire && isDuplicateNotificationBlock(decision.reason)) return;
+      this.forwardTakeoverCue(text);
+      return;
+    }
     const decision = this.notifyOsDecision(event, text);
     if (!decision.fire && isDuplicateNotificationBlock(decision.reason)) return;
     this.postSound(kind);
+  }
+
+  /**
+   * 远程接管态下完成提示的 QQ 出口。
+   *
+   * QQ 注入回合自己的回执由任务通道投递（`deliverQqMainIntermediateText` /
+   * `completeMainFinalAnswer`），这里跳过以免同一条完成提示被发两遍；其余
+   * （本地回合 / 子会话收尾 / 汇报轮）都没有 QQ 任务归属，提示必须由这条
+   * 通道送达。投递是附加信息，失败只记日志，绝不影响产生它的回合。
+   */
+  private forwardTakeoverCue(text: string): void {
+    if (this.disposed) return;
+    if (this.qqInjectedTaskId !== null) return;
+    const service = this.qq?.service;
+    if (!service || typeof service.notifyBoundUser !== "function") return;
+    void service.notifyBoundUser(text).catch((error: unknown) => {
+      this.log.warn(`远程接管提示投递失败：${errorMessage(error)}`);
+    });
+  }
+
+  /**
+   * 远程接管态下，本地发起任务的「最终汇报正文」投递。
+   *
+   * be79be5 让接管态的完成提示改投 QQ，但投的只是状态文案
+   * 「主会话已汇报超流体结果」—— 真正的正文仍只走 `deliverQqMainFinalAnswer`
+   * 的 QQ 任务通道，而本地发起的任务没有 QQ awaiter，那条通道一个任务都
+   * 找不到，于是 QQ 端只收到一句元信息、看不到结果（2026-11-20 用户实测）。
+   *
+   * 这里只在「没有 QQ awaiter」时补投正文：有 awaiter 时任务通道已投递真实
+   * 结论，绝不重复刷屏。正文优先取主会话这一轮的转述（answer），为空则退到
+   * 子会话汇报正文（fallback，已清洗）；两者都空时如实说明，绝不伪造结论。
+   * QQ 单条消息有字符预算，截断后标注完整结果在面板查看。
+   */
+  private forwardTakeoverReport(answer: string, fallbackText: string | undefined): void {
+    if (this.disposed) return;
+    if (!this.qqTakeoverActive) return;
+    // QQ 注入回合自身有专属回执通道；跳过以免同一条结果被发两遍。
+    if (this.qqInjectedTaskId !== null) return;
+    const service = this.qq?.service;
+    if (!service || typeof service.notifyBoundUser !== "function") return;
+    const status = vscode.l10n.t("主会话已汇报超流体结果");
+    const body = answer.trim() || sanitizeQqReportFallback(fallbackText);
+    const text = body
+      ? `${status}\n${clipQqTakeoverReport(body)}\n${vscode.l10n.t("（完整结果请在面板查看）")}`
+      : `${status}\n${vscode.l10n.t("超流体任务已完成，但未产生可转发的正文摘要。")}`;
+    void service.notifyBoundUser(text).catch((error: unknown) => {
+      this.log.warn(`远程接管汇报正文投递失败：${errorMessage(error)}`);
+    });
   }
 
   /** A REAL user turn (typed prompt or regenerate) finished. */
@@ -14290,12 +14383,16 @@ export class ChatPanel implements vscode.Disposable {
       // 锚点失效（转录被清空/重排）时按「回合开始时的块数」切片取本轮新增文本；
       // 切片为空则由 finalFallbackText（子会话汇报正文）接管 —— 绝不静默放弃，
       // 那会让 awaiter 一直挂到空缓存补发、最终只发一句占位文案。
+      let takeoverReportSent = false;
       if (finalReport && result.stopReason !== "cancelled") {
         const { text: answer } = this.extractQqTurnTextFromAnchor(
           finalReportAnchorId,
           finalReportAnchorLen,
           finalReportFallbackCount,
         );
+        // 有 QQ awaiter 时任务通道会投递真实正文；本地发起的任务没有 QQ 归属，
+        // 那条通道找不到任何任务 —— 此时改由接管态的绑定者私聊补投正文。
+        const awaitedHere = [...this.qqMainFinalAwaiters.values()].includes(promptSessionId);
         void this.deliverQqMainFinalAnswer(
           promptSessionId,
           answer,
@@ -14303,6 +14400,10 @@ export class ChatPanel implements vscode.Disposable {
           undefined,
           finalFallbackText,
         );
+        if (!awaitedHere && this.qqTakeoverActive) {
+          this.forwardTakeoverReport(answer, finalFallbackText);
+          takeoverReportSent = true;
+        }
       }
       // 回合收尾：复核动作围栏 —— 回合都结束了还停在未闭合围栏上，说明这个
       // 动作块永远不会被执行。旧实现对此完全静默（零日志、零 toast）。
@@ -14321,7 +14422,11 @@ export class ChatPanel implements vscode.Disposable {
           // 主会话汇报回合：主 Agent 读完子会话结果并汇报回来，那是主会话
           // 真实的收尾工作，用**独立事件** superReport + 常规 done 音 —— 与
           // 单个子会话收尾（childDone + child 音）明确分开。
-          this.announceSuperReport(vscode.l10n.t("主会话已汇报超流体结果"));
+          // 接管态下无 awaiter 的最终汇报已把正文（含状态抬头）投给 QQ，
+          // 不再重复发一句纯状态文案；其余情形照旧走完成提示。
+          if (!takeoverReportSent) {
+            this.announceSuperReport(vscode.l10n.t("主会话已汇报超流体结果"));
+          }
         }
         // 其余 hidden 回合（动作回执 / 被改道用户消息补投）**完全静音**：
         // 那是宿主自己的记账回合，转录里没有用户气泡，也不对应任何新事件。

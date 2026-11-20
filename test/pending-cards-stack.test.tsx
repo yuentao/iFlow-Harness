@@ -105,6 +105,13 @@ function arriveBoth() {
   render({ pendingApproval: APPROVAL, pendingQuestions: QUESTIONS });
 }
 
+/** The overlay shell — in the list layout it is the vertical scroll container. */
+function overlay(): HTMLElement {
+  const node = document.querySelector<HTMLElement>("[data-pending-overlay]");
+  expect(node, "overlay").not.toBeNull();
+  return node!;
+}
+
 describe("PendingCards", () => {
   it("单卡：完整渲染，不出现计数器与露边", () => {
     render({ pendingApproval: APPROVAL });
@@ -248,5 +255,52 @@ describe("PendingCards", () => {
     render({ pendingApproval: APPROVAL, pendingQuestions: QUESTIONS });
     expect(counter().getAttribute("aria-expanded")).toBe("false");
     expect(slot("questions").getAttribute("aria-hidden")).toBeNull();
+  });
+});
+
+/**
+ * The counter button in the EXPANDED list is `sticky top-0` inside the
+ * overlay's own vertical scroll container, and it is a `card-lift` canvas
+ * button: hovering lifts it 1px (translateY(-1px)). With the button's top
+ * edge flush against the clip line, the lift pushed its top border outside
+ * the scrollport and the border row was cut away entirely.
+ *
+ * Chromium + CDP, pixel-decoded (border-top painted red, strip decoded via
+ * canvas): idle gapTop 0 (border row whole) → hover gapTop -1 (border row
+ * reduced to 4 stray pixels = clipped).
+ *
+ * The clearance therefore has to come from the CONTAINER's top padding, so
+ * the sticky box's constraint edge moves down with it: hover gapTop 3, the
+ * border row stays whole. `overflow-y: visible` is NOT an option here — this
+ * overlay must scroll vertically (the expanded list scrolls inside it and the
+ * counter sticks to its top).
+ *
+ * The padding is scoped to count >= 2 (the expanded list): the single-card
+ * layout and the stacked layout must not move by a single pixel.
+ */
+describe("PendingCards 计数按钮裁切不变量", () => {
+  it("展开列表态：滚动容器留 4px 顶部内边距，计数按钮不贴裁剪线", () => {
+    arriveBoth();
+
+    // 堆叠态走的是另一个分支（无纵向裁剪），不需要顶部内边距。
+    expect(overlay().className).not.toContain("overflow-y-auto");
+    expect(overlay().className).not.toContain("pt-1");
+
+    act(() => counter().click());
+
+    // 展开态 = 列表布局 + 有计数按钮 → 顶部内边距把 sticky 按钮推离裁剪线。
+    expect(overlay().className).toContain("overflow-y-auto");
+    expect(overlay().className).toContain("pt-1");
+    // 余量来自容器内边距，sticky 偏移仍是 top-0（别把它改成 top-N 顶替）。
+    expect(counter().className).toContain("sticky top-0");
+  });
+
+  it("单卡态：容器无顶部内边距（单卡布局零变化）", () => {
+    render({ pendingApproval: APPROVAL });
+
+    expect(overlay().className).toContain("overflow-y-auto");
+    expect(overlay().className).not.toContain("pt-1");
+    // 单卡态没有计数按钮，也就没有 sticky 裁切问题。
+    expect(counterOrNull()).toBeNull();
   });
 });
