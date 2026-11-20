@@ -673,6 +673,63 @@ export interface ContextRefUi {
   content: string;
 }
 
+/**
+ * U1 provenance vocabulary. Every number on `SessionUsageUi` is produced by one
+ * of a small set of EXISTING computation paths; these enums only RECORD which
+ * path produced a number. They add no inference, no confidence score and no
+ * new source of truth — a future UI unit uses them to label a figure honestly
+ * instead of presenting a guess as a measurement. String-literal unions on
+ * purpose: they compile away and stay a pure type-level protocol contract.
+ */
+
+/** Source of `SessionUsageUi.contextUsed` and of the input/output token split.
+ * Today occupancy comes from either the CLI Mod's authoritative report or the
+ * host's BPE estimate over the transcript; the split is ALWAYS the estimate
+ * because the ACP wire carries no split (probed CLI 0.5.19 bundle). */
+export type UsageNumberSource =
+  /** acp-usage-report-refactor Mod `lastRequestInputTokens`: stamped into
+   * `state.usageReport` in `completePrompt` (shared/session-state.ts:2037) and
+   * overlaid onto `contextUsed` in `refreshSessionUsage`
+   * (shared/session-state.ts:2125). Authoritative model-carried occupancy. */
+  | "kernel-report"
+  /** Host gpt-tokenizer (o200k_base) estimate over transcript blocks:
+   * `estimateSessionUsage` (shared/session-state.ts:1867), the fallback while
+   * the Mod is missing / the gateway swallowed `stream_options.include_usage`.
+   * It is a LOWER bound — the CLI's built-in tool declarations and environment
+   * section never reach the ACP wire (shared/session-state.ts:1735). */
+  | "transcript-estimate"
+  /** Post-compression floor: the CLI's own `newTokenCount` from a completed
+   * compression card (shared/session-state.ts:1829) combined with measured
+   * host prefill. A CLI-derived lower bound rather than a fresh per-request
+   * report; supersedes the kernel anchor inside the compression delta. */
+  | "lower-bound";
+
+/** Source of the curated-model metadata figures (`contextWindow` and the unit
+ * price behind `estimatedCost`). Mirrors the resolution order in
+ * `resolveContextWindow` (shared/context-window.ts:200) / `resolveCost`
+ * (shared/context-window.ts:231): user override → curated table → fallback. */
+export type ModelMetadataSource =
+  /** `iflow.contextWindowOverrides` / `iflow.costTable` setting override
+   * (override branches: shared/context-window.ts:207 and :238). This is also
+   * where the 「联网补充模型数据」 flow APPENDS AI-supplied values
+   * (src/panel/panel.ts:3938/:3939), so a user may see `user` for a value they
+   * did not type by hand — see `ai-supplement` for the citation-bearing variant. */
+  | "user"
+  /** Curated published-value tables `CONTEXT_WINDOW_TABLE` /
+   * `COST_TABLE` (table branches: shared/context-window.ts:209 and :239),
+   * scraped from vendor pages on 2026-10-11. */
+  | "builtin-table"
+  /** Value appended by the host-side AI metadata flow: `ModelMetadataEntry`
+   * (shared/model-metadata.ts:20) → `contextWindowOverrides` / `costTable`
+   * (src/panel/panel.ts:3938/:3939). `sourceUrl` on the usage snapshot carries
+   * the cited `MetadataSource.url` (shared/model-metadata.ts:34) when available. */
+  | "ai-supplement"
+  /** Unknown model with no override: `DEFAULT_CONTEXT_WINDOW` conservative
+   * fallback (shared/context-window.ts:17, :210), flagged `estimated: true`.
+   * Cost has no fallback number — `resolveCost` returns null and the UI shows
+   * 无单价 instead (shared/context-window.ts:236/:239). */
+  | "fallback-estimate";
+
 /** Cumulative token usage for the active session. `contextUsed` is the CLI's
  * authoritative occupancy when the acp-usage-report-refactor Mod reported one
  * this turn (see `usageAuthoritative`); the input/output split and everything
@@ -729,6 +786,32 @@ export interface SessionUsageUi {
    * tokens × cached token sums). Null when the active model has no unit price.
    */
   estimatedCost?: number | null;
+
+  /**
+   * U1 provenance — which EXISTING computation path produced each displayed
+   * number. Purely descriptive: no value is recomputed or re-scored from it.
+   * Every member is optional so older hosts / persisted transcripts that never
+   * set it stay valid; a consumer treating it as absent must say "来源未知"
+   * rather than assume a particular source. This does NOT replace the legacy
+   * `estimated` / `usageAuthoritative` booleans — those keep their exact
+   * meaning and remain the source of truth until a later UI unit opts in.
+   */
+  sources?: {
+    /** Source of `contextUsed` (occupancy). */
+    contextUsed?: UsageNumberSource;
+    /** Source of `inputTokens` / `outputTokens` (the wire carries no split). */
+    split?: UsageNumberSource;
+    /** Source of `contextWindow`. */
+    window?: ModelMetadataSource;
+    /** Source of the unit price behind `estimatedCost`. */
+    cost?: ModelMetadataSource;
+  };
+  /** Host capture time of this provenance snapshot (epoch ms, `Date.now()`).
+   * Omitted on older hosts; a metadata value may have gone stale since. */
+  capturedAt?: number;
+  /** Citation URL when a figure was supplied by the AI metadata flow
+   * (`ai-supplement`), copied from `MetadataSource.url`. Omitted otherwise. */
+  sourceUrl?: string;
 }
 
 /** P0-6 hover breakdown: token sums per block kind (post-compression fold). */
