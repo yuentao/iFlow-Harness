@@ -37,16 +37,24 @@
  *  - 出站 HTTP 失败（send）与断线都写入 lastError，health() 脱敏后带出。
  */
 
+import { readFile as nodeReadFile } from "node:fs/promises";
 import type { ChannelAdapter, ChannelHealth, InboundMessage, OutboundMessage, SendResult } from "../adapter/types.js";
 import {
   buildAccessTokenRequest,
   buildAuthHeaders,
   buildSendGroupMsg,
   buildSendPrivateMsg,
+  buildSendWithFileInfo,
+  buildUploadRequest,
   DEFAULT_QQBOT_GATEWAY_URL,
   describeAccessTokenFailure,
+  guessQqBotContentType,
   normalizeQqBotEvent,
   parseAccessTokenResponse,
+  parseUploadResponse,
+  type QqBotRichMediaBodyConfig,
+  type QqBotRichMediaKind,
+  type QqBotUploadConfig,
 } from "./protocol.js";
 
 /** 注入的 WebSocket 抽象。 */
@@ -65,6 +73,17 @@ export interface QqBotSocket {
 export interface QqBotTransport {
   connect(url: string, headers: Record<string, string>): Promise<QqBotSocket>;
   post(endpoint: string, headers: Record<string, string>, body: Record<string, unknown>): Promise<unknown>;
+  /**
+   * 富媒体上传：以二进制 multipart/form-data body 发请求并解析 JSON 响应。
+   *
+   * 可选——未实现的 transport 上 send(filePath) 会明确失败（retryable:false），
+   * 绝不假装已送达。真实端点 / 字段细节属「端到端另案」，见 protocol.ts 注释。
+   */
+  postMultipart?(
+    endpoint: string,
+    headers: Record<string, string>,
+    body: Buffer,
+  ): Promise<unknown>;
 }
 
 /** 归一化成功后的入站消息回调。 */
@@ -107,10 +126,19 @@ export interface QqBotAdapterDeps {
    */
   resumeHandshakeTimeoutMs?: number;
   /**
-   * Resume 连续失败上限；缺省 1。resume 阶段（建连失败或握手超时）失败这么
-   * 多次就放弃旧会话、回默认网关新建 Identify。测试可注入更大值覆盖抖动场景。
+   * Resume 连续失败上限；缺省 1。resume 阶段（建连失败或握手超时）失败这么多次
+   * 就放弃旧会话、回默认网关新建 Identify。测试可注入更大值覆盖抖动场景。
    */
   resumeFailureLimit?: number;
+  /**
+   * 读文件字节（富媒体上传用）；缺省用 node:fs/promises.readFile。测试注入
+   * 假实现即可离线验证全流程，不碰真实磁盘。
+   */
+  readFileBytes?: (filePath: string) => Promise<Buffer>;
+  /** 富媒体上传端点 / multipart 字段配置；缺省用 protocol.ts 的占位常量。 */
+  uploadConfig?: QqBotUploadConfig;
+  /** 富媒体消息体 msg_type / file_info 字段配置；缺省用 protocol.ts 占位常量。 */
+  richMediaBodyConfig?: QqBotRichMediaBodyConfig;
 }
 
 /** 过期前 5 分钟刷新：避免请求打到临界点被拒。 */
@@ -200,6 +228,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** 富媒体上传的确定性失败（业务码拒绝 / 响应缺 file_info），重试无意义。 */
+class QqBotUploadPermanentError extends Error {}
+
 function toFiniteNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() !== "") {
@@ -279,6 +310,10 @@ export class QqBotAdapter implements ChannelAdapter {
   private readonly gatewayUrl: string;
   private readonly nowFn: () => number;
   private readonly logFn?: (line: string) => void;
+  /** 读文件字节：富媒体上传注入点，缺省 node:fs/promises.readFile。 */
+  private readonly readFileBytes: (filePath: string) => Promise<Buffer>;
+  private readonly uploadConfig: QqBotUploadConfig;
+  private readonly richMediaBodyConfig: QqBotRichMediaBodyConfig;
 
   private token: string | undefined;
   private tokenExpiresAt = 0;
@@ -436,6 +471,9 @@ export class QqBotAdapter implements ChannelAdapter {
     this.gatewayUrl = deps.gatewayUrl ?? DEFAULT_QQBOT_GATEWAY_URL;
     this.nowFn = deps.now ?? Date.now;
     this.logFn = deps.log;
+    this.readFileBytes = deps.readFileBytes ?? nodeReadFile;
+    this.uploadConfig = deps.uploadConfig ?? {};
+    this.richMediaBodyConfig = deps.richMediaBodyConfig ?? {};
     this.reconnectBaseDelayMs =
       typeof deps.reconnectBaseDelayMs === "number" && deps.reconnectBaseDelayMs > 0
         ? deps.reconnectBaseDelayMs
@@ -1102,15 +1140,43 @@ export class QqBotAdapter implements ChannelAdapter {
     return next;
   }
 
-  /** 发送一条文本消息；token 复用缓存。filePath 属富媒体上传，M2 明确不支持。 */
+  /**
+   * 发送一条消息；token 复用缓存。
+   *
+   * 纯文本走既有 post/Token 通道（行为不变）；带 filePath 时先把字节经注入
+   * reader 读出 → 上传纯函数构造 multipart → 调 transport.postMultipart 换
+   * file_info → 带 file_info 的消息体仍走既有 post/Token 通道。真实上传端点 /
+   * 字段细节 / 真机送达属「端到端另案」，见 protocol.ts 注释。
+   */
   async send(msg: OutboundMessage): Promise<SendResult> {
-    if (msg.filePath) {
+    // 上传通道缺失：明确失败，绝不假装已送达（端到端另案，字段/端点未核实）。
+    if (msg.filePath && typeof this.transport.postMultipart !== "function") {
       return {
         ok: false,
-        error: "QQBot: 富媒体上传（file_info）尚未实现",
+        error: "QQBot: 当前 transport 不支持富媒体上传（缺少 postMultipart）",
         retryable: false,
       };
     }
+
+    let richMedia: { fileInfo: string; kind: QqBotRichMediaKind } | undefined;
+    if (msg.filePath) {
+      try {
+        richMedia = await this.uploadRichMedia(msg.filePath);
+      } catch (error) {
+        const text = errorText(error);
+        const status = errorStatus(error);
+        const retryable =
+          error instanceof QqBotUploadPermanentError
+            ? false
+            : status === undefined
+              ? true
+              : !isPermanentHttpStatus(status);
+        this.noteError("send", `富媒体上传失败：${text}`);
+        this.lastSendRejection = this.redact(text);
+        return { ok: false, error: text, retryable };
+      }
+    }
+
     try {
       const token = await this.ensureToken();
       // 有 msg_id 才算被动回复，才需要 msg_seq；主动消息两者都不带。
@@ -1119,10 +1185,18 @@ export class QqBotAdapter implements ChannelAdapter {
       const msgSeq = msg.replyToMsgId
         ? this.nextReplySeq(msg.replyToMsgId, msg.dedupeKey)
         : undefined;
-      const request =
+      const baseRequest =
         msg.chatType === "group"
           ? buildSendGroupMsg(msg.chatId, msg.text, msg.replyToMsgId, msgSeq)
           : buildSendPrivateMsg(msg.chatId, msg.text, msg.replyToMsgId, msgSeq);
+      const request = richMedia
+        ? buildSendWithFileInfo(
+            baseRequest,
+            richMedia.fileInfo,
+            richMedia.kind,
+            this.richMediaBodyConfig,
+          )
+        : baseRequest;
       const raw = await this.transport.post(
         request.endpoint,
         { ...buildAuthHeaders(token), "content-type": "application/json" },
@@ -1169,6 +1243,37 @@ export class QqBotAdapter implements ChannelAdapter {
       // 网络/服务端异常交给上层重试；错误文本不含凭据。
       return { ok: false, error: text, retryable };
     }
+  }
+
+  /**
+   * 富媒体上传：读字节 → 构造 multipart → 换 file_info。
+   *
+   * 全程走注入的 reader 与 transport.postMultipart，token 复用 ensureToken
+   * 的同一条通道；端点 / 字段配置来自构造注入（端到端另案核实）。
+   */
+  private async uploadRichMedia(
+    filePath: string,
+  ): Promise<{ fileInfo: string; kind: QqBotRichMediaKind }> {
+    const bytes = await this.readFileBytes(filePath);
+    const fileName = filePath.replace(/\\/g, "/").split("/").pop() || "file";
+    const contentType = guessQqBotContentType(fileName);
+    const upload = buildUploadRequest(bytes, fileName, contentType, this.uploadConfig);
+    const token = await this.ensureToken();
+    const raw = await this.transport.postMultipart!(
+      upload.endpoint,
+      { ...buildAuthHeaders(token), "content-type": upload.contentType },
+      upload.body,
+    );
+    // HTTP 200 也可能用业务码承载拒绝；与 send 同一口径处理。
+    const failure = businessError(raw);
+    if (failure) {
+      throw new QqBotUploadPermanentError(
+        `QQBot: 富媒体上传业务错误 ${failure.code}（${failure.message}）`,
+      );
+    }
+    const fileInfo = parseUploadResponse(raw);
+    if (!fileInfo) throw new QqBotUploadPermanentError("QQBot: 富媒体上传响应缺少 file_info");
+    return { fileInfo, kind: contentType.startsWith("image/") ? "image" : "file" };
   }
 
   /** 关闭连接并清理心跳/重连定时器，可安全重复调用；关闭后不再自动重连。 */

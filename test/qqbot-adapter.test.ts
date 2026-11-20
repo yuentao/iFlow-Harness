@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { InboundMessage } from "../src/qq/adapter/types.js";
 import {
   QqBotAdapter,
@@ -18,6 +18,8 @@ import {
   DEFAULT_QQBOT_GATEWAY_URL,
   normalizeQqBotEvent,
   parseAccessTokenResponse,
+  type QqBotRichMediaBodyConfig,
+  type QqBotUploadConfig,
 } from "../src/qq/qqbot/protocol.js";
 import { parseQqCommand } from "../shared/qq-command.js";
 
@@ -477,7 +479,8 @@ describe("QqBotAdapter", () => {
     expect(groupPost?.endpoint).toBe("https://api.sgroup.qq.com/v2/groups/group-1/messages");
     expect(groupPost?.body).toEqual({ content: "hello" });
 
-    // 富媒体在 M2 明确不支持，retryable=false 交给上层提示用户。
+    // 该 FakeTransport 未实现 postMultipart：富媒体上传明确失败、retryable=false，
+    // 绝不假装已送达（真实端点/字段属端到端另案，完整离线流程见下方专测）。
     const file = await adapter.send({ chatType: "private", chatId: "openid-1", text: "", filePath: "/tmp/a.png" });
     expect(file).toMatchObject({ ok: false, retryable: false });
 
@@ -1606,6 +1609,182 @@ describe("QqBotAdapter — 断线恢复收敛", () => {
     await waitFor(() => transport.connects.length >= 2);
     expect(transport.connects).toHaveLength(2);
 
+    await adapter.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 富媒体上传离线全流程（端到端另案：真实端点/字段/真机送达未实现）
+// ---------------------------------------------------------------------------
+
+/** 带二进制上传能力的假 transport：记录上传请求，返回可配置的上传响应。 */
+class UploadFakeTransport extends FakeTransport {
+  readonly uploads: Array<{
+    endpoint: string;
+    headers: Record<string, string>;
+    body: Buffer;
+  }> = [];
+  uploadResult: unknown = { code: 0, data: { file_info: "FILE_INFO_1" } };
+  uploadError: unknown;
+
+  async postMultipart(
+    endpoint: string,
+    headers: Record<string, string>,
+    body: Buffer,
+  ): Promise<unknown> {
+    this.uploads.push({ endpoint, headers, body });
+    if (this.uploadError !== undefined) throw this.uploadError;
+    return this.uploadResult;
+  }
+}
+
+function makeUploadAdapter(over: {
+  transport: UploadFakeTransport;
+  readFileBytes: (p: string) => Promise<Buffer>;
+  uploadConfig?: QqBotUploadConfig;
+  richMediaBodyConfig?: QqBotRichMediaBodyConfig;
+}): QqBotAdapter {
+  return new QqBotAdapter({
+    appId: "app-1",
+    appSecret: "secret-1",
+    transport: over.transport,
+    readFileBytes: over.readFileBytes,
+    ...(over.uploadConfig ? { uploadConfig: over.uploadConfig } : {}),
+    ...(over.richMediaBodyConfig ? { richMediaBodyConfig: over.richMediaBodyConfig } : {}),
+  });
+}
+
+describe("QqBotAdapter — 富媒体上传（离线）", () => {
+  const UPLOAD_ENDPOINT = "https://example.test/upload";
+
+  it("send(filePath)：注入 reader 读字节 → 上传换 file_info → 带 file_info 走既有 post/Token 通道", async () => {
+    const transport = new UploadFakeTransport();
+    const bytes = Buffer.from("PNG-BYTES");
+    const readFileBytes = vi.fn(async (p: string) => {
+      expect(p).toBe("/fake/照片.png");
+      return bytes;
+    });
+    const adapter = makeUploadAdapter({
+      transport,
+      readFileBytes,
+      uploadConfig: { endpoint: UPLOAD_ENDPOINT, boundary: "BOUNDARY" },
+    });
+
+    const result = await adapter.send({
+      chatType: "private",
+      chatId: "openid-1",
+      text: "看这张图",
+      filePath: "/fake/照片.png",
+    });
+
+    expect(result).toEqual({ ok: true, messageId: "sent-1" });
+    expect(readFileBytes).toHaveBeenCalledWith("/fake/照片.png");
+
+    // 上传走 postMultipart：端点/鉴权头/content-type 正确，字节原样嵌入。
+    expect(transport.uploads).toHaveLength(1);
+    const upload = transport.uploads[0]!;
+    expect(upload.endpoint).toBe(UPLOAD_ENDPOINT);
+    expect(upload.headers.Authorization).toBe("QQBot tok-1");
+    expect(upload.headers["content-type"]).toBe("multipart/form-data; boundary=BOUNDARY");
+    expect(upload.body.toString("latin1")).toContain("PNG-BYTES");
+    expect(upload.body.toString("utf8")).toContain('filename="照片.png"');
+
+    // 带 file_info 的消息体走既有 post 通道（图片默认 msg_type=2、image 字段）。
+    const messagePost = transport.posts.find((p) => p.endpoint.includes("/users/"));
+    expect(messagePost?.body).toMatchObject({
+      content: "看这张图",
+      msg_type: 2,
+      image: { file_info: "FILE_INFO_1" },
+    });
+    // token 只换一次（上传与发送复用同一缓存）。
+    expect(transport.tokenRequestCount()).toBe(1);
+    await adapter.close();
+  });
+
+  it("文件（非图片）走 file kind，msg_type/字段可注入覆盖", async () => {
+    const transport = new UploadFakeTransport();
+    const adapter = makeUploadAdapter({
+      transport,
+      readFileBytes: async () => Buffer.from("PDF-BYTES"),
+      richMediaBodyConfig: { fileMsgType: 77, fileField: "custom_file" },
+    });
+
+    const result = await adapter.send({
+      chatType: "group",
+      chatId: "group-1",
+      text: "文件",
+      filePath: "/fake/doc.pdf",
+    });
+
+    expect(result).toEqual({ ok: true, messageId: "sent-1" });
+    expect(transport.uploads[0]?.headers["content-type"]).toContain("multipart/form-data");
+    const messagePost = transport.posts.find((p) => p.endpoint.includes("/groups/"));
+    expect(messagePost?.body).toMatchObject({ msg_type: 77, custom_file: { file_info: "FILE_INFO_1" } });
+    await adapter.close();
+  });
+
+  it("上传响应缺 file_info：明确失败 retryable=false，且不发送富媒体消息", async () => {
+    const transport = new UploadFakeTransport();
+    transport.uploadResult = { code: 0, data: {} };
+    const adapter = makeUploadAdapter({
+      transport,
+      readFileBytes: async () => Buffer.from("x"),
+    });
+
+    const result = await adapter.send({
+      chatType: "private",
+      chatId: "openid-1",
+      text: "",
+      filePath: "/fake/a.png",
+    });
+
+    expect(result).toMatchObject({ ok: false, retryable: false });
+    expect(String(result.ok === false ? result.error : "")).toContain("file_info");
+    expect(transport.posts.some((p) => p.endpoint.includes("/messages"))).toBe(false);
+    await adapter.close();
+  });
+
+  it("上传业务码拒绝：明确失败 retryable=false，不发送富媒体消息", async () => {
+    const transport = new UploadFakeTransport();
+    transport.uploadResult = { code: 12001, message: "bad file" };
+    const adapter = makeUploadAdapter({
+      transport,
+      readFileBytes: async () => Buffer.from("x"),
+    });
+
+    const result = await adapter.send({
+      chatType: "private",
+      chatId: "openid-1",
+      text: "",
+      filePath: "/fake/a.png",
+    });
+
+    expect(result).toMatchObject({ ok: false, retryable: false });
+    expect(String(result.ok === false ? result.error : "")).toContain("12001");
+    expect(transport.posts.some((p) => p.endpoint.includes("/messages"))).toBe(false);
+    await adapter.close();
+  });
+
+  it("reader 抛错（读文件失败）：不发上传也不发消息，明确失败", async () => {
+    const transport = new UploadFakeTransport();
+    const adapter = makeUploadAdapter({
+      transport,
+      readFileBytes: async () => {
+        throw new Error("ENOENT: no such file");
+      },
+    });
+
+    const result = await adapter.send({
+      chatType: "private",
+      chatId: "openid-1",
+      text: "",
+      filePath: "/fake/missing.png",
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(String(result.ok === false ? result.error : "")).toContain("ENOENT");
+    expect(transport.uploads).toHaveLength(0);
+    expect(transport.posts.some((p) => p.endpoint.includes("/messages"))).toBe(false);
     await adapter.close();
   });
 });

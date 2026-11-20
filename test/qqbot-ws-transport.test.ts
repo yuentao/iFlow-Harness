@@ -7,9 +7,10 @@
 
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QqBotSocket } from "../src/qq/qqbot/adapter.js";
 import {
+  createNodeQqBotMultipartPoster,
   createNodeQqBotTransport,
   DEFAULT_QQBOT_HTTP_TIMEOUT_MS,
 } from "../src/qq/qqbot/ws-transport.js";
@@ -391,5 +392,93 @@ describe("createNodeQqBotTransport — 有界缓冲与响应上限", () => {
     }
     expect(String(error)).toMatch(/超过上限/);
     expect(String(error)).not.toContain("xxxxx");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 富媒体上传：二进制 multipart POST（端到端另案的实施点，离线验证）
+// ---------------------------------------------------------------------------
+
+describe("createNodeQqBotMultipartPoster", () => {
+  const MULTIPART_CT = "multipart/form-data; boundary=BOUNDARY";
+
+  it("原样发送 Buffer body，透传调用方 content-type，并设正确 content-length；仅 2xx 解析 JSON", async () => {
+    const { baseUrl, captured } = await startPostServer(() => ({
+      status: 200,
+      body: JSON.stringify({ code: 0, data: { file_info: "FI-1" } }),
+    }));
+    const poster = createNodeQqBotMultipartPoster();
+    const body = Buffer.from(
+      "--BOUNDARY\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n\r\nBINARY\r\n--BOUNDARY--\r\n",
+      "utf8",
+    );
+
+    const result = await poster.postMultipart(
+      `${baseUrl}/v2/files/upload`,
+      { Authorization: "QQBot tok-1", "content-type": MULTIPART_CT },
+      body,
+    );
+
+    expect(result).toEqual({ code: 0, data: { file_info: "FI-1" } });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.method).toBe("POST");
+    expect(captured[0]?.path).toBe("/v2/files/upload");
+    expect(captured[0]?.headers.authorization).toBe("QQBot tok-1");
+    expect(captured[0]?.headers["content-type"]).toBe(MULTIPART_CT);
+    expect(Number(captured[0]?.headers["content-length"])).toBe(body.length);
+    // 纯 ASCII 测试字节：utf8 往返无损，服务端应拿到完全一致的 body。
+    expect(captured[0]?.body).toBe(body.toString("utf8"));
+  });
+
+  it("非 2xx reject 带 status 与业务码；上传端点非 token 端点可带诊断文案（截断）", async () => {
+    const longMessage = "bad file " + "x".repeat(400);
+    const { baseUrl } = await startPostServer(() => ({
+      status: 400,
+      body: JSON.stringify({ code: 12001, message: longMessage }),
+    }));
+    const poster = createNodeQqBotMultipartPoster();
+    let error: unknown;
+    try {
+      await poster.postMultipart(`${baseUrl}/upload`, {}, Buffer.from("x"));
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({ status: 400, code: 12001 });
+    expect(String(error)).toContain("HTTP 400");
+    expect(String(error)).toContain("bad file");
+    // 诊断文案截断到 200 字，不整段回显响应体。
+    expect(String(error)).not.toContain(longMessage);
+  });
+
+  it("响应体超过上限：明确 reject，不回显响应体", async () => {
+    const { baseUrl } = await startPostServer(() => ({ status: 200, body: "y".repeat(500) }));
+    const poster = createNodeQqBotMultipartPoster({ maxResponseBytes: 100 });
+    await expect(
+      poster.postMultipart(`${baseUrl}/upload`, {}, Buffer.from("x")),
+    ).rejects.toThrow(/超过上限/);
+  });
+
+  it("非 http(s) 协议直接 reject", () => {
+    const poster = createNodeQqBotMultipartPoster();
+    expect(() => poster.postMultipart("ftp://example.com/upload", {}, Buffer.from("x"))).toThrow(
+      /不支持的协议/,
+    );
+  });
+});
+
+describe("createNodeQqBotTransport — postMultipart 装配", () => {
+  it("暴露 postMultipart 并委派给注入的 multipartPoster（离线，不起真实网络）", async () => {
+    const postMultipart = vi.fn(async () => ({ file_info: "FI-2" }));
+    const transport = createNodeQqBotTransport({
+      WebSocketImpl: FakeWebSocket,
+      multipartPoster: { postMultipart },
+    });
+    const body = Buffer.from("BINARY");
+    const headers = { "content-type": "multipart/form-data; boundary=BOUNDARY" };
+
+    await expect(
+      transport.postMultipart!("https://example.test/upload", headers, body),
+    ).resolves.toEqual({ file_info: "FI-2" });
+    expect(postMultipart).toHaveBeenCalledWith("https://example.test/upload", headers, body);
   });
 });
