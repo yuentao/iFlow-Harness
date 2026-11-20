@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import path from "node:path";
 import os from "node:os";
 import { realpathSync } from "node:fs";
@@ -322,5 +322,57 @@ describe("AcpClient (integration with mock ACP agent)", () => {
         client["peer"]!.request("totally/unknown", {}, 5000),
       ),
     ).rejects.toMatchObject({ code: -32601 });
+  });
+
+  // --- S4 (3.5.0): AGENTS.md pitfall #20 — connect() must dispose the
+  // spawned child when the initialize handshake fails, so every retry no
+  // longer leaks a zombie node process. These tests only PIN the existing
+  // behaviour; no runtime code is changed here.
+  it("disposes the child on initialize timeout and dispose stays idempotent", async () => {
+    let exits = 0;
+    const client = new AcpClient(
+      {
+        command: process.execPath,
+        args: [mockAgent],
+        cwd: here,
+        env: { ACP_MOCK_MODE: "hang_initialize" },
+        requestTimeoutMs: 500,
+      },
+      { onExit: () => { exits += 1; } },
+    );
+    clients.push(client);
+    const disposeSpy = vi.spyOn(client, "dispose");
+
+    await expect(client.connect()).rejects.toThrow(/timed out/i);
+    // connect()'s catch must have started teardown of the still-running child.
+    expect(disposeSpy).toHaveBeenCalled();
+    // And the child must actually be gone — not merely "dispose was called".
+    await vi.waitFor(() => expect(exits).toBe(1), { timeout: 5000 });
+
+    // The panel's catch calls dispose() a second time on the SAME instance;
+    // a double call on an already-killed child must be a harmless no-op.
+    await expect(client.dispose()).resolves.toBeUndefined();
+    expect(disposeSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("disposes the child on a non-timeout initialize handshake error", async () => {
+    let exits = 0;
+    const client = new AcpClient(
+      { command: process.execPath, args: [mockAgent], cwd: here, env: { ACP_MOCK_MODE: "error_initialize" } },
+      { onExit: () => { exits += 1; } },
+    );
+    clients.push(client);
+    const disposeSpy = vi.spyOn(client, "dispose");
+
+    await expect(client.connect()).rejects.toMatchObject({ code: -32000 });
+    expect(disposeSpy).toHaveBeenCalled();
+    await vi.waitFor(() => expect(exits).toBe(1), { timeout: 5000 });
+  });
+
+  it("does not dispose a client whose initialize succeeded", async () => {
+    const client = createClient();
+    const disposeSpy = vi.spyOn(client, "dispose");
+    await expect(client.connect()).resolves.toMatchObject({ protocolVersion: 1 });
+    expect(disposeSpy).not.toHaveBeenCalled();
   });
 });

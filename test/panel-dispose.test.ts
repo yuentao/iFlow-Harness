@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ChatPanel, DisposedError } from "../src/panel/panel.js";
+import { AcpClient } from "../src/acp/client.js";
 import { acpSessionFilePath } from "../src/acp/models-query.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import type { SessionState } from "../shared/messages.js";
@@ -301,4 +302,57 @@ describe("ChatPanel restartCli vs wedged connect (P0-3)", () => {
     // The wedged handshake rejected (superseded), it never resolved.
     await expect(wedged).rejects.toThrow();
   }, 30000);
+});
+
+/**
+ * S4 (3.5.0) / AGENTS.md pitfall #20 — a FAILED initialize handshake must
+ * kill the spawned child at BOTH safety nets: AcpClient.connect()'s own
+ * catch (point 1) and ChatPanel.ensureClient()'s catch (point 2). Patching
+ * the prototype lets us observe both calls even though the panel creates
+ * the client internally. No runtime behaviour changes — this only pins it.
+ */
+describe("ChatPanel connect failure disposes child at both points (S4)", () => {
+  let panel: ChatPanel;
+  let storageDir: string;
+
+  beforeEach(async () => {
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-dispose-both-"));
+  });
+
+  afterEach(async () => {
+    try {
+      await panel.dispose();
+    } catch {
+      // already disposed
+    }
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    delete process.env.ACP_MOCK_MODE;
+  });
+
+  it("calls dispose from both the client catch and the panel catch on initialize error", async () => {
+    process.env.ACP_MOCK_MODE = "error_initialize";
+    panel = new ChatPanel(makeContext(storageDir), {
+      entryOverride: mockAgent,
+      workspaceRoot: here,
+      watchers: makeWatchers(),
+    });
+    const p = panelOf(panel);
+    const disposeSpy = vi.spyOn(AcpClient.prototype, "dispose");
+    try {
+      let rejected = false;
+      try {
+        await p.ensureClient();
+      } catch {
+        rejected = true;
+      }
+      expect(rejected).toBe(true);
+      // Point 1: AcpClient.connect() catch; point 2: ensureClient() catch.
+      // The failed handshake nulls this.client before the rejection escapes,
+      // so panel.dispose() adds no third call — >=2 proves both nets fired.
+      expect(disposeSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(p.client).toBeNull();
+    } finally {
+      disposeSpy.mockRestore();
+    }
+  }, 15000);
 });
