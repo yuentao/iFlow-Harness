@@ -417,6 +417,14 @@ export async function waitForChildMcpReady(options: {
       try {
         const report = await client.mcpStatus(sessionId);
         if (stopped) return;
+        // 记录 MCP 发现状态与每个服务器的连接状态，便于排查子会话
+        // 中 MCP 工具不可见的问题（discoveryState / servers[].status / error）。
+        const serverEntries = Object.entries(report.servers ?? {}).map(
+          ([name, s]) => `${name}=${s.status}${s.error ? `(${s.error})` : ""}`,
+        );
+        log.info(
+          `[${label}] MCP 就绪状态：discoveryState=${report.discoveryState}, servers=[${serverEntries.join(", ")}]`,
+        );
         if (mcpDiscoverySettled(report.discoveryState)) {
           settled = true;
           return;
@@ -437,6 +445,8 @@ export async function waitForChildMcpReady(options: {
     log.warn(
       `[${label}] 等待 MCP 工具就绪超过 ${timeoutMs}ms，照常发送首轮 prompt（首轮可能缺 MCP 工具）`,
     );
+  } else {
+    log.info(`[${label}] MCP 工具已就绪，继续发送首轮 prompt`);
   }
 }
 
@@ -2165,6 +2175,9 @@ export class SuperAgentManager {
       // is then scoped to the sentinel by the host and spawns nothing).
       // 取一次复用：既进 session/new，也用来判断首轮 prompt 前要不要等 MCP。
       const childMcpServers = this.deps.childMcpServers?.() ?? [];
+      this.deps.log.info(
+        `[${id}] 子会话 MCP 服务器：${childMcpServers.length} 个（${childMcpServers.map((s) => s.name).join(", ") || "无"}]`,
+      );
       const { sessionId } = await client.newSession({
         cwd: isolation.path,
         mcpServers: childMcpServers,

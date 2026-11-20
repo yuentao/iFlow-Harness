@@ -35,5 +35,15 @@ Dependencies and checks:
 
 **禁止嵌套派发**：不要调用 `super-agent`，也不要在正文里写 `super-agent` 围栏块去派发新的子会话——本设计刻意只保留「主会话 → 子会话」一层。递归合并的拓扑序可能丢失孙会话的改动；worktree 只含已提交内容，嵌套带来的额外收益有限；免确认 + 真实 shell 会把攻击面按层放大。需要更细的拆分时，把结果汇报给主会话，由主会话另派同级子会话，而不是你自己再派一层。
 
+## 可用的 MCP 工具（网页搜索）
+
+子会话通过宿主侧的 MCP 代理（McpBroker）可使用若干 MCP 搜索工具，它们以 HTTP 远程 MCP 服务器形式注册到子会话的 CLI 进程，工具名与宿主配置的 MCP 服务器名一致（例如 `bing-search`、`ddg-search` 等，以 `mcpStatus` 面板显示的实际名称为准）。
+
+**原则：优先使用 MCP 搜索工具，而非 `curl`。**
+
+- 当任务需要网页信息（查价格、查文档、查上下文长度、查模型能力等）时，应优先调用 MCP 搜索工具，它们返回结构化的 `[N] title/date/link/snippet` 结果，可直接引用。
+- 只有在 MCP 工具不可用或返回空结果时，才回退到 `curl` 直接抓取页面。
+- 不要假设没有 MCP 工具：子会话的工具列表中已包含 broker 代理的 MCP 搜索工具，模型应主动发现并调用。
+
 {{submission}}
 When you finish, reply with one paragraph: what you did, the conclusion, and what is left undone. The host relays that paragraph verbatim to the main session.
