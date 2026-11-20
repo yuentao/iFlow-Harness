@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, Ellipsis, FileCode2, Undo2 } from "lucide-react";
 import type { DiffHunkUi, ToolDiffUi } from "../../../shared/messages";
 import { computeHunks, diffRows, type DiffOp } from "../../../shared/hunks";
@@ -33,6 +33,29 @@ const CONTEXT_LINES = 3;
  */
 const INITIAL_RENDER_ROWS = 800;
 const RENDER_ROWS_STEP = 800;
+
+/**
+ * P1 (long-session memory, 3.4.0): the 800-row prefix above is capped but
+ * GREW WITHOUT BOUND as the user scrolled — dozens of mounted diff cards with
+ * tens of thousands of rows each were the main driver of multi-hundred-MB
+ * webview processes. Cap the number of rows that stay in the DOM per card.
+ *
+ * A conservative sliding window is used ONLY for diffs whose folded result
+ * has no "⋯" gap rows (e.g. whole-file/minified edits where every line is a
+ * change) — the exact case from pitfall #27 that `collapseAroundChanges` cannot
+ * shrink. Folded diffs keep the original prefix behaviour so gap
+ * expand/collapse (which shifts row indices) is never disturbed.
+ *
+ * `windowStart`/`renderCap` are absolute indices into `rows`; the invariant
+ * `renderCap - windowStart <= MAX_DOM_ROWS` holds. When appending hits the cap,
+ * the surplus top rows are recycled into a single spacer whose pixel height is
+ * the sum of their measured heights — the scroll height (and thus the visible
+ * position) stays unchanged. A "加载上方 N 行" button restores them on demand
+ * and drops an equal count from the far bottom to re-apply the cap.
+ */
+const MAX_DOM_ROWS = 1200;
+/** Rows restored by the top "加载上方" button in one click. */
+const RECOVERY_BLOCK = 400;
 
 /**
  * Content-keyed cache of the line alignment (the LCS).
@@ -213,12 +236,30 @@ export function DiffView({
     [alignment, hunks, keep],
   );
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
-  /** DOM row cap; grows as the user scrolls the diff body (see render). */
+  /**
+   * Absolute [windowStart, renderCap) slice of `rows` currently in the DOM.
+   * `renderCap` grows on scroll like before; `windowStart` stays 0 for folded
+   * diffs and only advances for unfoldable ones once the cap is hit (P1).
+   */
+  const [windowStart, setWindowStart] = useState(0);
   const [renderCap, setRenderCap] = useState(INITIAL_RENDER_ROWS);
-  // A new diff invalidates previous expand/collapse and row-cap choices.
+  /** Pixel height of the recycled rows above `windowStart`. */
+  const [spacerHeight, setSpacerHeight] = useState(0);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  /** Measured height of each rendered absolute row index (for exact spacer). */
+  const rowHeights = useRef(new Map<number, number>());
+  // Synchronous mirror so scroll handlers read the latest window even between
+  // renders (React batches setState; two quick scrolls must not double-append).
+  const winRef = useRef({ start: 0, cap: INITIAL_RENDER_ROWS });
+  winRef.current = { start: windowStart, cap: renderCap };
+
+  // A new diff invalidates previous expand/collapse, window and row-cap choices.
   useEffect(() => {
     setExpanded(new Set());
+    setWindowStart(0);
     setRenderCap(INITIAL_RENDER_ROWS);
+    setSpacerHeight(0);
+    rowHeights.current.clear();
   }, [diff]);
 
   const rows = useMemo(
@@ -227,10 +268,65 @@ export function DiffView({
   );
   const addCount = rows.filter((r) => r.type === "add").length;
   const delCount = rows.filter((r) => r.type === "del").length;
-  // Bounded DOM prefix (see INITIAL_RENDER_ROWS): the full row list stays in
-  // the memo for folding/hunk math, only the rendered slice is capped.
-  const visibleRows = rows.slice(0, renderCap);
-  const hiddenRows = rows.length - visibleRows.length;
+
+  // Only diffs whose folded result has NO gap ("⋯") rows are windowed. A gap
+  // can be expanded/collapsed, which re-indexes `rows` and would invalidate
+  // absolute window indices — keep the original prefix behaviour there. A
+  // whole-file/minified edit folds to every row with no gap, so it is windowed
+  // (that is the memory hog from pitfall #27).
+  const windowed = !rows.some((r) => r.type === "hunk");
+
+  // Measure rendered rows AFTER each window change, so recycling can restore
+  // the exact pixel height later. jsdom reports 0 — harmless (spacer stays 0),
+  // while the row-count/content invariants remain fully testable.
+  useEffect(() => {
+    if (!windowed) return;
+    const container = scrollRef.current;
+    if (!container) return;
+    container.querySelectorAll<HTMLElement>("[data-diff-row]").forEach((node) => {
+      const idx = Number(node.dataset.diffRow);
+      if (Number.isFinite(idx) && node.offsetHeight > 0) {
+        rowHeights.current.set(idx, node.offsetHeight);
+      }
+    });
+  }, [windowed, windowStart, renderCap]);
+
+  /** Append a step of rows; recycle an equal surplus off the top when capped. */
+  const appendRows = () => {
+    const { start, cap } = winRef.current;
+    if (cap >= rows.length) return;
+    const nextCap = Math.min(cap + RENDER_ROWS_STEP, rows.length);
+    if (windowed) {
+      const overflow = nextCap - start - MAX_DOM_ROWS;
+      if (overflow > 0) {
+        const removeEnd = start + overflow;
+        let removed = 0;
+        for (let i = start; i < removeEnd; i++) removed += rowHeights.current.get(i) ?? 0;
+        setSpacerHeight((h) => h + removed);
+        setWindowStart(removeEnd);
+      }
+    }
+    setRenderCap(nextCap);
+  };
+
+  /** Restore a block of recycled rows above the window, re-applying the cap at
+   * the far bottom so the DOM row count never exceeds MAX_DOM_ROWS. */
+  const restoreAbove = () => {
+    const { start, cap } = winRef.current;
+    if (start <= 0) return;
+    const nextStart = Math.max(0, start - RECOVERY_BLOCK);
+    let restored = 0;
+    for (let i = nextStart; i < start; i++) restored += rowHeights.current.get(i) ?? 0;
+    setSpacerHeight((h) => Math.max(0, h - restored));
+    setWindowStart(nextStart);
+    const nextCap = Math.min(cap, nextStart + MAX_DOM_ROWS);
+    if (nextCap < cap) setRenderCap(nextCap);
+  };
+
+  // Bounded DOM slice (see MAX_DOM_ROWS): the full row list stays in the memo
+  // for folding/hunk math, only the rendered slice is capped/windowed.
+  const visibleRows = rows.slice(windowStart, renderCap);
+  const hiddenRows = rows.length - renderCap;
 
   const toggleGap = (win: number) => {
     setExpanded((prev) => {
@@ -266,6 +362,7 @@ export function DiffView({
         </span>
       </div>
       <div
+        ref={scrollRef}
         className={`diff-scroll overflow-auto bg-editor font-mono text-ui-caption leading-[1.7] ${
           flat
             ? "mx-2 mb-2 rounded-sm border border-border/50"
@@ -274,14 +371,34 @@ export function DiffView({
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollHeight - el.scrollTop - el.clientHeight < 120) {
-            setRenderCap((c) => (c < rows.length ? c + RENDER_ROWS_STEP : c));
+            appendRows();
           }
         }}
       >
-        {visibleRows.map((row, i) =>
-          row.type === "hunk" ? (
+        {windowStart > 0 && (
+          <div
+            data-diff-spacer
+            aria-hidden="true"
+            style={{ height: spacerHeight }}
+            className="w-full"
+          />
+        )}
+        {windowed && windowStart > 0 && (
+          <button
+            type="button"
+            data-diff-restore
+            className="flex w-full items-center gap-1.5 px-3 py-1 text-left text-ui-caption text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+            onClick={restoreAbove}
+          >
+            <Ellipsis className="size-3 shrink-0" />
+            <span className="truncate">{t("加载上方 {0} 行", windowStart)}</span>
+          </button>
+        )}
+        {visibleRows.map((row, i) => {
+          const abs = windowStart + i;
+          return row.type === "hunk" ? (
             <button
-              key={i}
+              key={abs}
               type="button"
               className="flex w-full items-center gap-1.5 px-3 py-0.5 text-left text-ui-caption text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
               title={expanded.has(row.win ?? -1) ? t("收起") : t("展开上下文")}
@@ -294,7 +411,7 @@ export function DiffView({
               </span>
             </button>
           ) : (
-            <div key={i}>
+            <div key={abs} data-diff-row={abs}>
               {editable && row.hunkHead && row.hunk !== undefined && (
                 <HunkHeader
                   index={row.hunk}
@@ -339,13 +456,13 @@ export function DiffView({
                 </span>
               </div>
             </div>
-          ),
-        )}
+          );
+        })}
         {hiddenRows > 0 && (
           <button
             type="button"
             className="flex w-full items-center gap-1.5 px-3 py-1 text-left text-ui-caption text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
-            onClick={() => setRenderCap((c) => c + RENDER_ROWS_STEP)}
+            onClick={appendRows}
           >
             <Ellipsis className="size-3 shrink-0" />
             <span className="truncate">{t("加载剩余 {0} 行", hiddenRows)}</span>
