@@ -1260,7 +1260,9 @@ export const EVICT_BUDGET_CHARS = 4_000_000;
  * mounted card keeps its payload; the host applies the same window to child
  * transcripts. */
 export const EVICT_KEEP_BLOCKS = 200;
-/** Tail blocks kept regardless of the budget (newest turns always render). */
+/** Absolute floor on kept tail blocks, independent of the byte budget — keeps
+ * the newest turn readable even when a few very large payloads exhaust the
+ * budget before EVICT_KEEP_BLOCKS is reached. */
 export const EVICT_MIN_KEEP = 20;
 
 /**

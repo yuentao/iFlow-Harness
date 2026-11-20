@@ -47,11 +47,11 @@ export function isValidQqId(value: unknown): value is string {
 }
 
 /**
- * `supervised` 策略下等待 QQ 审批的时长（分钟）——UI 文案的唯一来源。
+ * `supervised` 策略下等待 QQ 审批的时长（分钟）——UI 文案与宿主审批窗口的唯一真值。
  *
- * 宿主侧 `src/qq/service.ts` 的 `QQ_APPROVAL_TIMEOUT_MS`（4 分钟）才是真正执行
- * 的值；两者必须一致，UI 不再写死「5 分钟」。改动其中一处时另一处必须同步
- * （下一批应让 service.ts 直接引用本常量，届时这里就是唯一真值）。
+ * 宿主侧 `src/qq/service.ts` 已直接引用本常量计算 `QQ_APPROVAL_TIMEOUT_MS`
+ * （本常量 * 60_000 = 4 分钟）作为真正执行的值，UI 文案也读这里，不再写死「5 分钟」。
+ * 因此改动本处即可同步两端，无需在两处各写一份分钟数。
  */
 export const QQ_APPROVAL_TIMEOUT_MINUTES = 4;
 
