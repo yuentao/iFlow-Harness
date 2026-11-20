@@ -1,16 +1,27 @@
 #!/usr/bin/env node
 /**
- * Minimal stdio MCP server used by `test/mcp-broker.test.ts`.
+ * Minimal MCP server used by `test/mcp-broker.test.ts`.
  *
- * Every instance appends one line to `FAKE_MCP_SPAWN_LOG` at startup, which is
- * how the tests prove that N concurrent child sessions still mean ONE process
- * per server. Tools:
+ * Two modes:
+ *  - default: stdio, newline-delimited JSON-RPC 2.0 on stdin/stdout. Every
+ *    instance appends one line to `FAKE_MCP_SPAWN_LOG` at startup, which is how
+ *    the tests prove N concurrent child sessions still mean ONE process per
+ *    server.
+ *  - `--ws`: local loopback WebSocket server (port written to
+ *    `FAKE_MCP_WS_PORT_FILE`) speaking the same JSON-RPC frames. Fully offline.
+ *
+ * Tools:
  *  - `<name>_echo`  — echoes `text`
  *  - `<name>_slow`  — answers after 300ms (exercises concurrent fan-out)
  *
- * Speaks newline-delimited JSON-RPC 2.0 on stdio, like the real transports.
+ * Proactive inbound requests (offline receive/reply proof): when
+ * `FAKE_MCP_INBOUND_METHODS` is set (comma separated), the server sends one
+ * server→client request per method right after the `initialize` reply. Any
+ * reply it later receives (a frame with `id` but no `method`) is appended as a
+ * JSON line to `FAKE_MCP_REPLY_LOG`. No real sampling/elicitation is claimed —
+ * this only proves the broker received the request and sent a reply back.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 const nameArg = argv.indexOf("--name");
@@ -24,8 +35,21 @@ if (process.env.FAKE_MCP_SPAWN_LOG) {
   }
 }
 
+let currentSocket = null;
+/** Frames sent back to us for our own inbound requests (id, no method). */
+function logReply(message) {
+  if (!process.env.FAKE_MCP_REPLY_LOG) return;
+  try {
+    appendFileSync(process.env.FAKE_MCP_REPLY_LOG, `${JSON.stringify(message)}\n`);
+  } catch {
+    // Diagnostics only.
+  }
+}
+
 function send(message) {
-  process.stdout.write(`${JSON.stringify(message)}\n`);
+  const line = JSON.stringify(message);
+  if (currentSocket) currentSocket.send(line);
+  else process.stdout.write(`${line}\n`);
 }
 
 function result(id, value) {
@@ -34,6 +58,21 @@ function result(id, value) {
 
 function error(id, code, message) {
   send({ jsonrpc: "2.0", id, error: { code, message } });
+}
+
+const inboundMethods = (process.env.FAKE_MCP_INBOUND_METHODS ?? "")
+  .split(",")
+  .map((method) => method.trim())
+  .filter(Boolean);
+let inboundSeq = 0;
+
+/** Proactively push server→client requests (the upstream inbound channel). */
+function sendInbound() {
+  const prefix = process.env.FAKE_MCP_INBOUND_ID_PREFIX ?? "inbound";
+  for (const method of inboundMethods) {
+    inboundSeq += 1;
+    send({ jsonrpc: "2.0", id: `${prefix}-${inboundSeq}`, method, params: { probe: method } });
+  }
 }
 
 async function handle(message) {
@@ -45,6 +84,7 @@ async function handle(message) {
         capabilities: { tools: {} },
         serverInfo: { name: `fake-${name}`, version: "1.0.0" },
       });
+      sendInbound();
       return;
     case "notifications/initialized":
       return;
@@ -99,20 +139,54 @@ async function handle(message) {
   }
 }
 
-let buffer = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  buffer += chunk;
-  let index;
-  while ((index = buffer.indexOf("\n")) >= 0) {
-    const line = buffer.slice(0, index).trim();
-    buffer = buffer.slice(index + 1);
-    if (!line) continue;
-    try {
-      void handle(JSON.parse(line));
-    } catch {
-      // Ignore malformed frames.
-    }
+function onFrame(raw) {
+  let message;
+  try {
+    message = typeof raw === "string" ? JSON.parse(raw) : JSON.parse(raw.toString("utf8"));
+  } catch {
+    return;
   }
-});
-process.stdin.on("end", () => process.exit(0));
+  // A reply to one of OUR inbound requests: id + result/error, no method.
+  // Never feed it back into handle() — that would start an error ping-pong.
+  if (typeof message.method !== "string" && message.id !== undefined) {
+    logReply(message);
+    return;
+  }
+  void handle(message);
+}
+
+if (argv.includes("--ws")) {
+  const { WebSocketServer } = await import("ws");
+  const port = Number(process.env.FAKE_MCP_WS_PORT ?? 0);
+  const wss = new WebSocketServer({ host: "127.0.0.1", port });
+  wss.on("listening", () => {
+    const address = wss.address();
+    if (process.env.FAKE_MCP_WS_PORT_FILE && address && typeof address === "object") {
+      writeFileSync(process.env.FAKE_MCP_WS_PORT_FILE, String(address.port));
+    }
+  });
+  wss.on("connection", (socket) => {
+    currentSocket = socket;
+    socket.on("message", (raw) => onFrame(raw));
+    socket.on("close", () => {
+      if (currentSocket === socket) currentSocket = null;
+    });
+  });
+  const shutdown = () => wss.close();
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+} else {
+  let buffer = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    buffer += chunk;
+    let index;
+    while ((index = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, index).trim();
+      buffer = buffer.slice(index + 1);
+      if (!line) continue;
+      onFrame(line);
+    }
+  });
+  process.stdin.on("end", () => process.exit(0));
+}
