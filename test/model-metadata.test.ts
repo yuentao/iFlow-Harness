@@ -164,6 +164,87 @@ describe("parseModelMetadata", () => {
     const wrong = '{"models":[{"name":"glm-5","inputPrice":9.9,"outputPrice":2.4,"source":"S1"}]}';
     expect(parseModelMetadata(wrong, src)).toEqual([]);
   });
+
+  // --- Baseline tests: lock in the price-grounding behaviour that must NOT
+  // regress when the currency / input-output semantic check is added below.
+  it("BASELINE: keeps USD prices written with a dollar sign", () => {
+    const src: MetadataSource[] = [
+      { id: "S1", title: "GLM-5 pricing (USD)", url: "https://example.test/glm", snippet: "GLM-5 input $0.27 and output $1.10 per 1M tokens (USD)." },
+    ];
+    const raw = '{"models":[{"name":"glm-5","inputPrice":0.27,"outputPrice":1.1,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, src)).toEqual([
+      { name: "glm-5", inputPrice: 0.27, outputPrice: 1.1, source: "S1" },
+    ]);
+  });
+
+  it("BASELINE: keeps a price on a no-symbol pricing page (neutral context)", () => {
+    const src: MetadataSource[] = [
+      { id: "S1", title: "Kimi K2 pricing", url: "https://example.test/kimi", snippet: "Kimi K2 lists 2.5 input and 10 output per million tokens on its pricing page." },
+    ];
+    const raw = '{"models":[{"name":"kimi-k2","inputPrice":2.5,"outputPrice":10,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, src)).toEqual([
+      { name: "kimi-k2", inputPrice: 2.5, outputPrice: 10, source: "S1" },
+    ]);
+  });
+
+  it("BASELINE: price number still matches trailing-zero / unit-aware forms", () => {
+    const src: MetadataSource[] = [
+      { id: "S1", title: "GLM-5", url: "https://example.test/glm", snippet: "GLM-5 input $0.600 / 1M tokens, 600K context." },
+    ];
+    const raw = '{"models":[{"name":"glm-5","inputPrice":0.6,"contextWindow":600000,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, src)).toEqual([
+      { name: "glm-5", contextWindow: 600000, inputPrice: 0.6, source: "S1" },
+    ]);
+  });
+
+  // --- T-10: currency / input-output semantic validation of mined prices.
+  it("T-10: drops a CNY price written with ¥ (never converts currency)", () => {
+    const src: MetadataSource[] = [
+      { id: "S1", title: "GLM-5 定价", url: "https://example.test/glm", snippet: "GLM-5 输入价 ¥2 /百万 tokens，输出价 ¥8 /百万 tokens。" },
+    ];
+    const raw = '{"models":[{"name":"glm-5","inputPrice":2,"outputPrice":8,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, src)).toEqual([]);
+  });
+
+  it("T-10: drops a CNY price written as 元 / 人民币", () => {
+    const src: MetadataSource[] = [
+      { id: "S1", title: "Kimi 价格", url: "https://example.test/kimi", snippet: "Kimi K2 每百万 tokens 输入 2.5 元，输出 10 元，均为人民币计价。" },
+    ];
+    const raw = '{"models":[{"name":"kimi-k2","inputPrice":2.5,"outputPrice":10,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, src)).toEqual([]);
+  });
+
+  it("T-10: drops an output price mislabelled as inputPrice", () => {
+    const src: MetadataSource[] = [
+      { id: "S1", title: "GLM-5 pricing", url: "https://example.test/glm", snippet: "GLM-5 input $0.6 output $2.4 per 1M tokens." },
+    ];
+    // model reported the output price (2.4) as the input price and vice versa
+    const swapped = '{"models":[{"name":"glm-5","inputPrice":2.4,"outputPrice":0.6,"source":"S1"}]}';
+    expect(parseModelMetadata(swapped, src)).toEqual([]);
+    // correct orientation still grounded
+    const correct = '{"models":[{"name":"glm-5","inputPrice":0.6,"outputPrice":2.4,"source":"S1"}]}';
+    expect(parseModelMetadata(correct, src)).toEqual([
+      { name: "glm-5", inputPrice: 0.6, outputPrice: 2.4, source: "S1" },
+    ]);
+  });
+
+  it("T-10: drops a monthly / subscription fee used as a token price", () => {
+    const src: MetadataSource[] = [
+      { id: "S1", title: "Plan pricing", url: "https://example.test/plan", snippet: "GLM-5 Pro 订阅 plan is $20 per month (monthly billing)." },
+    ];
+    const raw = '{"models":[{"name":"glm-5","inputPrice":20,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, src)).toEqual([]);
+  });
+
+  it("T-10: a USD price in a mixed CNY/USD snippet is still kept", () => {
+    const src: MetadataSource[] = [
+      { id: "S1", title: "价格对比", url: "https://example.test/cmp", snippet: "海外版 GLM-5 input $0.6 per 1M tokens; 国内版 输入 2 元 per 1M tokens." },
+    ];
+    const raw = '{"models":[{"name":"glm-5","inputPrice":0.6,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, src)).toEqual([
+      { name: "glm-5", inputPrice: 0.6, source: "S1" },
+    ]);
+  });
 });
 
 describe("planMetadataAdditions", () => {
