@@ -2655,3 +2655,52 @@ describe("QqService — 通知展示位标题化", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 远程接管提示：本地发起的任务没有 QQ 任务归属，完成提示走绑定者私聊
+// ---------------------------------------------------------------------------
+
+describe("QqService — 远程接管提示投递（notifyBoundUser）", () => {
+  it("作为主动私聊消息投递给绑定者，不建任务、不改任务列表", async () => {
+    const f = makeService();
+    await f.service.start();
+
+    const ok = await f.service.notifyBoundUser("  iFlow 已完成本轮回复  ");
+
+    expect(ok).toBe(true);
+    // 主动消息：不带 replyToMsgId（没有被动回复窗口可用），文本已 trim。
+    expect(f.delivered).toEqual([
+      { chatType: "private", chatId: "u1", text: "iFlow 已完成本轮回复" },
+    ]);
+    expect(f.service.listTasks()).toHaveLength(0);
+  });
+
+  it("空文本 / 未启动 / 无绑定者时不投递，也不抛错", async () => {
+    const notStarted = makeService();
+    expect(await notStarted.service.notifyBoundUser("提示")).toBe(false);
+    expect(notStarted.delivered).toHaveLength(0);
+
+    const started = makeService();
+    await started.service.start();
+    expect(await started.service.notifyBoundUser("   ")).toBe(false);
+    expect(started.delivered).toHaveLength(0);
+
+    // 白名单为空 → 推导不出绑定者私聊：静默放弃，绝不乱发。
+    const unbound = makeService({ config: { allowedUsers: [] } });
+    await unbound.service.start();
+    expect(await unbound.service.notifyBoundUser("提示")).toBe(false);
+    expect(unbound.delivered).toHaveLength(0);
+  });
+
+  it("平台拒绝时如实返回 false（不抛错、不伪造送达）", async () => {
+    const f = makeService();
+    await f.service.start();
+    vi.spyOn(f.host, "deliver").mockResolvedValue({
+      ok: false,
+      error: "40054 主动消息额度已用尽",
+      retryable: false,
+    });
+
+    await expect(f.service.notifyBoundUser("提示")).resolves.toBe(false);
+  });
+});
+

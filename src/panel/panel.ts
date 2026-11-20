@@ -3329,6 +3329,24 @@ export class ChatPanel implements vscode.Disposable {
    */
   private notifyOsDecision(event: OsNotifyEvent, text: string): OsNotifyDecision {
     const setting = vscode.workspace.getConfiguration("iflow").get<string>("osNotifications", "approvals");
+    const decision = this.evaluateOsNotification(event, text, setting);
+    if (!decision.fire) return decision;
+    void this.deliverOsNotification(text);
+    return decision;
+  }
+
+  /**
+   * Pure gate evaluation + gate bookkeeping — shared by the local OS toast and
+   * the remote-takeover QQ cue. The takeover cue borrows the same throttle and
+   * content cooldown (a burst of child completions must not spam QQ) but must
+   * NOT deliver a local toast, which is why the decision and the delivery are
+   * separated here.
+   */
+  private evaluateOsNotification(
+    event: OsNotifyEvent,
+    text: string,
+    setting: string,
+  ): OsNotifyDecision {
     const gate = gateOsNotification({
       event,
       setting,
@@ -3341,9 +3359,7 @@ export class ChatPanel implements vscode.Disposable {
       // identical text within the cooldown window is dropped.
       contentKey: text,
     });
-    if (!gate.fire) return gate;
-    this.osNotifyGate = gate.gate;
-    void this.deliverOsNotification(text);
+    if (gate.fire) this.osNotifyGate = gate.gate;
     return gate;
   }
 
@@ -3369,18 +3385,55 @@ export class ChatPanel implements vscode.Disposable {
    * Host bookkeeping turns that are NOT reports (action receipts, delegated
    * user-turn backfill) never call any of these — they stay silent.
    *
-   * QQ 远程接管态本机静音(2026-11-19):接管时用户已离开本机、反馈只走 QQ 转发
-   * (`deliverQqMainFinalAnswer` / 子会话 QQ 回执)。这里是最小的统一出口 —— 在入口
-   * 一步挡住 OS 原生通知 + done/child 提示音,同时覆盖 turnDone / superReport /
-   * childDone 三类完成提示。切勿上移到 sendPrompt 收尾的 finalReport 块:那里还放着
-   * QQ 转发调用,误伤会让远程用户永远收不到最终答复。错误音 `postSound("error")`
-   * 不经此出口,保持原样。
+   * QQ 远程接管态(2026-11-19 静音 / 2026-11-20 改投 QQ):接管时用户已离开本机,
+   * 本机不再弹 OS toast、不响 done/child 音 —— 但提示不能就此消失:QQ 任务自己的
+   * 回执有专属通道(`deliverQqMainFinalAnswer` / 中间正文),而**本地发起的任务**
+   * 没有 QQ 任务归属,只静音就等于一条通知都收不到(用户实测)。因此接管态下
+   * 这条统一出口把提示改投到绑定者私聊({@link forwardTakeoverCue})。
+   * 切勿上移到 sendPrompt 收尾的 finalReport 块:那里还放着 QQ 转发调用,误伤会让
+   * 远程用户永远收不到最终答复。错误音 `postSound("error")` 不经此出口,保持原样。
    */
   private announceCue(event: OsNotifyEvent, text: string, kind: "done" | "child"): void {
-    if (this.qqTakeoverActive) return;
+    // 远程接管态：本机静音，反馈只走 QQ（用户已离开本机）。
+    //
+    // 旧实现在这里直接 return —— 本机确实静音了，但「QQ 转发」只覆盖 QQ 任务
+    // 自己的回执；**本地发起的任务没有 QQ 任务可归属**，于是接管期间一条通知
+    // 都收不到（2026-11-20 用户实测：任务进行中才开启远程接续，此后的通知在
+    // QQ 上全部消失）。现在把这条完成提示改投到绑定者私聊，本机仍然不发
+    // toast、不响铃。
+    //
+    // 去重沿用同一道 OS 通知闸门，但以 `all` 档评估：`osNotifications` 档位管
+    // 的是本机 OS toast，与 QQ 提示无关；这里只借闸门的节流 + 内容冷却两条
+    // 去重规则。判定与 chime 同源 —— **只有重复才丢弃**：watching / focus 在
+    // 本机只是「不弹 toast」，chime 照响；接管态下 QQ 就是那条唯一的提示通道，
+    // 若因为「窗口有焦点」就吞掉，用户会彻底静默。
+    if (this.qqTakeoverActive) {
+      const decision = this.evaluateOsNotification(event, text, "all");
+      if (!decision.fire && isDuplicateNotificationBlock(decision.reason)) return;
+      this.forwardTakeoverCue(text);
+      return;
+    }
     const decision = this.notifyOsDecision(event, text);
     if (!decision.fire && isDuplicateNotificationBlock(decision.reason)) return;
     this.postSound(kind);
+  }
+
+  /**
+   * 远程接管态下完成提示的 QQ 出口。
+   *
+   * QQ 注入回合自己的回执由任务通道投递（`deliverQqMainIntermediateText` /
+   * `completeMainFinalAnswer`），这里跳过以免同一条完成提示被发两遍；其余
+   * （本地回合 / 子会话收尾 / 汇报轮）都没有 QQ 任务归属，提示必须由这条
+   * 通道送达。投递是附加信息，失败只记日志，绝不影响产生它的回合。
+   */
+  private forwardTakeoverCue(text: string): void {
+    if (this.disposed) return;
+    if (this.qqInjectedTaskId !== null) return;
+    const service = this.qq?.service;
+    if (!service || typeof service.notifyBoundUser !== "function") return;
+    void service.notifyBoundUser(text).catch((error: unknown) => {
+      this.log.warn(`远程接管提示投递失败：${errorMessage(error)}`);
+    });
   }
 
   /** A REAL user turn (typed prompt or regenerate) finished. */

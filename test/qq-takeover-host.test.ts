@@ -86,6 +86,10 @@ type Internals = {
   qqTakeoverSessionId: string | null;
   qqTakeoverToastId: number | null;
   qqRemoteDetachedSessions: Set<string>;
+  /** 当前跑在主会话上的 QQ 注入任务 id（接管态完成提示据此跳过重复投递）。 */
+  qqInjectedTaskId: string | null;
+  /** 完成提示的统一出口（本文件用它验证「接管态改投 QQ」）。 */
+  announceCue: (event: string, text: string, kind: "done" | "child") => void;
   // 完成提示 / QQ 转发两条路径（本文件新增用例要同时接通）。
   superAgent: unknown;
   ensureClient: () => Promise<unknown>;
@@ -112,6 +116,7 @@ type Internals = {
         text: string;
         stopReason?: string;
       }) => Promise<void>;
+      notifyBoundUser?: (text: string) => Promise<boolean>;
     };
   };
 };
@@ -345,5 +350,105 @@ describe("ChatPanel 远程接续开关", () => {
     // 本机完成提示静音（真实经过 announceCue 出口）。
     expect(notify).not.toHaveBeenCalled();
     expect(sound).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 回归（2026-11-20 用户实测）：「任务进行中才开启远程接续，此后 QQ 上一条
+   * 通知都收不到」。
+   *
+   * 根因：接管态下 announceCue 直接 return，本机静音了，但「QQ 转发」只覆盖
+   * QQ 任务自己的回执 —— 本地发起的任务没有任务归属，提示就此彻底消失。
+   * 现在同一条完成提示改投绑定者私聊，本机仍然不发 toast / 不响铃。
+   */
+  it("接管态：一轮进行中开启接续后，回合收尾提示改投 QQ（本机静音）", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      autoMemoryCapture: false,
+      nextStepSuggestions: false,
+    });
+    const notifyBoundUser = vi.fn(async () => true);
+    p.qq = { service: { notifyBoundUser } };
+    p.superAgent = { list: () => [] };
+    p.ensureClient = async () => ({});
+    const pending: Array<(v: { stopReason: string }) => void> = [];
+    p.promptWithRetry = vi.fn(
+      (_c: unknown, _s: string, _prompt: unknown) =>
+        new Promise<{ stopReason: string }>((resolve) => pending.push(resolve)),
+    ) as unknown as Internals["promptWithRetry"];
+    p.persistActiveTranscript = async () => {};
+    p.touchActiveSession = async () => {};
+    p.store.sessionStarted({ sessionId: "s1" });
+    p.store.replaceState({ ...p.store.getState(), status: "idle" });
+
+    const notify = vi.spyOn(p, "notifyOsDecision");
+    const sound = vi.spyOn(p, "postSound");
+
+    // 一轮进行中：此时还没有任何 QQ 任务 / 投递通道。
+    const started = p.sendPrompt("把剩下的活干完");
+    for (let i = 0; i < 100 && pending.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect(pending).toHaveLength(1);
+
+    // 中途开启远程接续。
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+
+    // 回合收尾 → 产生一条完成提示。
+    pending[0]!({ stopReason: "end_turn" });
+    await started;
+
+    // 提示从那一刻起改走 QQ。
+    expect(notifyBoundUser).toHaveBeenCalledTimes(1);
+    expect(notifyBoundUser).toHaveBeenCalledWith("iFlow 已完成本轮回复");
+    // 本机仍静音（不弹 OS 通知、不响铃）。
+    expect(notify).not.toHaveBeenCalled();
+    expect(sound).not.toHaveBeenCalled();
+  });
+
+  it("未开启接续：完成提示仍走本机，不投 QQ（反向用例）", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      autoMemoryCapture: false,
+      nextStepSuggestions: false,
+    });
+    const notifyBoundUser = vi.fn(async () => true);
+    p.qq = { service: { notifyBoundUser } };
+    p.superAgent = { list: () => [] };
+    p.ensureClient = async () => ({});
+    const pending: Array<(v: { stopReason: string }) => void> = [];
+    p.promptWithRetry = vi.fn(
+      (_c: unknown, _s: string, _prompt: unknown) =>
+        new Promise<{ stopReason: string }>((resolve) => pending.push(resolve)),
+    ) as unknown as Internals["promptWithRetry"];
+    p.persistActiveTranscript = async () => {};
+    p.touchActiveSession = async () => {};
+    p.store.sessionStarted({ sessionId: "s1" });
+    p.store.replaceState({ ...p.store.getState(), status: "idle" });
+
+    const notify = vi.spyOn(p, "notifyOsDecision");
+
+    const started = p.sendPrompt("把剩下的活干完");
+    for (let i = 0; i < 100 && pending.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    pending[0]!({ stopReason: "end_turn" });
+    await started;
+
+    // 开关关着：本机照常走 OS 通知闸门，绝不往 QQ 发。
+    expect(notify).toHaveBeenCalledWith("turnDone", "iFlow 已完成本轮回复");
+    expect(notifyBoundUser).not.toHaveBeenCalled();
+  });
+
+  it("接管态：QQ 注入回合自身不额外投递完成提示（任务通道已有回执）", () => {
+    const notifyBoundUser = vi.fn(async () => true);
+    p.qq = { service: { notifyBoundUser } };
+    p.qqTakeoverActive = true;
+    p.qqInjectedTaskId = "task-qq";
+
+    p.announceCue("turnDone", "iFlow 已完成本轮回复", "done");
+
+    expect(notifyBoundUser).not.toHaveBeenCalled();
   });
 });
