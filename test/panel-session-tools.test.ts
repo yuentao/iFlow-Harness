@@ -481,6 +481,9 @@ describe("主会话 session settings · 剔除 task 与读写执行工具", () =
  */
 describe("主会话 session settings · 静态守卫（每个创建点都必须带门控）", () => {
   const panelSource = fs.readFileSync(path.join(here, "..", "src", "panel", "panel.ts"), "utf8");
+  // 阶段 4：恢复探针 / session/load 两个创建点下沉到 SessionRestoreService，
+  // 守卫必须跟着覆盖新模块，不能因为文件换了就漏守。
+  const sessionRestoreSource = fs.readFileSync(path.join(here, "..", "src", "panel", "session-restore.ts"), "utf8");
 
   /** 从 `(` 开始按括号配对取到调用实参的原始文本（跳过字符串与行注释）。 */
   function argumentSlice(source: string, openParenIndex: number): string {
@@ -527,15 +530,18 @@ describe("主会话 session settings · 静态守卫（每个创建点都必须�
     return calls;
   }
 
-  it("panel.ts 里每个 client.newSession/loadSession 都带 settings: mainSessionSettings()", () => {
-    const calls = sessionCalls(panelSource);
-    // 扫描器自检：现有六个创建点（新建、恢复探针、恢复加载、Profile 热切换、
-    // 删除消息截断重载、回滚重载），少于此数说明正则/文件路径出了问题，
-    // 不能让「零命中」伪装成通过。
+  it("每个 client.newSession/loadSession 都带主会话 settings 门控（panel + session-restore）", () => {
+    // 六个创建点：新建、恢复探针、恢复加载、Profile 热切换、删除消息截断重载、
+    // 回滚重载；前三者的一部分现居 session-restore.ts。少于此数说明正则或
+    // 文件路径出了问题，不能让「零命中」伪装成通过。
+    const calls = [
+      ...sessionCalls(panelSource).map((c) => ({ ...c, file: "panel.ts" })),
+      ...sessionCalls(sessionRestoreSource).map((c) => ({ ...c, file: "session-restore.ts" })),
+    ];
     expect(calls.length).toBeGreaterThanOrEqual(6);
     const offenders = calls
-      .filter((call) => !/settings\s*:\s*mainSessionSettings\(\s*\)/.test(call.args))
-      .map((call) => `${call.callee} at panel.ts:${call.line}`);
+      .filter((call) => !/settings\s*:\s*(?:mainSessionSettings|this\.deps\.getMainSessionSettings)\(\s*\)/.test(call.args))
+      .map((call) => `${call.callee} at ${call.file}:${call.line}`);
     expect(offenders).toEqual([]);
   });
 
