@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { readFile, readdir, writeFile, mkdir, rm, rename, stat } from "node:fs/promises";
+import { readFile, writeFile, rm, rename } from "node:fs/promises";
 import { AcpClient, type AcpClientCallbacks } from "../acp/client.js";
 import {
   errorMessage,
@@ -66,19 +66,12 @@ import {
   removeQueued as removeQueuedUi,
   shiftQueued as shiftQueuedUi,
 } from "../../shared/queue.js";
-import {
-  checkpointLabelFromText,
-  parseCheckpointIndex,
-  planCheckpointRetention,
-  pruneCheckpointsForBlocks,
-  reanchorCheckpoints,
-  serializeCheckpointIndex,
-  upsertCheckpoint,
-} from "../../shared/checkpoints.js";
-import { CheckpointManager } from "./checkpoints.js";
+import { checkpointLabelFromText } from "../../shared/checkpoints.js";
 import { ToolDiffService } from "./tool-diff-service.js";
 import { StatusPresenter } from "./status-presenter.js";
 import { SessionPersistenceService, type PersistedTranscript } from "./session-persistence.js";
+import { CheckpointService } from "./checkpoint-service.js";
+import { SessionRestoreService, type RestoreOutcome } from "./session-restore.js";
 import { SuperAgentManager, type SuperResidueCount } from "./super-agent.js";
 import {
   buildSuperActionReceiptPrompt,
@@ -119,13 +112,8 @@ import {
   awaitSuperSessionArchiveWrite,
   deleteSuperSessionArchive,
   deleteSuperTranscriptSnapshot,
-  listSuperSessionArchiveFiles,
-  listSuperTranscriptFiles,
   readSuperSessionArchive,
   readSuperTranscriptSnapshot,
-  superSessionFileName,
-  superSessionsDir,
-  superTranscriptFileName,
   writeSuperSessionArchive,
 } from "./super-store.js";
 import {
@@ -143,11 +131,9 @@ import {
 import type { ParsedEditArgs, PreEditSnapshot, UsageContext } from "../../shared/session-state.js";
 import {
   canStopSubAgent,
-  beginReplay,
   clampSessionLabel,
   estimateMcpContextTokens,
   dropSessionUpdate,
-  endReplay,
   extractRerunnableCommand,
   findCliHistoryCut,
   findToolBlockById,
@@ -155,7 +141,6 @@ import {
   isSubAgentToolCall,
   newSessionState,
   parseEditArgs,
-  reassignBlockIds,
   renameSessionSummary,
   SESSION_LABEL_MAX,
   setQqTasks,
@@ -319,7 +304,6 @@ const DISCARDED_SESSION_IDS_CAP = 8;
  * 新会话 request that interrupted the restore can word its notice truthfully
  * ("已取消…" vs "恢复完成后将自动新建会话").
  */
-type RestoreOutcome = "aborted" | "completed" | "failed";
 /**
  * 结构化 super-agent 工具调用（`super-agent` / `super-agent-actions`）的
  * 宿主侧处理结果，按 toolCallId 记账：
@@ -332,16 +316,6 @@ type RestoreOutcome = "aborted" | "completed" | "failed";
  * 因为「帧里没带 args」而静默跳过，completed 帧必须能把这件事查出来并回话。
  */
 type SuperToolCallOutcome = "dispatched" | "actions" | "rejected" | "dropped";
-/** Cap for abandonedRestoreSessionIds (one entry per abandoned restore). */
-const ABANDONED_RESTORE_IDS_CAP = 8;
-/** A promise whose resolver is captured for later (settle handles). */
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
-    resolve = res;
-  });
-  return { promise, resolve };
-}
 /** Hard cap on how long the @iflow participant waits for a prompt to finish
  * (P3). The wait loop ends on idle/error/cancel; this timeout is the last
  * resort if none of those ever fire. */
@@ -1877,21 +1851,18 @@ export class ChatPanel implements vscode.Disposable {
   private queueSendNowId: string | null = null;
 
   /**
-   * M3 P0-1: shadow-git snapshotter (one shadow repo per session under
-   * `storageUri/checkpoints/`). Lazily consulted per turn; disabled per
-   * session when git is missing / init failed / the workspace is too big.
+   * M3 P0-1: shadow-git snapshotter (阶段 4 下沉到 CheckpointService).
+   * All checkpoint state (manager / warning gates / index chain / pending
+   * re-anchor index) now lives in that service; the panel keeps a single
+   * instance and same-named thin delegates for unchanged call sites.
    */
-  private readonly checkpoints = new CheckpointManager({
-    log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m) },
-  });
-  /** Sessions whose disable-reason toast was already shown (avoid repeats). */
-  private readonly checkpointWarnedSessions = new Set<string>();
-  /** Sessions whose large-file skip toast was already shown (avoid repeats). */
-  private readonly checkpointSkippedWarnedSessions = new Set<string>();
-  /** Persist chain for checkpoint index files (same discipline as transcripts). */
-  private checkpointPersistChain: Promise<void> = Promise.resolve();
-  /** Index loaded before a restore's id re-mint; consumed by finalizeCheckpointIndex. */
-  private pendingCheckpointIndex: { sessionId: string; checkpoints: CheckpointUi[] } | null = null;
+  private readonly checkpointService: CheckpointService;
+  /**
+   * Session restore + session-list GC (阶段 4 下沉到 SessionRestoreService).
+   * Uses stage 3's SessionPersistenceService via injection, never a second
+   * instance; all shared panel state is read/written through callbacks.
+   */
+  private readonly sessionRestoreService: SessionRestoreService;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -1990,6 +1961,90 @@ export class ChatPanel implements vscode.Disposable {
       sessionsKey: SESSIONS_KEY,
       activeSessionKey: ACTIVE_SESSION_KEY,
       maxRecentSessions: MAX_RECENT_SESSIONS,
+    });
+    // 阶段 4: checkpoint + restore 服务。所有 path base 与共享状态都在调用时
+    // 通过箭头回调读取（陷阱 #8：sessionCwd，不是 process.cwd()），绝不把
+    // 构造时刻的快照传进去；SessionPersistenceService 直接复用上面注入的实例。
+    this.checkpointService = new CheckpointService({
+      log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m) },
+      getState: () => this.store.getState(),
+      setCheckpoints: (checkpoints) => this.store.setCheckpoints(checkpoints),
+      sendToast: (level, message, opts) => { this.store.sendToast(level, message, opts); },
+      appendNotice: (text) => this.store.appendNotice(text),
+      isDisposed: () => this.disposed,
+      isHistorySyncBusy: () => this.historySyncBusy,
+      getSessionCwd: () => this.sessionCwd,
+      getWorkspaceRoot: () => this.services.workspaceRoot ?? null,
+      getExtensionPath: () => this.context.extensionUri.fsPath,
+      getStorageDir: () => (this.context.storageUri ?? this.context.globalStorageUri).fsPath,
+      deleteUserMessage: (id, reason) => this.deleteUserMessage(id, reason),
+    });
+    this.sessionRestoreService = new SessionRestoreService({
+      log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m), error: (m) => this.log.error(m) },
+      isHistorySyncBusy: () => this.historySyncBusy,
+      isDroppingForReset: () => this.droppingForReset,
+      isDisposed: () => this.disposed,
+      getSessionCwd: () => this.sessionCwd,
+      setSessionCwd: (cwd) => { this.sessionCwd = cwd; },
+      getWorkspaceRoot: () => this.services.workspaceRoot ?? null,
+      getExtensionPath: () => this.context.extensionUri.fsPath,
+      isRestoring: () => this.restoring,
+      setRestoring: (value) => { this.restoring = value; },
+      getRestoringSessionId: () => this.restoringSessionId,
+      setRestoringSessionId: (id) => { this.restoringSessionId = id; },
+      getReplayTitle: () => this.replayTitle,
+      setReplayTitle: (value) => { this.replayTitle = value; },
+      isRestoreAbort: () => this.restoreAbort,
+      setRestoreAbort: (value) => { this.restoreAbort = value; },
+      isPendingNewSession: () => this.pendingNewSession,
+      setPendingNewSession: (value) => { this.pendingNewSession = value; },
+      getLastRestoreOutcome: () => this.lastRestoreOutcome,
+      setLastRestoreOutcome: (value) => { this.lastRestoreOutcome = value; },
+      getRestoreSettle: () => this.restoreSettle,
+      setRestoreSettle: (value) => { this.restoreSettle = value; },
+      getAbandonedRestoreIds: () => this.abandonedRestoreSessionIds,
+      getContextReportBaseline: () => this.contextReportBaseline,
+      setContextReportBaseline: (value) => { this.contextReportBaseline = value; },
+      getPendingSwitchModel: () => this.pendingSwitchModel,
+      setPendingSwitchModel: (value) => { this.pendingSwitchModel = value; },
+      getWorkspaceActiveSessionId: () => this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null),
+      getState: () => this.store.getState(),
+      replaceState: (state) => this.store.replaceState(state),
+      setInitializing: (value) => this.store.setInitializing(value),
+      replaceTranscript: (blocks) => this.store.replaceTranscript(blocks),
+      sessionStarted: (meta) => this.store.sessionStarted(meta),
+      markError: (message) => this.store.markError(message),
+      sendToast: (level, message) => { this.store.sendToast(level, message); },
+      setSessions: (sessions, activeId) => this.store.setSessions(sessions, activeId),
+      persistence: this.persistence,
+      migrateLegacyTranscripts: () => this.migrateLegacyTranscripts(),
+      readPersistedSessions: () => this.readPersistedSessions(),
+      persistSessions: (sessions, activeId) => this.persistSessions(sessions, activeId),
+      listOwnTranscriptFileNames: () => this.listOwnTranscriptFileNames(),
+      loadCheckpointIndex: (id) => this.loadCheckpointIndex(id),
+      finalizeCheckpointIndex: (remap) => this.finalizeCheckpointIndex(remap),
+      checkpointRoot: () => this.checkpointRoot(),
+      clearQqTakeover: () => this.clearQqTakeover(),
+      clearQqRemoteDetachedSessions: () => this.clearQqRemoteDetachedSessions(),
+      hasPersistedTranscript: (id) => this.hasPersistedTranscript(id),
+      forgetSession: (id) => this.forgetSession(id),
+      ensureClient: () => this.ensureClient(),
+      queryLiveModels: () => this.queryLiveModels(),
+      publishSuperSessions: () => this.publishSuperSessions(),
+      resetSuperDirectiveScans: () => this.resetSuperDirectiveScans(),
+      getMainSessionSettings: () => mainSessionSettings(),
+      loadPersistedTranscript: (id) => this.loadPersistedTranscript(id),
+      workspaceModelId: () => this.workspaceModelId(),
+      applyLiveModels: (models, client, id, cliModelId) => this.applyLiveModels(models, client, id, cliModelId),
+      validateModelForPush: (models, id, fallback) => this.validateModelForPush(models, id, fallback),
+      setModel: (id) => this.setModel(id),
+      applyThinkLevel: (client, id, level) => this.applyThinkLevel(client, id, level),
+      cleanupEmptySession: (id) => this.cleanupEmptySession(id),
+      recordSession: (id, label) => this.recordSession(id, label),
+      persistActiveTranscript: (force) => { void this.persistActiveTranscript(force); },
+      restoreSuperSessions: (id) => this.restoreSuperSessions(id),
+      postSound: (kind) => this.postSound(kind),
+      superStoreDir: () => this.superStoreDir(),
     });
     this.statusPresenter = new StatusPresenter();
     this.statusBar = this.statusPresenter.statusBar;
@@ -7024,331 +7079,13 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Restore a persisted session via `session/load`. Wire behavior (CLI
-   * 0.5.19): load succeeds (sessionId + modes returned) but the CLI does NOT
-   * replay history through `session/update` — the transcript is rebuilt from
-   * the CLI's own session file instead.
+   * Restore a persisted session via `session/load` (阶段 4 thin delegate).
+   * The replay / transcript rebuild / abort state machine now lives in
+   * SessionRestoreService; the panel keeps the signature for the webview
+   * switch, `extension.ts` and the restore-abort tests.
    */
   private async restoreSession(sessionId: string): Promise<boolean> {
-    if (this.historySyncBusy) return false;
-    // A3: the panel was disposed — the store is gone.
-    if (this.disposed) return false;
-    // 远程接续绑定在旧会话上：切走即失效。
-    this.clearQqTakeover();
-    this.clearQqRemoteDetachedSessions();
-    // Fast path: the CLI only persists jsonl transcripts for sessions that
-    // actually had a conversation. A "dead" session (auto-created on panel
-    // open, never used) would burn 60s+ on new+load for nothing.
-    this.sessionCwd =
-      this.services.workspaceRoot ??
-      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
-      this.context.extensionUri.fsPath;
-    if (!this.hasPersistedTranscript(sessionId)) {
-      // Dead switcher entry (recorded but never used): clicking it would
-      // fail on every attempt and the husk would sit in the list forever —
-      // forget it instead. Clicking the LIVE active session (no transcript
-      // until its first prompt lands) stays a plain no-op.
-      const liveId = this.store.getState().activeSessionId ?? this.store.getState().sessionId;
-      if (sessionId !== liveId) {
-        this.log.warn(`forget dead entry: no persisted transcript for ${sessionId}`);
-        await this.forgetSession(sessionId);
-      } else {
-        this.log.warn(`skip restore: no persisted transcript for ${sessionId}`);
-      }
-      return false;
-    }
-
-    const client = await this.ensureClient();
-    // A3: a dispose during the handshake rejects ensureClient with
-    // DisposedError; a dispose AFTER it must not write into the destroyed
-    // store either.
-    if (this.disposed) return false;
-    const workspaceRoot = this.sessionCwd;
-    const init = client.getInitializeResult();
-    if (init && !init.agentCapabilities.loadSession) {
-      this.log.warn("loadSession capability not declared by CLI");
-      void vscode.window.showWarningMessage(
-        vscode.l10n.t("当前内核不支持恢复历史会话"),
-      );
-      return false;
-    }
-
-    // Mutual exclusion: a 新会话 is in flight (initializing) — its
-    // session/new can take 30-60s with MCP servers, and running a restore
-    // CONCURRENTLY let the replayed updates repopulate the transcript the
-    // reset just cleared (user-reported: old content + "正在创建新会话…" +
-    // empty-state all on screen). Refuse until the reset settles; the user
-    // can retry the restore once the switcher unlocks.
-    if (this.store.getState().initializing || this.droppingForReset) {
-      this.log.warn(`restore ${sessionId} refused: a new-session switch is in flight`);
-      void vscode.window.showWarningMessage(
-        vscode.l10n.t("正在创建新会话，请稍后再恢复历史会话"),
-      );
-      return false;
-    }
-    if (this.restoring) return false; // a restore is already in flight
-
-    // Race the /models HTTP query with the probe + loadSession below (it only
-    // reads the endpoint from settings.json — independent of the session).
-    const modelsPromise = this.queryLiveModels();
-    // An abandoned restore never calls applyLiveModels — keep the rejection
-    // handled so the query cannot become an unhandled rejection.
-    modelsPromise.catch(() => {});
-    // Capture before the state swap: if the switch succeeds, an abandoned
-    // empty active session must not linger in the switcher.
-    const outgoingId = this.store.getState().activeSessionId ?? this.store.getState().sessionId;
-    const tRestore = Date.now();
-    this.log.info(`restoring session ${sessionId} …`);
-    this.restoring = true;
-    this.restoringSessionId = sessionId;
-    this.replayTitle = null;
-    this.sessionCwd = workspaceRoot;
-    // A fresh attempt: neither an abort request nor a queued 新会话 intent
-    // may survive from an earlier restore.
-    this.restoreAbort = false;
-    this.pendingNewSession = false;
-    this.lastRestoreOutcome = "completed";
-    // Settle handle — a 新会话 requested while the restore runs waits on it
-    // and may ask the restore to abort through `restoreAbort`.
-    const settle = deferred<RestoreOutcome>();
-    this.restoreSettle = settle;
-    // This session is being restored FOR REAL: drop the abandoned marker a
-    // previous aborted attempt may have left, otherwise its replayed updates
-    // would be swallowed by the late-traffic guard.
-    this.abandonedRestoreSessionIds.delete(sessionId);
-    const fresh = newSessionState(this.store.getState());
-    beginReplay(fresh);
-    fresh.activeSessionId = sessionId;
-    this.store.replaceState(fresh);
-    // 看板跟着主会话走：切到 B 就不能还显示着 A 的历史子会话。
-    this.publishSuperSessions();
-    // 委派扫描状态也换人：上一个会话的助手文本（以及里面没收口的围栏）、
-    // 已派发载荷的账本都跟新会话无关 —— 留着会让新会话的扫描基线落在别人的
-    // 文本上，还会把本该重新派发的指令误判成重复。
-    this.resetSuperDirectiveScans();
-    try {
-      // CLI 0.5.19 wire behavior: an empty/short session's loadSession response
-      // carries ONLY {sessionId} — no modes, no _meta. A prior session/new does
-      // return the full meta, so fetch it first (also warms up the CLI).
-      // R4: the probe session itself is deliberately discarded — only its
-      // meta/modes are used. The CLI owns that session's lifecycle (ACP-mode
-      // sessions are not persisted and die with the CLI process); this is not
-      // a leak.
-      //
-      // Concurrency (probed 2026-11-12 against the vendored CLI,
-      // test/fixtures/probe-restore-concurrency.mjs): running the probe
-      // `session/new` and the `session/load` CONCURRENTLY on one client is
-      // SAFE (both resolve, the loaded session keeps its id, a later load
-      // still works, the loaded session still answers a prompt — no
-      // crosstalk), but it is NOT meaningfully faster: serial 1541ms/1750ms
-      // vs concurrent 1489ms/1574ms — the CLI does the heavy work serially
-      // internally, only ~50ms of the ~1.5s overlap. The serial order stays:
-      // no measurable win, and the probe's meta/modes ordering stays obvious.
-      this.contextReportBaseline = Date.now();
-      const tProbe = Date.now();
-      const probe = await client.newSession({
-        cwd: workspaceRoot,
-        mcpServers: [],
-        settings: mainSessionSettings(),
-      });
-      this.log.info(`restore: probe session/new ok in ${Date.now() - tProbe}ms`);
-      // Abort checkpoint 1 — nothing has been written to the store yet.
-      if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
-      const probeMeta: NewSessionMeta | undefined = probe._meta;
-      const tLoad = Date.now();
-      const session = await client.loadSession({
-        cwd: workspaceRoot,
-        mcpServers: [],
-        sessionId,
-        settings: mainSessionSettings(),
-      });
-      this.log.info(`restore: session/load ok in ${Date.now() - tLoad}ms`);
-      // Abort checkpoint 2 — still nothing written to the store.
-      if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
-      const meta: NewSessionMeta | undefined = probeMeta ?? session._meta;
-      const modes = session.modes ?? probe.modes;
-      endReplay(this.store.getState());
-
-      // Rebuild the transcript from the CLI's session file (NDJSON).
-      const loadedId = session.sessionId;
-      const tTranscript = Date.now();
-      const restored = await this.loadPersistedTranscript(loadedId);
-      this.log.info(`restore: transcript loaded in ${Date.now() - tTranscript}ms (${restored.blocks.length} blocks)`);
-      // Abort checkpoint 3 — the transcript is rebuilt but not yet written.
-      if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
-      if (restored.blocks.length === 0) {
-        restored.blocks.push({
-          kind: "text",
-          text: vscode.l10n.t("已恢复会话。内核没有保存这条会话的历史记录，所以这里看不到之前的消息，但可以继续对话。"),
-        });
-      }
-      // Structural isolation (user directive): a restored transcript carries
-      // ids minted by PREVIOUS host lifetimes this process can never know —
-      // entering the live array with them collided with fresh minting (404
-      // duplicate ids measured). Re-mint every id from THIS host's counter so
-      // a restored session shares NOTHING with the live namespace; the
-      // original ids stay untouched in the persisted file (lossless).
-      // backfillBlockIds (inside loadPersistedTranscript) already seeded the
-      // counter past the originals, so the re-mints are collision-free.
-      // M3 P0-1 phase 1: the persisted checkpoint index anchors to the
-      // ORIGINAL ids (the transcript file is lossless), so read it + reopen
-      // the shadow repo BEFORE the re-mint happens.
-      const tCheckpoint = Date.now();
-      await this.loadCheckpointIndex(loadedId);
-      this.log.info(`restore: checkpoint index loaded in ${Date.now() - tCheckpoint}ms`);
-      // Abort checkpoint 4 — the LAST await before the first store write
-      // (sessionStarted / replaceTranscript). Beyond this point the restore
-      // has already committed to the store and can no longer be abandoned;
-      // a 新会话 request waits for it to settle instead.
-      if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
-      const preRemintUserIds = restored.blocks
-        .filter((b) => b.kind === "user" && b.id)
-        .map((b) => b.id as string);
-      reassignBlockIds(restored.blocks);
-      this.store.replaceTranscript(restored.blocks);
-      // M3 P0-1 phase 2: the re-mint changed every user id in place (same
-      // order, same array) — re-anchor the loaded index to the live ids.
-      const postRemintUserIds = restored.blocks
-        .filter((b) => b.kind === "user" && b.id)
-        .map((b) => b.id as string);
-      if (preRemintUserIds.length === postRemintUserIds.length) {
-        const remap = new Map<string, string>();
-        for (let i = 0; i < preRemintUserIds.length; i++) {
-          const from = preRemintUserIds[i];
-          const to = postRemintUserIds[i];
-          if (from && to) remap.set(from, to);
-        }
-        this.finalizeCheckpointIndex(remap);
-      }
-
-      // Model list: same live-endpoint-only source as a fresh session,
-      // otherwise the model dropdown would vanish after a restore. Fetched
-      // concurrently with probe/loadSession above and late-pushed via
-      // applyLiveModels AFTER sessionStarted — a slow endpoint must not stall
-      // the already-rebuilt transcript (it paints above before models land).
-      // After a profile switch the default model is the one written in the
-      // NEW profile (its configured modelName), not the previous endpoint's
-      // stale current model (user directive).
-      const switchModel = this.pendingSwitchModel;
-      this.pendingSwitchModel = null;
-      const currentModelId =
-        switchModel ??
-        this.store.getState().currentModelId ??
-        this.workspaceModelId() ??
-        meta?.models?.currentModelId ??
-        null;
-
-      this.store.sessionStarted({
-        sessionId: loadedId,
-        modes,
-        commands: meta?.availableCommands ?? [],
-        skills: meta?.availableSkills ?? [],
-        currentModelId,
-      });
-      this.applyLiveModels(modelsPromise, client, loadedId, meta?.models?.currentModelId ?? null);
-      // Same wire behavior as startNewSession (probed against CLI 0.5.19
-      // bundle): session/new reports the CLI's BOOT-time model because
-      // set_model never writes back to Config.model, while the shared
-      // contentGeneratorConfig still carries the last dropdown switch.
-      // Re-push whenever the panel's selection differs — after validating
-      // the selection is still offered by the live endpoint.
-      const restoreCliModelId = meta?.models?.currentModelId ?? null;
-      const tModel = Date.now();
-      if (currentModelId && currentModelId !== restoreCliModelId) {
-        const pushId = await this.validateModelForPush(modelsPromise, currentModelId, restoreCliModelId);
-        if (pushId) await this.setModel(pushId);
-      }
-      await this.applyThinkLevel(client, loadedId, this.store.getState().thinkLevel);
-      this.log.info(`restore: model push done in ${Date.now() - tModel}ms`);
-      this.log.info(
-        `session restored: ${loadedId} (${restored.blocks.length} blocks) in ${Date.now() - tRestore}ms total`,
-      );
-      await this.cleanupEmptySession(outgoingId);
-      await this.recordSession(loadedId, restored.firstUserText ? clampSessionLabel(restored.firstUserText) : null);
-      void this.persistActiveTranscript(true); // seed the extension-owned copy
-      // 该主会话当年派发的子会话（重启后进程已亡，但分支与工作目录还在）：
-      // 把它们取回看板，用户才知道有哪些分支等着合并或清理。
-      //
-      // 单独兜错：看板是**附加信息**，它坏了不能把「会话已恢复」判成失败 ——
-      // 那会连带丢掉刚重建好的转录并让用户以为恢复失败。失败可见（toast +
-      // 日志）但不阻断（新建会话、继续对话都照常）。
-      await this.restoreSuperSessions(loadedId).catch((error: unknown) => {
-        this.log.warn(`super agent: 恢复超流体记录失败（不影响会话恢复）：${errorMessage(error)}`);
-        this.store.sendToast(
-          "warning",
-          vscode.l10n.t("超流体记录恢复失败（不影响会话）：{0}", errorMessage(error)),
-        );
-      });
-      void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
-      return true;
-    } catch (error) {
-      const message = errorMessage(error);
-      endReplay(this.store.getState());
-      this.log.error(`session restore failed: ${message} (after ${Date.now() - tRestore}ms)`);
-      this.store.markError(vscode.l10n.t("会话恢复失败：{0}", message));
-      // Async failure — the user is likely in the editor; cue it.
-      this.postSound("error");
-      // Do NOT forget the session here: the transcript file still exists and
-      // the failure is often transient (CLI boot hiccup, endpoint down, auth
-      // not ready). Forgetting would drop it from the switcher, and the next
-      // pruneUnrestorableSessions would delete the orphaned transcript file —
-      // turning a retryable failure into irreversible content loss. The user
-      // can still remove it explicitly via the switcher's delete.
-      this.lastRestoreOutcome = "failed";
-      return false;
-    } finally {
-      this.restoring = false;
-      this.restoringSessionId = null;
-      this.replayTitle = null;
-      // Release everyone waiting on this restore (a 新会话 request that
-      // interrupted it) with the truthful outcome.
-      const settleHandle = this.restoreSettle;
-      this.restoreSettle = null;
-      settleHandle?.resolve(this.lastRestoreOutcome);
-    }
-  }
-
-  /**
-   * Abort checkpoint of an in-flight restore.
-   *
-   * True → the restore was abandoned: the user asked for a 新会话 while the
-   * history was still being restored. Every store write of a restore happens
-   * AFTER the last checkpoint, so abandoning here leaves the store untouched:
-   * no sessionStarted, no replaceTranscript, no applyLiveModels, no
-   * restoreSuperSessions, no "已恢复会话" toast. The state is reset to a
-   * clean idle (the replay marker must not survive) and the abandoned
-   * session id is remembered so its late traffic cannot leak into the fresh
-   * session.
-   *
-   * False → no abort was requested: the restore continues.
-   */
-  private abortRestoreIfRequested(sessionId: string, outgoingId: string | null): boolean {
-    if (!this.restoreAbort) return false;
-    // Both flags are set together by the 新会话 flow: the abort REQUEST and
-    // the queued INTENT. The restore only gives up when the intent is really
-    // there — otherwise the request was stale.
-    if (!this.pendingNewSession) return false;
-    this.restoreAbort = false;
-    this.lastRestoreOutcome = "aborted";
-    // The replayed history of the abandoned session must never reach the
-    // store again — even the tail that arrives after the abort.
-    this.abandonedRestoreSessionIds.add(sessionId);
-    while (this.abandonedRestoreSessionIds.size > ABANDONED_RESTORE_IDS_CAP) {
-      const oldest = this.abandonedRestoreSessionIds.values().next().value;
-      if (oldest === undefined) break;
-      this.abandonedRestoreSessionIds.delete(oldest);
-    }
-    // Clean idle: the replay marker (status "streaming" + replaying) must not
-    // survive the abandoned restore, and the switcher must point back at the
-    // session we came from (the 新会话 flow cleans THAT one up).
-    const state = this.store.getState();
-    endReplay(state);
-    state.sessionId = null;
-    state.activeSessionId = outgoingId;
-    this.store.setInitializing(false);
-    this.store.replaceState(state);
-    this.log.warn(`session restore of ${sessionId} abandoned: the user asked for a 新会话`);
-    return true;
+    return this.sessionRestoreService.restoreSession(sessionId);
   }
 
   /**
@@ -12891,26 +12628,14 @@ export class ChatPanel implements vscode.Disposable {
   // --- Turn-level checkpoints (M3 P0-1) ------------------------------------------
 
   /**
-   * Root of the shadow-git stores: `storageUri/checkpoints/<sessionId>/git`,
-   * or `<iflow.checkpointDir>/<workspace-hash>/<sessionId>/git` when the
-   * setting is set (move stores off workspaceStorage — e.g. huge GGUF-heavy
-   * workspaces filled C:). Read fresh per call so the setting applies to the
-   * next capture without a window reload.
+   * Root of the shadow-git stores (阶段 4 thin delegate). Read fresh per call
+   * by the service so `iflow.checkpointDir` applies without a window reload.
    */
   private checkpointRoot(): string {
-    const defaultRoot = path.join(
-      (this.context.storageUri ?? this.context.globalStorageUri).fsPath,
-      "checkpoints",
-    );
-    const custom = vscode.workspace.getConfiguration("iflow").get<string>("checkpointDir", "");
-    return CheckpointManager.resolveCheckpointRoot(custom, this.sessionCwd ?? null, defaultRoot);
+    return this.checkpointService.checkpointRoot();
   }
 
-  private checkpointIndexPath(sessionId: string): string {
-    return path.join(this.checkpointRoot(), CheckpointManager.safeSessionId(sessionId), "index.json");
-  }
-
-  private ownTranscriptFileName(sessionId: string): string {
+  ownTranscriptFileName(sessionId: string): string {
     return this.persistence.ownTranscriptFileName(sessionId);
   }
 
@@ -12949,109 +12674,22 @@ export class ChatPanel implements vscode.Disposable {
     return this.persistence.hasPersistedTranscript(sessionId);
   }
 
-  /**
-   * Drop persisted sessions the CLI has no transcript for (auto-created but
-   * never used). Returns the surviving list (already persisted). Orphaned
-   * transcript files (session forgotten/dead, file left behind) are deleted.
-   */
-  private async pruneUnrestorableSessions(): Promise<SessionSummaryUi[]> {
-    this.sessionCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
-    // Migrate BEFORE filtering: hasPersistedTranscript is file-based now, and
-    // unmigrated transcripts would otherwise look unrestorable.
-    await this.migrateLegacyTranscripts();
-    const before = this.readPersistedSessions();
-    // The CURRENTLY ACTIVE session must never be pruned: a panel-open
-    // auto-session has no transcript until its first prompt lands. Dropping
-    // it from the list here poisons the state — the user then chats into a
-    // session the switcher no longer contains, nothing ever re-adds it, and
-    // the orphan cleanup below deletes its transcript file on the next
-    // refresh (close / profile switch) = total content loss.
-    const liveActiveId = this.store.getState().activeSessionId;
-    const kept = before.filter((s) => this.hasPersistedTranscript(s.id) || s.id === liveActiveId);
-    if (kept.length !== before.length) {
-      this.log.info(`pruned ${before.length - kept.length} unrestorable session(s)`);
-    }
-    // P2: drop transcript files whose session is no longer in the list —
-    // the old workspaceState map could only grow; the per-session files get
-    // garbage-collected here instead. Filename-based comparison: the on-disk
-    // name is the sanitized id, so kept ids must go through the same mapping.
-    const keptFileNames = new Set(kept.map((s) => this.ownTranscriptFileName(s.id)));
-    for (const name of await this.listOwnTranscriptFileNames()) {
-      if (name.endsWith(".json") && !keptFileNames.has(name)) {
-        await rm(path.join(this.transcriptDir(), name), { force: true });
-      }
-    }
-    // Same garbage collection for the Super Agent child-session archives: an
-    // archive whose session left the list is pure residue — nothing would
-    // ever read it again, and leaving it behind resurrects the dead session's
-    // children (and their unmerged branches) on the next restore.
-    const keptArchiveNames = new Set(kept.map((s) => superSessionFileName(s.id)));
-    for (const name of await listSuperSessionArchiveFiles(this.superStoreDir())) {
-      // 归档本体（<name>.json）与损坏备份（<name>.json.corrupt）都要 GC。
-      // 备份名是归档名再加 .corrupt：剥掉后缀后按同一份 kept 集合比对——
-      // 正常归档（含仍归属的会话）一律不动，只有其会话已离开列表的残留
-      // 才回收，避免误删正在用的归档或把备份当独立会话。
-      const isBackup = name.endsWith(".corrupt");
-      const archiveName = isBackup ? name.slice(0, -".corrupt".length) : name;
-      if ((isBackup || archiveName.endsWith(".json")) && !keptArchiveNames.has(archiveName)) {
-        await rm(path.join(superSessionsDir(this.superStoreDir()), name), { force: true });
-      }
-    }
-    // 转录快照按 childId 放在 transcripts/ 子目录（新文件放子目录必须显式
-    // GC，否则永久残留）。转录按 childId 命名，无法直接与主会话列表比；先从
-    // 仍归属的归档里取出全部子会话 id，再回收不在其中的快照。归档读不出来
-    // 时按空处理（损坏归档已由 restoreSuperSessions 单独提示），绝不误删
-    // 仍归属会话的转录。
-    const keptChildIds = new Set<string>();
-    for (const session of kept) {
-      const archive = await readSuperSessionArchive(this.superStoreDir(), session.id);
-      for (const child of archive.sessions) keptChildIds.add(child.id);
-    }
-    const keptTranscriptNames = new Set([...keptChildIds].map((id) => superTranscriptFileName(id)));
-    const transcriptsDir = path.join(superSessionsDir(this.superStoreDir()), "transcripts");
-    for (const name of await listSuperTranscriptFiles(this.superStoreDir())) {
-      if (name.endsWith("-transcript.json") && !keptTranscriptNames.has(name)) {
-        await rm(path.join(transcriptsDir, name), { force: true });
-      }
-    }
-    // M3 P0-1: same garbage collection for shadow-repo dirs — a checkpoint
-    // store whose session left the list is pure residue (dirs are keyed by
-    // the same sanitized id as the transcript files, minus the extension).
-    const keptDirNames = new Set(kept.map((s) => CheckpointManager.safeSessionId(s.id)));
-    try {
-      for (const name of await readdir(this.checkpointRoot())) {
-        if (!keptDirNames.has(name)) {
-          await rm(path.join(this.checkpointRoot(), name), { recursive: true, force: true });
-        }
-      }
-    } catch {
-      // ENOENT: no session ever captured a checkpoint — nothing to prune.
-    }
-    const activeId = this.store.getState().activeSessionId
-      ?? (await this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null))
-      ?? kept[0]?.id
-      ?? null;
-    await this.persistSessions(kept, kept.some((s) => s.id === activeId) ? activeId : kept[0]?.id ?? null);
-    return kept;
+  /** Thin delegate (阶段 4): session-list pruning + orphan GC (transcript /
+   * super-archive / shadow-repo) now lives in SessionRestoreService. */
+  async pruneUnrestorableSessions(): Promise<SessionSummaryUi[]> {
+    return this.sessionRestoreService.pruneUnrestorableSessions();
   }
 
-  /**
-   * Background refresh of the recent-session switcher: prune unrestorable
-   * entries, then push the list WITHOUT touching activeSessionId (used after
-   * a fresh session start — the new session must stay active).
-   */
+  /** Thin delegate (阶段 4): session-list GC / switcher refresh now lives in SessionRestoreService. */
   private async refreshSessionList(): Promise<void> {
-    this.sessionCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
-    const kept = await this.pruneUnrestorableSessions();
-    const activeId = this.store.getState().activeSessionId;
-    this.store.setSessions(kept, activeId);
+    await this.sessionRestoreService.refreshSessionList();
   }
 
   /**
    * Transcript file names on disk under the extension's transcript store
    * (for orphan cleanup). Empty when the store directory doesn't exist yet.
    */
-  private async listOwnTranscriptFileNames(): Promise<string[]> {
+  async listOwnTranscriptFileNames(): Promise<string[]> {
     return this.persistence.listOwnTranscriptFileNames();
   }
 
@@ -13059,7 +12697,7 @@ export class ChatPanel implements vscode.Disposable {
    * P2 migration: thin delegate (阶段 3) — the legacy-key read, per-file
    * enqueue and key deletion now live in SessionPersistenceService.
    */
-  private async migrateLegacyTranscripts(): Promise<void> {
+  async migrateLegacyTranscripts(): Promise<void> {
     await this.persistence.migrateLegacyTranscripts();
   }
 
@@ -15266,329 +14904,43 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   // --- Turn-level checkpoints (M3 P0-1) ------------------------------------------
+  /** Thin delegates (阶段 4): checkpoint orchestration now lives in
+   * CheckpointService; signatures stay so message routing, sendPrompt /
+   * deleteUserMessage call sites and every test keep the same contract. */
 
-  private checkpointSettingEnabled(): boolean {
-    return vscode.workspace.getConfiguration("iflow").get<boolean>("checkpoints", true);
-  }
-
-  /** Work tree the shadow repo mirrors = the session cwd (pitfall #8). */
-  private checkpointCwd(): string {
-    return this.sessionCwd ?? this.services.workspaceRoot ??
-      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
-  }
-
-  /**
-   * Snapshot the workspace for the turn about to start. Awaited by sendPrompt
-   * BEFORE the CLI prompt is issued — a parallel capture would race the
-   * agent's own writes and bake them into the "before" snapshot. Returns the
-   * commit sha (null = partial: git missing / init failed / timed out / over
-   * the file cap); the reason is toasted once per session.
-   */
   private async captureWorkspaceSnapshot(sessionId: string, text: string): Promise<string | null> {
-    if (!this.checkpointSettingEnabled()) return null;
-    const cfg = vscode.workspace.getConfiguration("iflow");
-    this.checkpoints.setMaxFiles(cfg.get<number>("checkpointMaxFiles", 50_000));
-    const maxFileMB = cfg.get<number>("checkpointMaxFileMB", 300);
-    this.checkpoints.setMaxFileBytes(maxFileMB * 1024 * 1024);
-    const reason = await this.checkpoints.ensureReady(sessionId, this.checkpointRoot(), this.checkpointCwd());
-    if (reason) {
-      if (!this.checkpointWarnedSessions.has(sessionId)) {
-        this.checkpointWarnedSessions.add(sessionId);
-        this.store.sendToast("warning", vscode.l10n.t("本轮起工作区快照不可用（{0}），回滚将只处理对话。", reason));
-      }
-      return null;
-    }
-    const label = checkpointLabelFromText(text);
-    const sha = await this.checkpoints.captureTurn(sessionId, label || vscode.l10n.t("轮次快照"));
-    const skipped = this.checkpoints.skippedFiles(sessionId);
-    if (sha && skipped > 0 && !this.checkpointSkippedWarnedSessions.has(sessionId)) {
-      this.checkpointSkippedWarnedSessions.add(sessionId);
-      this.store.sendToast(
-        "warning",
-        vscode.l10n.t("本轮快照已跳过 {0} 个超过大小限制的文件；这些文件不会参与文件回滚。", skipped),
-      );
-    }
-    return sha;
+    return this.checkpointService.captureWorkspaceSnapshot(sessionId, text);
   }
 
-  /** Record one turn's checkpoint into the store projection + index file. */
   private recordCheckpoint(sessionId: string, entry: CheckpointUi): void {
-    if (this.disposed) return;
-    const state = this.store.getState();
-    // Session switched (or the panel moved on) while the capture was running.
-    if ((state.activeSessionId ?? state.sessionId) !== sessionId) return;
-    const next = upsertCheckpoint(state.checkpoints ?? [], entry);
-    this.store.setCheckpoints(next);
-    void this.persistCheckpointIndex(sessionId, next);
-    void this.enforceCheckpointRetention(sessionId);
+    this.checkpointService.recordCheckpoint(sessionId, entry);
   }
 
-  /**
-   * Post-capture retention (settings: checkpointMaxTurns / checkpointMaxSizeMB,
-   * 0 = off). Runs fire-and-forget after a turn's checkpoint is recorded —
-   * never blocks the prompt, failures only log (the next capture retries).
-   *
-   * Turn cap: prune the shadow repo to the newest N captures (rewritten
-   * chain + gc) and rewrite the live index with the new shas.
-   * Size cap: whole-session LRU eviction under the global byte budget —
-   * per-turn gc cannot shrink a single huge capture (one GGUF set IS one
-   * snapshot), only dropping stale sessions reclaims that. The active
-   * session is never evicted. Orphan stores (no index after an idle window,
-   * or an index without a single restorable sha — the partial-only /
-   * corrupt-repo residue) are reclaimed unconditionally.
-   */
-  private async enforceCheckpointRetention(sessionId: string): Promise<void> {
-    if (this.disposed) return;
-    const cfg = vscode.workspace.getConfiguration("iflow");
-    const maxTurns = cfg.get<number>("checkpointMaxTurns", 0);
-    const maxSizeMB = cfg.get<number>("checkpointMaxSizeMB", 0);
-    const state = this.store.getState();
-    const activeId = state.activeSessionId ?? state.sessionId;
-
-    if (maxTurns > 0 && activeId === sessionId) {
-      const list = state.checkpoints ?? [];
-      const { kept, dropped } = planCheckpointRetention(list, maxTurns);
-      if (dropped.length > 0) {
-        const keptShas = [...new Set(kept.map((c) => c.sha).filter((s): s is string => !!s))];
-        try {
-          const mapping = keptShas.length > 0
-            ? await this.checkpoints.pruneToKeptShas(sessionId, keptShas)
-            : [];
-          if (this.disposed) return;
-          const live = this.store.getState();
-          if ((live.activeSessionId ?? live.sessionId) !== sessionId) return;
-          const remap = new Map(mapping.map((m) => [m.oldSha, m.newSha]));
-          const rewritten = kept.map((c) =>
-            c.sha && remap.has(c.sha) ? { ...c, sha: remap.get(c.sha)! } : c);
-          this.store.setCheckpoints(rewritten);
-          void this.persistCheckpointIndex(sessionId, rewritten);
-          this.log.info(`checkpoint retention: dropped ${dropped.length} turn(s) for ${sessionId}`);
-        } catch (error) {
-          this.log.warn(`checkpoint retention failed for ${sessionId}: ${errorMessage(error)}`);
-        }
-      }
-    }
-
-    if (maxSizeMB <= 0) return;
-    const root = this.checkpointRoot();
-    let names: string[];
-    try {
-      const entries = await readdir(root, { withFileTypes: true });
-      names = entries.filter((e) => e.isDirectory()).map((e) => e.name);
-    } catch {
-      return; // no store dir yet
-    }
-    const scored: Array<{ name: string; bytes: number; lastUsed: number }> = [];
-    for (const name of names) {
-      const dir = path.join(root, name);
-      const bytes = await CheckpointManager.dirSizeBytes(dir);
-      let lastUsed = 0;
-      try {
-        lastUsed = (await stat(path.join(dir, "index.json"))).mtimeMs;
-      } catch {
-        try {
-          lastUsed = (await stat(dir)).mtimeMs;
-        } catch {
-          // vanished mid-scan
-        }
-      }
-      scored.push({ name, bytes, lastUsed });
-    }
-    const activeDir = activeId ? CheckpointManager.safeSessionId(activeId) : null;
-    // Orphans: index-less stores idle >10 min (crashed capture / corrupt repo
-    // — the idle guard avoids racing a brand-new session's first capture),
-    // or an index whose entries have no restorable sha at all.
-    const removed = new Set<string>();
-    for (const s of scored) {
-      if (s.name === activeDir) continue;
-      try {
-        const parsed = parseCheckpointIndex(await readFile(path.join(root, s.name, "index.json"), "utf8"));
-        if (!parsed || !parsed.some((c) => c.sha)) removed.add(s.name);
-      } catch {
-        if (Date.now() - s.lastUsed > 10 * 60 * 1000) removed.add(s.name);
-      }
-    }
-    let total = scored.reduce((sum, s) => sum + (removed.has(s.name) ? 0 : s.bytes), 0);
-    const budget = maxSizeMB * 1024 * 1024;
-    for (const s of [...scored].sort((a, b) => a.lastUsed - b.lastUsed)) {
-      if (total <= budget) break;
-      if (removed.has(s.name) || s.name === activeDir) continue;
-      removed.add(s.name);
-      total -= s.bytes;
-    }
-    if (removed.size === 0) return;
-    const freedBytes = scored
-      .filter((s) => removed.has(s.name))
-      .reduce((sum, s) => sum + s.bytes, 0);
-    for (const name of removed) {
-      await rm(path.join(root, name), { recursive: true, force: true }).catch(() => undefined);
-    }
-    this.log.info(`checkpoint retention: removed ${removed.size} store dir(s), freed ${Math.round(freedBytes / (1024 * 1024))} MB`);
-    this.store.sendToast(
-      "info",
-      vscode.l10n.t("已按上限清理 {0} 份旧快照（释放约 {1} MB）", removed.size, Math.round(freedBytes / (1024 * 1024))),
-      { durationMs: 8000 },
-    );
-  }
-
-  /** Atomic index write (temp + rename), serialized on its own chain. */
-  private persistCheckpointIndex(sessionId: string, checkpoints: readonly CheckpointUi[]): Promise<void> {
-    const run = this.checkpointPersistChain
-      .then(() => new Promise<void>((resolve) => setImmediate(resolve)))
-      .then(async () => {
-        const target = this.checkpointIndexPath(sessionId);
-        await mkdir(path.dirname(target), { recursive: true });
-        const tmp = `${target}.tmp`;
-        await writeFile(tmp, serializeCheckpointIndex(checkpoints), "utf8");
-        await rename(tmp, target);
-      });
-    this.checkpointPersistChain = run.catch(() => {});
-    return run;
-  }
-
-  /**
-   * Phase 1 of the restore wiring: read the persisted index (whose anchors
-   * are the ORIGINAL block ids — the transcript file is lossless) and reopen
-   * the shadow repo so file restores work. Must run BEFORE
-   * `reassignBlockIds` re-mints the ids; the raw list is kept for
-   * {@link finalizeCheckpointIndex}. Silent no-op when the session predates
-   * the feature.
-   */
   private async loadCheckpointIndex(sessionId: string): Promise<void> {
-    this.pendingCheckpointIndex = null;
-    let raw: string;
-    try {
-      raw = await readFile(this.checkpointIndexPath(sessionId), "utf8");
-    } catch {
-      return; // no index — nothing to restore
-    }
-    const parsed = parseCheckpointIndex(raw);
-    if (!parsed || parsed.length === 0) return;
-    if (this.checkpointSettingEnabled()) {
-      const lastSha = [...parsed].reverse().find((c) => c.sha)?.sha ?? null;
-      await this.checkpoints.reopen(sessionId, this.checkpointRoot(), this.checkpointCwd(), lastSha);
-    }
-    this.pendingCheckpointIndex = { sessionId, checkpoints: parsed };
+    return this.checkpointService.loadCheckpointIndex(sessionId);
   }
 
-  /**
-   * Phase 2: after `replaceTranscript` re-minted the block ids, re-anchor the
-   * loaded index to the live ids (old→new map captured by the caller around
-   * the re-mint) and push the projection. No-op when phase 1 found nothing
-   * or the session changed meanwhile.
-   */
   private finalizeCheckpointIndex(remap: ReadonlyMap<string, string>): void {
-    const pending = this.pendingCheckpointIndex;
-    this.pendingCheckpointIndex = null;
-    if (!pending) return;
-    const state = this.store.getState();
-    if (state.activeSessionId !== pending.sessionId) return;
-    const reanchored = reanchorCheckpoints(pending.checkpoints, remap);
-    if (reanchored.length > 0) this.store.setCheckpoints(reanchored);
+    this.checkpointService.finalizeCheckpointIndex(remap);
   }
 
-  /** Drop checkpoints whose anchor user block no longer exists (truncation). */
   private pruneCheckpointIndexAfterTruncation(): void {
-    const state = this.store.getState();
-    const sessionId = state.activeSessionId ?? state.sessionId;
-    const list = state.checkpoints ?? [];
-    if (!sessionId || list.length === 0) return;
-    const pruned = pruneCheckpointsForBlocks(list, state.blocks);
-    if (pruned.length === list.length) return;
-    this.store.setCheckpoints(pruned);
-    void this.persistCheckpointIndex(sessionId, pruned);
+    this.checkpointService.pruneCheckpointIndexAfterTruncation();
   }
 
-  /** Delete a session's shadow repo (session deleted / pruned as dead). */
   private async removeCheckpointsForSession(sessionId: string): Promise<void> {
-    this.checkpointWarnedSessions.delete(sessionId);
-    this.checkpointSkippedWarnedSessions.delete(sessionId);
-    await this.checkpoints.removeSession(sessionId, this.checkpointRoot());
+    await this.checkpointService.removeCheckpointsForSession(sessionId);
   }
 
-  /**
-   * M3 P0-1 restore entry point (three modes, roadmap §1 P0-1): "files" =
-   * shadow-git checkout of the turn's pre-turn snapshot; "conversation" =
-   * truncate the transcript at that user message (reuses the deleteUserMessage
-   * chain incl. CLI chatHistory truncation); "both" = files first, then
-   * conversation. Gates mirror deleteUserMessage (no mid-turn restores).
-   */
   private async restoreCheckpoint(
     userBlockId: string,
     mode: "files" | "conversation" | "both",
   ): Promise<void> {
-    if (this.disposed || this.historySyncBusy) return;
-    const state = this.store.getState();
-    if (
-      state.initializing || state.replaying || state.status === "streaming" || state.status === "connecting" ||
-      state.pendingApproval || state.pendingQuestions
-    ) {
-      this.store.appendNotice(vscode.l10n.t("正在生成、连接或等待确认，请先完成当前操作后再回滚"));
-      return;
-    }
-    const sessionId = state.activeSessionId ?? state.sessionId;
-    if (!sessionId) return;
-    const entry = (state.checkpoints ?? []).find((c) => c.userBlockId === userBlockId);
-    if (!entry) {
-      this.store.appendNotice(vscode.l10n.t("该轮没有可用的工作区快照"));
-      return;
-    }
-    if (mode === "files" || mode === "both") {
-      if (!entry.sha) {
-        this.store.appendNotice(vscode.l10n.t("该轮快照不完整，无法恢复文件（可选择仅回滚对话）"));
-        return;
-      }
-      const restored = await this.confirmAndRestoreCheckpointFiles(sessionId, entry);
-      if (!restored) return;
-    }
-    if (mode === "conversation" || mode === "both") {
-      // Reuses the full delete chain: transcript truncation + CLI history
-      // truncation + reload, plus the checkpoint-index prune inside it.
-      await this.deleteUserMessage(userBlockId, "rollback");
-    }
+    await this.checkpointService.restoreCheckpoint(userBlockId, mode);
   }
 
-  /**
-   * Confirm + perform the workspace checkout. Two guard rails mirror
-   * revertToolDiff: dirty editors (unsaved buffers) and an explicit modal
-   * (this is a whole-workspace overwrite). Returns false when the user
-   * cancels or the checkout fails.
-   */
   private async confirmAndRestoreCheckpointFiles(sessionId: string, entry: CheckpointUi): Promise<boolean> {
-    const dirty = vscode.workspace.textDocuments.filter((d) => d.isDirty && d.uri.scheme === "file");
-    if (dirty.length > 0) {
-      const pick = await vscode.window.showWarningMessage(
-        vscode.l10n.t("有 {0} 个文件在编辑器中有未保存的修改。回滚将从磁盘重新加载并丢弃这些修改。", dirty.length),
-        { modal: true },
-        vscode.l10n.t("丢弃并回滚"),
-      );
-      if (pick !== vscode.l10n.t("丢弃并回滚")) return false;
-    }
-    const title = entry.label || vscode.l10n.t("该轮");
-    const pick = await vscode.window.showWarningMessage(
-      vscode.l10n.t("将工作区文件回滚到「{0}」之前的状态？已跟踪文件会被覆盖；该快照之后新建的文件会保留。", title),
-      { modal: true },
-      vscode.l10n.t("回滚文件"),
-    );
-    if (pick !== vscode.l10n.t("回滚文件")) return false;
-    try {
-      await this.checkpoints.restoreFiles(sessionId, entry.sha!);
-    } catch (error) {
-      void vscode.window.showErrorMessage(vscode.l10n.t("工作区回滚失败: {0}", errorMessage(error)));
-      return false;
-    }
-    // Reload the editors we just overwrote from disk so the restored content
-    // is what the user sees (same trick as revertToolDiff).
-    for (const doc of dirty) {
-      try {
-        await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: true });
-        await vscode.commands.executeCommand("workbench.action.files.revert");
-      } catch {
-        // best-effort reload
-      }
-    }
-    void vscode.window.showInformationMessage(vscode.l10n.t("工作区文件已回滚到该轮之前的状态。"));
-    return true;
+    return this.checkpointService.confirmAndRestoreCheckpointFiles(sessionId, entry);
   }
 
   /**
