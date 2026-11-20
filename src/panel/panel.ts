@@ -559,8 +559,12 @@ const SUPER_ARCHIVED_REPORT_MAX_CHARS = 480;
  * The exclusion is per session: child sessions (SuperAgentManager) deliberately
  * do NOT pass settings and therefore keep every tool — the main session hands
  * both the implementation and the investigation down to them. The MCP scope is
- * likewise per PROCESS: only the main session's spawn gets
- * `--allowed-mcp-server-names`, child spawns do not.
+ * likewise per PROCESS: the main session's spawn gets the sentinel
+ * (`--allowed-mcp-server-names __iflow_harness_no_mcp__`, zero MCP), while
+ * child spawns get the host broker's server names only
+ * (`--allowed-mcp-server-names <broker name>` per brokered server) — so a child
+ * can reach the broker's HTTP MCP endpoints but never spawns the user's own
+ * stdio servers. See `createSuperClient` → `buildAcpCommand(..., { mcpServerNames: broker?.names() ?? [] })`.
  *
  * Side effect (deliberate, not hidden): the `@iflow` chat participant and
  * `iflow.askSelection` reuse this panel session, so they lose file reads and
