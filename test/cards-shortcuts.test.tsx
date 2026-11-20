@@ -485,3 +485,64 @@ it("caps the approval diff preview at 45vh, never with viewport arithmetic", () 
   expect(diff!.classList.contains("max-h-[45vh]")).toBe(true);
   expect(container.innerHTML).not.toContain("calc(100vh");
 });
+
+/** Dispatch a key event another handler already consumed (`defaultPrevented`). */
+function keyAlreadyHandled(keyValue: string) {
+  act(() => {
+    const event = new KeyboardEvent("keydown", { key: keyValue, bubbles: true, cancelable: true });
+    event.preventDefault();
+    window.dispatchEvent(event);
+  });
+}
+
+/**
+ * Shared gate contract (ApprovalCard / QuestionCard `window` keydown handlers):
+ * a shortcut must not answer a card when the event was already consumed by a
+ * handler above it. Both cards check `e.defaultPrevented` before doing anything,
+ * so a second consumer of the same key can never silently approve/deny/dismiss
+ * behind the user's back.
+ */
+it("ignores an already-defaultPrevented Y on an approval card", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  keyAlreadyHandled("y");
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("ignores an already-defaultPrevented N on an approval card", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  keyAlreadyHandled("n");
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("ignores an already-defaultPrevented Escape on an approval card", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  keyAlreadyHandled("Escape");
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("ignores Escape on a question card while a modal sits above it", () => {
+  act(() => root.render(<QuestionCard pending={QUESTIONS} />));
+  const backdrop = document.createElement("div");
+  backdrop.className = "auth-backdrop";
+  document.body.append(backdrop);
+  key("Escape");
+  expect(send).not.toHaveBeenCalled();
+  backdrop.remove();
+});
+
+it("ignores Escape on a question card originating from a select element", () => {
+  act(() => root.render(<QuestionCard pending={QUESTIONS} />));
+  const select = document.createElement("select");
+  document.body.append(select);
+  act(() => {
+    select.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
+  expect(send).not.toHaveBeenCalled();
+  select.remove();
+});
+
+it("ignores an already-defaultPrevented Escape on a question card", () => {
+  act(() => root.render(<QuestionCard pending={QUESTIONS} />));
+  keyAlreadyHandled("Escape");
+  expect(send).not.toHaveBeenCalled();
+});
