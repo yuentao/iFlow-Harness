@@ -11,7 +11,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { createHash } from "node:crypto";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename, stat } from "node:fs/promises";
 import { AcpClient, type AcpClientCallbacks } from "../acp/client.js";
 import {
@@ -78,6 +78,7 @@ import {
 import { CheckpointManager } from "./checkpoints.js";
 import { ToolDiffService } from "./tool-diff-service.js";
 import { StatusPresenter } from "./status-presenter.js";
+import { SessionPersistenceService, type PersistedTranscript } from "./session-persistence.js";
 import { SuperAgentManager, type SuperResidueCount } from "./super-agent.js";
 import {
   buildSuperActionReceiptPrompt,
@@ -141,7 +142,6 @@ import {
 } from "../../shared/context-source.js";
 import type { ParsedEditArgs, PreEditSnapshot, UsageContext } from "../../shared/session-state.js";
 import {
-  backfillBlockIds,
   canStopSubAgent,
   beginReplay,
   clampSessionLabel,
@@ -155,12 +155,10 @@ import {
   isSubAgentToolCall,
   newSessionState,
   parseEditArgs,
-  parseTranscriptJsonl,
   reassignBlockIds,
   renameSessionSummary,
   SESSION_LABEL_MAX,
   setQqTasks,
-  sortSessionSummaries,
   toAgentPromptText,
 } from "../../shared/session-state.js";
 import { SessionStore } from "./store.js";
@@ -855,19 +853,6 @@ function asSuperIntegrationMode(value: unknown): SuperIntegrationMode {
 const MAX_RECENT_SESSIONS = 20;
 /** Label until the first user prompt names the session. */
 const DEFAULT_SESSION_LABEL = vscode.l10n.t("（无标题会话）");
-/** Legacy workspaceState key: transcripts used to live in one monolithic map
- * here (P2 — every persist meant read-all + structuredClone + write-all, and
- * the map grew without bound). Transcripts now persist as per-session JSON
- * files under storageUri; this key survives only as the one-shot migration
- * source and is deleted after migration. */
-const TRANSCRIPTS_KEY = "iflow.transcripts";
-
-/** Persisted transcript payload for one session. */
-interface PersistedTranscript {
-  label: string;
-  blocks: SessionState["blocks"];
-}
-
 /** Structural shape of a vscode.FileSystemWatcher (the test stub has none). */
 interface PanelWatcher {
   dispose: () => void;
@@ -1170,6 +1155,12 @@ export class ChatPanel implements vscode.Disposable {
    * `StatusPresenter` in 阶段 2. `updateStatusBar` below is a thin delegate to
    * this instance, so the store callback / extension contract is unchanged. */
   private readonly statusPresenter: StatusPresenter;
+  /** Read-only session persistence + transcript disk helpers, extracted to
+   * `SessionPersistenceService` in 阶段 3. Every persistence method below is a
+   * thin delegate to this instance so the webview-message switch, tests and the
+   * extension contract are unchanged. The service is also the reuse surface
+   * for 阶段 4 (restoreSession / checkpoint). */
+  private readonly persistence: SessionPersistenceService;
   /** M5: agent status at a glance (idle / streaming / approval / error + model).
    * Its tooltip doubles as the session-info entry for usage: the composer's
    * model chip only carries the compact occupancy bar, so the full breakdown
@@ -1744,16 +1735,6 @@ export class ChatPanel implements vscode.Disposable {
     timer: NodeJS.Timeout;
   }>();
   private superResidueConfirmSeq = 0;
-  /** Serializes per-session transcript file writes (P2): overlapping persists
-   * must not interleave inside one file's temp+rename sequence. */
-  private persistChain: Promise<void> = Promise.resolve();
-  /**
-   * Transcript writes currently queued or in flight on `persistChain`.
-   * `cleanupEmptySession` awaits the chain before the new-session state swap;
-   * while that wait is non-trivial the new-session projection must say
-   * 「正在等待后台任务结束」 instead of looking frozen (see NewSessionPhase).
-   */
-  private persistPending = 0;
   /** P6: workspace file list for the @-mention popup — `findFiles` is a full
    * workspace scan; cache it and invalidate on file-system changes. */
   private fileSearchCache: { rels: string[] } | null = null;
@@ -1998,6 +1979,18 @@ export class ChatPanel implements vscode.Disposable {
     // auth fields out of the shared ~/.iflow/settings.json write-back. The
     // extension therefore uses the SHARED home for everything else (slash
     // commands, agents, skills, memory, acp/sessions) — no private dir.
+    this.persistence = new SessionPersistenceService({
+      log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m) },
+      // storageUri / sessionCwd are read at call time — never pass a snapshot
+      // base (AGENTS.md pitfall #8). Arrow wrappers preserve `this` binding.
+      getStorageDir: () => (this.context.storageUri ?? this.context.globalStorageUri).fsPath,
+      getSessionCwd: () => this.sessionCwd,
+      getWorkspaceState: () => this.context.workspaceState,
+      defaultSessionLabel: DEFAULT_SESSION_LABEL,
+      sessionsKey: SESSIONS_KEY,
+      activeSessionKey: ACTIVE_SESSION_KEY,
+      maxRecentSessions: MAX_RECENT_SESSIONS,
+    });
     this.statusPresenter = new StatusPresenter();
     this.statusBar = this.statusPresenter.statusBar;
     // Let the panel follow the editor color theme (the webview ignores this
@@ -6797,18 +6790,14 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- Session persistence (M4) --------------------------------------------------
 
+  /** Thin delegate (阶段 3): the session-index read lives in SessionPersistenceService. */
   private readPersistedSessions(): SessionSummaryUi[] {
-    return this.context.workspaceState.get<SessionSummaryUi[]>(SESSIONS_KEY, []);
+    return this.persistence.readPersistedSessions();
   }
 
+  /** Thin delegate (阶段 3): canonical ordering + persist live in SessionPersistenceService. */
   private async persistSessions(sessions: SessionSummaryUi[], activeId: string | null): Promise<void> {
-    // M4 P1-8: canonical order (pinned first, newest activity) on EVERY
-    // persist — stored index and rendered list can never drift. The cap
-    // drops from the tail, which after sorting means oldest non-pinned
-    // first (archived sessions are old by nature, so they leave first).
-    const sorted = sortSessionSummaries(sessions);
-    await this.context.workspaceState.update(SESSIONS_KEY, sorted.slice(0, MAX_RECENT_SESSIONS));
-    await this.context.workspaceState.update(ACTIVE_SESSION_KEY, activeId);
+    await this.persistence.persistSessions(sessions, activeId);
   }
 
   /** Upsert a session into the recent list (newest first) and persist it.
@@ -6928,7 +6917,7 @@ export class ChatPanel implements vscode.Disposable {
     // outgoing transcript as a fire-and-forget enqueued write BEFORE the
     // state swap clears the blocks — an existsSync check here would race
     // that write and misread a real session as empty.
-    await this.persistChain.catch(() => {});
+    await this.persistence.awaitPersistChain();
     const state = this.store.getState();
     const liveId = state.activeSessionId ?? state.sessionId;
     // The live session with blocks on screen is never "empty" — its
@@ -7366,50 +7355,15 @@ export class ChatPanel implements vscode.Disposable {
    * Locate the CLI's NDJSON transcript file for a session id. The CLI stores
    * one file per project dir: `~/.iflow/projects/<cwd-as-slug>/session-<id>.jsonl`.
    */
-  private cliTranscriptFilePath(sessionId: string): string | null {
-    const fileBase = sessionId.startsWith("session-") ? sessionId : `session-${sessionId}`;
-    const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-    const base = path.join(home, ".iflow", "projects");
-    const cwdSlug = (this.sessionCwd ?? "").replace(/[^A-Za-z0-9-]/g, "-");
-    if (cwdSlug) {
-      const candidate = path.join(base, cwdSlug, `${fileBase}.jsonl`);
-      if (existsSync(candidate)) return candidate;
-    }
-    // Fallback: session ids are globally unique — scan every project dir.
-    try {
-      for (const dir of readdirSync(base)) {
-        const candidate = path.join(base, dir, `${fileBase}.jsonl`);
-        if (existsSync(candidate)) return candidate;
-      }
-    } catch {
-      // projects dir missing
-    }
-    return null;
+  /** Thin delegate (阶段 3). Public so tests / 阶段 4 can reuse the path lookup
+   * even though the panel itself no longer calls it directly. */
+  cliTranscriptFilePath(sessionId: string): string | null {
+    return this.persistence.cliTranscriptFilePath(sessionId);
   }
 
+  /** Thin delegate (阶段 3): both transcript sources + backfill live in SessionPersistenceService. */
   private async loadPersistedTranscript(sessionId: string): Promise<{ blocks: SessionState["blocks"]; firstUserText: string | null }> {
-    // Source 1: the extension's own persisted copy (ACP mode writes no files).
-    const own = await this.readTranscript(sessionId);
-    if (own) {
-      // P4: files written before block ids existed lack stable keys.
-      backfillBlockIds(own.blocks);
-      this.log.info(`transcript source: extension store (${own.blocks.length} blocks)`);
-      return { blocks: own.blocks, firstUserText: own.label !== DEFAULT_SESSION_LABEL ? own.label : null };
-    }
-    // Source 2: the CLI's interactive-mode jsonl (only exists for terminal sessions).
-    const file = this.cliTranscriptFilePath(sessionId);
-    if (!file) {
-      this.log.warn(`no persisted transcript found for ${sessionId}`);
-      return { blocks: [], firstUserText: null };
-    }
-    try {
-      const text = await readFile(file, "utf8");
-      this.log.info(`transcript source: ${file}`);
-      return parseTranscriptJsonl(text);
-    } catch (error) {
-      this.log.warn(`transcript read failed: ${errorMessage(error)}`);
-      return { blocks: [], firstUserText: null };
-    }
+    return this.persistence.loadPersistedTranscript(sessionId);
   }
 
   // --- Super Agent (child sessions of the main session) ----------------------
@@ -12727,10 +12681,10 @@ export class ChatPanel implements vscode.Disposable {
    * one JSON file per session under storageUri (P2: the old workspaceState
    * map made every persist a read-all + clone + write-all of every session).
    */
-  private transcriptDir(): string {
-    // workspaceState falls back to global state when no workspace is open;
-    // mirror that fallback for the file store.
-    return path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, "transcripts");
+  /** Thin delegate (阶段 3). Public for stage-4 reuse; base is read live in
+   * the service (storageUri ?? globalStorageUri), never snapshotted. */
+  transcriptDir(): string {
+    return this.persistence.transcriptDir();
   }
 
   // --- System-prompt override for the CLI (IFLOW_SYSTEM_MD) ------------------
@@ -12957,74 +12911,42 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private ownTranscriptFileName(sessionId: string): string {
-    // Session ids come from the CLI and webview messages — restrict to a
-    // filesystem-safe charset so a hostile id cannot escape the directory.
-    const safe = sessionId.replace(/[^A-Za-z0-9_-]/g, "-");
-    return `${safe}.json`;
+    return this.persistence.ownTranscriptFileName(sessionId);
   }
 
-  private ownTranscriptFilePath(sessionId: string): string {
-    return path.join(this.transcriptDir(), this.ownTranscriptFileName(sessionId));
+  /** Thin delegate (阶段 3). Public: no static panel callers after extraction
+   * (noUnusedLocals) and used by tests / 阶段 4 as a path hook. */
+  ownTranscriptFilePath(sessionId: string): string {
+    return this.persistence.ownTranscriptFilePath(sessionId);
   }
 
-  /** Read one session's transcript file; null when absent or corrupt. */
+  /** Thin delegate (阶段 3): read one transcript file, null when absent/corrupt. */
   private async readTranscript(sessionId: string): Promise<PersistedTranscript | null> {
-    try {
-      const raw = await readFile(this.ownTranscriptFilePath(sessionId), "utf8");
-      const parsed = JSON.parse(raw) as PersistedTranscript;
-      if (!Array.isArray(parsed.blocks)) return null;
-      return parsed;
-    } catch {
-      return null; // ENOENT (never persisted) or corrupt (crash mid-write)
-    }
+    return this.persistence.readTranscript(sessionId);
   }
 
-  /**
-   * Serialize a transcript payload synchronously, at call time. Blocks are
-   * mutated in place by the shared reducer; stringifying here captures a
-   * coherent snapshot even though the actual file write runs later on the
-   * persist chain. (Also replaces the old per-persist structuredClone.)
-   */
+  /** Thin delegate (阶段 3): serialization lives in SessionPersistenceService. */
   private serializeTranscript(label: string, blocks: SessionState["blocks"]): string {
-    return JSON.stringify({ label, blocks } satisfies PersistedTranscript);
+    return this.persistence.serializeTranscript(label, blocks);
   }
 
-  private async writeTranscriptFile(sessionId: string, payload: string): Promise<void> {
-    const target = this.ownTranscriptFilePath(sessionId);
-    const tmp = `${target}.tmp`;
-    await mkdir(this.transcriptDir(), { recursive: true });
-    await writeFile(tmp, payload, "utf8");
-    await rename(tmp, target);
+  /** Thin delegate (阶段 3). Public for stage-4 reuse (no static panel callers). */
+  writeTranscriptFile(sessionId: string, payload: string): Promise<void> {
+    return this.persistence.writeTranscriptFile(sessionId, payload);
   }
 
-  /**
-   * Queue a transcript file write on the persist chain: overlapping persists
-   * (e.g. prompt-start seeding and the previous prompt's completion) run
-   * back-to-back instead of interleaving inside one file's write sequence.
-   * The payload factory runs on the chain (after a setImmediate yield), so
-   * the synchronous JSON.stringify no longer sits on the event path (P1).
-   */
+  /** Thin delegate (阶段 3): the serialize + write chain lives in the service. */
   private enqueueTranscriptWrite(sessionId: string, payloadFactory: () => string): Promise<void> {
-    this.persistPending += 1;
-    const run = this.persistChain
-      .then(() => new Promise<void>((resolve) => setImmediate(resolve)))
-      .then(() => this.writeTranscriptFile(sessionId, payloadFactory()));
-    this.persistChain = run
-      .catch(() => {})
-      .finally(() => {
-        this.persistPending = Math.max(0, this.persistPending - 1);
-      });
-    return run;
+    return this.persistence.enqueueTranscriptWrite(sessionId, payloadFactory);
   }
 
   private async clearTranscript(sessionId: string): Promise<void> {
-    await rm(this.ownTranscriptFilePath(sessionId), { force: true });
+    await this.persistence.clearTranscript(sessionId);
   }
 
   /** Restorable = the extension holds a transcript OR the CLI wrote a file. */
   private hasPersistedTranscript(sessionId: string): boolean {
-    if (existsSync(this.ownTranscriptFilePath(sessionId))) return true;
-    return this.cliTranscriptFilePath(sessionId) !== null;
+    return this.persistence.hasPersistedTranscript(sessionId);
   }
 
   /**
@@ -13130,30 +13052,15 @@ export class ChatPanel implements vscode.Disposable {
    * (for orphan cleanup). Empty when the store directory doesn't exist yet.
    */
   private async listOwnTranscriptFileNames(): Promise<string[]> {
-    try {
-      return await readdir(this.transcriptDir());
-    } catch {
-      return []; // transcripts dir not created yet
-    }
+    return this.persistence.listOwnTranscriptFileNames();
   }
 
   /**
-   * P2 migration: move transcripts out of the legacy workspaceState map into
-   * per-session files, then delete the legacy key. One-shot; a no-op when
-   * the key is absent (fresh installs, already-migrated workspaces).
+   * P2 migration: thin delegate (阶段 3) — the legacy-key read, per-file
+   * enqueue and key deletion now live in SessionPersistenceService.
    */
   private async migrateLegacyTranscripts(): Promise<void> {
-    const legacy = this.context.workspaceState.get<Record<string, PersistedTranscript>>(TRANSCRIPTS_KEY);
-    if (!legacy) return;
-    for (const [sessionId, transcript] of Object.entries(legacy)) {
-      if (!transcript || !Array.isArray(transcript.blocks) || transcript.blocks.length === 0) continue;
-      await this.enqueueTranscriptWrite(
-        sessionId,
-        () => this.serializeTranscript(transcript.label ?? DEFAULT_SESSION_LABEL, transcript.blocks),
-      );
-    }
-    await this.context.workspaceState.update(TRANSCRIPTS_KEY, undefined);
-    this.log.info(`migrated ${Object.keys(legacy).length} legacy transcript(s) from workspaceState to files`);
+    await this.persistence.migrateLegacyTranscripts();
   }
 
   /**
@@ -13425,7 +13332,7 @@ export class ChatPanel implements vscode.Disposable {
     // switcher (empty sessions have no transcript → unrestorable).
     // 清空转录前要先等落盘链收尾（profile 切换 / 上一轮的 transcript 写可能
     // 还在飞）。真的在等就投影成 waiting —— 否则这段等待在 UI 上和卡死没区别。
-    const waitingOnPersist = this.persistPending > 0;
+    const waitingOnPersist = this.persistence.pendingWriteCount() > 0;
     if (waitingOnPersist && !this.disposed) this.store.setNewSessionPhase("waiting");
     await this.cleanupEmptySession(
       this.store.getState().activeSessionId ?? this.store.getState().sessionId,
@@ -15339,14 +15246,14 @@ export class ChatPanel implements vscode.Disposable {
       );
     }
     this.persistDirty = true;
-    if (this.persistTimer) return this.persistChain;
+    if (this.persistTimer) return this.persistence.currentChain();
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
       if (!this.persistDirty) return;
       this.persistDirty = false;
       void this.flushDirtyTranscript();
     }, ChatPanel.PERSIST_DEBOUNCE_MS);
-    return this.persistChain;
+    return this.persistence.currentChain();
   }
 
   /** Debounced flush: serialize + enqueue on the persist chain. */
