@@ -1898,6 +1898,34 @@ export function closeOpenSubAgents(blocks: Block[], now = Date.now()): number | 
 }
 
 /**
+ * Tools the CLI settles SUCCESSFULLY but never closes with a terminal
+ * `tool_call_update` — the turn-end zombie close must mark them completed,
+ * not failed.
+ *
+ * Wire behavior (probed, CLI 0.5.19 fork snapshot
+ * `vendor/iflow-fork/bundle/iflow.js`, `AcpSession.runTool`):
+ *   `if (t.name === "ask_user_question") return { response: await this.handleAskUserQuestion(...) }`
+ * — an early return that sits BEFORE the in_progress / completed / failed
+ * `sendUpdate` pair, so the CLI emits NO terminal frame for this call. The
+ * only frame it emits is the `tool_call(pending)` stamped when the model's
+ * functionCall chunk streams (`AcpSession.prompt`: `D && w.id &&
+ * sendUpdate({sessionUpdate:"tool_call",…,status:"pending"})`).
+ * `handleAskUserQuestion` awaits the `_iflow/user/questions` answer and
+ * returns `{ success: true, output: "User has answered your questions: …" }`
+ * — the call SETTLED SUCCESSFULLY, so stamping 「× 失败」 on it would be a lie.
+ *
+ * Why the reducer is the only layer that can fix it: the `_iflow/user/questions`
+ * request carries only `sessionId` + `questions` and NO toolCallId
+ * (`gso.parse({sessionId:this.id,questions:t.questions||[]})`), so the host
+ * cannot correlate a question card with its tool block.
+ */
+const SUCCESS_SETTLED_TOOL_NAMES = new Set(["ask_user_question"]);
+function isSuccessSettledTool(name: string | undefined): boolean {
+  if (!name) return false;
+  return SUCCESS_SETTLED_TOOL_NAMES.has(name.trim().toLowerCase());
+}
+
+/**
  * Turn-end zombie close for TOOL cards — the tool-block analogue of
  * closeOpenSubAgents above. The CLI stamps `tool_call(pending)` the moment the
  * model's functionCall chunk streams (bundle, CLI 0.5.19 fork: stream path
@@ -1917,6 +1945,13 @@ export function closeOpenSubAgents(blocks: Block[], now = Date.now()): number | 
  * provably dead — every uncovered path answered the call with an error
  * functionResponse, so marking it failed is honest (same discipline as the
  * zombie SubAgent cards above).
+ *
+ * ONE uncovered path is NOT an error path: `ask_user_question` settles with a
+ * SUCCESS functionResponse and never sends a terminal frame (see
+ * {@link isSuccessSettledTool}), so it closes as completed — otherwise the
+ * question tool card of a question the user JUST answered ends up stamped
+ * 「× 失败」 (user report 2026-11-21: the 工具操作 card flipped to 失败 right
+ * after the answer was submitted).
  */
 export function closeOpenToolBlocks(blocks: Block[], now = Date.now()): number | null {
   let mutatedFrom: number | null = null;
@@ -1931,7 +1966,10 @@ export function closeOpenToolBlocks(blocks: Block[], now = Date.now()): number |
     }
     if (block.kind !== "tool") continue;
     if (block.status === "pending" || block.status === "in_progress") {
-      block.status = "failed";
+      // A call the CLI settled successfully but never closed on the wire
+      // (ask_user_question) is completed, not failed — see
+      // {@link isSuccessSettledTool}.
+      block.status = isSuccessSettledTool(block.toolName) ? "completed" : "failed";
       if (block.startedAt !== undefined) block.completedAt ??= now;
       if (mutatedFrom === null) mutatedFrom = i;
     }
