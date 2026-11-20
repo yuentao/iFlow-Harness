@@ -241,9 +241,28 @@ export function PendingCards({
       // The shell spans the transcript wrapper (definite height → cards can
       // cap themselves with max-h-full). pointer-events-none keeps the empty
       // gutters transparent; each card re-enables pointer events on itself.
+      //
+      // `pt-1` (expanded list only, i.e. count >= 2 → the counter exists):
+      // the list layout is a SCROLL container, so the sticky counter's top
+      // edge would sit exactly ON the clip line — and the counter is a
+      // `card-lift` canvas button whose hover lifts it 1px (translateY(-1px)),
+      // so the lift pushed the button's top border outside the clip and the
+      // border row vanished (Chromium + CDP, pixel-decoded: idle gapTop 0 →
+      // hover gapTop -1, the painted border row lost 96% of its pixels).
+      // A 4px top padding moves the sticky box's constraint edge down with
+      // it → hover gapTop 3, the border row stays whole.
+      //
+      // Why not `overflow-y: visible` (the fix used for the composer's action
+      // row): this overlay MUST scroll vertically — the expanded list scrolls
+      // inside it and the counter sticks to its top. Letting the vertical
+      // axis overflow would spill the list into the transcript.
+      //
+      // Scoped to count >= 2 on purpose: the single-card layout has no
+      // counter and no clipping problem, and the stacked layout has no
+      // vertical scroll at all — neither may move by a single pixel.
       className={
         listMode
-          ? "pointer-events-none absolute inset-x-0 bottom-0 z-30 flex min-h-0 flex-col gap-2 overflow-y-auto pb-3"
+          ? `pointer-events-none absolute inset-x-0 bottom-0 z-30 flex min-h-0 flex-col gap-2 overflow-y-auto pb-3${count >= 2 ? " pt-1" : ""}`
           : "pointer-events-none absolute inset-x-0 bottom-0 z-30 flex min-h-0 flex-col justify-end pb-3"
       }
       style={{ top: "var(--super-bar-h, 0px)" }}
