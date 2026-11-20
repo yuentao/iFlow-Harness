@@ -477,3 +477,54 @@ it("keeps the list-page actions on a single row (primary left, conveniences righ
   expect(catalog.className).not.toContain("from-primary");
   expect(refresh.className).not.toContain("from-primary");
 });
+
+it("shows a blue connecting dot (not red or neutral) while the broker handshake is in flight", () => {
+  reply({ a: { command: "node" } });
+  statusReply({
+    discoveryState: "in_progress",
+    servers: {
+      a: {
+        status: "connecting", toolCount: 0, promptCount: 0, tools: [], prompts: [],
+        // The main session always reports `blocked`; a connecting broker must
+        // still win over that neutral flag.
+        blocked: true, childConnected: undefined, contextTokens: 0,
+      },
+    },
+  });
+  const spans = [...container.querySelectorAll("span")];
+  expect(spans.some((s) => s.className.includes("bg-info"))).toBe(true);
+  expect(spans.some((s) => s.className.includes("bg-destructive"))).toBe(false);
+  expect(spans.some((s) => (s.getAttribute("title") ?? "").includes("连接中…"))).toBe(true);
+});
+
+it("reads discoveryState=in_progress as 'reading tools' even behind a blocked main report", () => {
+  reply({ a: { command: "node" } });
+  statusReply({
+    discoveryState: "in_progress",
+    servers: {
+      a: {
+        status: "disconnected", toolCount: 0, promptCount: 0, tools: [], prompts: [],
+        blocked: true, childConnected: undefined, contextTokens: 0,
+      },
+    },
+  });
+  clickTitle("详情");
+  expect(container.textContent).toContain("正在读取工具列表…");
+  expect(container.textContent).not.toContain("主会话不加载 MCP，新建超流体并连接后才会上报工具列表");
+});
+
+it("keeps a real child failure red even while discovery is still in progress", () => {
+  reply({ a: { command: "node" } });
+  statusReply({
+    discoveryState: "in_progress",
+    servers: {
+      a: {
+        status: "disconnected", toolCount: 0, promptCount: 0, tools: [], prompts: [],
+        blocked: true, childConnected: false, error: "spawn ENOENT", errorKind: "spawn_failed", contextTokens: 0,
+      },
+    },
+  });
+  const spans = [...container.querySelectorAll("span")];
+  expect(spans.some((s) => s.className.includes("bg-destructive"))).toBe(true);
+  expect(spans.some((s) => (s.getAttribute("title") ?? "").includes("超流体连接失败"))).toBe(true);
+});

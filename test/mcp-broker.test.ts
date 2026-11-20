@@ -12,7 +12,7 @@
  *    transport produces;
  *  - upstream `http` and `sse` transports are covered by in-process servers.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -468,5 +468,72 @@ describe("McpBroker · 远程上游", () => {
 
     const list = await postRpc(entry.url!, token, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     expect(toolNames(list)).toContain("sse_echo");
+  }, 30000);
+});
+
+describe("McpBroker · 状态上报（面板刷新数据源）", () => {
+  it("statuses 暴露 connecting 三态与缓存的 tools/list，并在连接完成时回调 onStatusChange", async () => {
+    const onChange = vi.fn();
+    const broker = await McpBroker.start({
+      servers: { alpha: { command: process.execPath, args: [fakeServer, "--name", "alpha"] } },
+      onStatusChange: onChange,
+    });
+    cleanups.push(() => broker.dispose());
+
+    const before = broker.statuses()[0]!;
+    expect(before).toMatchObject({ name: "alpha", connected: false, connecting: false, tools: [] });
+
+    await broker.prewarm();
+    await waitFor(() => onChange.mock.calls.length > 0);
+    await waitFor(() => broker.statuses()[0]!.connected === true);
+
+    const after = broker.statuses()[0]!;
+    expect(after.connected).toBe(true);
+    expect(after.connecting).toBe(false);
+    expect(after.tools.map((tool) => tool.name)).toEqual(["alpha_echo", "alpha_slow"]);
+    // 标准 MCP 的 inputSchema 被归一化成 McpToolView.schema（token 估算可用）。
+    expect(after.tools[0]!.schema).toMatchObject({ type: "object" });
+  }, 30000);
+
+  it("握手未完成时 connecting=true，完成后归零（不误报失败）", async () => {
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const server = createServer((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => (body += chunk));
+      request.on("end", () => {
+        const message = JSON.parse(body || "{}") as { id?: number; method?: string };
+        if (message.method === "notifications/initialized") {
+          response.writeHead(202); response.end(); return;
+        }
+        if (message.method === "initialize") {
+          void gate.then(() => {
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end(JSON.stringify({
+              jsonrpc: "2.0", id: message.id,
+              result: { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "slow" } },
+            }));
+          });
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools: [] } }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || !address) throw new Error("no address");
+    cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+
+    const broker = await McpBroker.start({ servers: { slow: { type: "http", url: `http://127.0.0.1:${address.port}/mcp` } } });
+    cleanups.push(() => broker.dispose());
+
+    const prewarm = broker.prewarm();
+    // ensure() 在第一个 await 之前就登记了 connecting，立即可见。
+    expect(broker.statuses()[0]).toMatchObject({ connected: false, connecting: true });
+    release!();
+    await prewarm;
+    expect(broker.statuses()[0]).toMatchObject({ connected: true, connecting: false });
   }, 30000);
 });

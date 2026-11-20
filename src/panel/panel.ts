@@ -6273,6 +6273,13 @@ export class ChatPanel implements vscode.Disposable {
       });
   }
 
+  /** The shared broker pushes status changes from its background handshake.
+   * Keep this a thin wrapper so it can be wired as a callback and exercised
+   * in tests without standing up a real broker. */
+  private refreshMcpStatusFromBroker(): void {
+    void this.sendMcpStatus();
+  }
+
   /**
    * MCP card asked for live connection state. Super Agent changes the meaning
    * of the CLI's `_iflow/mcp/status` on the MAIN session: because it starts
@@ -6282,20 +6289,23 @@ export class ChatPanel implements vscode.Disposable {
    * child sessions through the host's shared MCP broker (`this.mcpBroker`).
    *
    * So the broker is the authority for the live connection state. We still
-   * query the CLI report because it is the only source of the tools/prompts
-   * declarations shown in the detail sub-page; its status/error are then
-   * overridden per server from `mcpBroker.statuses()`:
-   *   - broker connected    → status "connected", childConnected true, no error
-   *   - broker disconnected → status "disconnected", childConnected false, error
-   *   - broker not ready    → childConnected undefined; a CLI-blocked server
-   *     falls back to a NEUTRAL "main session does not load MCP" (no red dot),
-   *     never "server is broken".
+   * query the CLI report for prompts/declarations and its `errorKind`, then
+   * override per server from `mcpBroker.statuses()`:
+   *   - broker connected     → status "connected", childConnected true
+   *   - broker connecting    → status "connecting", childConnected undefined
+   *                            (blue dot, never a false red failure)
+   *   - broker failed(error) → status "disconnected", childConnected false,
+   *                            keep the CLI's errorKind (fallback "unknown")
+   *   - broker not ready     → childConnected undefined; a CLI-blocked server
+   *                            falls back to NEUTRAL "main session does not
+   *                            load MCP" (no red dot), never "broken".
    *
-   * `contextTokens` is the host-computed BPE of the tool declarations (the
-   * CLI itself has no such estimate, and re-tokenizing per render in the
-   * webview would be wasteful). Any total failure (no CLI report AND no
-   * broker) degrades to `status: null` — the card shows NO indicator rather
-   * than a guessed one.
+   * `contextTokens` is the host-computed BPE of the tool declarations. The
+   * CLI report's `tools[]` is ALWAYS empty on the MCP-disabled main session,
+   * so we substitute the broker's cached `tools/list` declarations (the same
+   * ones a child actually sees) before estimating. Any total failure (no CLI
+   * report AND no broker) degrades to `status: null` — the card shows NO
+   * indicator rather than a guessed one.
    */
   private async sendMcpStatus(): Promise<void> {
     const client = this.client;
@@ -6326,7 +6336,7 @@ export class ChatPanel implements vscode.Disposable {
     for (const name of names) {
       const cliView = report?.servers?.[name];
       const broker = brokerBy.get(name);
-      // Start from the CLI view to keep tools/schema/prompts for the detail
+      // Start from the CLI view to keep prompts/declarations for the detail
       // sub-page; synthesize a minimal view when only the broker knows it.
       const view: McpServerStatusView & {
         contextTokens?: number;
@@ -6341,14 +6351,41 @@ export class ChatPanel implements vscode.Disposable {
         ...cliView,
       };
       if (broker) {
-        view.status = broker.connected ? "connected" : "disconnected";
-        view.childConnected = broker.connected;
-        if (broker.connected) {
+        // The CLI (MCP-disabled main session) reports no tools. The broker is
+        // the only place with the real declarations a child injects, so use
+        // them for the detail view and the token chip.
+        const brokerTools = broker.tools ?? [];
+        if (brokerTools.length > 0) {
+          view.tools = brokerTools;
+          view.toolCount = brokerTools.length;
+        }
+        if (broker.connecting) {
+          view.status = "connecting";
+          view.childConnected = undefined;
+        } else if (broker.connected) {
+          view.status = "connected";
+          view.childConnected = true;
+          // Only drop the main session's blocked/disconnected artifacts; do
+          // not wipe an unrelated CLI error wholesale.
+          if (!cliView || cliView.blocked || cliView.status !== "connected") {
+            delete view.error;
+            delete view.errorKind;
+          }
+        } else if (broker.error) {
+          view.status = "disconnected";
+          view.childConnected = false;
+          view.error = broker.error;
+          // Preserve the CLI's captured errorKind (spawn_failed/timeout/…);
+          // only fall back to "unknown" when the CLI did not report one.
+          if (!view.errorKind) view.errorKind = "unknown";
+        } else {
+          // Not connected, not connecting, no failure recorded: no authority
+          // to claim either success or failure yet.
+          view.childConnected = undefined;
+        }
+        if (broker.connecting && (!cliView || cliView.blocked)) {
           delete view.error;
           delete view.errorKind;
-        } else if (broker.error) {
-          view.error = broker.error;
-          view.errorKind = "unknown";
         }
       } else if (cliView?.blocked) {
         // Broker not ready: `blocked` only means the main session never loads
@@ -8411,6 +8448,10 @@ export class ChatPanel implements vscode.Disposable {
           servers,
           cwd: this.mcpProjectCwd() ?? undefined,
           log: (level, message) => this.log[level](`[mcp-broker] ${message}`),
+          // Broker connects/fails in the background; push a fresh status to
+          // the card when it settles so the user need not open the settings
+          // modal and press 刷新 to see the real state.
+          onStatusChange: () => this.refreshMcpStatusFromBroker(),
         });
         this.mcpBroker = broker;
         // Eager handshake so failures land in the log early instead of only on
