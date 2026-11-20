@@ -144,6 +144,24 @@ import {
 export const SUPER_PENDING_TIMEOUT_MS = 5 * 60_000;
 
 /**
+ * 子会话首轮 prompt 前等待 MCP 工具就绪的上限（毫秒）。
+ *
+ * 背景（2026-11 只读审计，CLI 0.5.19 + mcp-background-loader）：子会话走 host
+ * MCP broker（不是零 MCP、也不是保留全部 server），但 CLI 侧的 MCP 工具是**后台
+ * 异步注册**的 —— `startMcpDiscoveryInBackground()` 不 await，`newSession` 返回时
+ * 工具可能还没挂上。紧接着发首轮 prompt，模型就会缺 MCP 工具。这里在两者之间
+ * 加一次**有界**等待：轮询 `mcpStatus` 的 `discoveryState` 到 `completed`。
+ *
+ * 超时 / 查询失败一律只记一条降级日志后照常发送，绝不让子会话永久卡住。作为
+ * 实例字段的默认值（见 {@link SuperAgentManager.mcpReadyTimeoutMs}），便于单测
+ * 注入极小值验证超时路径，而不必真的等满数秒。
+ */
+export const SUPER_MCP_READY_TIMEOUT_MS = 4_000;
+
+/** 上述等待的轮询间隔（毫秒），同样作为实例字段便于测试注入。 */
+export const SUPER_MCP_READY_POLL_MS = 120;
+
+/**
  * `.iflow/super/attachments/` 下附件副本的空闲清扫阈值（7 天）。
  *
  * 附件是主会话附件的临时拷贝，只服务一次子会话派发；正常终态会立即删除，
@@ -346,6 +364,75 @@ export async function awaitSuperPermissionDecision(
     return "deny";
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * MCP 发现是否已经稳定（工具已注册，可以安全发首轮 prompt）。
+ *
+ * 只有 `completed` 算“发现结束”。`undefined` / `"unknown"` 表示被查询的 CLI
+ * 没上报发现状态（旧 bundle / 无 loader）—— 没有可等的信号，按“已就绪”立即
+ * 返回，避免为一个永远不会来的状态白等满超时。`in_progress` / `not_started`
+ * 才需要继续等。
+ */
+function mcpDiscoverySettled(state: string | undefined): boolean {
+  return state === undefined || state === "unknown" || state === "completed";
+}
+
+/**
+ * 子会话首轮 prompt 前，有界等待 MCP 工具注册完成（见
+ * {@link SUPER_MCP_READY_TIMEOUT_MS} 的背景说明）。
+ *
+ * 三条降级路径都**不阻塞**子会话，只记一条日志后返回：
+ *  - `mcpStatus` 抛错（mcp-status-refactor Mod 缺失 / CLI 已拆）—— 与面板
+ *    「无指示灯」同一纪律，绝不假装就绪；
+ *  - 超过 `timeoutMs` —— 整体 deadline 连“某次 mcpStatus 一直挂着”也卡住
+ *    （`JsonRpcPeer.request` 默认 120s，远超这里的小上限）；
+ *  - `discoveryState` 为 undefined/unknown —— 无可等信号，立即返回。
+ *
+ * `client` 只取 `mcpStatus` 一个方法，便于单测用极小的 FakeClient 直接验证。
+ */
+export async function waitForChildMcpReady(options: {
+  client: Pick<AcpClient, "mcpStatus">;
+  sessionId: string;
+  timeoutMs: number;
+  pollMs: number;
+  log: SuperAgentDeps["log"];
+  label: string;
+}): Promise<void> {
+  const { client, sessionId, timeoutMs, pollMs, log, label } = options;
+  let stopped = false;
+  let settled = false;
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, Math.max(0, timeoutMs));
+    if (typeof timer.unref === "function") timer.unref();
+  });
+  const poll = (async () => {
+    while (!stopped) {
+      try {
+        const report = await client.mcpStatus(sessionId);
+        if (stopped) return;
+        if (mcpDiscoverySettled(report.discoveryState)) {
+          settled = true;
+          return;
+        }
+      } catch (error) {
+        if (stopped) return;
+        settled = true;
+        log.warn(`[${label}] 查询 MCP 就绪状态失败，照常发送首轮 prompt：${errorMessage(error)}`);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, pollMs)));
+    }
+  })();
+  await Promise.race([poll, deadline]);
+  stopped = true;
+  if (timer) clearTimeout(timer);
+  if (!settled) {
+    log.warn(
+      `[${label}] 等待 MCP 工具就绪超过 ${timeoutMs}ms，照常发送首轮 prompt（首轮可能缺 MCP 工具）`,
+    );
   }
 }
 
@@ -757,6 +844,14 @@ export class SuperAgentManager {
   private readonly integrationReasonEn = new Map<string, string>();
   /** 集成（自动合并 / PR）的串行链 —— 并发合并同一个工作区会把仓库搅乱。 */
   private integrationChain: Promise<void> = Promise.resolve();
+  /**
+   * 首轮 prompt 前等待 MCP 工具就绪的上限 / 轮询间隔。
+   *
+   * 公开且非常量，测试注入极小值（如 40ms / 5ms）即可确定性地验证超时降级
+   * 路径，而不必真的等满 {@link SUPER_MCP_READY_TIMEOUT_MS}。生产路径永不改写。
+   */
+  mcpReadyTimeoutMs = SUPER_MCP_READY_TIMEOUT_MS;
+  mcpReadyPollMs = SUPER_MCP_READY_POLL_MS;
   /**
    * 「分支上没有任何独有提交」的隔离，等子进程退出后再释放。
    *
@@ -2035,13 +2130,15 @@ export class SuperAgentManager {
       }
       this.clients.set(id, client);
 
+      // Broker endpoints for the configured MCP servers (one shared process
+      // per server across ALL children). Empty when the host has no broker
+      // (no configured servers, or broker startup failed — the CLI process
+      // is then scoped to the sentinel by the host and spawns nothing).
+      // 取一次复用：既进 session/new，也用来判断首轮 prompt 前要不要等 MCP。
+      const childMcpServers = this.deps.childMcpServers?.() ?? [];
       const { sessionId } = await client.newSession({
         cwd: isolation.path,
-        // Broker endpoints for the configured MCP servers (one shared process
-        // per server across ALL children). Empty when the host has no broker
-        // (no configured servers, or broker startup failed — the CLI process
-        // is then scoped to the sentinel by the host and spawns nothing).
-        mcpServers: this.deps.childMcpServers?.() ?? [],
+        mcpServers: childMcpServers,
         // 工具黑名单与主会话的 `settings.disallowed_tools` 同一机制；**为空时
         // 不带 settings** —— 缺省策略下 `session/new` 的请求形状必须与既有
         // 行为逐字节一致（既有测试断言子会话不传 settings）。
@@ -2050,6 +2147,22 @@ export class SuperAgentManager {
           : {}),
       });
       this.apply(id, { type: "started", cliSessionId: sessionId, at: Date.now() });
+
+      // CLI 的 MCP 发现走后台（mcp-background-loader 的
+      // startMcpDiscoveryInBackground() 不 await），newSession 返回时工具可能
+      // 还没注册。首轮 prompt 前做一次**有界**等待，避免模型首轮缺 MCP 工具。
+      // 没配置任何 MCP server 时立即跳过（无 broker 场景与修复前逐字节同行为），
+      // 超时 / 查询失败都只记日志后照常发 prompt，绝不永久卡住子会话。
+      if (childMcpServers.length > 0) {
+        await waitForChildMcpReady({
+          client,
+          sessionId,
+          timeoutMs: this.mcpReadyTimeoutMs,
+          pollMs: this.mcpReadyPollMs,
+          log: this.deps.log,
+          label: id,
+        });
+      }
 
       // 子会话推 `yolo` 是 `auto` 策略**刻意**的语义：子会话完全自主，不因审批
       // 往返而停顿。代价是 `yolo` 下内核通常**不发** `session/request_permission`，

@@ -266,6 +266,30 @@ describe("AcpClient (integration with mock ACP agent)", () => {
     expect(both.args).toContain(MCP_SERVER_ALLOWLIST_FLAG);
   });
 
+  it("buildAcpCommand scopes child MCP servers with one allowlist flag per name (empty → sentinel)", () => {
+    // 子会话路径（createClient 的 broker names）：每个 server 名一个 flag，
+    // CLI 侧按 set 过滤合并后的 map，只有这些名字能连 host broker。
+    const names = ["broker-a", "broker-b", "broker-c"];
+    const scoped = buildAcpCommand(mockAgent, [], { mcpServerNames: names });
+    const passed: string[] = [];
+    for (let i = 0; i < scoped.args.length; i++) {
+      if (scoped.args[i] === MCP_SERVER_ALLOWLIST_FLAG) passed.push(scoped.args[i + 1] ?? "");
+    }
+    expect(passed).toEqual(names);
+
+    // 空数组（无 broker / 无配置）= 无 MCP：必须是永不匹配的哨兵，而不是
+    // 「没有 flag」—— 后者会让 CLI 保留用户配置里的全部 stdio server。
+    const empty = buildAcpCommand(mockAgent, [], { mcpServerNames: [] });
+    const i = empty.args.indexOf(MCP_SERVER_ALLOWLIST_FLAG);
+    expect(i).toBeGreaterThan(-1);
+    expect(empty.args[i + 1]).toBe(MCP_SERVER_ALLOWLIST_SENTINEL);
+    expect(empty.args.filter((a) => a === MCP_SERVER_ALLOWLIST_FLAG)).toHaveLength(1);
+
+    // undefined = 不带 flag（没有 scope 请求时保持上游默认行为）。
+    const unset = buildAcpCommand(mockAgent, [], {});
+    expect(unset.args).not.toContain(MCP_SERVER_ALLOWLIST_FLAG);
+  });
+
   it("rejects fs/write_text_file paths that escape the session dir (A1 guardrail)", async () => {
     const updates: SessionNotification[] = [];
     const client = createClient("sandbox_escape", { onSessionUpdate: (n) => updates.push(n) });

@@ -12,7 +12,7 @@ import {
   SUPER_TEXT_MAX_CHARS,
 } from "../src/panel/super-agent.js";
 import type { AcpClient, AcpClientCallbacks } from "../src/acp/client.js";
-import type { ContentBlock, UserQuestion } from "../src/acp/protocol.js";
+import type { ContentBlock, McpServer, UserQuestion } from "../src/acp/protocol.js";
 import {
   DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   type SuperIntegrationMode,
@@ -83,6 +83,10 @@ class FakeClient {
   blocks: ContentBlock[][] = [];
   /** Mode ids pushed to the child session — the manager must send "yolo". */
   modes: string[] = [];
+  /** MCP 就绪等待测试用：mcpStatus 依次返回的 discoveryState（最后一个一直复用）。 */
+  mcpStatusStates: string[] = ["completed"];
+  /** 事件顺序记录（"mcpStatus" / "prompt"）：断言等待发生在首轮 prompt 之前。 */
+  eventLog: string[] = [];
   disposed = false;
   cwd = "";
   allowedRoots: string[] = [];
@@ -102,6 +106,17 @@ class FakeClient {
     readonly callbacks: AcpClientCallbacks,
     private readonly plan: Plan,
   ) {}
+
+  async mcpStatus(): Promise<{
+    available: boolean;
+    discoveryState?: string;
+    servers: Record<string, unknown>;
+  }> {
+    this.eventLog.push("mcpStatus");
+    const state =
+      this.mcpStatusStates.length > 1 ? this.mcpStatusStates.shift() : this.mcpStatusStates[0];
+    return { available: true, discoveryState: state, servers: {} };
+  }
 
   async newSession(request?: Record<string, unknown>): Promise<{ sessionId: string }> {
     this.newSessionRequests.push(request);
@@ -130,6 +145,7 @@ class FakeClient {
     stopReason: string;
     usage?: { lastRequestInputTokens: number; completionTokens?: number; cachedReadTokens?: number };
   }> {
+    this.eventLog.push("prompt");
     this.blocks.push(request.prompt);
     this.prompts.push(request.prompt.map((p) => (p.type === "text" ? p.text : "")).join("\n"));
     const emit = (sessionUpdate: "agent_message_chunk" | "agent_thought_chunk", text: string): void => {
@@ -242,6 +258,8 @@ interface Harness {
   }[];
   /** 「子会话在等你回答」的通知（宿主据此弹系统通知）。 */
   needInputs: SuperSessionUi[];
+  /** 管理器写出的 warn 日志（MCP 就绪降级路径据此断言）。 */
+  warns: string[];
 }
 
 function makeManager(
@@ -253,7 +271,14 @@ function makeManager(
   /** 并发上限：排队用例显式注入小值，避免依赖某个写死的常量。 */
   maxConcurrent: number = DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   /** 隔离回收相关设置（默认：完成后回收工作目录、保留分支）。 */
-  options: { keepWorktree?: boolean; maxWorktrees?: number } = {},
+  options: {
+    keepWorktree?: boolean;
+    maxWorktrees?: number;
+    /** 子会话 MCP server（首轮 prompt 前会因此等待 MCP 就绪）。 */
+    childMcpServers?: () => McpServer[];
+    /** 建好后、交给管理器之前配置 FakeClient（如注入 mcpStatus 返回序列）。 */
+    configureClient?: (client: FakeClient) => void;
+  } = {},
 ): Harness {
   const clients: FakeClient[] = [];
   const sessions: SuperSessionUi[] = [];
@@ -262,14 +287,17 @@ function makeManager(
   const needMerges: { session: SuperSessionUi; reason: string }[] = [];
   const mergeResults: Harness["mergeResults"] = [];
   const needInputs: SuperSessionUi[] = [];
+  const warns: string[] = [];
   const manager = new SuperAgentManager({
     repoRoot,
+    childMcpServers: options.childMcpServers,
     createClient: async (params) => {
       const planForClient = Array.isArray(plan) ? (plan[clients.length] ?? "complete") : plan;
       const client = new FakeClient(params.callbacks, planForClient);
       client.cwd = params.cwd;
       client.allowedRoots = params.allowedRoots;
       client.includeDirectories = params.includeDirectories;
+      options.configureClient?.(client);
       clients.push(client);
       return client as unknown as AcpClient;
     },
@@ -300,9 +328,9 @@ function makeManager(
     maxConcurrentSessions: () => maxConcurrent,
     keepWorktree: () => options.keepWorktree ?? false,
     maxWorktrees: () => options.maxWorktrees ?? 10,
-    log: { info: () => {}, warn: () => {}, error: () => {} },
+    log: { info: () => {}, warn: (msg) => warns.push(msg), error: () => {} },
   });
-  return { manager, clients, sessions, reports, transcripts, needMerges, mergeResults, needInputs };
+  return { manager, clients, sessions, reports, transcripts, needMerges, mergeResults, needInputs, warns };
 }
 
 /**
@@ -385,6 +413,61 @@ describe("super agent · 编排", () => {
     expect(JSON.stringify(request ?? {})).not.toContain("disallowed_tools");
     expect(JSON.stringify(request ?? {})).not.toContain("allowed_tools");
     expect(request?.cwd).toBe(harness.sessions[0]?.isolation.path);
+    // 没配置 MCP server 时首轮 prompt 前不查询就绪状态（无 broker 场景不空等）。
+    expect(harness.clients[0]?.eventLog).not.toContain("mcpStatus");
+  }, 30000);
+
+  it("配置 MCP 时首轮 prompt 前会等待工具就绪（discoveryState 到 completed 才发）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete", "manual", "main-1", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS, {
+      childMcpServers: () => [
+        { name: "broker-a", type: "http", url: "http://127.0.0.1:1/mcp" } satisfies McpServer,
+      ],
+      configureClient: (client) => {
+        // 前两次 in_progress，第三次起 completed —— 必须等到稳定才发 prompt。
+        client.mcpStatusStates = ["in_progress", "in_progress", "completed"];
+      },
+    });
+    // 极小轮询间隔 / 上限：测试不等真实 4 秒，也不碰真实 CLI。
+    harness.manager.mcpReadyPollMs = 5;
+    harness.manager.mcpReadyTimeoutMs = 500;
+    harness.manager.spawn({ title: "用 MCP", task: "调用 broker 工具" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    const child = harness.clients[0]!;
+    const statusCalls = child.eventLog.filter((e) => e === "mcpStatus").length;
+    expect(statusCalls).toBeGreaterThanOrEqual(3);
+    expect(child.eventLog[0]).toBe("mcpStatus");
+    expect(child.eventLog.indexOf("prompt")).toBeGreaterThan(
+      child.eventLog.lastIndexOf("mcpStatus"),
+    );
+    expect(child.prompts).toHaveLength(1);
+    expect(harness.warns.some((w) => w.includes("等待 MCP 工具就绪超过"))).toBe(false);
+  }, 30000);
+
+  it("配置 MCP 但发现一直不完成时，有界超时后照常发送首轮 prompt（不永久卡住）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete", "manual", "main-1", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS, {
+      childMcpServers: () => [
+        { name: "broker-a", type: "http", url: "http://127.0.0.1:1/mcp" } satisfies McpServer,
+      ],
+      configureClient: (client) => {
+        // 永远 in_progress —— 逼出超时降级路径。
+        client.mcpStatusStates = ["in_progress"];
+      },
+    });
+    harness.manager.mcpReadyPollMs = 5;
+    harness.manager.mcpReadyTimeoutMs = 40;
+    harness.manager.spawn({ title: "用 MCP", task: "调用 broker 工具" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    const child = harness.clients[0]!;
+    // 超时后 prompt 照常发出，子会话正常完成 —— 绝不为等 MCP 永久卡住。
+    expect(child.eventLog).toContain("prompt");
+    expect(child.prompts).toHaveLength(1);
+    expect(harness.sessions[0]?.status).toBe("completed");
+    // 降级如实记日志，而不是假装「已就绪」。
+    expect(harness.warns.some((w) => w.includes("等待 MCP 工具就绪超过"))).toBe(true);
   }, 30000);
 
   it("超流体被推到 yolo 模式（刻意完全自主，不因审批往返停顿）", async () => {
