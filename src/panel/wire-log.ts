@@ -81,11 +81,23 @@ export function wireFrameLine(frame: WireFrame): string {
  * session (long-session bloat, 2026-10). The budget is measured in
  * `line.length` (UTF-16 code units ≈ the JS heap cost of the retained
  * string), which bounds retention regardless of frame shape.
+ *
+ * Redaction is deliberately NOT done in `tap` (the hot path): it runs in
+ * `dump()` via `wireFrameLine`. The redacted result is memoized per frame
+ * (`redactedLines`) and the joined dump is cached while the buffer is
+ * untouched (`dumpCache`), so repeated exports never re-parse / re-redact /
+ * re-stringify frames that have not changed. The cache stores only the OUTPUT
+ * of the unchanged redaction path — it can never bypass a redaction pass —
+ * so `dump()` stays byte-for-byte identical to the uncached implementation.
  */
 export class WireRingBuffer {
   private readonly frames: WireFrame[] = [];
   /** Sum of `line.length` over `frames` — maintained on push/evict. */
   private chars = 0;
+  /** Redacted NDJSON line per frame, computed at most once (frames are immutable after push). */
+  private readonly redactedLines = new WeakMap<WireFrame, string>();
+  /** Last joined dump; null = stale. Invalidated on every push. */
+  private dumpCache: string | null = null;
 
   constructor(
     private readonly capacity = 2000,
@@ -116,6 +128,8 @@ export class WireRingBuffer {
       drop++;
     }
     if (drop > 0) this.frames.splice(0, drop);
+    // Any push (even one that only evicts) changes what dump() must emit.
+    this.dumpCache = null;
   };
 
   get size(): number {
@@ -124,6 +138,15 @@ export class WireRingBuffer {
 
   /** Redacted NDJSON of everything buffered (oldest first). */
   dump(): string {
-    return this.frames.map(wireFrameLine).join("\n") + (this.frames.length > 0 ? "\n" : "");
+    if (this.dumpCache !== null) return this.dumpCache;
+    const lines = this.frames.map((frame) => {
+      const cached = this.redactedLines.get(frame);
+      if (cached !== undefined) return cached;
+      const line = wireFrameLine(frame);
+      this.redactedLines.set(frame, line);
+      return line;
+    });
+    this.dumpCache = lines.join("\n") + (this.frames.length > 0 ? "\n" : "");
+    return this.dumpCache;
   }
 }
