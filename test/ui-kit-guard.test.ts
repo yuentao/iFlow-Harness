@@ -350,7 +350,6 @@ describe("ui kit guard", () => {
       "export function FieldLabel(",
       "export function ActionRow(",
       "export function ToolbarRow(",
-      "export function SecondaryRow(",
       "export function Chip(",
       "export function HelpTip(",
       "export function ModalShell(",
