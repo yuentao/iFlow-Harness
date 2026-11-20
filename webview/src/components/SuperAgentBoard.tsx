@@ -1773,7 +1773,7 @@ function SuperSessionRow({
   // F1 落盘 + 恢复时会把历史子会话的转录按 from:0 推进 superTranscripts（以
   // session.id 为 key）。历史会话没有活进程可拉全量，但只要有这份已保存的
   // 快照就能打开详情查看；无快照时仍不给一个点了没内容的按钮。
-  const hasTranscript = (useChat((s) => s.superTranscripts[session.id])?.length ?? 0) > 0;
+  const hasTranscript = (useChat((s) => s.superTranscripts?.[session.id])?.length ?? 0) > 0;
   // 折叠行只报状态时也要能看出「改动没落地」：终态且集成有问题的行给一个小
   // chip（需人工合并 / 冲突 / 未自动合并），完整说明仍只在展开详情里。
   const integrationIssue = collapsedIntegrationIssue(session);
@@ -2165,7 +2165,7 @@ function SuperSessionLive({
 }) {
   const send = useChat((s) => s.send);
   const historical = session.restored === true;
-  const transcript = useChat((s) => s.superTranscripts[session.id]) ?? EMPTY_TRANSCRIPT;
+  const transcript = useChat((s) => s.superTranscripts?.[session.id]) ?? EMPTY_TRANSCRIPT;
   const liveRef = useRef<HTMLDivElement>(null);
   // Follow the tail unless the user scrolled up — same rule as the main
   // transcript, so live activity keeps the newest tool call in view.

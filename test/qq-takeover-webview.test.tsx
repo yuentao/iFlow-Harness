@@ -48,6 +48,7 @@ const useChat = vi.hoisted(() =>
         toasts: [],
         qqSettings: { enabled: mocked.qqEnabled },
         remoteTakeover: mocked.takeover,
+        superTranscripts: {},
       }),
     {
       getState: () => ({
@@ -55,6 +56,7 @@ const useChat = vi.hoisted(() =>
         send: mocked.send,
         notify: mocked.notify,
         remoteTakeover: mocked.takeover,
+        superTranscripts: {},
       }),
     },
   ),
