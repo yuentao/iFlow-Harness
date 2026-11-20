@@ -10,7 +10,7 @@
  * so instead of presenting a guess as fact.
  */
 
-import type { SessionUsageUi } from "./messages.js";
+import type { ModelMetadataSource, SessionUsageUi } from "./messages.js";
 
 /** Fallback window for an unknown model — small on purpose: overestimating
  * the window hides an overflow that is about to happen. */
@@ -246,4 +246,89 @@ export function estimateCost(
 ): number | null {
   if (!price) return null;
   return (usage.inputTokens / 1_000_000) * price.input + (usage.outputTokens / 1_000_000) * price.output;
+}
+
+// --- U1 provenance: source-aware wrappers -----------------------------------
+// These add ONLY a source label to the numbers the two resolvers above already
+// compute. They never recompute or re-score a value: `window` / `price` come
+// straight from `resolveContextWindow` / `resolveCost`, and the source is
+// derived by re-checking the same deterministic branches (keep the branch
+// order below in sync with the originals above). This is the host computation
+// point where `SessionUsageUi.sources.window` / `.cost` get filled.
+
+/** Window value plus the provenance of the number. `source` is null when no
+ * number exists (null model id); copy it into `SessionUsageUi.sources.window`
+ * only when `window !== null`. */
+export interface ContextWindowResolution {
+  window: number | null;
+  estimated: boolean;
+  source: ModelMetadataSource | null;
+}
+
+/** Source-aware `resolveContextWindow`: reports which EXISTING branch produced
+ * the window so the host can fill `SessionUsageUi.sources.window`. String
+ * literals mirror `ModelMetadataSource` (shared/messages.ts:711) and are
+ * descriptive only — no value is recomputed from them.
+ *
+ * Provenance / 决策点证据 (all in this file):
+ *  - `"user"` — explicit `iflow.contextWindowOverrides` hit: the
+ *    `overrides[key] !== undefined` branch at shared/context-window.ts:207.
+ *    NOTE: the 「联网补充模型数据」 flow APPENDS its AI-supplied values into
+ *    the SAME overrides array (src/panel/panel.ts:3938), so from inside this
+ *    module a hand-typed and an AI-appended value are indistinguishable — both
+ *    report `user`. Precise `ai-supplement` tagging must be stamped on the
+ *    panel write side; deferred to T-9. Never guessed here.
+ *  - `"builtin-table"` — curated table hit: `lookup(CONTEXT_WINDOW_TABLE, …)`
+ *    at shared/context-window.ts:209.
+ *  - `"fallback-estimate"` — unknown model, `DEFAULT_CONTEXT_WINDOW` returned
+ *    at shared/context-window.ts:210 (the branch that also sets `estimated:
+ *    true`).
+ *  - `null` — null/blank model id: no number, hence no provenance.
+ */
+export function resolveContextWindowWithSource(
+  modelId: string | null | undefined,
+  overrides: Record<string, number>,
+): ContextWindowResolution {
+  const base = resolveContextWindow(modelId, overrides);
+  if (base.window === null) return { ...base, source: null };
+  const key = normalizeModelId(modelId);
+  if (overrides[key] !== undefined) return { ...base, source: "user" };
+  if (lookup(CONTEXT_WINDOW_TABLE, modelId) !== null) return { ...base, source: "builtin-table" };
+  return { ...base, source: "fallback-estimate" };
+}
+
+/** Unit price plus the provenance of the number. `source` is null when there
+ * is no attributable number (no price, or an unclassifiable branch). */
+export interface CostResolution {
+  price: { input: number; output: number } | null;
+  source: ModelMetadataSource | null;
+}
+
+/** Source-aware `resolveCost`: reports which EXISTING branch produced the price
+ * so the host can fill `SessionUsageUi.sources.cost`. Price comes from
+ * `resolveCost` (shared/context-window.ts:231); no new estimate.
+ *
+ * Provenance / 决策点证据:
+ *  - `"user"` — explicit `iflow.costTable` override hit at
+ *    shared/context-window.ts:238. Same panel AI-append ambiguity as the
+ *    window path (src/panel/panel.ts:3939): a hand-typed and an AI-appended
+ *    price are indistinguishable here — both report `user`; precise
+ *    `ai-supplement` tagging belongs to the panel write side (T-9).
+ *  - `"builtin-table"` — `COST_TABLE` hit at shared/context-window.ts:239.
+ *  - `null` — no override and no table hit: there is NO fallback price, the UI
+ *    shows 无单价, so there is no number to attribute and `sources.cost` must
+ *    be omitted. Never `fallback-estimate` for cost.
+ */
+export function resolveCostWithSource(
+  modelId: string | null | undefined,
+  overrides: Record<string, { input: number; output: number }>,
+): CostResolution {
+  const price = resolveCost(modelId, overrides);
+  if (price === null) return { price: null, source: null };
+  const key = normalizeModelId(modelId);
+  if (overrides[key]) return { price, source: "user" };
+  if (lookup(COST_TABLE, modelId) !== null) return { price, source: "builtin-table" };
+  // Defensive: an unclassifiable non-null price (e.g. a future new branch in
+  // resolveCost) must stay unattributed rather than be mislabeled.
+  return { price, source: null };
 }
