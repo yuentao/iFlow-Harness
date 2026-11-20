@@ -55,7 +55,7 @@ import type {
   SessionSettings,
   ToolCallBase,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QqSettingsPatch, QqTaskUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QqSettingsPatch, QqTaskUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
@@ -137,7 +137,7 @@ import {
   normalizeFolderRel,
   truncateChars,
 } from "../../shared/context-source.js";
-import type { ParsedEditArgs, PreEditSnapshot } from "../../shared/session-state.js";
+import type { ParsedEditArgs, PreEditSnapshot, UsageContext } from "../../shared/session-state.js";
 import {
   backfillBlockIds,
   canStopSubAgent,
@@ -175,7 +175,7 @@ import { buildSkillPrompt, parseSkillInvocation, type SkillInvocation } from "..
 import { isWithin, memoryHome } from "../memory/files.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
-import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, resolveCost } from "../../shared/context-window.js";
+import { normalizeModelId, parseContextWindowOverrides, parseCostTable, resolveCost, resolveContextWindowWithSource, resolveCostWithSource } from "../../shared/context-window.js";
 import {
   gateOsNotification,
   initOsNotifyGate,
@@ -198,7 +198,9 @@ import {
   buildModelMetadataPrompt,
   parseModelMetadata,
   planMetadataAdditions,
+  type MetadataAdditions,
   type MetadataSource,
+  type ModelMetadataEntry,
 } from "../../shared/model-metadata.js";
 import { fetchPageText, searchWeb, type WebSearchHit } from "../acp/web-search.js";
 import { WireRingBuffer } from "./wire-log.js";
@@ -3944,6 +3946,14 @@ export class ChatPanel implements vscode.Disposable {
         thinkingModelRules: existingRules,
       });
       if (additions.total > 0) {
+        // T-9: record which rows the AI flow is about to append so the usage
+        // resolver can label them `ai-supplement` instead of `user`. Done
+        // BEFORE the writes — the config-change handler invalidates the usage
+        // cache synchronously and a stale `user` label could otherwise flash.
+        // A failed write still can't produce a false label: the relabel also
+        // requires a matching, winning `user` override value. Values / settings
+        // bytes are untouched — this is in-memory provenance only.
+        this.recordAiMetadataStamp(entries, sources, additions);
         await this.writeUserSetting("contextWindowOverrides", [...cfg.get<string[]>("contextWindowOverrides", []), ...additions.windows]);
         await this.writeUserSetting("costTable", [...cfg.get<string[]>("costTable", []), ...additions.costs]);
         await this.writeUserSetting("thinkingModelRules", [...existingRules, ...additions.rules]);
@@ -4434,14 +4444,65 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- M1: context occupancy (P0-6) + cost (P1-6) ------------------------------
 
-  /** Resolve the store's usage context: settings overrides → curated tables →
-   * conservative fallback. Synchronous and cheap (runs per push). */
   /** Cached parse of the two usage settings (invalidated on config change —
    * `resolveUsageContext` runs on EVERY store push, so re-parsing the arrays
    * per push would waste work during streaming). */
   private usageOverridesCache: { overrides: Record<string, number>; cost: Record<string, { input: number; output: number }> } | null = null;
 
-  private resolveUsageContext(): { contextWindow: number | null; estimated: boolean; costPrice: { input: number; output: number } | null } {
+  /**
+   * T-9 in-memory provenance for values appended by the 「联网补充模型数据」
+   * flow. That flow APPENDS AI-supplied `name=value` rows into the SAME
+   * `contextWindowOverrides` / `costTable` settings as hand-typed rows, so
+   * T-8's `resolveContextWindowWithSource` / `resolveCostWithSource` can only
+   * report `user` for both (documented in shared/context-window.ts). This map
+   * is the ONLY distinction: keyed by normalized model id, it records which
+   * kind of value the AI appended, its exact value (so a later hand-edit stops
+   * being labeled ai-supplement), the citation URL and the capture time.
+   * Purely in-memory — no settings disk format is touched, so user settings
+   * stay compatible; a process restart simply drops the tags while the values
+   * remain honest user overrides.
+   */
+  private aiMetadataStamp: Map<string, {
+    window?: { value: number; sourceUrl?: string; capturedAt: number };
+    cost?: { value: { input: number; output: number }; sourceUrl?: string; capturedAt: number };
+  }> = new Map();
+
+  /** Record AI-supplement provenance for the rows actually appended by
+   * `planMetadataAdditions` (pre-existing user rows are never stamped). Called
+   * right before the setting writes in the metadata fetch flow. */
+  private recordAiMetadataStamp(
+    entries: readonly ModelMetadataEntry[],
+    sources: readonly MetadataSource[],
+    additions: MetadataAdditions,
+  ): void {
+    const windowKeys = new Set(additions.windows.map((line) => normalizeModelId(line.slice(0, line.indexOf("=")))));
+    const costKeys = new Set(additions.costs.map((line) => normalizeModelId(line.slice(0, line.indexOf("=")))));
+    if (windowKeys.size === 0 && costKeys.size === 0) return;
+    const capturedAt = Date.now();
+    for (const entry of entries) {
+      const key = normalizeModelId(entry.name);
+      if (!key) continue;
+      const sourceUrl = entry.source ? sources.find((s) => s.id === entry.source)?.url : undefined;
+      const stamp = this.aiMetadataStamp.get(key) ?? {};
+      if (windowKeys.has(key) && entry.contextWindow !== undefined) {
+        stamp.window = { value: entry.contextWindow, capturedAt, ...(sourceUrl ? { sourceUrl } : {}) };
+      }
+      if (costKeys.has(key) && entry.inputPrice !== undefined && entry.outputPrice !== undefined) {
+        stamp.cost = {
+          value: { input: entry.inputPrice, output: entry.outputPrice },
+          capturedAt,
+          ...(sourceUrl ? { sourceUrl } : {}),
+        };
+      }
+      if (stamp.window || stamp.cost) this.aiMetadataStamp.set(key, stamp);
+    }
+  }
+
+  /** Resolve the store's usage context: settings overrides → curated tables →
+   * conservative fallback, together with the provenance of each number (T-8)
+   * and the ai-supplement relabel (T-9). Value and label come from the SAME
+   * resolver call so they can never drift. Synchronous and cheap (per push). */
+  private resolveUsageContext(): UsageContext {
     const cfg = vscode.workspace.getConfiguration("iflow");
     let cached = this.usageOverridesCache;
     if (!cached) {
@@ -4452,8 +4513,45 @@ export class ChatPanel implements vscode.Disposable {
       this.usageOverridesCache = cached;
     }
     const modelId = this.store.getState().currentModelId;
-    const { window, estimated } = resolveContextWindow(modelId, cached.overrides);
-    return { contextWindow: window, estimated, costPrice: resolveCost(modelId, cached.cost) };
+    const win = resolveContextWindowWithSource(modelId, cached.overrides);
+    const cost = resolveCostWithSource(modelId, cached.cost);
+    let windowSource: ModelMetadataSource | null = win.source;
+    let costSource: ModelMetadataSource | null = cost.source;
+    let capturedAt: number | undefined;
+    let sourceUrl: string | undefined;
+
+    const key = normalizeModelId(modelId);
+    if (key) {
+      const aiStamp = this.aiMetadataStamp.get(key);
+      // Relabel ONLY a winning "user" override whose exact value still matches
+      // what the AI flow appended. A hand-typed override — or a later hand edit
+      // of an AI value — stays / returns to `user`, never a false
+      // `ai-supplement`. T-5's contextUsed/split sources are produced
+      // downstream (estimateSessionUsage + kernel overlay) and left untouched.
+      if (aiStamp?.window && win.source === "user" && cached.overrides[key] === aiStamp.window.value) {
+        windowSource = "ai-supplement";
+        capturedAt = aiStamp.window.capturedAt;
+        if (aiStamp.window.sourceUrl) sourceUrl = aiStamp.window.sourceUrl;
+      }
+      if (aiStamp?.cost && cost.source === "user") {
+        const live = cached.cost[key];
+        if (live && live.input === aiStamp.cost.value.input && live.output === aiStamp.cost.value.output) {
+          costSource = "ai-supplement";
+          if (capturedAt === undefined) capturedAt = aiStamp.cost.capturedAt;
+          if (sourceUrl === undefined && aiStamp.cost.sourceUrl) sourceUrl = aiStamp.cost.sourceUrl;
+        }
+      }
+    }
+
+    return {
+      contextWindow: win.window,
+      estimated: win.estimated,
+      costPrice: cost.price,
+      windowSource,
+      costSource,
+      ...(capturedAt !== undefined ? { capturedAt } : {}),
+      ...(sourceUrl !== undefined ? { sourceUrl } : {}),
+    };
   }
 
   /**

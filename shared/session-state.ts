@@ -40,6 +40,7 @@ import {
   type ToolBlock,
   type ToolDiffUi,
   type UsageBreakdownUi,
+  type ModelMetadataSource,
 } from "./messages.js";
 import { classifySuperToolName, resolveSuperToolCallKind } from "./super-tool-call.js";
 import { parseSuperDelegationPayload, type SuperDirectiveAction } from "./super-agent.js";
@@ -2155,6 +2156,20 @@ export interface UsageContext {
   estimated: boolean;
   /** Unit price per million tokens (null = no price known → no cost shown). */
   costPrice: { input: number; output: number } | null;
+  /** U1 provenance — source of `contextWindow` (user / builtin-table /
+   * fallback-estimate / ai-supplement). Null/omitted means no attributable
+   * number (null model id); the reducer must not stamp a source in that case.
+   * The panel computes this in the same place as `contextWindow` (its resolver
+   * calls resolveContextWindowWithSource) so value and label never drift. */
+  windowSource?: ModelMetadataSource | null;
+  /** U1 provenance — source of the unit price behind `estimatedCost`.
+   * Null/omitted when resolveCost found no price (cost has no fallback), so
+   * the reducer leaves `sources.cost` absent rather than fabricate one. */
+  costSource?: ModelMetadataSource | null;
+  /** Host capture time of this provenance snapshot (epoch ms). */
+  capturedAt?: number;
+  /** Citation URL for an ai-supplement figure (from MetadataSource.url). */
+  sourceUrl?: string;
 }
 
 /**
@@ -2228,6 +2243,22 @@ export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext
     next.contextWindow = usageCtx.contextWindow;
     next.estimated = usageCtx.estimated;
     next.estimatedCost = estimateCost(next, usageCtx.costPrice);
+    // U1 provenance (T-8 window/cost + T-9 ai-supplement): stamp the labels
+    // the panel resolver produced IN THE SAME EXPRESSION as the numbers above,
+    // so a value and its source can never drift apart. `estimateSessionUsage`
+    // already filled `contextUsed`/`split` (T-5) and the kernel overlay above
+    // refined `contextUsed` — spread those through untouched. A null source
+    // (no model / no price) is deliberately NOT written: the field stays
+    // absent rather than claim a fabricated provenance.
+    if (usageCtx.windowSource != null || usageCtx.costSource != null) {
+      next.sources = {
+        ...next.sources,
+        ...(usageCtx.windowSource != null ? { window: usageCtx.windowSource } : {}),
+        ...(usageCtx.costSource != null ? { cost: usageCtx.costSource } : {}),
+      };
+    }
+    if (usageCtx.capturedAt !== undefined) next.capturedAt = usageCtx.capturedAt;
+    if (usageCtx.sourceUrl !== undefined) next.sourceUrl = usageCtx.sourceUrl;
   }
   const prev = state.usage;
   if (
@@ -2245,6 +2276,12 @@ export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext
     // refreshes (500ms cadence mid-stream) reference-stable.
     prev.sources?.contextUsed === next.sources?.contextUsed &&
     prev.sources?.split === next.sources?.split &&
+    // Provenance labels are compared too: a user→ai-supplement relabel (or a
+    // citation appearing) must break reference stability even when every
+    // number is unchanged, otherwise the webview would never see the new tag.
+    prev.sources?.window === next.sources?.window &&
+    prev.sources?.cost === next.sources?.cost &&
+    prev.sourceUrl === next.sourceUrl &&
     prev.contextWindow === next.contextWindow &&
     prev.estimated === next.estimated &&
     prev.estimatedCost === next.estimatedCost
