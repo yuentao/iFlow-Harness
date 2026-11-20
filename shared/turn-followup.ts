@@ -103,16 +103,28 @@ function digObject(raw: string): Record<string, unknown> | null {
   return null;
 }
 
-/** Balanced-bracket dig for one array key (used when the envelope parse failed). */
+/** Balanced-bracket dig for one array key (used when the envelope parse failed).
+ * Brackets inside JSON string values are ignored, and backslash escapes
+ * (`\"`, `\\`, ...) are honoured, so a `]`/`[` in a suggestion text cannot end
+ * the array early and drop the whole list. */
 function digArray(raw: string, key: string): readonly unknown[] | null {
   const at = raw.indexOf(`"${key}"`);
   if (at < 0) return null;
   const open = raw.indexOf("[", at);
   if (open < 0) return null;
   let depth = 0;
+  let inString = false;
+  let escaped = false;
   for (let i = open; i < raw.length; i++) {
     const ch = raw[i];
-    if (ch === "[") depth += 1;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "[") depth += 1;
     else if (ch === "]") {
       depth -= 1;
       if (depth === 0) {
