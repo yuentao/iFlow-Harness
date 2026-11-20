@@ -84,13 +84,19 @@ class MemoryIo implements QqSettingsIo {
 }
 
 /** Stateful harness: the component is controlled, so a test must feed the
- * patch back for the next render (like the host will). */
+ * patch back for the next render (like the host will).
+ *
+ * `status` 显式覆盖连接态回执：`undefined` = 沿用默认夹具（enabled 时视为已连接），
+ * `null` = 完全不传 status（连接状态未知），其余按传入值 —— 引导卡是否渲染完全
+ * 由这个回执决定，用例必须能逐档控制。 */
 function Harness({
   initial,
   pending,
+  status,
 }: {
   initial?: Partial<QqSettingsValue>;
   pending?: QqPendingUserUi[];
+  status?: { connected?: boolean; detail?: string } | null;
 }) {
   const [value, setValue] = useState<QqSettingsValue>({ ...VALUE, ...initial });
   return (
@@ -105,7 +111,11 @@ function Harness({
       onUnbind={onUnbind}
       pendingUsers={pending}
       onUserAction={onUserAction}
-      status={{ connected: initial?.enabled ? true : false, detail: "QQ 官方机器人已连接" }}
+      status={
+        status === undefined
+          ? { connected: initial?.enabled ? true : false, detail: "QQ 官方机器人已连接" }
+          : (status ?? undefined)
+      }
       warnings={initial?.enabled ? [] : ["机器人凭据还没有配置"]}
     />
   );
@@ -885,6 +895,63 @@ describe("QqSettings", () => {
     // 白名单区与开关不受授权态影响。
     expect(text).toContain("允许的用户");
     expect(text).toContain("允许的群");
+  });
+
+  it("已连接时整张「一键接入」引导卡不渲染（与已连接状态互斥）", () => {
+    render(
+      <Harness
+        initial={{ enabled: true }}
+        status={{ connected: true, detail: "QQBot 官方网关已连接" }}
+      />,
+    );
+    const text = container.textContent ?? "";
+    // 引导卡整块消失：标题、说明与入口按钮都不在。
+    expect(text).not.toContain("一键接入");
+    expect(text).not.toContain("一键接入 QQ 机器人");
+    expect(text).not.toContain("官方合规通道（推荐）");
+    // 不是 CSS 隐藏：按钮根本不在 DOM 里（不会残留占位或可聚焦性）。
+    expect(
+      [...container.querySelectorAll("button")].some(
+        (button) => button.textContent?.trim() === "一键接入 QQ 机器人",
+      ),
+    ).toBe(false);
+    // 已连接状态与三个操作按钮保留。
+    expect(text).toContain("已连接");
+    expect(text).toContain("QQBot 官方网关已连接");
+    expect(text).toContain("重新扫码授权");
+    expect(text).toContain("测试连接");
+    expect(text).toContain("解除绑定");
+  });
+
+  it("未连接时引导卡照常渲染：用户需要一个重新接入的入口", () => {
+    render(
+      <Harness
+        initial={{ enabled: true }}
+        status={{ connected: false, detail: "QQBot 未连接" }}
+      />,
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("一键接入");
+    expect(text).toContain("一键接入 QQ 机器人");
+    expect(text).toContain("未连接");
+  });
+
+  it("连接状态未知时引导卡照常渲染（不得凭空隐藏入口）", () => {
+    render(<Harness initial={{ enabled: true }} status={null} />);
+    const text = container.textContent ?? "";
+    expect(text).toContain("一键接入 QQ 机器人");
+    expect(text).toContain("连接状态未知");
+  });
+
+  it("曾经绑定过但当前未连接：引导卡仍在（解绑后能重新接入）", () => {
+    render(
+      <Harness
+        initial={{ enabled: true, hasAppSecret: true }}
+        status={{ connected: false, detail: "QQ 通道已停止" }}
+      />,
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("一键接入 QQ 机器人");
   });
 
   it("已授权时显示重新扫码授权 / 测试连接 / 解除绑定并接线", () => {

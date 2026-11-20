@@ -652,6 +652,23 @@ export function QqSettings({
    */
   const authorized =
     value.hasAppSecret === true || status?.connected === true || managedPhase === "logged_in";
+  /**
+   * 机器人是否已连上官方网关 —— 判据只用**已有的连接状态源** `status.connected`
+   * （宿主 `qqStatus` 回执：网关已连上 / 已失活 / 未连接 / 未知）。
+   *
+   * 为什么不用别的信号：
+   *  - `hasAppSecret`（曾扫码授权过）不是连接态：解绑后凭据被清、通道被停，
+   *    用户必须还能看到「一键接入」入口重新绑定；
+   *  - `managedPhase`（托管阶段机）是一次性接入流程的进度，不是存活信号：通道
+   *    失活时宿主只推 `qqStatus(false)`，阶段仍停在 logged_in，拿它当隐藏条件
+   *    会让失活后回不了头；
+   *  - 「已连接」chip 本身就是 `status.connected` 驱动的 —— 用同一个信号判引导卡，
+   *    两处状态不可能互相矛盾（这正是用户截图里「已连接 + 一键接入」并存的成因）。
+   *
+   * 隐藏只在**已连接**这一档生效：连接中（托管阶段机在跑）仍要显示进度与
+   * 「停止托管」，未绑定 / 未连接 / 状态未知也必须留入口。
+   */
+  const botConnected = status?.connected === true;
 
   return (
     <div className="flex flex-col gap-3">
@@ -659,8 +676,12 @@ export function QqSettings({
        * 一键接入卡（含扫码区）是远程任务的从属配置：总开关关闭时整卡不渲染
        * （AGENTS.md「设置项的从属配置应跟随对应开关」：关闭时完全不显示，
        * 而不是仅禁用）。打开开关后的说明由「连接」分组里的提示补上。
+       *
+       * 机器人**已经连上**时同样整卡不渲染：引导卡是「还没接入」的入口，
+       * 与下面那条绿色「已连接」状态互斥（用户截图里的并排出现就是这么来的）。
+       * 不渲染而不是 CSS 隐藏 —— 隐藏的按钮仍可聚焦、仍占位。
        */}
-      {value.enabled && (
+      {value.enabled && !botConnected && (
       <div className="rounded-lg border border-border bg-surface/40 px-3 py-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
