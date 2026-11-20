@@ -58,6 +58,13 @@
   --radius-overlay: 12px;
   --radius-bubble: 16px;
 
+  /* Modal width tiers (semantic): narrow 400 (confirm / quick-add /
+     profile-switch), wide 560, settings 680. Every modal still clamps to
+     `calc(100vw - 32px)` so a narrow panel keeps 16px on each side. */
+  --modal-w: 400px;
+  --modal-w-wide: 560px;
+  --modal-w-settings: 680px;
+
   /* Panel typography / density (iflow.uiFontSize / iflow.uiDensity). The
      store writes the scale inline on <html>; the fallbacks here match the
      "standard" preset. Every text node uses one of the five semantic sizes
@@ -2064,7 +2071,7 @@ pre {
 }
 
 .auth-modal {
-  width: min(400px, calc(100vw - 32px));
+  width: min(var(--modal-w), calc(100vw - 32px));
   max-height: 78vh;
   overflow-y: auto;
   border-radius: var(--radius-overlay);
@@ -2080,7 +2087,7 @@ pre {
 .auth-modal-wide {
   display: flex;
   flex-direction: column;
-  width: min(560px, calc(100vw - 32px));
+  width: min(var(--modal-w-wide), calc(100vw - 32px));
   /* Fixed height: tab switches change the content's height, which used to
    * resize the whole modal every switch (the body scrolls internally, so a
    * fixed height costs nothing — the content area absorbs the slack). */
@@ -2095,10 +2102,24 @@ pre {
 }
 
 /* Settings modal only: wider than the generic wide dialog so grouped rows
- * and segmented controls have breathing room. Other wide modals keep 560px. */
+ * and segmented controls have breathing room. On a narrow panel the other
+ * wide modals keep 560px; on a roomy panel they share this 680px tier (see
+ * the media query below). */
 .auth-modal-wide.settings-modal {
-  width: min(680px, calc(100vw - 32px));
+  width: min(var(--modal-w-settings), calc(100vw - 32px));
   height: min(640px, 86vh);
+}
+
+/* Roomy panel: the four long-content / split-layout wide dialogs (settings,
+ * onboarding, memory review, super-agent live progress) must not stay pinned
+ * at 560px once the panel has room. They reuse the settings tier's 680px —
+ * no new pixel value — while narrow panels keep 560/400 and the 16px-per-side
+ * viewport clamp above. `.auth-modal-wide.settings-modal` has higher
+ * specificity and already resolves to the same 680px tier, so it is unaffected. */
+@media (min-width: 900px) {
+  .auth-modal-wide {
+    width: min(var(--modal-w-settings), calc(100vw - 32px));
+  }
 }
 
 @media (max-width: 560px) {
