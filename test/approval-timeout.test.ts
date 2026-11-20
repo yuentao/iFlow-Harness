@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
-import type { RequestPermissionRequest } from "../src/acp/protocol.js";
+import type { RequestPermissionRequest, UserQuestionsRequest, UserQuestionsResponse } from "../src/acp/protocol.js";
 import type * as vscode from "vscode";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -57,12 +57,22 @@ type PanelInternals = {
   client: { cancel: (sessionId: string) => void } | null;
   onSessionUpdate: (n: unknown) => void;
   store: {
-    getState: () => { status: string; sessionId: string; errorMessage: string | null };
+    getState: () => {
+      status: string;
+      sessionId: string;
+      errorMessage: string | null;
+      pendingApproval: unknown;
+      pendingQuestions: unknown;
+    };
     sessionStarted: (meta: { sessionId: string }) => void;
     userPrompt: (text: string) => void;
     promptCompleted: (stopReason: string) => void;
   };
   requestPermissionFromUser: (req: RequestPermissionRequest) => Promise<unknown>;
+  userQuestionsFromAgent: (req: UserQuestionsRequest) => Promise<UserQuestionsResponse>;
+  /** Pending-slot maps are surfaced only so tests can prove a timed-out card leaves no residue. */
+  pendingApprovals: Map<string, unknown>;
+  pendingQuestions: Map<string, unknown>;
 };
 
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
@@ -83,6 +93,13 @@ const permissionRequest: RequestPermissionRequest = {
   ],
 };
 
+const questionRequest: UserQuestionsRequest = {
+  sessionId: "timeout-session",
+  questions: [
+    { header: "framework", question: "Which framework?", options: [], multiSelect: false },
+  ],
+};
+
 /**
  * Regression (user-reported 2026-10-06, "审批超时自动拒绝之后一直卡在正在生成"):
  * the timeout path must (1) resolve the wire response FIRST — a throwing
@@ -92,6 +109,12 @@ const permissionRequest: RequestPermissionRequest = {
  * pitfall #13). Wire repro (real CLI, delayed-cancelled responses) shows the
  * healthy path streams output within seconds — so the watchdog only fires on
  * a genuinely dead turn.
+ *
+ * Coverage matrix for the two surviving 5-minute cards (Plan mode was removed
+ * 2026-11-18 — `_iflow/plan/exit` is now auto-approved with no card/slot/timer,
+ * see `handleRemovedPlanExit` — so there is no third watchdog to pin here):
+ *   approval card → auto-reject + clear slot + shared post-rejection watchdog
+ *   question card → auto-continue unanswered + clear slot + shared watchdog
  */
 describe("ChatPanel approval-timeout auto-reject", () => {
   let panel: ChatPanel;
@@ -122,12 +145,45 @@ describe("ChatPanel approval-timeout auto-reject", () => {
     expect(p.store.getState().status).toBe("streaming");
   });
 
+  it("clears the approval slot on timeout so the stale card cannot be answered again", async () => {
+    const pending = p.requestPermissionFromUser(permissionRequest);
+    expect(p.pendingApprovals.size).toBe(1);
+    expect(p.store.getState().pendingApproval).not.toBeNull();
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await pending;
+    expect(p.pendingApprovals.size).toBe(0);
+    expect(p.store.getState().pendingApproval).toBeNull();
+  });
+
+  it("answers a timed-out question card as unanswered, clears its slot and keeps the turn streaming", async () => {
+    const pending = p.userQuestionsFromAgent(questionRequest);
+    expect(p.pendingQuestions.size).toBe(1);
+    expect(p.store.getState().pendingQuestions).not.toBeNull();
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    // An unanswered question must unblock the agent with an empty answer map —
+    // that wire response is what stops the CLI waiting forever on the tool.
+    await expect(pending).resolves.toEqual({ answers: {} });
+    expect(p.pendingQuestions.size).toBe(0);
+    expect(p.store.getState().pendingQuestions).toBeNull();
+    expect(p.store.getState().status).toBe("streaming");
+  });
+
   it("cancels the dead turn when the post-rejection model request stays silent", async () => {
     const pending = p.requestPermissionFromUser(permissionRequest);
     vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
     await pending;
     // Zero session/update for the full liveness window → the CLI wedged after
     // our rejection: cancel the turn and surface the error (composer unlocks).
+    vi.advanceTimersByTime(POST_REJECTION_IDLE_MS);
+    expect(p.client!.cancel).toHaveBeenCalledWith("timeout-session");
+    expect(p.store.getState().status).toBe("error");
+    expect(p.store.getState().errorMessage).toContain("已自动中断本轮");
+  });
+
+  it("cancels the dead turn when the follow-up after a question timeout stays silent", async () => {
+    const pending = p.userQuestionsFromAgent(questionRequest);
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await pending;
     vi.advanceTimersByTime(POST_REJECTION_IDLE_MS);
     expect(p.client!.cancel).toHaveBeenCalledWith("timeout-session");
     expect(p.store.getState().status).toBe("error");
@@ -152,5 +208,18 @@ describe("ChatPanel approval-timeout auto-reject", () => {
     vi.advanceTimersByTime(POST_REJECTION_IDLE_MS);
     expect(p.store.getState().status).toBe("idle");
     expect(p.client!.cancel).not.toHaveBeenCalled();
+  });
+
+  it("disarms the question-timeout watchdog once the follow-up turn produces output", async () => {
+    const pending = p.userQuestionsFromAgent(questionRequest);
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await pending;
+    p.onSessionUpdate({
+      sessionId: "timeout-session",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "已按未回答继续" } },
+    });
+    vi.advanceTimersByTime(POST_REJECTION_IDLE_MS);
+    expect(p.client!.cancel).not.toHaveBeenCalled();
+    expect(p.store.getState().status).toBe("streaming");
   });
 });
