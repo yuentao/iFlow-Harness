@@ -1893,8 +1893,17 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             remoteTakeover ? "justify-center px-2 py-1.5" : "px-2 pb-2 pt-2"
           }`}
         >
+          {/* The zone clips horizontally (the takeover collapse wipes the row
+              away) but must NOT clip vertically: the canvas buttons carry
+              `card-lift` (translateY(-1px) on hover) plus a card shadow, and
+              `overflow: hidden` sliced the button's top border off exactly at
+              the clip edge — the reported 「底部栏 hover 时上边缘被裁切掉一点」
+              (measured in Chromium: hovered top 850 vs clip edge 851).
+              `overflow-x: clip` keeps the horizontal wipe and, unlike
+              `overflow-x: hidden`, does not force the vertical axis to
+              `auto` — so the lift and the shadow paint outside the box. */}
           <div
-            className={`flex min-w-0 items-center gap-1.5 overflow-hidden transition-all duration-200 ${
+            className={`flex min-w-0 items-center gap-1.5 overflow-x-clip overflow-y-visible transition-all duration-200 ${
               remoteTakeover ? "max-w-0 flex-none opacity-0" : "max-w-full flex-1 opacity-100"
             }`}
           >
@@ -2122,9 +2131,12 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               </Button>
             )}
             {/* 接管态下其余操作按钮水平收缩隐藏，只留下方的「关闭接续」作为
-                解冻的唯一出口；用 CSS 过渡而非卸载 DOM，保持布局稳定。 */}
+                解冻的唯一出口；用 CSS 过渡而非卸载 DOM，保持布局稳定。
+                横向裁剪（overflow-x: clip）负责收起动画；垂直方向必须放行，
+                否则 canvas 按钮 hover 时的 card-lift 抬升会被切掉上边框
+                （左侧模型分区同一个坑，两处一起修）。 */}
             <div
-              className={`flex items-center gap-1.5 overflow-hidden transition-all duration-200 ${
+              className={`flex items-center gap-1.5 overflow-x-clip overflow-y-visible transition-all duration-200 ${
                 remoteTakeover ? "max-w-0 opacity-0" : "max-w-full opacity-100"
               }`}
             >
