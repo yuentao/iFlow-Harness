@@ -3,6 +3,12 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [3.8.0] - 2026-11-20
+
+- mcp-broker 新增 websocket 上游 transport 与入站请求接收/回包基础能力（离线可验证）
+- 真实 MCP server 语义与到子 CLI 的 sampling/elicitation 端到端另案处理
+- 修复 F1 引入的 superTranscripts 看板回归（防御性可选链 + 测试 mock）
+
 ## [3.7.0] - 2026-11-20
 
 - 新增 QQBot 富媒体上传的离线可验证部分：注入式上传请求构造与 file_info 响应解析
