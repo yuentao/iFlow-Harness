@@ -409,6 +409,24 @@ describe("turn-followup prompt & envelope (pure)", () => {
     expect(result.nextSteps).toEqual(["继续实现", "运行测试"]);
   });
 
+  it("digArray keeps a ] inside a suggestion instead of truncating the list", () => {
+    const raw = '{"title":"t", "nextSteps": ["run ] step", "second"], broken';
+    const result = parseFollowupResponse(raw, ["nextSteps"]);
+    expect(result.nextSteps).toEqual(["run ] step", "second"]);
+  });
+
+  it("digArray keeps a [ inside a suggestion instead of losing the list", () => {
+    const raw = '{"title":"t", "nextSteps": ["run [ step", "second"], broken';
+    const result = parseFollowupResponse(raw, ["nextSteps"]);
+    expect(result.nextSteps).toEqual(["run [ step", "second"]);
+  });
+
+  it("digArray honours escaped quotes inside a suggestion", () => {
+    const raw = '{"title":"t", "nextSteps": ["say \\" quoted ] text"], broken';
+    const result = parseFollowupResponse(raw, ["nextSteps"]);
+    expect(result.nextSteps).toEqual(['say " quoted ] text']);
+  });
+
   it("never fabricates a part from a non-JSON reply", () => {
     const result = parseFollowupResponse("好的，我来看看这几点。", ["title", "nextSteps"]);
     expect(result.title).toBeNull();
