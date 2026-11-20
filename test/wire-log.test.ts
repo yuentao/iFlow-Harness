@@ -106,4 +106,39 @@ describe("WireRingBuffer", () => {
     expect(buf.size).toBe(1);
     expect(JSON.parse(buf.dump().trim()).msg.pad).toBe("z".repeat(200));
   });
+
+  it("dump() is byte-identical across repeated calls and never leaks cached secrets", () => {
+    const buf = new WireRingBuffer(10);
+    buf.tap("out", { method: "authenticate", params: { apiKey: "sk-abcdefghij1234567890" } });
+    buf.tap("in", { result: { token: "Bearer raw-secret-value" } });
+    const first = buf.dump();
+    expect(buf.dump()).toBe(first); // cache hit — identical bytes
+    expect(first).not.toContain("sk-abcdefghij1234567890");
+    expect(first).not.toContain("Bearer raw-secret-value");
+    expect(first.match(/«redacted»/g)).toHaveLength(2);
+  });
+
+  it("keeps value-shaped redaction stable across cached dumps", () => {
+    const buf = new WireRingBuffer(5);
+    buf.tap("in", { note: "key is sk-abcdefghij1234567890 here" });
+    const first = buf.dump();
+    expect(first).not.toContain("sk-abcdefghij1234567890");
+    expect(first).toContain("key is «redacted» here");
+    expect(buf.dump()).toBe(first);
+  });
+
+  it("invalidates the cached dump on both push and eviction", () => {
+    const buf = new WireRingBuffer(2);
+    buf.tap("out", { i: 0, apiKey: "sk-abcdefghij1234567890" });
+    buf.tap("out", { i: 1 });
+    const before = buf.dump();
+    expect(before).not.toContain("sk-abcdefghij1234567890");
+    expect(JSON.parse(before.trim().split("\n")[0]!).msg.i).toBe(0);
+
+    buf.tap("out", { i: 2 }); // evicts frame 0
+    const after = buf.dump();
+    expect(after).not.toBe(before);
+    expect(after.trim().split("\n").map((l) => JSON.parse(l!).msg.i)).toEqual([1, 2]);
+    expect(after).not.toContain("sk-abcdefghij1234567890");
+  });
 });
