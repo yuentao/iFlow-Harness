@@ -102,6 +102,18 @@ type Internals = {
   touchActiveSession: () => Promise<void>;
   notifyOsDecision: (event: string, text: string) => unknown;
   postSound: (kind: "done" | "error" | "child") => void;
+  sendPrompt: (
+    text: string,
+    images?: unknown,
+    files?: unknown,
+    contexts?: unknown,
+    options?: {
+      hidden?: boolean;
+      reportTurn?: boolean;
+      finalReport?: boolean;
+      finalFallbackText?: string;
+    },
+  ) => Promise<boolean>;
   deliverQqMainFinalAnswer: (
     sessionId: string | null,
     text: string,
@@ -450,5 +462,113 @@ describe("ChatPanel 远程接续开关", () => {
     p.announceCue("turnDone", "iFlow 已完成本轮回复", "done");
 
     expect(notifyBoundUser).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 回归（2026-11-20 QQ 用户实测）：「只收到『主会话已汇报超流体结果』的提醒，
+   * 完全不知道具体结果」。
+   *
+   * 根因：汇报正文只走 QQ 任务通道（deliverQqMainFinalAnswer），本地发起的任务
+   * 没有 awaiter → 无处投递；be79be5 补的完成提示改投又只带一句状态文案。
+   * 现在无 awaiter 时把正文并入一条 QQ 消息投给绑定者。
+   */
+  it("接管态：本地发起任务的最终汇报正文（非状态语）投递到 QQ", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      autoMemoryCapture: false,
+      nextStepSuggestions: false,
+    });
+    const notifyBoundUser = vi.fn(async () => true);
+    p.qq = { service: { notifyBoundUser } };
+    p.qqMainFinalAwaiters.clear();
+    p.superAgent = { list: () => [] };
+    p.ensureClient = async () => ({});
+    const pending: Array<(v: { stopReason: string }) => void> = [];
+    p.promptWithRetry = vi.fn(
+      (_c: unknown, _s: string, _prompt: unknown) =>
+        new Promise<{ stopReason: string }>((resolve) => pending.push(resolve)),
+    ) as unknown as Internals["promptWithRetry"];
+    p.persistActiveTranscript = async () => {};
+    p.touchActiveSession = async () => {};
+    p.store.sessionStarted({ sessionId: "s1" });
+    p.store.replaceState({ ...p.store.getState(), status: "idle", blocks: [] });
+
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+    const notify = vi.spyOn(p, "notifyOsDecision");
+    const sound = vi.spyOn(p, "postSound");
+
+    const fallback = "修好登录跳转：改动 src/auth.ts，npx vitest run 全绿";
+    const started = p.sendPrompt("【汇报】超流体完成", undefined, undefined, undefined, {
+      hidden: true,
+      reportTurn: true,
+      finalReport: true,
+      finalFallbackText: fallback,
+    });
+    for (let i = 0; i < 100 && pending.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    pending[0]?.({ stopReason: "end_turn" });
+    await started;
+
+    expect(notifyBoundUser).toHaveBeenCalledTimes(1);
+    const delivered = notifyBoundUser.mock.calls[0]?.[0] as string;
+    // 状态抬头仍在，但必须带上具体正文，不再只有一句元信息。
+    expect(delivered).toContain("主会话已汇报超流体结果");
+    expect(delivered).toContain(fallback);
+    expect(delivered).toContain("完整结果请在面板查看");
+    // 本机仍静音：提示只走 QQ。
+    expect(notify).not.toHaveBeenCalled();
+    expect(sound).not.toHaveBeenCalled();
+  });
+
+  it("接管态：最终汇报优先发主会话转述正文，超长截断并保留开头", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      autoMemoryCapture: false,
+      nextStepSuggestions: false,
+    });
+    const notifyBoundUser = vi.fn(async () => true);
+    p.qq = { service: { notifyBoundUser } };
+    p.qqMainFinalAwaiters.clear();
+    p.superAgent = { list: () => [] };
+    p.ensureClient = async () => ({});
+    const pending: Array<(v: { stopReason: string }) => void> = [];
+    p.promptWithRetry = vi.fn(
+      (_c: unknown, _s: string, _prompt: unknown) =>
+        new Promise<{ stopReason: string }>((resolve) => pending.push(resolve)),
+    ) as unknown as Internals["promptWithRetry"];
+    p.persistActiveTranscript = async () => {};
+    p.touchActiveSession = async () => {};
+    p.store.sessionStarted({ sessionId: "s1" });
+    p.store.replaceState({ ...p.store.getState(), status: "idle", blocks: [] });
+
+    p.qqTakeoverActive = true;
+    const fallback = "子会话汇报兜底正文不应出现";
+    const started = p.sendPrompt("【汇报】超流体完成", undefined, undefined, undefined, {
+      hidden: true,
+      reportTurn: true,
+      finalReport: true,
+      finalFallbackText: fallback,
+    });
+    for (let i = 0; i < 100 && pending.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    // 主 Agent 这一轮的转述流式进入转录（锚点在回合开始时已取，故它能被识别为本轮新增）。
+    p.store.getState().blocks.push({
+      kind: "text",
+      id: "b-turn",
+      text: `主会话转述：${"A".repeat(2000)}尾部标记`,
+    } as never);
+    pending[0]?.({ stopReason: "end_turn" });
+    await started;
+
+    expect(notifyBoundUser).toHaveBeenCalledTimes(1);
+    const delivered = notifyBoundUser.mock.calls[0]?.[0] as string;
+    expect(delivered).toContain("主会话转述：");
+    expect(delivered).not.toContain(fallback); // 转述优先于兜底
+    expect(delivered).not.toContain("尾部标记"); // 超长已截断
+    expect(delivered).toContain("完整结果请在面板查看");
   });
 });
