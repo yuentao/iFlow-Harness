@@ -42,11 +42,17 @@
  * Deliberate limits (do not paper over):
  *  - This is a stateless gateway: `initialize` is answered from the shared
  *    upstream handshake, and per-child MCP sessions share one upstream
- *    connection. Servers that keep per-client state (sampling, elicitation,
- *    server→client requests) are NOT supported — the broker never forwards
- *    server→client requests to a specific child.
- *  - Upstream `websocket` URLs are not supported (the CLI supports them, the
- *    broker does not); such entries are skipped and reported, never faked.
+ *    connection. Server→client requests (sampling / elicitation) are now
+ *    RECEIVED and answered generically: `ping` → `{}`, everything else →
+ *    JSON-RPC -32601 "Method not found". They are NOT routed to a specific
+ *    child CLI: the vendored bundle registers no
+ *    `setRequestHandler("sampling/createMessage")` handler, so end-to-end
+ *    sampling/elicitation needs a fork-side change and is a SEPARATE case —
+ *    the offline fake server only proves receive + reply, not real routing.
+ *  - Upstream `websocket` URLs ARE supported via one shared WebSocket client
+ *    (same "one process chain per server" rule as the other transports). The
+ *    ws constructor is injected (`WebSocketImpl`) so offline tests can drive
+ *    a local fake server without any external network.
  *  - Outbound HTTP uses `node:http(s)` directly, not global `fetch`: the
  *    extension host patches `fetch` with a proxy agent that throws on SOCKS /
  *    scheme-less system proxies (same reason `models-query.ts` does this).
@@ -57,6 +63,7 @@ import { existsSync } from "node:fs";
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import path from "node:path";
+import WebSocket from "ws";
 import type { McpServer, McpToolView } from "./protocol.js";
 
 /** Header the child's CLI must present — keeps other local processes out. */
@@ -79,7 +86,7 @@ const INITIALIZE_PARAMS = {
 
 export interface McpBrokerServerConfig {
   name: string;
-  type: "stdio" | "http" | "sse";
+  type: "stdio" | "http" | "sse" | "websocket";
   command?: string;
   args: string[];
   env: Record<string, string>;
@@ -87,6 +94,20 @@ export interface McpBrokerServerConfig {
   url?: string;
   headers: Record<string, string>;
 }
+
+/** An upstream server→client JSON-RPC request (sampling / elicitation / ping). */
+export interface McpUpstreamRequest {
+  method: string;
+  params?: unknown;
+  id: number | string;
+}
+
+/** What the host wants sent back for an upstream request. `void` = use the
+ * broker's generic fallback (ping → `{}`, otherwise -32601 Method not found). */
+export type McpUpstreamReply =
+  | { result: unknown }
+  | { error: { code: number; message: string } }
+  | void;
 
 export interface McpBrokerOptions {
   /** Merged MCP server dict (global settings + project settings). */
@@ -101,6 +122,13 @@ export interface McpBrokerOptions {
    * changes, so the panel can push a fresh `mcpStatus` reply without waiting
    * for the webview to open the card and press 刷新. */
   onStatusChange?: () => void;
+  /** ws-style constructor used for `websocket` upstreams. Defaults to the
+   * statically imported `ws` package (bundled into the host). Tests inject a
+   * local fake impl to stay fully offline. */
+  webSocketImpl?: unknown;
+  /** Called for upstream→broker requests (server→client). Return a result or
+   * error to decide the reply, or nothing to use the generic fallback. */
+  onUpstreamRequest?: (serverName: string, request: McpUpstreamRequest) => McpUpstreamReply;
 }
 
 export interface McpBrokerStatus {
@@ -132,6 +160,12 @@ interface UpstreamClient {
   initialize(): Promise<void>;
   request(method: string, params: unknown): Promise<unknown>;
   notify(method: string, params?: unknown): void;
+  /** Send an already-formed JSON-RPC message (used to answer upstream→broker
+   * requests — those carry an `id` + `result`/`error`, not a `method`). */
+  sendRaw(message: JsonRpcMessage): void;
+  /** Register the handler for upstream→broker requests (`method` + `id`).
+   * Set by the broker BEFORE `initialize()` so early requests are not lost. */
+  onInboundRequest(handler: (message: JsonRpcMessage) => void): void;
   close(): Promise<void>;
 }
 
@@ -224,7 +258,8 @@ function toolViewsFromListing(result: unknown): McpToolView[] {
  * Turn the on-disk `mcpServers` dict into broker configs.
  *
  * Skips (and reports) entries the broker cannot serve honestly: `disabled`
- * servers, entries with no usable command/url, and websocket URLs. The caller
+ * servers and entries with no usable command/url. `websocket` entries are now
+ * served by a shared WebSocket client like any other transport. The caller
  * uses the returned names as the child's `--allowed-mcp-server-names` list, so
  * a skipped server is ALSO absent from the child — never silently left to be
  * spawned per child.
@@ -249,20 +284,27 @@ export function normalizeBrokerServers(input: Record<string, unknown> | null | u
     const command = typeof record.command === "string" ? record.command : undefined;
     const url = typeof record.url === "string" ? record.url : undefined;
     const httpUrl = typeof record.httpUrl === "string" ? record.httpUrl : undefined;
-    const type =
-      declared === "http" || declared === "streamable-http"
-        ? "http"
-        : declared === "sse"
-          ? "sse"
-          : declared === "stdio"
-            ? "stdio"
-            : command
+    const isWsUrl = (value: string | undefined): boolean => Boolean(value && /^wss?:/i.test(value));
+    // A ws/wss target is a websocket transport even if a hand-written config
+    // still says `type: "sse"` — driving it over node:http would only produce
+    // a confusing protocol error. A real `command` (stdio) still wins.
+    const websocket = declared === "websocket" || isWsUrl(httpUrl) || isWsUrl(url);
+    const type: McpBrokerServerConfig["type"] | null =
+      websocket && declared !== "stdio" && !command
+        ? "websocket"
+        : declared === "http" || declared === "streamable-http"
+          ? "http"
+          : declared === "sse"
+            ? "sse"
+            : declared === "stdio"
               ? "stdio"
-              : httpUrl
-                ? "http"
-                : url
-                  ? "sse"
-                  : null;
+              : command
+                ? "stdio"
+                : httpUrl
+                  ? "http"
+                  : url
+                    ? "sse"
+                    : null;
     if (!type) {
       skipped.push({ name, reason: "缺少 command 或 url" });
       continue;
@@ -276,10 +318,6 @@ export function normalizeBrokerServers(input: Record<string, unknown> | null | u
       continue;
     }
     const target = httpUrl ?? url ?? "";
-    if (type !== "stdio" && /^wss?:/i.test(target)) {
-      skipped.push({ name, reason: "websocket transport 不支持共享" });
-      continue;
-    }
     servers.push({
       name,
       type,
@@ -407,6 +445,7 @@ class StdioUpstreamClient implements UpstreamClient {
   private buffer = "";
   private stderrTail = "";
   private nextId = 1;
+  private inboundHandler: ((message: JsonRpcMessage) => void) | null = null;
   private readonly pending = new Map<
     number,
     { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
@@ -448,6 +487,14 @@ class StdioUpstreamClient implements UpstreamClient {
 
   notify(method: string, params?: unknown): void {
     this.write(params === undefined ? { jsonrpc: "2.0", method } : { jsonrpc: "2.0", method, params });
+  }
+
+  sendRaw(message: JsonRpcMessage): void {
+    this.write(message);
+  }
+
+  onInboundRequest(handler: (message: JsonRpcMessage) => void): void {
+    this.inboundHandler = handler;
   }
 
   async close(): Promise<void> {
@@ -510,7 +557,13 @@ class StdioUpstreamClient implements UpstreamClient {
     } catch {
       return;
     }
-    if (typeof message.id !== "number") return; // notifications / server→client requests
+    // server→client request (method + id): hand it to the broker instead of
+    // silently dropping it. Notifications (method, no id) stay ignored.
+    if (typeof message.method === "string" && message.id !== undefined && message.id !== null) {
+      this.inboundHandler?.(message);
+      return;
+    }
+    if (typeof message.id !== "number") return;
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
@@ -641,6 +694,16 @@ class HttpUpstreamClient implements UpstreamClient {
       .catch(() => undefined);
   }
 
+  sendRaw(message: JsonRpcMessage): void {
+    void this.post(message).catch(() => undefined);
+  }
+
+  /** Streamable-HTTP has no persistent server→client channel in this broker
+   * (no SSE GET stream — 405 is deliberate), so there is nothing to receive. */
+  onInboundRequest(_handler: (message: JsonRpcMessage) => void): void {
+    // Intentionally a no-op: don't pretend an inbound channel exists.
+  }
+
   close(): Promise<void> {
     return Promise.resolve();
   }
@@ -662,6 +725,7 @@ class SseUpstreamClient implements UpstreamClient {
   initResult: unknown = null;
   private endpoint: string | null = null;
   private nextId = 1;
+  private inboundHandler: ((message: JsonRpcMessage) => void) | null = null;
   private readonly pending = new Map<
     number,
     { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
@@ -728,6 +792,16 @@ class SseUpstreamClient implements UpstreamClient {
       this.config.headers,
       this.timeoutMs,
     ).catch(() => undefined);
+  }
+
+  sendRaw(message: JsonRpcMessage): void {
+    const endpoint = this.endpoint;
+    if (!endpoint) return;
+    void postJsonRpc(endpoint, message, this.config.headers, this.timeoutMs).catch(() => undefined);
+  }
+
+  onInboundRequest(handler: (message: JsonRpcMessage) => void): void {
+    this.inboundHandler = handler;
   }
 
   async close(): Promise<void> {
@@ -811,6 +885,10 @@ class SseUpstreamClient implements UpstreamClient {
     } catch {
       return;
     }
+    if (typeof message.method === "string" && message.id !== undefined && message.id !== null) {
+      this.inboundHandler?.(message);
+      return;
+    }
     if (typeof message.id !== "number") return;
     const pending = this.pending.get(message.id);
     if (!pending) return;
@@ -825,6 +903,216 @@ class SseUpstreamClient implements UpstreamClient {
 }
 
 // ---------------------------------------------------------------------------
+// Upstream: WebSocket (one shared connection, injectable constructor)
+// ---------------------------------------------------------------------------
+
+/** Minimal ws surface the broker uses; duck-typed so a fake impl works too. */
+interface WsLike {
+  readyState?: number;
+  on?: (event: string, listener: (arg?: unknown) => void) => unknown;
+  addEventListener?: (event: string, listener: (event?: unknown) => void) => unknown;
+  send: (data: string) => unknown;
+  close: () => unknown;
+  terminate?: () => unknown;
+}
+type WsCtor = new (url: string, options?: { headers?: Record<string, string> }) => WsLike;
+
+function resolveWsCtor(injected: unknown): WsCtor {
+  const ctor = injected !== undefined ? injected : WebSocket;
+  if (typeof ctor !== "function") {
+    throw new Error("MCP broker: WebSocket 构造器不可用（请注入 WebSocketImpl）");
+  }
+  return ctor as WsCtor;
+}
+
+/** Register an event on both the ws `.on` and WHATWG `addEventListener` APIs. */
+function attachWs(ws: WsLike, event: string, listener: (arg?: unknown) => void): void {
+  if (typeof ws.on === "function") {
+    ws.on(event, (arg?: unknown) => listener(arg));
+    return;
+  }
+  if (typeof ws.addEventListener === "function") {
+    ws.addEventListener(event, (ev?: unknown) => {
+      if (event === "message" && ev !== null && typeof ev === "object") {
+        listener((ev as { data?: unknown })["data"]);
+      } else {
+        listener(ev);
+      }
+    });
+  }
+}
+
+function wsFrameText(data: unknown): string | null {
+  if (Buffer.isBuffer(data)) return data.toString("utf8");
+  return typeof data === "string" ? data : null;
+}
+
+class WebSocketUpstreamClient implements UpstreamClient {
+  initResult: unknown = null;
+  private ws: WsLike | null = null;
+  private nextId = 1;
+  private inboundHandler: ((message: JsonRpcMessage) => void) | null = null;
+  private readonly pending = new Map<
+    number,
+    { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+  >();
+
+  constructor(
+    private readonly config: McpBrokerServerConfig,
+    private readonly timeoutMs: number,
+    private readonly webSocketImpl: unknown,
+  ) {}
+
+  async initialize(): Promise<void> {
+    await this.open();
+    const result = await this.request("initialize", INITIALIZE_PARAMS);
+    this.initResult = result;
+    this.notify("notifications/initialized");
+  }
+
+  request(method: string, params: unknown): Promise<unknown> {
+    const id = this.nextId++;
+    return new Promise<unknown>((resolve, reject) => {
+      if (!this.ws) {
+        reject(new Error(`MCP server "${this.config.name}" 的 websocket 未连接`));
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`MCP server "${this.config.name}" 在 ${this.timeoutMs}ms 内没有响应 ${method}`));
+      }, this.timeoutMs);
+      timer.unref?.();
+      this.pending.set(id, { resolve, reject, timer });
+      this.write({ jsonrpc: "2.0", id, method, params });
+    });
+  }
+
+  notify(method: string, params?: unknown): void {
+    this.write(params === undefined ? { jsonrpc: "2.0", method } : { jsonrpc: "2.0", method, params });
+  }
+
+  sendRaw(message: JsonRpcMessage): void {
+    this.write(message);
+  }
+
+  onInboundRequest(handler: (message: JsonRpcMessage) => void): void {
+    this.inboundHandler = handler;
+  }
+
+  async close(): Promise<void> {
+    this.failAll(new Error(`MCP server "${this.config.name}" 已关闭`));
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) {
+      try {
+        ws.close();
+      } catch {
+        // best effort
+      }
+    }
+  }
+
+  private write(message: JsonRpcMessage): void {
+    const ws = this.ws;
+    if (!ws) return;
+    try {
+      ws.send(JSON.stringify(message));
+    } catch (error) {
+      this.failAll(error instanceof Error ? error : new Error(messageOf(error)));
+    }
+  }
+
+  private open(): Promise<void> {
+    const url = this.config.url;
+    if (!url) return Promise.reject(new Error(`MCP server "${this.config.name}" 缺少 url`));
+    let Ctor: WsCtor;
+    try {
+      Ctor = resolveWsCtor(this.webSocketImpl);
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(messageOf(error)));
+    }
+    let ws: WsLike;
+    try {
+      ws = new Ctor(url, { headers: this.config.headers });
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(messageOf(error)));
+    }
+    this.ws = ws;
+    // Attach frames early: a fake server may push the first frame right after
+    // connect, before the `open` promise settles.
+    attachWs(ws, "message", (arg?: unknown) => this.onFrame(arg));
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const succeed = (): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        resolve();
+      };
+      const fail = (error: unknown): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        if (this.ws === ws) this.ws = null;
+        reject(error instanceof Error ? error : new Error(messageOf(error)));
+      };
+      timer = setTimeout(() => {
+        fail(new Error(`MCP server "${this.config.name}" 的 websocket 连接超时（${this.timeoutMs}ms）`));
+        try {
+          if (typeof ws.terminate === "function") ws.terminate();
+          else ws.close();
+        } catch {
+          // best effort
+        }
+      }, this.timeoutMs);
+      timer.unref?.();
+      attachWs(ws, "open", () => succeed());
+      attachWs(ws, "error", (arg?: unknown) => fail(arg));
+      attachWs(ws, "close", (arg?: unknown) => {
+        if (!settled) fail(arg ?? new Error(`MCP server "${this.config.name}" 的 websocket 已关闭`));
+        else this.failAll(new Error(`MCP server "${this.config.name}" 的 websocket 已断开`));
+      });
+      // A fake impl may start already OPEN (readyState === 1).
+      if (ws.readyState === 1) succeed();
+    });
+  }
+
+  private onFrame(arg?: unknown): void {
+    const text = wsFrameText(arg);
+    if (text === null) return;
+    let message: JsonRpcMessage;
+    try {
+      message = JSON.parse(text) as JsonRpcMessage;
+    } catch {
+      return;
+    }
+    if (typeof message.method === "string" && message.id !== undefined && message.id !== null) {
+      this.inboundHandler?.(message);
+      return;
+    }
+    if (typeof message.id !== "number") return;
+    const pending = this.pending.get(message.id);
+    if (!pending) return;
+    this.pending.delete(message.id);
+    clearTimeout(pending.timer);
+    try {
+      pending.resolve(readJsonRpcResponse(message, message.id));
+    } catch (error) {
+      pending.reject(error instanceof Error ? error : new Error(messageOf(error)));
+    }
+  }
+
+  private failAll(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Broker
 // ---------------------------------------------------------------------------
 
@@ -832,9 +1120,11 @@ function createUpstreamClient(
   config: McpBrokerServerConfig,
   timeoutMs: number,
   defaultCwd: string | undefined,
+  webSocketImpl: unknown,
 ): UpstreamClient {
   if (config.type === "stdio") return new StdioUpstreamClient(config, timeoutMs, defaultCwd);
   if (config.type === "sse") return new SseUpstreamClient(config, timeoutMs);
+  if (config.type === "websocket") return new WebSocketUpstreamClient(config, timeoutMs, webSocketImpl);
   return new HttpUpstreamClient(config, timeoutMs);
 }
 
@@ -997,7 +1287,15 @@ export class McpBroker {
       // a slow handshake instead of a false red failure light.
       this.scheduleStatusChange();
       state.connecting = (async () => {
-        const client = createUpstreamClient(state.config, this.timeoutMs, this.options.cwd);
+        const client = createUpstreamClient(
+          state.config,
+          this.timeoutMs,
+          this.options.cwd,
+          this.options.webSocketImpl,
+        );
+        // Register BEFORE initialize: a fake server may push an inbound
+        // request right after the handshake frame.
+        client.onInboundRequest((message) => this.onUpstreamRequest(name, client, message));
         await client.initialize();
         // Cache the shared upstream's tool declarations ONCE. A `tools/list`
         // failure must not turn a healthy connection into a failure — keep the
@@ -1021,6 +1319,34 @@ export class McpBroker {
         });
     }
     return state.connecting;
+  }
+
+  /**
+   * Answer an upstream server→client request. This proves the receive/reply
+   * channel end-to-end; it does NOT claim to route sampling/elicitation to a
+   * real child CLI (that needs a fork-side handler and is a separate case).
+   */
+  private onUpstreamRequest(name: string, client: UpstreamClient, raw: JsonRpcMessage): void {
+    const id = raw.id;
+    if (typeof raw.method !== "string" || id === undefined || id === null) return;
+    const request: McpUpstreamRequest = {
+      method: raw.method,
+      ...(raw.params !== undefined ? { params: raw.params } : {}),
+      id,
+    };
+    let reply: McpUpstreamReply;
+    try {
+      reply = this.options.onUpstreamRequest?.(name, request);
+    } catch (error) {
+      reply = { error: { code: -32000, message: `上游请求处理失败：${messageOf(error)}` } };
+    }
+    const body =
+      reply && typeof reply === "object"
+        ? reply
+        : raw.method === "ping"
+          ? { result: {} }
+          : { error: { code: -32601, message: `Method not found: ${raw.method}` } };
+    client.sendRaw({ jsonrpc: "2.0", id, ...body });
   }
 
   private handleHttp(request: IncomingMessage, response: ServerResponse): void {

@@ -13,6 +13,7 @@
  *  - upstream `http` and `sse` transports are covered by in-process servers.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -133,6 +134,7 @@ describe("normalizeBrokerServers", () => {
       off: { command: "node", disabled: true },
       noTarget: { args: ["x"] },
       ws: { type: "sse", url: "wss://example.test/ws" },
+      explicitWs: { type: "websocket", url: "wss://example.test/socket", headers: { Authorization: "Bearer y" } },
       noCommand: { type: "stdio" },
     });
 
@@ -142,6 +144,8 @@ describe("normalizeBrokerServers", () => {
       "remoteHttp",
       "remoteSse",
       "explicitHttp",
+      "ws",
+      "explicitWs",
     ]);
     expect(servers.find((server) => server.name === "stdio")).toMatchObject({
       type: "stdio",
@@ -157,9 +161,19 @@ describe("normalizeBrokerServers", () => {
     });
     expect(servers.find((server) => server.name === "remoteSse")?.type).toBe("sse");
     expect(servers.find((server) => server.name === "explicitHttp")?.type).toBe("http");
+    // ws/wss targets are websocket even when a stale config says `sse`.
+    expect(servers.find((server) => server.name === "ws")).toMatchObject({
+      type: "websocket",
+      url: "wss://example.test/ws",
+    });
+    expect(servers.find((server) => server.name === "explicitWs")).toMatchObject({
+      type: "websocket",
+      url: "wss://example.test/socket",
+      headers: { Authorization: "Bearer y" },
+    });
 
     const skippedNames = skipped.map((entry) => entry.name);
-    expect(skippedNames).toEqual(["off", "noTarget", "ws", "noCommand"]);
+    expect(skippedNames).toEqual(["off", "noTarget", "noCommand"]);
   });
 });
 
@@ -535,5 +549,194 @@ describe("McpBroker · 状态上报（面板刷新数据源）", () => {
     release!();
     await prewarm;
     expect(broker.statuses()[0]).toMatchObject({ connected: true, connecting: false });
+  }, 30000);
+});
+
+describe("McpBroker · websocket 上游与上游入站请求（全离线）", () => {
+  function spawnFakeWsUpstream(opts: {
+    portFile: string;
+    replyLog: string;
+    inboundMethods: string;
+  }): ChildProcess {
+    const child = spawn(process.execPath, [fakeServer, "--name", "ws", "--ws"], {
+      env: {
+        ...process.env,
+        FAKE_MCP_WS_PORT_FILE: opts.portFile,
+        FAKE_MCP_REPLY_LOG: opts.replyLog,
+        FAKE_MCP_INBOUND_METHODS: opts.inboundMethods,
+      },
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    cleanups.push(() => {
+      if (!child.killed) child.kill();
+    });
+    return child;
+  }
+
+  async function waitPort(file: string): Promise<number> {
+    let port = 0;
+    await waitFor(() => {
+      try {
+        port = Number(fs.readFileSync(file, "utf8").trim());
+        return Number.isInteger(port) && port > 0;
+      } catch {
+        return false;
+      }
+    });
+    return port;
+  }
+
+  function readReplies(file: string): { id?: unknown; result?: unknown; error?: { code?: number; message?: string } }[] {
+    try {
+      return fs
+        .readFileSync(file, "utf8")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) =>
+          JSON.parse(line) as { id?: unknown; result?: unknown; error?: { code?: number; message?: string } },
+        );
+    } catch {
+      return [];
+    }
+  }
+
+  it("websocket 上游：连接可见可调用，入站请求经钩子接收并回包（不伪装真实子 CLI 路由）", async () => {
+    const dir = tempDir("iflow-mcp-broker-ws-");
+    const portFile = path.join(dir, "ws.port");
+    const replyLog = path.join(dir, "replies.log");
+    spawnFakeWsUpstream({ portFile, replyLog, inboundMethods: "ping,sampling/createMessage" });
+    const port = await waitPort(portFile);
+
+    const seen: { name?: string; method?: string; id?: unknown }[] = [];
+    const broker = await McpBroker.start({
+      servers: { remote: { type: "websocket", url: `ws://127.0.0.1:${port}` } },
+      onUpstreamRequest: (name, request) => {
+        seen.push({ name, method: request.method, id: request.id });
+        if (request.method === "sampling/createMessage") return { result: { handled: true } };
+        // ping falls through to the broker's generic `{}` reply.
+      },
+    });
+    cleanups.push(() => broker.dispose());
+    await broker.prewarm();
+
+    const entry = broker.sessionServers()[0]!;
+    const token = tokenOf(broker);
+    const session = await childSession(entry.url!, token, "ws_echo");
+    expect(session.init.status).toBe(200);
+    expect(toolNames(session.list)).toContain("ws_echo");
+    expect(callText(session.call)).toBe("echo:hi");
+    expect(broker.statuses()[0]).toMatchObject({ connected: true, type: "websocket" });
+
+    await waitFor(() => readReplies(replyLog).length === 2);
+    const replies = readReplies(replyLog);
+    expect(replies.find((reply) => reply.id === "inbound-1")?.result).toEqual({});
+    expect(replies.find((reply) => reply.id === "inbound-2")?.result).toEqual({ handled: true });
+    expect(seen).toEqual([
+      { name: "remote", method: "ping", id: "inbound-1" },
+      { name: "remote", method: "sampling/createMessage", id: "inbound-2" },
+    ]);
+  }, 30000);
+
+  it("webSocketImpl 注入：进程内假构造器即可驱动上游，不打开真实 socket", async () => {
+    class FakeWebSocket {
+      static instances: FakeWebSocket[] = [];
+      readyState = 0;
+      private readonly handlers = new Map<string, ((arg?: unknown) => void)[]>();
+      readonly sent: string[] = [];
+
+      constructor(
+        readonly url: string,
+        readonly options?: { headers?: Record<string, string> },
+      ) {
+        FakeWebSocket.instances.push(this);
+        queueMicrotask(() => {
+          this.readyState = 1;
+          this.emit("open");
+        });
+      }
+
+      on(event: string, listener: (arg?: unknown) => void): this {
+        const list = this.handlers.get(event) ?? [];
+        list.push(listener);
+        this.handlers.set(event, list);
+        return this;
+      }
+
+      send(data: string): void {
+        this.sent.push(data);
+        const message = JSON.parse(data) as { id?: number; method?: string };
+        if (message.id === undefined) return;
+        const result =
+          message.method === "initialize"
+            ? { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "injected" } }
+            : message.method === "tools/list"
+              ? { tools: [{ name: "injected_echo", inputSchema: { type: "object" } }] }
+              : message.method === "tools/call"
+                ? { content: [{ type: "text", text: "injected:ok" }] }
+                : {};
+        queueMicrotask(() =>
+          this.emit("message", JSON.stringify({ jsonrpc: "2.0", id: message.id, result })),
+        );
+      }
+
+      close(): void {
+        this.readyState = 3;
+        this.emit("close");
+      }
+
+      private emit(event: string, arg?: unknown): void {
+        for (const listener of this.handlers.get(event) ?? []) listener(arg);
+      }
+    }
+
+    const broker = await McpBroker.start({
+      servers: { injected: { type: "websocket", url: "ws://injected.test/ws" } },
+      webSocketImpl: FakeWebSocket,
+    });
+    cleanups.push(() => broker.dispose());
+    await broker.prewarm();
+
+    const entry = broker.sessionServers()[0]!;
+    const session = await childSession(entry.url!, tokenOf(broker), "injected_echo");
+    expect(session.init.status).toBe(200);
+    expect(toolNames(session.list)).toContain("injected_echo");
+    expect(callText(session.call)).toBe("injected:ok");
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances[0]?.url).toBe("ws://injected.test/ws");
+    expect(FakeWebSocket.instances[0]?.options?.headers).toBeTruthy();
+  }, 30000);
+
+  it("stdio 上游也转发入站请求；无 host 钩子时未知方法回 -32601（如实声明未路由到子 CLI）", async () => {
+    const dir = tempDir("iflow-mcp-broker-stdinbound-");
+    const replyLog = path.join(dir, "replies.log");
+    const broker = await McpBroker.start({
+      servers: {
+        alpha: {
+          command: process.execPath,
+          args: [fakeServer, "--name", "alpha"],
+          env: {
+            FAKE_MCP_INBOUND_METHODS: "sampling/createMessage",
+            FAKE_MCP_REPLY_LOG: replyLog,
+          },
+        },
+      },
+    });
+    cleanups.push(() => broker.dispose());
+    await broker.prewarm();
+
+    const entry = broker.sessionServers()[0]!;
+    const token = tokenOf(broker);
+    const session = await childSession(entry.url!, token, "alpha_echo");
+    expect(session.init.status).toBe(200);
+    expect(toolNames(session.list)).toContain("alpha_echo");
+    expect(callText(session.call)).toBe("echo:hi");
+
+    await waitFor(() => readReplies(replyLog).length === 1);
+    const reply = readReplies(replyLog)[0]!;
+    expect(reply.id).toBe("inbound-1");
+    expect(reply.error?.code).toBe(-32601);
+    expect(reply.error?.message).toContain("sampling/createMessage");
   }, 30000);
 });
