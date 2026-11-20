@@ -4399,7 +4399,9 @@ function describeSubmission(isolation: SuperSessionUi["isolation"]): string {
       [
         "Submitting your work:",
         '- Commit before finishing: `git add -A && git commit -m "<message describing the change>"`. Commit only the files that belong to this task.',
-        "- Do not switch, rename or delete branches, and do not push, create a pull request or merge. The host brings the branch back into the main workspace after you finish, and commits any changes you leave uncommitted.",
+        "- Do not switch, rename or delete branches, and do not push, create a pull request or merge.",
+        "- The host brings the branch back into the main workspace after you finish, and commits any changes you leave uncommitted — but only on normal completion, with a `super-agent: <title>` message before integrating.",
+        "- If you fail or are interrupted the host deliberately does not commit, so a retry lands directly on the unfinished work; cleaning up the worktree discards uncommitted changes — do not rely on the fallback, commit before finishing.",
       ].join("\n")
     );
   }

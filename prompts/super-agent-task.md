@@ -45,5 +45,6 @@ Dependencies and checks:
 - 只有在 MCP 工具不可用或返回空结果时，才回退到 `curl` 直接抓取页面。
 - 不要假设没有 MCP 工具：子会话的工具列表中已包含 broker 代理的 MCP 搜索工具，模型应主动发现并调用。
 
+The `Submitting your work` section below is the authoritative submission contract, generated for your actual isolation mode — follow it exactly.
 {{submission}}
 When you finish, reply with one paragraph: what you did, the conclusion, and what is left undone. The host relays that paragraph verbatim to the main session.
