@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { Block } from "../../shared/messages.js";
 import type { PersistedSuperSession } from "../../shared/super-agent.js";
 
 /** 归档文件格式版本。读到的版本不认识就当没有归档（宁可少显示，不显示坏的）。 */
@@ -246,19 +247,135 @@ export async function deleteSuperSessionArchive(baseDir: string, sessionId: stri
  * `writeSuperSessionArchive` 的写链是串行的：删除会话时如果直接 `rm`，
  * 一个早已排队的写会在 rm 之后才 rename —— 文件被「复活」，而那个会话已经
  * 不存在了。先等链尾（吞掉错误，与写入侧一致），再删才确定。
+ *
+ * 转录快照走同一套写链，所以删除会话时也要把它的子会话转录写一并收尾
+ * （`transcriptChildIds`），否则终态写会在转录被删之后 rename 复活它。
  */
 export async function awaitSuperSessionArchiveWrite(
   baseDir: string,
   sessionId: string,
+  /** 该会话下要一并收尾转录写的子会话 id（删除会话时传入）。 */
+  transcriptChildIds: string[] = [],
 ): Promise<void> {
-  const pending = pendingWrites.get(archivePath(baseDir, sessionId));
-  if (pending) await pending.catch(() => undefined);
+  const targets = [
+    archivePath(baseDir, sessionId),
+    ...transcriptChildIds.map((id) => transcriptPath(baseDir, id)),
+  ];
+  await Promise.all(
+    targets.map(async (target) => {
+      const pending = pendingWrites.get(target);
+      if (pending) await pending.catch(() => undefined);
+    }),
+  );
 }
 
 /** 归档目录里的文件名列表（清理孤儿归档用）。 */
 export async function listSuperSessionArchiveFiles(baseDir: string): Promise<string[]> {
   try {
     return await readdir(superSessionsDir(baseDir));
+  } catch {
+    return []; // 目录还没建
+  }
+}
+
+// --- 子会话转录快照（旁路展示数据，与归档记录生命周期不同） ----------------
+//
+// 为什么**不**把转录嵌进 `<mainSessionId>.json` 归档：
+//  - 归档是整份重写 + 800ms 节流，转录大且高频（流式块），塞进去会把每次
+//    归档写都变成一次大 payload 重写；
+//  - 生命周期不同：归档记的是「重启后仍成立的事实」，转录只是详情面板的
+//    展示缓存，会话被删 / 清理时两者可以各自独立回收；
+//  - 因此它是独立旁路文件，不参与 ARCHIVE_VERSION，归档「只存记录」的纪律
+//    不被破坏。
+//
+// **落盘口径**：写的是宿主侧 `evictBlockPayloads` 已经裁剪过的块窗口（200 块
+// / 4M 字符 / minKeep 20），不是为磁盘保真再造一套全量历史。超长子会话的旧
+// 载荷不可恢复 —— 详情面板上这些块带 `evicted` 标记，如实呈现为「已裁剪历史
+// 转录」，绝不假装它们还在。
+
+/** 转录快照目录名（`super-sessions/transcripts/`）。 */
+const TRANSCRIPTS_SUBDIR = "transcripts";
+
+/** 转录快照文件名（按 childId，单射映射与归档同一纪律）。 */
+export function superTranscriptFileName(childId: string): string {
+  const safe = childId.replace(/[^A-Za-z0-9_-]/g, "-");
+  if (safe === childId) return `${safe}-transcript.json`;
+  const hash = createHash("sha256").update(childId).digest("hex").slice(0, 8);
+  return `${safe}-${hash}-transcript.json`;
+}
+
+function transcriptPath(baseDir: string, childId: string): string {
+  return path.join(superSessionsDir(baseDir), TRANSCRIPTS_SUBDIR, superTranscriptFileName(childId));
+}
+
+/** 转录快照文件的最小合法形状。 */
+interface TranscriptSnapshotFile {
+  blocks: Block[];
+}
+
+/**
+ * 原子写一个子会话的终态转录快照。
+ *
+ * 复用归档的三道保障：唯一临时文件名、按目标路径串行的写链、内容逐字相同
+ * 就跳过（见 `pendingWrites` / `lastWritten`）。只在终态写一次，不做运行中
+ * 节流写 —— 那会把高频流式块变成持续磁盘 IO，超出本功能范围。
+ */
+export async function writeSuperTranscriptSnapshot(
+  baseDir: string,
+  childId: string,
+  blocks: Block[],
+): Promise<void> {
+  const target = transcriptPath(baseDir, childId);
+  const payload = JSON.stringify({ blocks } satisfies TranscriptSnapshotFile);
+  // 内容没变就不写 —— 但要先确认文件还在（可能已被删除 / GC）。
+  if (lastWritten.get(target) === payload && existsSync(target)) return;
+  const previous = pendingWrites.get(target) ?? Promise.resolve();
+  const next = previous.then(() => writeArchiveFile(target, payload));
+  // 链里存吞掉错误的版本：一次写失败不能卡死后续写。
+  pendingWrites.set(target, next.then(() => undefined, () => undefined));
+  await next;
+  // 只有真的写成功才记账。
+  lastWritten.set(target, payload);
+}
+
+/**
+ * 读一个子会话的终态转录快照。
+ *
+ * **绝不抛**：转录是旁路展示数据，读不出来（不存在 / JSON 损坏 / 形状不对 /
+ * 权限问题）就是「没有可恢复的转录」，看板照常恢复。损坏的快照不备份、不
+ * 提示 —— 与归档不同，它不是必须如实告知用户的关键事实。
+ */
+export async function readSuperTranscriptSnapshot(baseDir: string, childId: string): Promise<Block[]> {
+  try {
+    const raw = await readFile(transcriptPath(baseDir, childId), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as TranscriptSnapshotFile).blocks)) {
+      return [];
+    }
+    return (parsed as TranscriptSnapshotFile).blocks;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 删除一个子会话的转录快照。
+ *
+ * 先等这个目标已排队的写落定再 `rm` —— 否则一个终态写会在删除之后 rename，
+ * 把刚删掉的转录「复活」（与归档删除同一纪律）。
+ */
+export async function deleteSuperTranscriptSnapshot(baseDir: string, childId: string): Promise<void> {
+  const target = transcriptPath(baseDir, childId);
+  const pending = pendingWrites.get(target);
+  if (pending) await pending.catch(() => undefined);
+  await rm(target, { force: true });
+  lastWritten.delete(target);
+}
+
+/** 转录快照目录里的文件名列表（清理孤儿快照用）。 */
+export async function listSuperTranscriptFiles(baseDir: string): Promise<string[]> {
+  try {
+    return await readdir(path.join(superSessionsDir(baseDir), TRANSCRIPTS_SUBDIR));
   } catch {
     return []; // 目录还没建
   }
