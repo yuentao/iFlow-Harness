@@ -5,8 +5,10 @@
  * session/update events on prompt, and issues a server→client
  * session/request_permission call. Also supports scripted failure injection
  * via ACP_MOCK_MODE env ("timeout_prompt" never answers a prompt;
- * "sandbox_escape" makes the "agent" ask the client to fs/write_text_file a
- * path outside the session dir, so tests can verify boundary rejection).
+ * "hang_initialize" never answers initialize; "error_initialize" answers
+ * initialize with a JSON-RPC error while staying alive; "sandbox_escape"
+ * makes the "agent" ask the client to fs/write_text_file a path outside the
+ * session dir, so tests can verify boundary rejection).
  *
  * Optional environment dump: with ACP_MOCK_ENV_DUMP pointing at a file, the
  * agent writes its own process.env there before reading any stdin — that lets
@@ -56,6 +58,14 @@ async function handle(msg) {
   switch (msg.method) {
     case "initialize":
       if (process.env.ACP_MOCK_MODE === "hang_initialize") return; // never respond
+      if (process.env.ACP_MOCK_MODE === "error_initialize") {
+        // Handshake failure injection: the mock stays ALIVE but answers
+        // initialize with a JSON-RPC error. Lets tests verify the client
+        // disposes the still-running child after a non-timeout failure
+        // (as opposed to hang_initialize, where the child never answers).
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "initialize failed" } });
+        return;
+      }
       send({
         jsonrpc: "2.0",
         id: msg.id,
