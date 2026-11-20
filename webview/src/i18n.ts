@@ -118,6 +118,9 @@ const en: Record<string, string> = {
     "Delete the working directories of {0} child sessions? Their branches are all kept (unmerged commits are not lost), but uncommitted changes in those directories are deleted for good.",
   "查看实时进度": "Show live progress",
   "超流体实时进度": "Child session live progress",
+  "查看已保存的转录": "View saved transcript",
+  "超流体历史转录": "Child session saved transcript",
+  "已保存的转录": "Saved transcript",
   "上次运行": "From a previous run",
   "这次超流体在上一次运行里就已经结束（扩展重启后恢复的历史记录）":
     "This child session had already finished in a previous run (a historical record restored after the extension restarted)",

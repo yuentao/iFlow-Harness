@@ -1770,6 +1770,10 @@ function SuperSessionRow({
   // What survives is the record — the branch and its worktree — so the merge
   // and cleanup actions stay available.
   const historical = session.restored === true;
+  // F1 落盘 + 恢复时会把历史子会话的转录按 from:0 推进 superTranscripts（以
+  // session.id 为 key）。历史会话没有活进程可拉全量，但只要有这份已保存的
+  // 快照就能打开详情查看；无快照时仍不给一个点了没内容的按钮。
+  const hasTranscript = (useChat((s) => s.superTranscripts[session.id])?.length ?? 0) > 0;
   // 折叠行只报状态时也要能看出「改动没落地」：终态且集成有问题的行给一个小
   // chip（需人工合并 / 冲突 / 未自动合并），完整说明仍只在展开详情里。
   const integrationIssue = collapsedIntegrationIssue(session);
@@ -2003,18 +2007,21 @@ function SuperSessionRow({
               The greyed-out buttons keep their full reason in title /
               aria-label. */}
           <div className="flex flex-wrap items-center gap-1">
-            {/* A restored child has no live transcript (its process died with
-                the previous extension lifetime) and cannot be retried —
-                retrying would re-run the whole task from scratch. The branch
-                and its worktree are still there, so merge / cleanup stay. */}
-            {!historical && (
+            {/* A restored child's CLI process is gone, so there is no LIVE
+                transcript and no retry — but F1 persists its transcript on
+                completion and the host re-pushes it on restore, so a saved
+                snapshot can still be opened (labelled as history, not
+                realtime). With no snapshot there is nothing to show and no
+                process to fetch from, so the entry stays hidden. A live child
+                always offers the entry and asks the host on first open. */}
+            {(!historical || hasTranscript) && (
               <Button
                 variant="canvas"
                 size="sm"
                 icon={<Activity className={ICON_INLINE} />}
                 onClick={() => setShowLive(true)}
               >
-                {t("查看实时进度")}
+                {historical ? t("查看已保存的转录") : t("查看实时进度")}
               </Button>
             )}
             {!historical && canRetrySuperSession(session) && (
@@ -2157,6 +2164,7 @@ function SuperSessionLive({
   onClose: () => void;
 }) {
   const send = useChat((s) => s.send);
+  const historical = session.restored === true;
   const transcript = useChat((s) => s.superTranscripts[session.id]) ?? EMPTY_TRANSCRIPT;
   const liveRef = useRef<HTMLDivElement>(null);
   // Follow the tail unless the user scrolled up — same rule as the main
@@ -2184,7 +2192,7 @@ function SuperSessionLive({
       wide
       title={session.title}
       icon={<Activity className={`${ICON_INLINE} shrink-0 text-primary`} />}
-      ariaLabel={t("超流体实时进度")}
+      ariaLabel={historical ? t("超流体历史转录") : t("超流体实时进度")}
       onClose={onClose}
       initialFocus="first"
     >
@@ -2203,7 +2211,9 @@ function SuperSessionLive({
               : t("已运行 {0}", elapsedText(session, now))}
           </span>
           {session.model && <Chip tone="muted">{session.model}</Chip>}
-          <span className="ml-auto text-ui-micro text-muted-foreground">{t("实时输出")}</span>
+          <span className="ml-auto text-ui-micro text-muted-foreground">
+            {historical ? t("已保存的转录") : t("实时输出")}
+          </span>
         </div>
         <div
           ref={liveRef}

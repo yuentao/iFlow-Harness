@@ -301,6 +301,49 @@ describe("超流体实时进度面板", () => {
   });
 });
 
+describe("历史超流体（restored）的转录详情入口", () => {
+  const restored = { restored: true, status: "completed" as const };
+
+  it("有已保存转录时放行详情入口，文案按历史区分，点击可打开并渲染转录", () => {
+    render({ "super-1": [USER_BLOCK, TEXT_BLOCK] }, restored);
+    clickLabel("超流体看板");
+    clickRow("修复登录跳转");
+
+    // 历史会话入口是「查看已保存的转录」，不再是写死的「查看实时进度」。
+    expect(document.body.textContent).toContain("查看已保存的转录");
+    expect(document.body.textContent).not.toContain("查看实时进度");
+    // 恢复的会话没有活进程可重试，重试入口保持隐藏。
+    expect(document.body.textContent).not.toContain("重试");
+
+    clickText("查看已保存的转录");
+
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog!.getAttribute("aria-label")).toBe("超流体历史转录");
+    const text = dialog!.textContent ?? "";
+    expect(text).toContain(USER_TASK);
+    expect(text).toContain(ASSISTANT_TEXT);
+    expect(text).toContain("已保存的转录");
+    expect(text).not.toContain("实时输出");
+    // 快照已在本地（恢复时宿主按 from:0 推来），不向已死的进程拉全量。
+    expect(send).not.toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "transcript",
+      sessionId: "super-1",
+    });
+  });
+
+  it("无转录时详情入口仍隐藏，不给一个点了没内容的按钮", () => {
+    render({}, restored);
+    clickLabel("超流体看板");
+    clickRow("修复登录跳转");
+
+    expect(document.body.textContent).not.toContain("查看已保存的转录");
+    expect(document.body.textContent).not.toContain("查看实时进度");
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+});
+
 describe("超流体合并入口", () => {
   it("运行中的超流体不允许合并（按钮置灰，禁用原因由帮助按钮统一说明）", () => {
     render();
