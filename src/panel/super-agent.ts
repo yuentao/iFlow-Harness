@@ -166,6 +166,23 @@ export const SUPER_MCP_READY_TIMEOUT_MS = 4_000;
 export const SUPER_MCP_READY_POLL_MS = 120;
 
 /**
+ * 子会话「无进展」看门狗阈值（毫秒）：收到任意 session/update 即刷新最近进展
+ * 时刻，超过这个时长没有任何进展 → 归一为 failed、回收并发槽位并上报。
+ *
+ * 背景（SA-1 / 调研 G1，2026-11）：子会话有独立 CLI 进程与 ACP session，但宿主
+ * 此前没有任何探活 / 无进展超时 —— 一个 CLI 进程失联、在途请求永不返回、或
+ * 长时间不发 session/update 的子会话，状态会永远停在 running，并发槽位不回收，
+ * 心跳空转，主会话的「等待 N 个子会话」永不结束。
+ *
+ * 刻意保守：真实长任务可能跑数小时，但只要它在正常工作就会持续发工具调用 /
+ * 思考 / 文本帧，`lastProgressAt` 会不断刷新。只有「连续这么久一声不吭」才算
+ * 卡死；且看门狗到点还会先用「进程是否存活」二次确认（见 onWatchdogTick）。
+ * 这是实例字段的默认值（见 SuperAgentManager.stallTimeoutMs），单测注入极小值
+ * 即可确定性验证超时路径，生产路径永不改写。
+ */
+export const SUPER_STALL_WATCHDOG_MS = 30 * 60_000;
+
+/**
  * `.iflow/super/attachments/` 下附件副本的空闲清扫阈值（7 天）。
  *
  * 附件是主会话附件的临时拷贝，只服务一次子会话派发；正常终态会立即删除，
@@ -832,6 +849,14 @@ export class SuperAgentManager {
   private readonly promptTokens = new Map<string, number>();
   /** 实时进度的节流定时器（每个子会话最多一个在飞）。 */
   private readonly progressTimers = new Map<string, NodeJS.Timeout>();
+  /**
+   * 子会话卡死看门狗的最近进展时刻与归属尝试序号（SA-1）。
+   * 收到任意 session/update 即刷新 lastProgressAt；attempt 用于防止重试后
+   * 旧一轮的定时器误杀新尝试。
+   */
+  private readonly watchdogs = new Map<string, { lastProgressAt: number; attempt: number }>();
+  /** 看门狗定时器（每个子会话最多一个在飞，unref，不阻塞宿主退出）。 */
+  private readonly watchdogTimers = new Map<string, NodeJS.Timeout>();
   /** 每个子会话的实时转录缓冲（详情看板的数据源）。 */
   private readonly transcripts = new Map<string, SuperTranscript>();
   /** 转录推送的节流定时器（流式块高频到达，合并成一次消息）。 */
@@ -872,6 +897,12 @@ export class SuperAgentManager {
    */
   mcpReadyTimeoutMs = SUPER_MCP_READY_TIMEOUT_MS;
   mcpReadyPollMs = SUPER_MCP_READY_POLL_MS;
+  /**
+   * 卡死看门狗的无进展阈值（公开且非常量，测试注入极小值即可确定性验证超时
+   * 路径；生产路径永不改写）。默认 {@link SUPER_STALL_WATCHDOG_MS}，足够保守，
+   * 只作用于子会话 —— 主会话 prompt 刻意无限等待（见 AGENTS.md 陷阱 #13）。
+   */
+  stallTimeoutMs = SUPER_STALL_WATCHDOG_MS;
   /**
    * 「分支上没有任何独有提交」的隔离，等子进程退出后再释放。
    *
@@ -1152,6 +1183,8 @@ export class SuperAgentManager {
     // 内核退出一律记成 failed —— 终态粘性会让随后的 cancelled 被丢弃，手动
     // 停止就显示成失败。先把终态占住，onExit 的失败事件会被幂等地忽略。
     this.apply(id, { type: "cancelled", at: Date.now(), source });
+    // 已被用户喊停：清掉看门狗，避免进程回收前的迟到定时器把 cancelled 误判成超时。
+    this.clearWatchdog(id);
     const client = this.clients.get(id);
     if (client && session.cliSessionId) {
       try {
@@ -1278,6 +1311,9 @@ export class SuperAgentManager {
     // 排在自己前面。
     await this.disposeClient(id);
     this.started.delete(id);
+    // 上一轮看门狗随旧尝试收口：旧定时器若到点，attempt 守卫本就会放过新尝试，
+    // 这里主动清掉省得它空转到点。
+    this.clearWatchdog(id);
     // 上一轮若正卡在提问上，它的 resolver/定时器必须随旧尝试一起收口 ——
     // 否则旧定时器到点会误删新一轮刚挂上的 resolver（跨尝试串包）。
     this.discardQuestionResolver(id);
@@ -1884,6 +1920,11 @@ export class SuperAgentManager {
     this.resolvers.clear();
     for (const timer of this.progressTimers.values()) clearTimeout(timer);
     this.progressTimers.clear();
+    // 卡死看门狗定时器随面板关闭一并清掉：残留的 unref 定时器会在宿主还活着时
+    // 对一个已 dispose 的子会话触发归一（会话记录可能已被清理）。
+    for (const timer of this.watchdogTimers.values()) clearTimeout(timer);
+    this.watchdogTimers.clear();
+    this.watchdogs.clear();
     // 隔离释放的重试定时器也要清掉：面板正在关闭，不能让后台重试去动
     // 磁盘上的 worktree（它与 dispose 的收尾会互相踩）。
     for (const timer of this.releaseRetryTimers.values()) clearTimeout(timer);
@@ -2002,9 +2043,12 @@ export class SuperAgentManager {
       await this.finalizeMergeChild(id);
     } finally {
       // 槽位必须回收。已被一次重试接管（attempts 变了）时不能动 —— 那一轮
-      // 才是槽位现在的主人。
+      // 才是槽位现在的主人。看门狗同理：只能清属于本轮的定时器。
       const latest = this.sessions.get(id);
-      if (!latest || (latest.attempts ?? 1) === attempt) this.started.delete(id);
+      if (!latest || (latest.attempts ?? 1) === attempt) {
+        this.started.delete(id);
+        this.clearWatchdog(id);
+      }
       this.pump();
     }
   }
@@ -2168,6 +2212,10 @@ export class SuperAgentManager {
         return;
       }
       this.clients.set(id, client);
+      // 卡死看门狗从「进程已就绪、即将发第一个 ACP 请求」开始布防：覆盖
+      // newSession / MCP 就绪等待 / setMode / 首轮 prompt 等所有可能在途挂起的
+      // 阶段。此后每个 session/update 都会刷新最近进展时刻（见 callbacksFor）。
+      this.armWatchdog(id, attempt);
 
       // Broker endpoints for the configured MCP servers (one shared process
       // per server across ALL children). Empty when the host has no broker
@@ -2450,6 +2498,11 @@ export class SuperAgentManager {
   private callbacksFor(id: string): AcpClientCallbacks {
     return {
       onSessionUpdate: (notification) => {
+        // SA-1 看门狗：任意 session/update（流式文本、thought、tool_call /
+        // tool_call_update、plan 等）都证明子会话还活着，刷新最近进展时刻。
+        // 必须放在护栏判定之前 —— 即便这一帧随后被护栏拦下，它本身也是「进程
+        // 仍在产出事件」的证据，不该被算成无进展。
+        this.touchWatchdog(id);
         const update = notification.update;
         const session = this.sessions.get(id);
         // **所有隔离档位都要过预检**：此前这里跳过了 repo 档（`kind !== "repo"`），
@@ -3794,6 +3847,7 @@ export class SuperAgentManager {
       clearTimeout(timer);
       this.progressTimers.delete(id);
     }
+    this.clearWatchdog(id);
     this.lastText.delete(id);
     this.lastThought.delete(id);
     this.promptTokens.delete(id);
@@ -3836,6 +3890,100 @@ export class SuperAgentManager {
     }
     this.sessions.set(id, { ...session, todos, updatedAt: Date.now() });
     this.emit();
+  }
+
+  // --- 卡死看门狗（SA-1，只作用于子会话）------------------------------------
+
+  /** 布防子会话看门狗（进程就绪、首个 ACP 请求前调用）。 */
+  private armWatchdog(id: string, attempt: number): void {
+    this.clearWatchdog(id);
+    this.watchdogs.set(id, { lastProgressAt: Date.now(), attempt });
+    this.resetWatchdogTimer(id);
+  }
+
+  /** 收到任意 session/update：刷新最近进展时刻并重置定时器。 */
+  private touchWatchdog(id: string): void {
+    const state = this.watchdogs.get(id);
+    if (!state) return;
+    state.lastProgressAt = Date.now();
+    this.resetWatchdogTimer(id);
+  }
+
+  /** 重设某个子会话的看门狗定时器（clear + 重新 setTimeout，恒 unref）。 */
+  private resetWatchdogTimer(id: string, delayMs: number = this.stallTimeoutMs): void {
+    const prev = this.watchdogTimers.get(id);
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      this.watchdogTimers.delete(id);
+      this.onWatchdogTick(id);
+    }, Math.max(1, delayMs));
+    if (typeof timer.unref === "function") timer.unref();
+    this.watchdogTimers.set(id, timer);
+  }
+
+  /** 清除某个子会话的看门狗（终态 / 清理 / dispose 的统一入口）。 */
+  private clearWatchdog(id: string): void {
+    const timer = this.watchdogTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.watchdogTimers.delete(id);
+    this.watchdogs.delete(id);
+  }
+
+  /**
+   * 看门狗到点：双条件判定，避免误杀慢任务。
+   *
+   *  - 会话已终态 / 已被重试取代 → 直接收口（迟到的定时器什么都不做）；
+   *  - 进程仍存活但「实际静默时长」不足阈值（定时器漂移 / 注入值过小）→
+   *    按剩余时间重新布防，绝不误杀；
+   *  - 进程仍存活且确实静默超阈值 → 判为「在途请求永不返回 / 事件断流」，
+   *    归一为 failed 并写明确 error；
+   *  - 进程已死但状态没被 onExit 归一（兜底）→ 同样归一为 failed。
+   *
+   * 归一后用 dispose 杀掉卡死的进程（在途请求被 reject 会走 prepareInner 既有
+   * 的 catch/finally 收尾），并**显式**回收并发槽位 —— 覆盖「没有在途请求可
+   * reject」的阶段（如集成 / 准备阶段卡死）。槽位回收带 attempt 守卫，已被新
+   * 一轮重试接管时不能误删新尝试的槽位。
+   */
+  private onWatchdogTick(id: string): void {
+    const state = this.watchdogs.get(id);
+    if (!state) return;
+    const session = this.sessions.get(id);
+    if (
+      !session ||
+      isTerminalSuperStatus(session.status) ||
+      (session.attempts ?? 1) !== state.attempt
+    ) {
+      this.clearWatchdog(id);
+      return;
+    }
+    // clientAlive 缺失（测试桩）/ 抛错时按「存活」处理 —— 走无进展超时这条更保守
+    // 的路径，绝不因为一次存活探测失败就把正在跑的子会话误杀。
+    const client = this.clients.get(id);
+    const alive = client ? isClientAlive(client) : false;
+    const silentFor = Date.now() - state.lastProgressAt;
+    if (alive && silentFor < this.stallTimeoutMs) {
+      // 定时器漂移：静默还不够久，重新布防剩余时间。
+      this.resetWatchdogTimer(id, this.stallTimeoutMs - silentFor);
+      return;
+    }
+    const reason = alive
+      ? `子会话无响应超时（${Math.round(this.stallTimeoutMs / 1000)} 秒无进展）`
+      : "子会话进程已退出但状态未归一（看门狗兜底）";
+    this.deps.log.warn(`[${id}] 子会话看门狗触发：${reason}`);
+    this.apply(id, { type: "failed", error: reason, at: Date.now() });
+    this.discardQuestionResolver(id);
+    this.finalizeProgress(id);
+    this.clearWatchdog(id);
+    this.notifyReport(id);
+    // 杀进程 + 主动回收槽位。dispose 会让真实客户端的在途请求 reject，走既有
+    // catch/finally；FakeClient 等不 reject 在途请求的桩则由这里的 finally 兜底。
+    void this.disposeClient(id).finally(() => {
+      const latest = this.sessions.get(id);
+      if (!latest || (latest.attempts ?? 1) === state.attempt) {
+        this.started.delete(id);
+        this.pump();
+      }
+    });
   }
 
   /** 节流推送实时进度：流式 chunk 不必逐个上屏，但要让看板看得出「它在动」。 */
@@ -3966,6 +4114,23 @@ function reusableIsolation(
   if (!isolation.path || !existsSync(isolation.path)) return null;
   if (isolation.kind === "git_worktree" && !isolation.branch) return null;
   return isolation;
+}
+
+/**
+ * 只读进程存活判定（SA-1 看门狗）：复用 {@link AcpClient.isAlive}。
+ *
+ * 测试桩 / 旧客户端可能没有该方法，或探测本身抛错 —— 两种情况都按「存活」
+ * 处理，交回「无进展超时」这条更保守的判定路径，绝不因探测失败误杀正在跑的
+ * 子会话。
+ */
+function isClientAlive(client: AcpClient): boolean {
+  try {
+    const probe = (client as Partial<AcpClient>).isAlive;
+    if (typeof probe !== "function") return true;
+    return probe.call(client) !== false;
+  } catch {
+    return true;
+  }
 }
 
 /**

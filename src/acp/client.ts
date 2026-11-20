@@ -279,6 +279,30 @@ export class AcpClient {
   }
 
   /**
+   * 只读的进程存活判定（Super Agent 子会话卡死看门狗用，SA-1）。
+   *
+   * 不负责回收、不杀进程 —— 只是对已有 child 句柄的 pid 做一次跨平台安全的
+   * 「存在性」探测：`process.kill(pid, 0)` 只查询不发送真实信号，Windows 上
+   * Node/libuv 同样以 0 信号表示「仅探测进程是否存在」。配合 `exitCode` /
+   * `signalCode` 判定，覆盖「进程已退出但 exit 事件还没到」的窗口。
+   *
+   * 返回 false 表示进程肯定已退出 / 从未 spawn；返回 true 表示「看起来还活着」
+   * （无法区分活着但在空转 —— 那由调用方的无进展时长判定负责）。任何异常都按
+   * 不存在处理，绝不因为一次探测失败把卡死的子会话误判成仍在跑。
+   */
+  isAlive(): boolean {
+    const child = this.child;
+    if (!child || child.pid === undefined) return false;
+    if (child.exitCode !== null || child.signalCode !== null) return false;
+    try {
+      process.kill(child.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Resolve an agent-supplied path against the session cwd, enforcing a
    * directory boundary (review A1 / AGENTS.md S1):
    * - relative paths are session-cwd relative; `..` traversal that escapes
