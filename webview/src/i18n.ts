@@ -215,6 +215,7 @@ const en: Record<string, string> = {
   // long-session memory eviction markers
       "内容已释放": "Content released",
       "加载剩余 {0} 行": "Load remaining {0} rows",  "附件图片已释放": "Attached images released",
+  "加载上方 {0} 行": "Load {0} rows above",
   "为了不让长会话占用太多内存，这块输出与差异已从界面释放；回退和导出仍使用完整记录":
     "Released from the UI to keep long sessions light; revert and export still use the full record",
   "为了不让长会话占用太多内存，附件图片已从界面释放；完整记录仍然保留":
