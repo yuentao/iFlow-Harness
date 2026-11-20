@@ -6,6 +6,8 @@ import {
   parseCostTable,
   resolveContextWindow,
   resolveCost,
+  resolveContextWindowWithSource,
+  resolveCostWithSource,
   estimateCost,
 } from "../shared/context-window.js";
 
@@ -177,5 +179,108 @@ describe("estimateCost", () => {
 
   it("returns null when no price is known", () => {
     expect(estimateCost({ inputTokens: 100, outputTokens: 100 }, null)).toBeNull();
+  });
+});
+
+describe("resolveContextWindowWithSource (U1 provenance)", () => {
+  it("explicit override is attributed to user (决策点 shared/context-window.ts:207)", () => {
+    expect(resolveContextWindowWithSource("glm-4.6", { "glm-4.6": 4096 })).toEqual({
+      window: 4096,
+      estimated: false,
+      source: "user",
+    });
+  });
+
+  it("override wins over table/fallback in source attribution", () => {
+    // Overriding a tabled model must report `user`, not `builtin-table`.
+    expect(resolveContextWindowWithSource("glm-5.3", { "glm-5.3": 8192 })).toEqual({
+      window: 8192,
+      estimated: false,
+      source: "user",
+    });
+  });
+
+  it("curated table hit is attributed to builtin-table (决策点 shared/context-window.ts:209)", () => {
+    expect(resolveContextWindowWithSource("deepseek-v3", {})).toEqual({
+      window: 128_000,
+      estimated: false,
+      source: "builtin-table",
+    });
+  });
+
+  it("table provenance survives longest-prefix and dated-snapshot matches", () => {
+    // The existing longest-prefix behavior must keep its source label.
+    expect(resolveContextWindowWithSource("glm-5.3", {})).toEqual({
+      window: 1_000_000,
+      estimated: false,
+      source: "builtin-table",
+    });
+    expect(resolveContextWindowWithSource("glm-5", {})).toEqual({
+      window: 198_000,
+      estimated: false,
+      source: "builtin-table",
+    });
+    expect(resolveContextWindowWithSource("gpt-5.4-2026-03-05", {}).source).toBe("builtin-table");
+  });
+
+  it("unknown model is attributed to fallback-estimate and keeps estimated:true (决策点 shared/context-window.ts:210)", () => {
+    expect(resolveContextWindowWithSource("sensenova-6.8-flash", {})).toEqual({
+      window: DEFAULT_CONTEXT_WINDOW,
+      estimated: true,
+      source: "fallback-estimate",
+    });
+  });
+
+  it("null / blank model id yields no number and no source", () => {
+    expect(resolveContextWindowWithSource(null, {})).toEqual({ window: null, estimated: false, source: null });
+    expect(resolveContextWindowWithSource("   ", {})).toEqual({ window: null, estimated: false, source: null });
+  });
+
+  it("window value/estimated stay in parity with the legacy resolver", () => {
+    const overrides = { "glm-4.6": 4096 };
+    for (const id of ["glm-4.6", "deepseek-v3", "sensenova-x", null] as const) {
+      const base = resolveContextWindow(id, overrides);
+      const detailed = resolveContextWindowWithSource(id, overrides);
+      expect(detailed.window).toBe(base.window);
+      expect(detailed.estimated).toBe(base.estimated);
+    }
+  });
+});
+
+describe("resolveCostWithSource (U1 provenance)", () => {
+  it("explicit override is attributed to user (决策点 shared/context-window.ts:238)", () => {
+    expect(resolveCostWithSource("glm-4.6", { "glm-4.6": { input: 9, output: 9 } })).toEqual({
+      price: { input: 9, output: 9 },
+      source: "user",
+    });
+  });
+
+  it("curated table hit is attributed to builtin-table (决策点 shared/context-window.ts:239)", () => {
+    expect(resolveCostWithSource("gpt-4o", {})).toEqual({
+      price: { input: 2.5, output: 10 },
+      source: "builtin-table",
+    });
+  });
+
+  it("unknown model / null id has no price and no source — never fallback-estimate", () => {
+    expect(resolveCostWithSource("unknown-model", {})).toEqual({ price: null, source: null });
+    expect(resolveCostWithSource(null, {})).toEqual({ price: null, source: null });
+  });
+
+  it("price stays in parity with the legacy resolver", () => {
+    const overrides = { "gpt-4o": { input: 1, output: 2 } };
+    for (const id of ["gpt-4o", "deepseek-v3", "unknown-model", null] as const) {
+      expect(resolveCostWithSource(id, overrides).price).toEqual(resolveCost(id, overrides));
+    }
+  });
+
+  it("never guesses ai-supplement at this layer (deferred to panel write side / T-9)", () => {
+    const sources = [
+      resolveContextWindowWithSource("glm-4.6", { "glm-4.6": 4096 }).source,
+      resolveContextWindowWithSource("deepseek-v3", {}).source,
+      resolveContextWindowWithSource("sensenova-x", {}).source,
+      resolveCostWithSource("glm-4.6", { "glm-4.6": { input: 1, output: 2 } }).source,
+    ];
+    expect(sources).not.toContain("ai-supplement");
   });
 });
