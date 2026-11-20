@@ -24,7 +24,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type SkillInfo, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
+import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type ModelMetadataSource, type SkillInfo, type SlashCommand, type ThinkLevel, type UsageNumberSource } from "../../../shared/messages";
 import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
@@ -145,6 +145,15 @@ function useUsage() {
   const usageAuthoritative = useChat((s) => s.state?.usage?.usageAuthoritative ?? false);
   const estimatedCost = useChat((s) => s.state?.usage?.estimatedCost ?? null);
   const cacheReadTokens = useChat((s) => s.state?.usage?.cacheReadTokens ?? 0);
+  // T-2/3/4 provenance: read as PRIMITIVES so the clone-on-patch behavior of
+  // postMessage cannot re-render this leaf on every streamed block. A missing
+  // field is null — the UI must then say 来源未知, never assume authoritative.
+  const sourceContextUsed = useChat((s) => s.state?.usage?.sources?.contextUsed ?? null);
+  const sourceSplit = useChat((s) => s.state?.usage?.sources?.split ?? null);
+  const sourceWindow = useChat((s) => s.state?.usage?.sources?.window ?? null);
+  const sourceCost = useChat((s) => s.state?.usage?.sources?.cost ?? null);
+  const capturedAt = useChat((s) => s.state?.usage?.capturedAt ?? null);
+  const sourceUrl = useChat((s) => s.state?.usage?.sourceUrl ?? null);
   const bdUser = useChat((s) => s.state?.usage?.breakdown?.user ?? 0);
   const bdAssistant = useChat((s) => s.state?.usage?.breakdown?.assistant ?? 0);
   const bdTool = useChat((s) => s.state?.usage?.breakdown?.tool ?? 0);
@@ -165,6 +174,12 @@ function useUsage() {
     usageAuthoritative,
     estimatedCost,
     cacheReadTokens,
+    sourceContextUsed,
+    sourceSplit,
+    sourceWindow,
+    sourceCost,
+    capturedAt,
+    sourceUrl,
     bdUser,
     bdAssistant,
     bdTool,
@@ -177,6 +192,73 @@ type Usage = ReturnType<typeof useUsage>;
 
 function usageBarTone(pct: number): string {
   return pct >= 90 ? "bg-destructive" : pct >= 70 ? "bg-warning" : "bg-primary/70";
+}
+
+/**
+ * T-2/3/4 — 用量来源「一眼可读」标签。所有标签只是把宿主 U1 `sources`
+ * 描述的既有计算路径翻译成中文，不重新推算、不打分。来源缺失一律返回
+ * 「来源未知」，绝不能回退成「内核上报 / 权威」——把估算冒充实测正是本
+ * 单元要消灭的问题。
+ */
+function usageNumberLabel(src: UsageNumberSource | null): string {
+  switch (src) {
+    case "kernel-report":
+      return t("内核上报");
+    case "transcript-estimate":
+      return t("转录估算");
+    case "lower-bound":
+      return t("下界");
+    default:
+      return t("来源未知");
+  }
+}
+
+function modelMetadataLabel(src: ModelMetadataSource | null): string {
+  switch (src) {
+    case "user":
+      return t("用户配置");
+    case "builtin-table":
+      return t("内置表");
+    case "ai-supplement":
+      return t("AI 补充");
+    case "fallback-estimate":
+      return t("回退估算");
+    default:
+      return t("来源未知");
+  }
+}
+
+/** 占用条 / 拆分数字前缀：权威无前缀、转录估算 ≈、下界 ≥、未知 ?（不裸奔成权威）。 */
+function usageNumberPrefix(src: UsageNumberSource | null): string {
+  switch (src) {
+    case "kernel-report":
+      return "";
+    case "transcript-estimate":
+      return "≈";
+    case "lower-bound":
+      return "≥";
+    default:
+      return "?";
+  }
+}
+
+/** 成本前缀：用户配置 / 内置表 / AI 补充单价视为已知值（无前缀），回退估算加 ≈，未知 ?。 */
+function costPrefix(src: ModelMetadataSource | null): string {
+  switch (src) {
+    case "user":
+    case "builtin-table":
+    case "ai-supplement":
+      return "";
+    case "fallback-estimate":
+      return "≈";
+    default:
+      return "?";
+  }
+}
+
+/** 采集时间的诚实文案：缺失就说来源未知，不伪造时间戳。 */
+function capturedAtLabel(at: number | null): string {
+  return at != null && Number.isFinite(at) ? new Date(at).toLocaleString() : t("来源未知");
 }
 
 /** Full breakdown, shared by the chip's tooltip and the menu summary.
@@ -208,6 +290,30 @@ function usageTooltip(u: Usage): string {
         );
   const prefillNote = u.bdPrefill > 0 ? t("固定开销 = 系统提示词、记忆和工具说明，每次请求都要带上") : "";
   const caveatLine = !u.usageAuthoritative && u.bdPrefill > 0 ? t("估算没有算上内核内置的工具说明和目录清单") : "";
+  // T-4：ACP wire 不带输入/输出拆分，拆分永远是转录估算；按 sources.split
+  // 如实标注，缺失就标「来源未知」而不是冒称权威。
+  const splitLine = t(
+    "输入 {0}{1} tokens · 输出 {2}{3} tokens（拆分来源：{4}）",
+    usageNumberPrefix(u.sourceSplit),
+    u.inputTokens.toLocaleString(),
+    usageNumberPrefix(u.sourceSplit),
+    u.outputTokens.toLocaleString(),
+    usageNumberLabel(u.sourceSplit),
+  );
+  // T-2：一行说清 token 从哪来、单价从哪来、什么时候采集、引用了哪个链接。
+  // 每个分量独立处理缺失，绝不拼出一个「看起来很准」的假来源。
+  const provenanceLine = t(
+    "数据出处：token {0} · 单价 {1} · 采集 {2} · {3}",
+    usageNumberLabel(u.sourceContextUsed),
+    modelMetadataLabel(u.sourceCost),
+    capturedAtLabel(u.capturedAt),
+    u.sourceUrl ? t("来源链接：{0}", u.sourceUrl) : t("无来源链接"),
+  );
+  const windowLine = t("窗口来源：{0}", modelMetadataLabel(u.sourceWindow));
+  const costLine =
+    u.estimatedCost !== null
+      ? t("预估成本 {0}（按公开单价估算）", costPrefix(u.sourceCost) + formatCost(u.estimatedCost))
+      : t("该模型无单价记录，不显示成本");
   return u.pct === null
     ? [
         t(
@@ -216,10 +322,12 @@ function usageTooltip(u: Usage): string {
             : "当前上下文约 {0} tokens（本地估算；压缩后按压缩结果重算）",
           (u.usageAuthoritative ? u.contextUsed : u.inputTokens).toLocaleString(),
         ),
-        t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
+        splitLine,
         breakdownLine,
         prefillNote,
         caveatLine,
+        windowLine,
+        provenanceLine,
       ]
         .filter(Boolean)
         .join("\n")
@@ -232,12 +340,14 @@ function usageTooltip(u: Usage): string {
           u.estimated ? t("，上限为估算值") : "",
           u.usageAuthoritative ? t("，占用为内核上报值") : "",
         ),
-        t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
+        splitLine,
         breakdownLine,
         prefillNote,
         caveatLine,
         u.cacheReadTokens > 0 ? t("缓存读取 {0} tokens", u.cacheReadTokens.toLocaleString()) : "",
-        u.estimatedCost !== null ? t("预估成本 {0}（按公开单价估算）", formatCost(u.estimatedCost)) : t("该模型无单价记录，不显示成本"),
+        costLine,
+        windowLine,
+        provenanceLine,
       ]
         .filter(Boolean)
         .join("\n");
@@ -250,7 +360,7 @@ function usageTooltip(u: Usage): string {
  * status-bar tooltip (a menu section was tried here first and was unreachable
  * behind a gateway's long model list).
  */
-function SessionUsageChip() {
+export function SessionUsageChip() {
   const u = useUsage();
   if (!u.hasUsage) return null;
   const hoverTitle = usageTooltip(u);
@@ -268,13 +378,14 @@ function SessionUsageChip() {
             />
           </span>
           <span className={u.pct >= 90 ? "text-destructive" : u.pct >= 70 ? "text-warning" : ""}>
-            {u.estimated ? "≈" : ""}
+            {usageNumberPrefix(u.sourceContextUsed)}
             {u.pct}%
           </span>
         </span>
       )}
       {u.estimatedCost !== null && (
-        <span className="ml-0.5 opacity-80" title={t("预估成本（token 估算 × 公开单价，仅供参考）")}>
+        <span className="ml-0.5 opacity-80" title={hoverTitle}>
+          {costPrefix(u.sourceCost)}
           {formatCost(u.estimatedCost)}
         </span>
       )}
