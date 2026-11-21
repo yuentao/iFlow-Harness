@@ -19,7 +19,10 @@ import { SuperAgentHost } from "../src/panel/super-agent-host.js";
 import { AcpClient, type AcpClientCallbacks } from "../src/acp/client.js";
 import type { ContentBlock } from "../src/acp/protocol.js";
 import { SuperReportBuffer, type SuperReport, type SuperSessionUi } from "../shared/super-agent.js";
-import { classifySuperFailureKind } from "../src/panel/super-agent.js";
+import {
+  classifySuperFailureKind,
+  type SuperResidueItem,
+} from "../src/panel/super-agent.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -111,7 +114,8 @@ describe("核心接线 · 失败归一后诊断/失败分类/状态说明有数�
   it("内核退出失败：投影里 diagnostics / lastError / statusDetail 非空且分类 retryable", async () => {
     const { manager } = makeFailureManager({ plans: ["exit"] });
     const child = manager.spawn({ title: "失败任务", task: "跑到一半内核退出" });
-    await settle();
+    // 固定 sleep 在并行 worker 下会先于 prepare 完成就断言；改为等真实终态。
+    await pollUntil(() => manager.get(child.id)?.status === "failed", 1500);
 
     const projected = manager.get(child.id)!;
     expect(projected.status).toBe("failed");
@@ -136,7 +140,7 @@ describe("核心接线 · 失败归一后诊断/失败分类/状态说明有数�
   it("spawn 阶段先留 spawn 诊断，再叠加 session/failed 诊断形成轨迹", async () => {
     const { manager } = makeFailureManager({ plans: ["throw"] });
     const child = manager.spawn({ title: "prepare 抛错", task: "炸在准备阶段" });
-    await settle();
+    await pollUntil(() => manager.get(child.id)?.status === "failed", 1500);
     const projected = manager.get(child.id)!;
     const kinds = (projected.diagnostics ?? []).map((d) => d.kind);
     expect(kinds).toContain("spawn");
@@ -166,7 +170,7 @@ describe("核心接线 · retry 上限与自动重试", () => {
     });
     const child = manager.spawn({ title: "自动重试", task: "第一次内核退出" });
     // 首次：prepareInner 跑到 prompt → onExit → failed + 归一 retryable。
-    await settle(80);
+    await pollUntil(() => manager.get(child.id)?.lastError?.kind === "retryable", 1500);
     expect(manager.get(child.id)!.attempts).toBe(1);
     expect(manager.get(child.id)!.lastError?.kind).toBe("retryable");
     // 退避窗口（250ms）+ 第二次执行 → completed。
@@ -318,5 +322,202 @@ describe("核心接线 · 汇报投递 G2 delivered-unacked", () => {
     host.reconcileReportDelivery();
     expect(host.reportDeliveryUnacked.size).toBe(1);
     expect(buffer.size).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 批次2A：看门狗分级 / 活性采集 / 判定卡死 / 残留令牌 / urgent 写
+// ---------------------------------------------------------------------------
+
+class TierFakeClient {
+  disposed = false;
+  promptStarted = false;
+  constructor(
+    readonly callbacks: AcpClientCallbacks,
+    private readonly hangNewSession: boolean,
+    private readonly emitActivity: boolean,
+  ) {}
+  async newSession(): Promise<{ sessionId: string }> {
+    if (this.hangNewSession) return new Promise(() => {});
+    return { sessionId: "sub-tier" };
+  }
+  async setMode(): Promise<unknown> { return {}; }
+  async setModel(): Promise<unknown> { return {}; }
+  async mcpStatus(): Promise<unknown> { return { available: false, servers: {} }; }
+  async prompt(): Promise<{ stopReason: string }> {
+    this.promptStarted = true;
+    if (this.emitActivity) {
+      this.callbacks.onSessionUpdate?.({
+        sessionId: "sub-tier",
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "tc-1",
+          toolName: "read_file",
+          status: "in_progress",
+          title: "读取文件",
+        },
+      } as never);
+    }
+    return new Promise(() => {});
+  }
+  isAlive(): boolean { return true; }
+  cancel(): void {}
+  async dispose(): Promise<void> { this.disposed = true; }
+}
+
+function makeTierManager(options: {
+  hangNewSession?: boolean;
+  emitActivity?: boolean;
+  prepareMs?: number;
+  runningMs?: number;
+}) {
+  const repoRoot = makeRepo();
+  const clients: TierFakeClient[] = [];
+  const sessions: SuperSessionUi[] = [];
+  const manager = new SuperAgentManager({
+    repoRoot,
+    createClient: async (params) => {
+      const client = new TierFakeClient(
+        params.callbacks,
+        options.hangNewSession === true,
+        options.emitActivity === true,
+      );
+      clients.push(client);
+      return client as unknown as AcpClient;
+    },
+    onSessionsChanged: (next) => { sessions.length = 0; sessions.push(...next); },
+    onReport: () => {},
+    currentModel: () => null,
+    currentMainSessionId: () => "main-1",
+    integrationMode: () => "manual",
+    maxConcurrentSessions: () => 5,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+  manager.prepareStallTimeoutMs = options.prepareMs ?? 60;
+  manager.stallTimeoutMs = options.runningMs ?? 60;
+  return { manager, clients, sessions };
+}
+
+describe("批次2A · 看门狗分级 / 活性采集 / 判定卡死", () => {
+  it("准备档独立阈值：newSession 挂起时按准备档归一并写 timeout 诊断", async () => {
+    const h = makeTierManager({ hangNewSession: true, prepareMs: 80, runningMs: 5000 });
+    try {
+      const child = h.manager.spawn({ title: "准备卡死", task: "newSession 永不返回" });
+      await pollUntil(() => h.manager.get(child.id)?.status === "failed", 1500);
+      const failed = h.manager.get(child.id)!;
+      expect(failed.error).toContain("准备中");
+      expect(
+        failed.diagnostics?.some((d) => d.kind === "timeout" && d.message.includes("准备中")),
+      ).toBe(true);
+      expect(h.clients[0]!.disposed).toBe(true);
+    } finally {
+      await h.manager.dispose();
+    }
+  });
+
+  it("运行档独立阈值：started 之后 prompt 挂起按运行档归一，不用准备档短阈值", async () => {
+    const h = makeTierManager({ prepareMs: 5000, runningMs: 80 });
+    try {
+      const child = h.manager.spawn({ title: "运行卡死", task: "prompt 永不返回" });
+      await pollUntil(() => h.clients[0]?.promptStarted === true, 1500);
+      await pollUntil(() => h.manager.get(child.id)?.status === "failed", 1500);
+      const failed = h.manager.get(child.id)!;
+      expect(failed.error).toContain("运行中");
+      expect(
+        failed.diagnostics?.some((d) => d.kind === "timeout" && d.message.includes("运行中")),
+      ).toBe(true);
+    } finally {
+      await h.manager.dispose();
+    }
+  });
+
+  it("活性采集：tool_call update 追加诊断并维护最近活动时间戳（不改状态机）", async () => {
+    const h = makeTierManager({ emitActivity: true, prepareMs: 5000, runningMs: 5000 });
+    try {
+      const child = h.manager.spawn({ title: "活跃", task: "持续工具调用" });
+      await pollUntil(
+        () =>
+          (h.manager.get(child.id)?.diagnostics ?? []).some((d) =>
+            d.message.includes("工具调用") && d.message.includes("read_file"),
+          ),
+        1500,
+      );
+      const session = h.manager.get(child.id)!;
+      expect(session.status).toBe("running"); // 诊断不改变状态机
+      const snap = h.manager.activitySnapshot().find((a) => a.id === child.id);
+      expect(snap?.lastActivityAt).toBeGreaterThan(0);
+      expect(snap?.phase).toBe("running");
+    } finally {
+      await h.manager.dispose();
+    }
+  });
+
+  it("用户判定卡死：先记 timeout 诊断再按 user 来源中断", async () => {
+    const h = makeTierManager({ prepareMs: 5000, runningMs: 5000 });
+    try {
+      const child = h.manager.spawn({ title: "手动判定", task: "卡住" });
+      await pollUntil(() => h.clients[0]?.promptStarted === true, 1500);
+      const outcome = await h.manager.judgeStuck(child.id);
+      expect(outcome.reason).toBe("cancelled");
+      const session = h.manager.get(child.id)!;
+      expect(session.status).toBe("cancelled");
+      expect(
+        session.diagnostics?.some((d) => d.kind === "timeout" && d.message.includes("用户判定卡死")),
+      ).toBe(true);
+    } finally {
+      await h.manager.dispose();
+    }
+  });
+});
+
+describe("批次2A · 残留二次确认令牌与 urgent 写", () => {
+  const ITEM: SuperResidueItem = {
+    key: "/tmp/wt-1",
+    kind: "worktree",
+    path: "/tmp/wt-1",
+    branch: "iflow/super/legacy-x",
+    unmerged: true,
+    uncommitted: false,
+    inProgress: false,
+  };
+
+  it("discard 首次只发确认框并返回令牌；未确认不删除，确认后才执行", async () => {
+    const discarded: string[] = [];
+    const managerStub = {
+      listResidueItems: async () => [ITEM],
+      discardResidueItem: async (item: SuperResidueItem) => {
+        discarded.push(item.key);
+        return { ok: true };
+      },
+    };
+    const { host, deps } = makeHostHarness();
+    (deps as unknown as Record<string, unknown>).getSuperAgent = () => managerStub;
+
+    const first = await host.handleSuperResidueAction({ key: ITEM.key, action: "discard" });
+    expect(first.ok).toBe(false);
+    expect(first.token).toMatch(/^super-residue-discard-/);
+    expect(discarded).toHaveLength(0);
+
+    host.handleSuperResidueConfirmResponse(first.token!, false);
+    await settle(10);
+    expect(discarded).toHaveLength(0); // 取消 = 不丢弃
+
+    const second = await host.handleSuperResidueAction({ key: ITEM.key, action: "discard" });
+    host.handleSuperResidueConfirmResponse(second.token!, true);
+    await settle(20);
+    expect(discarded).toEqual([ITEM.key]);
+  });
+
+  it("urgent 写关键指纹：终态 / 失败分类 / 集成变化才触发强制落盘", () => {
+    const { host } = makeHostHarness();
+    const base = SETTLED_SESSION();
+    expect(host.noteSuperCriticalChange([base])).toBe(true);
+    expect(host.noteSuperCriticalChange([base])).toBe(false); // 无变化
+    expect(
+      host.noteSuperCriticalChange([
+        { ...base, lastError: { kind: "retryable", message: "x", at: 3 } },
+      ]),
+    ).toBe(true);
+    expect(host.noteSuperCriticalChange([{ ...base, status: "failed" }])).toBe(true);
   });
 });
