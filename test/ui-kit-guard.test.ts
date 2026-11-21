@@ -354,6 +354,7 @@ describe("ui kit guard", () => {
       "export function HelpTip(",
       "export function ModalShell(",
       "export function ConfirmDialog(",
+      "export function ImageLightbox(",
       "export function Dropdown(",
       "export function MenuItem(",
       "export function SettingsGroup(",
