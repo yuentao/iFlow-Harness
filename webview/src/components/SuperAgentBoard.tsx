@@ -11,6 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import {
   Activity,
+  Bug,
   Check,
   ChevronDown,
   ChevronRight,
@@ -20,6 +21,7 @@ import {
   GitBranch,
   GitMerge,
   Hourglass,
+  Info,
   Loader2,
   RotateCcw,
   ShieldOff,
@@ -54,9 +56,20 @@ import {
   type SuperTimelineNode,
   type SuperTimelineTone,
 } from "../../../shared/super-timeline";
+import {
+  buildSuperBoardAggregate,
+  collectSuperBoardDiagnosticTimeline,
+  collectSuperSessionDiagnostics,
+  summarizeSuperBoardDiagnostics,
+  superBoardFailureKind,
+  type SuperBoardFailureKind,
+  type SuperBoardSession,
+} from "../../../shared/super-board";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import { SuperDelegationFly } from "./SuperDelegationFly";
+import { SuperBatchGroups } from "./SuperBatchGroups";
+import { SuperDiagnosticTimeline } from "./SuperDiagnosticTimeline";
 import { BlockView } from "./MessageList";
 import {
   Button,
@@ -68,11 +81,29 @@ import {
   ICON_INLINE,
   IconButton,
   ModalShell,
+  TabButton,
+  rovingTabKeyDown,
 } from "./ui";
 import { QuestionBody, type QuestionAnswerMap } from "./QuestionBody";
 
 /** 状态色调（看板状态编码的第三重：颜色只是冗余，形状与文案才是主编码）。 */
 type StatusTone = "muted" | "success" | "warning" | "danger" | "primary" | "info";
+
+/** 看板视图：平铺 / 按波次分组 / 跨子会话诊断时间线。 */
+type BoardView = "sessions" | "waves" | "diagnostics";
+
+/**
+ * 视图切换的固定选项（中文源文案，渲染时过 `t()`）。
+ *
+ * 用页面级 tab（role=tablist + roving tabindex）而不是 Segmented：提问卡的单选
+ * 组本身就是 radiogroup，看板里再插一个 radiogroup 会让「第一个单选组」的定位
+ * （屏幕阅读器导航与既有回归测试）错误地指向视图切换。
+ */
+const BOARD_VIEW_OPTIONS: ReadonlyArray<{ value: BoardView; label: string }> = [
+  { value: "sessions", label: "子会话" },
+  { value: "waves", label: "按波次" },
+  { value: "diagnostics", label: "诊断" },
+];
 
 /**
  * 状态文案。
@@ -170,6 +201,33 @@ function interruptedByLabel(session: SuperSessionUi): string | null {
 }
 
 /**
+ * 失败分类 → 中文源文案。
+ *
+ * 分类本身是 shared 层给出的稳定英文枚举（retryable / terminal / blocked /
+ * interrupted），由 UI 翻成中文 —— 绝不能把枚举原样印到界面上。
+ */
+function failureKindLabel(kind: SuperBoardFailureKind): string {
+  switch (kind) {
+    case "retryable":
+      return t("可重试的失败");
+    case "terminal":
+      return t("不可重试的失败");
+    case "blocked":
+      return t("阻塞");
+    case "interrupted":
+      return t("中断退出");
+  }
+}
+
+/** 失败分类的 chip 色调。颜色只是第三重冗余（图标与文案已能独立区分）。 */
+const FAILURE_TONE: Record<SuperBoardFailureKind, StatusTone> = {
+  retryable: "warning",
+  terminal: "danger",
+  blocked: "warning",
+  interrupted: "muted",
+};
+
+/**
  * QQ 远程任务的元信息 tag，挂在对应子会话 title 后面。
  *
  * 数据来自 store 的 `qqTasks` 投影，靠 `findQqTaskForSuperSession` 关联到当前
@@ -262,6 +320,9 @@ export function shortBranch(branch: string): string {
 
 /** Id shared by the header toggle (`aria-controls`) and the expanded panel. */
 const SUPER_BOARD_PANEL_ID = "super-board-panel";
+
+/** 视图 tab 所控制的 tabpanel id（与 SettingsModal 的 tab/tabpanel 关系同构）。 */
+const SUPER_BOARD_VIEW_PANEL_ID = "super-board-view-panel";
 
 /**
  * 视图层的「已点击、等 host 回包」乐观集合 —— merge / retry 共用。
@@ -1032,6 +1093,43 @@ export function SuperAgentBoard({
   const hasActiveChild = useMemo(() => hasActiveSuperSession(list), [list]);
   const counts = useMemo(() => summarizeSuperSessions(list), [list]);
   const totals = useMemo(() => sumSuperUsage(list), [list]);
+  // 看板视图三态：「子会话」= 既有平铺（默认，行为完全不变）、「按波次」=
+  // 运行组 / 波次分组、「诊断」= 跨子会话诊断时间线。默认仍是平铺 —— 旧数据
+  // （没有 runId / wave / diagnostics）不该被强行换到一个新视图里。
+  const [boardView, setBoardView] = useState<BoardView>("sessions");
+  // 视图 tab 的 roving tabindex：只有当前视图在 Tab 序列里，方向键 / Home / End
+  // 在三个视图间移动（复用 kit 的 rovingTabKeyDown）。
+  const boardViewRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const onBoardViewKeyDown = rovingTabKeyDown<BoardView>(
+    BOARD_VIEW_OPTIONS.map((option) => option.value),
+    boardView,
+    setBoardView,
+    (id) => boardViewRefs.current[id]?.focus(),
+  );
+  // 聚合是纯函数：分组 / 波次 / 全量统计 / 诊断汇总一次算出。空列表也返回
+  // 合法空聚合（不抛错、不出现 undefined / NaN）。
+  const aggregate = useMemo(() => buildSuperBoardAggregate(list), [list]);
+  const diagnosticTimeline = useMemo(() => collectSuperBoardDiagnosticTimeline(list), [list]);
+  // 行渲染只写一次：平铺视图与波次视图共用同一个 SuperSessionRow（含全部
+  // pending 状态与 openRow 单选），分组视图绝不另造一套行组件 —— 那会让
+  // 「一次只展开一行」的纪律在两个视图里分叉。
+  const renderRow = (session: SuperBoardSession) => (
+    <SuperSessionRow
+      key={session.id}
+      session={session}
+      now={now}
+      open={openRow === session.id}
+      cleanupPending={cleanupPending.has(session.id)}
+      mergePending={mergeAction.pending.has(session.id)}
+      retryPending={retryAction.pending.has(session.id)}
+      cancelPending={cancelAction.pending.has(session.id)}
+      onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
+      onMerge={() => setConfirmMerge(session)}
+      onRetry={() => beginRetry(session)}
+      onCleanup={() => setConfirmCleanup(session)}
+      onCancel={() => setConfirmCancel(session)}
+    />
+  );
 
   // --- anchoring for the portaled surfaces --------------------------------
   // The panel and the collapsed pending strip are portaled to document.body
@@ -1437,27 +1535,57 @@ export function SuperAgentBoard({
                 )}
               </div>
             </div>
+            {/* 视图切换：页面级 tab（role=tablist + roving tabindex）。默认
+                「子会话」= 旧平铺视图，旧数据行为完全不变。 */}
+            <div
+              role="tablist"
+              aria-label={t("看板视图")}
+              className="flex shrink-0 items-center gap-1 border-b border-border/60 px-2 py-1"
+            >
+              {BOARD_VIEW_OPTIONS.map((option) => (
+                <TabButton
+                  key={option.value}
+                  id={`super-board-view-${option.value}`}
+                  active={boardView === option.value}
+                  controls={SUPER_BOARD_VIEW_PANEL_ID}
+                  onActivate={() => setBoardView(option.value)}
+                  refCallback={(el) => {
+                    boardViewRefs.current[option.value] = el;
+                  }}
+                  onKeyDown={onBoardViewKeyDown}
+                >
+                  {t(option.label)}
+                </TabButton>
+              ))}
+            </div>
             {/* Body: same rows as before, just inside the popup. px-3 py-2 keeps
                 the panel's breathing room (the row components add their own
                 px-2/py-1.5 on top). */}
-            <div className="max-h-[40vh] divide-y divide-border/50 overflow-y-auto px-3 py-2">
-              {visible.map((session) => (
-                <SuperSessionRow
-                  key={session.id}
-                  session={session}
-                  now={now}
-                  open={openRow === session.id}
-                  cleanupPending={cleanupPending.has(session.id)}
-                  mergePending={mergeAction.pending.has(session.id)}
-                  retryPending={retryAction.pending.has(session.id)}
-                  cancelPending={cancelAction.pending.has(session.id)}
-                  onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
-                  onMerge={() => setConfirmMerge(session)}
-                  onRetry={() => beginRetry(session)}
-                  onCleanup={() => setConfirmCleanup(session)}
-                  onCancel={() => setConfirmCancel(session)}
-                />
-              ))}
+            <div
+              id={SUPER_BOARD_VIEW_PANEL_ID}
+              role="tabpanel"
+              aria-label={t(
+                BOARD_VIEW_OPTIONS.find((option) => option.value === boardView)?.label ??
+                  "子会话",
+              )}
+              className="max-h-[40vh] divide-y divide-border/50 overflow-y-auto px-3 py-2"
+            >
+              {boardView === "waves" && (
+                <div className="py-1">
+                  <SuperBatchGroups groups={aggregate.groups} renderRow={renderRow} />
+                </div>
+              )}
+              {boardView === "diagnostics" && (
+                <div className="py-1">
+                  <SuperDiagnosticTimeline
+                    entries={diagnosticTimeline}
+                    summary={aggregate.diagnostics}
+                  />
+                </div>
+              )}
+              {boardView === "sessions" && (
+                <>
+                  {visible.map(renderRow)}
               {/* Settled children (already merged, or nothing to merge) collapse
                   into ONE history row: nothing left to act on — they only get
                   in the way of the live ones. The header splits the outcomes so
@@ -1491,23 +1619,7 @@ export function SuperAgentBoard({
                   </DisclosureButton>
                   {showFolded && (
                     <div className="divide-y divide-border/40 border-t border-border/40">
-                      {folded.map((session) => (
-                        <SuperSessionRow
-                          key={session.id}
-                          session={session}
-                          now={now}
-                          open={openRow === session.id}
-                          cleanupPending={cleanupPending.has(session.id)}
-                          mergePending={mergeAction.pending.has(session.id)}
-                          retryPending={retryAction.pending.has(session.id)}
-                          cancelPending={cancelAction.pending.has(session.id)}
-                          onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
-                          onMerge={() => setConfirmMerge(session)}
-                          onRetry={() => beginRetry(session)}
-                          onCleanup={() => setConfirmCleanup(session)}
-                          onCancel={() => setConfirmCancel(session)}
-                        />
-                      ))}
+                      {folded.map(renderRow)}
                     </div>
                   )}
                 </div>
@@ -1549,6 +1661,8 @@ export function SuperAgentBoard({
                     </Button>
                   )}
                 </div>
+              )}
+                </>
               )}
             </div>
           </div>,
@@ -1716,7 +1830,11 @@ function SuperSessionRow({
   onCleanup,
   onCancel,
 }: {
-  session: SuperSessionUi;
+  /**
+   * 看板行视图模型：`SuperSessionUi` 加上全部**可选**的波次 / 尝试 / 诊断
+   * 扩展字段（见 shared/super-board.ts）。旧数据缺这些字段时照常渲染。
+   */
+  session: SuperBoardSession;
   /** Wall-clock instant the elapsed label is rendered against — the board's
    * ticking state (it only advances when the rendered second changes). */
   now: number;
@@ -1736,6 +1854,35 @@ function SuperSessionRow({
   onCancel: () => void;
 }) {
   const [showLive, setShowLive] = useState(false);
+  // 单行诊断：点开只看这个子会话自己的诊断事件（跨子会话时间线在「诊断」视图）。
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const sessionDiagnostics = useMemo(
+    () => collectSuperSessionDiagnostics(session),
+    [session],
+  );
+  const sessionDiagnosticSummary = useMemo(
+    () => summarizeSuperBoardDiagnostics([session]),
+    [session],
+  );
+  // 波次标记只在真的带 wave 时显示：0 或缺省 = 旧数据，不印「第 0 波」。
+  const wave =
+    typeof session.wave === "number" && session.wave > 0 ? Math.trunc(session.wave) : null;
+  // 尝试次数只在真的重试过、或声明了上限时显示 —— 否则每行都挂「尝试 1/1」是噪音。
+  const attempts = session.attempts ?? 1;
+  const maxAttempts = session.maxAttempts;
+  const attemptChip =
+    attempts > 1 || (maxAttempts !== undefined && maxAttempts > 1)
+      ? { attempts, maxAttempts }
+      : null;
+  // 失败分类：与状态文案重复的分类不再挂 chip（cancelled 已写「已中断」、
+  // awaiting_input 已写「等你回答」），避免同一事实在一条 32px 行里说两遍。
+  const failureKind = superBoardFailureKind(session);
+  const failureChip =
+    failureKind === null ||
+    (failureKind === "interrupted" && session.status === "cancelled") ||
+    (failureKind === "blocked" && session.status === "awaiting_input")
+      ? null
+      : failureKind;
   // pr_created 行的「打开 PR」按钮走宿主 openExternal（只放行 http(s)）。
   const send = useChat((s) => s.send);
   // Busy states take the chip over: each one is a request the user just made
@@ -1860,6 +2007,38 @@ function SuperSessionRow({
           <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
             {session.title}
           </span>
+          {/* 波次标记：只在真实带 wave 时出现，旧数据不占位。 */}
+          {wave !== null && (
+            <Chip tone="info" className="shrink-0 max-[380px]:hidden" title={t("第 {0} 波", wave)}>
+              {t("第 {0} 波", wave)}
+            </Chip>
+          )}
+          {/* 尝试次数：重试过才显示，上限存在时一并给出「尝试 2/3」。 */}
+          {attemptChip && (
+            <Chip
+              tone="muted"
+              className="shrink-0 max-[380px]:hidden"
+              title={
+                attemptChip.maxAttempts !== undefined
+                  ? t("已尝试 {0} 次，最多 {1} 次", attemptChip.attempts, attemptChip.maxAttempts)
+                  : t("已尝试 {0} 次", attemptChip.attempts)
+              }
+            >
+              {attemptChip.maxAttempts !== undefined
+                ? t("尝试 {0}/{1}", attemptChip.attempts, attemptChip.maxAttempts)
+                : t("尝试 {0}", attemptChip.attempts)}
+            </Chip>
+          )}
+          {/* 失败分类：retryable / terminal / blocked / interrupted → 中文文案。 */}
+          {failureChip && (
+            <Chip
+              tone={FAILURE_TONE[failureChip]}
+              className="shrink-0 max-[380px]:hidden"
+              title={t("失败分类：{0}", failureKindLabel(failureChip))}
+            >
+              {failureKindLabel(failureChip)}
+            </Chip>
+          )}
           {/* 终态但改动没落地的行，折叠态就给出提示 —— 完整说明仍在展开详情。 */}
           {integrationIssue && (
             <Chip tone={integrationIssue.tone} className="shrink-0 max-[380px]:hidden">
@@ -1914,6 +2093,32 @@ function SuperSessionRow({
           {session.error && (
             <div className="break-words rounded-sm border border-destructive/30 bg-destructive/10 px-2 py-1 text-ui-caption text-destructive">
               {session.error}
+            </div>
+          )}
+
+          {/* statusDetail：宿主给的一句话状态说明（缺省不渲染）。 */}
+          {session.statusDetail && (
+            <div className="flex items-start gap-1.5 text-ui-micro text-muted-foreground">
+              <Info className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+              <span className="min-w-0 flex-1 break-words">{session.statusDetail}</span>
+            </div>
+          )}
+
+          {/* lastError：分类 chip + 原文消息。消息是子会话/宿主产出的原文，
+              绝不过 t() 字典；分类 chip 复用上面的失败分类映射。 */}
+          {session.lastError && (
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-ui-micro">
+              {failureKind && (
+                <Chip tone={FAILURE_TONE[failureKind]} className="shrink-0">
+                  {failureKindLabel(failureKind)}
+                </Chip>
+              )}
+              <span
+                className="min-w-0 flex-1 break-words text-muted-foreground"
+                title={session.lastError.message}
+              >
+                {session.lastError.message}
+              </span>
             </div>
           )}
 
@@ -2007,6 +2212,30 @@ function SuperSessionRow({
               The greyed-out buttons keep their full reason in title /
               aria-label. */}
           <div className="flex flex-wrap items-center gap-1">
+            {/* 单行诊断入口：只有真的有诊断事件才出现，点开就地展开该子会话
+                的时间线（不另开 portal，自然跟随看板的 openRow 单选与 inert）。 */}
+            {sessionDiagnostics.length > 0 && (
+              <Button
+                variant="canvas"
+                size="sm"
+                icon={<Bug className={ICON_INLINE} />}
+                aria-label={
+                  showDiagnostics
+                    ? t("收起诊断")
+                    : t("查看诊断（{0} 条）", sessionDiagnostics.length)
+                }
+                title={
+                  showDiagnostics
+                    ? t("收起诊断")
+                    : t("查看诊断（{0} 条）", sessionDiagnostics.length)
+                }
+                onClick={() => setShowDiagnostics((v) => !v)}
+              >
+                {showDiagnostics
+                  ? t("收起诊断")
+                  : t("查看诊断（{0} 条）", sessionDiagnostics.length)}
+              </Button>
+            )}
             {/* A restored child's CLI process is gone, so there is no LIVE
                 transcript and no retry — but F1 persists its transcript on
                 completion and the host re-pushes it on restore, so a saved
@@ -2131,6 +2360,15 @@ function SuperSessionRow({
               </Button>
             )}
           </div>
+
+          {showDiagnostics && sessionDiagnostics.length > 0 && (
+            <div className="rounded-sm border border-border/60 bg-surface/40">
+              <SuperDiagnosticTimeline
+                entries={sessionDiagnostics}
+                summary={sessionDiagnosticSummary}
+              />
+            </div>
+          )}
         </div>
       )}
 
