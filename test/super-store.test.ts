@@ -3,16 +3,23 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  classifySuperRecovery,
   deleteSuperSessionArchive,
   listSuperSessionArchiveFiles,
+  MAX_SUPER_ARCHIVE_DIAGNOSTICS,
+  MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT,
   readSuperSessionArchive,
+  sanitizeSuperArchiveRecord,
+  superArchiveRecordFingerprint,
+  superArchiveStoreFingerprint,
   superSessionFileName,
   superSessionsDir,
   writeSuperSessionArchive,
 } from "../src/panel/super-store.js";
+import type { SuperArchiveRecord } from "../src/panel/super-store.js";
 import type { PersistedSuperSession } from "../shared/super-agent.js";
 
-function record(overrides: Partial<PersistedSuperSession> = {}): PersistedSuperSession {
+function record(overrides: Partial<SuperArchiveRecord> = {}): SuperArchiveRecord {
   return {
     id: "super-1",
     title: "修复登录跳转",
@@ -239,5 +246,276 @@ describe("super agent · 超流体归档", () => {
     expect(leftovers).toEqual([]);
     const raw = readFileSync(path.join(dir, superSessionFileName("main-1")), "utf8");
     expect(() => JSON.parse(raw)).not.toThrow();
+  });
+});
+
+describe("super agent · 归档持久化 v2", () => {
+  let baseDir: string;
+
+  beforeEach(() => {
+    baseDir = mkdtempSync(path.join(tmpdir(), "iflow-super-store-v2-"));
+  });
+
+  afterEach(() => {
+    rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const fingerprintOf = (session: SuperArchiveRecord): string =>
+    superArchiveStoreFingerprint([{ mainSessionId: "main-1", sessions: [session] }]);
+
+  it("新字段往返：波次 / 依赖 / 尝试 / 失败分类 / 诊断 / 状态说明原样回来", async () => {
+    await writeSuperSessionArchive(baseDir, "main-1", [
+      record({
+        runId: "run-7",
+        wave: 2,
+        batch: 3,
+        dependsOn: ["super-0", "super-1"],
+        attempts: 2,
+        maxAttempts: 5,
+        lastError: { kind: "retryable", message: "网关超时", at: 1234 },
+        diagnostics: [
+          { at: 1, kind: "spawn", level: "info", message: "拉起子进程" },
+          { at: 2, kind: "error", level: "error", message: "网关超时", detail: "ETIMEDOUT" },
+        ],
+        statusDetail: "上游任务失败，已跳过",
+      }),
+    ]);
+    const loaded = await readSuperSessionArchive(baseDir, "main-1");
+    expect(loaded.damaged).toBe(false);
+    const got = loaded.sessions[0]!;
+    expect(got.runId).toBe("run-7");
+    expect(got.wave).toBe(2);
+    expect(got.batch).toBe(3);
+    expect(got.dependsOn).toEqual(["super-0", "super-1"]);
+    expect(got.attempts).toBe(2);
+    expect(got.maxAttempts).toBe(5);
+    expect(got.lastError).toEqual({ kind: "retryable", message: "网关超时", at: 1234 });
+    expect(got.diagnostics).toHaveLength(2);
+    expect(got.diagnostics?.[1]?.detail).toBe("ETIMEDOUT");
+    expect(got.statusDetail).toBe("上游任务失败，已跳过");
+  });
+
+  it("新字段落盘不改变归档版本号（老归档零迁移：版本仍是 1）", async () => {
+    await writeSuperSessionArchive(baseDir, "main-1", [record({ wave: 1, runId: "r" })]);
+    const raw = JSON.parse(
+      readFileSync(path.join(superSessionsDir(baseDir), superSessionFileName("main-1")), "utf8"),
+    ) as { version: number; sessions: SuperArchiveRecord[] };
+    expect(raw.version).toBe(1);
+    expect(raw.sessions[0]?.wave).toBe(1);
+  });
+
+  it("旧格式记录（无新字段）照常读回，指纹照常算得出", async () => {
+    const dir = superSessionsDir(baseDir);
+    mkdirSync(dir, { recursive: true });
+    // 手工写一份「v1 形状」的归档：只有 v1 字段，一个新字段都没有。
+    const legacy = {
+      id: "super-old",
+      title: "老记录",
+      task: "干活",
+      status: "completed",
+      mainSessionId: "main-legacy",
+      isolation: { kind: "git_worktree", path: "/tmp/wt", branch: "iflow/super/a" },
+      createdAt: 1,
+      updatedAt: 2,
+      reports: [],
+    };
+    writeFileSync(
+      path.join(dir, superSessionFileName("main-legacy")),
+      JSON.stringify({ version: 1, sessions: [legacy] }),
+      "utf8",
+    );
+    const loaded = await readSuperSessionArchive(baseDir, "main-legacy");
+    expect(loaded.damaged).toBe(false);
+    expect(loaded.sessions).toHaveLength(1);
+    expect(loaded.sessions[0]?.id).toBe("super-old");
+    // 新字段一律缺省，不补零、不填假值。
+    expect(loaded.sessions[0]?.wave).toBeUndefined();
+    expect(loaded.sessions[0]?.diagnostics).toBeUndefined();
+    expect(loaded.sessions[0]?.lastError).toBeUndefined();
+    // 指纹对缺失字段按默认值处理，不抛异常。
+    const fp = superArchiveStoreFingerprint([
+      { mainSessionId: "main-legacy", sessions: loaded.sessions },
+    ]);
+    expect(typeof fp).toBe("string");
+    expect(fp.length).toBeGreaterThan(0);
+  });
+
+  it("指纹规则：诊断事件流不参与指纹（高频事件不打爆节流写盘）", () => {
+    const base = record({ runId: "r", wave: 1, attempts: 1 });
+    const oneDiag = record({
+      runId: "r",
+      wave: 1,
+      attempts: 1,
+      diagnostics: [{ at: 1, kind: "spawn", level: "info", message: "x" }],
+    });
+    const manyDiag = record({
+      runId: "r",
+      wave: 1,
+      attempts: 1,
+      diagnostics: [
+        { at: 1, kind: "spawn", level: "info", message: "x" },
+        { at: 2, kind: "error", level: "error", message: "y" },
+      ],
+    });
+    expect(fingerprintOf(oneDiag)).toBe(fingerprintOf(base));
+    expect(fingerprintOf(manyDiag)).toBe(fingerprintOf(base));
+  });
+
+  it("指纹规则：状态 / 波次 / 尝试次数 / 失败分类 / 状态说明变了，指纹必变", () => {
+    const base = record({ status: "running", wave: 1, attempts: 1 });
+    const baseline = fingerprintOf(base);
+    expect(fingerprintOf(record({ status: "completed", wave: 1, attempts: 1 }))).not.toBe(baseline);
+    expect(fingerprintOf(record({ status: "running", wave: 2, attempts: 1 }))).not.toBe(baseline);
+    expect(fingerprintOf(record({ status: "running", wave: 1, attempts: 2 }))).not.toBe(baseline);
+    expect(
+      fingerprintOf(
+        record({
+          status: "running",
+          wave: 1,
+          attempts: 1,
+          lastError: { kind: "retryable", message: "boom", at: 5 },
+        }),
+      ),
+    ).not.toBe(baseline);
+    expect(
+      fingerprintOf(record({ status: "running", wave: 1, attempts: 1, statusDetail: "已跳过" })),
+    ).not.toBe(baseline);
+  });
+
+  it("指纹稳定：同样内容两次算出来一样；依赖是集合语义（顺序不同不算变化）", () => {
+    const r = record({ runId: "r", wave: 3, dependsOn: ["a", "b"], attempts: 2 });
+    expect(fingerprintOf(r)).toBe(fingerprintOf(record({ ...r })));
+    expect(fingerprintOf(record({ ...r, dependsOn: ["b", "a"] }))).toBe(fingerprintOf(r));
+    expect(superArchiveRecordFingerprint(r)).toBe(superArchiveRecordFingerprint(record({ ...r })));
+  });
+
+  it("诊断裁剪：超过上限只保留最近的，单条超长文本被截断", async () => {
+    const many = Array.from({ length: MAX_SUPER_ARCHIVE_DIAGNOSTICS + 50 }, (_, i) => ({
+      at: i,
+      kind: "spawn" as const,
+      level: "info" as const,
+      message: `事件 ${i}`,
+    }));
+    const long = "x".repeat(MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT * 3);
+    await writeSuperSessionArchive(baseDir, "main-1", [
+      record({
+        diagnostics: [
+          ...many,
+          { at: 9999, kind: "error", level: "error", message: long, detail: long },
+        ],
+      }),
+    ]);
+    const loaded = await readSuperSessionArchive(baseDir, "main-1");
+    const diags = loaded.sessions[0]?.diagnostics ?? [];
+    expect(diags).toHaveLength(MAX_SUPER_ARCHIVE_DIAGNOSTICS);
+    // 保留的是**最近**的：最老的那批被裁掉了。
+    // 总共 251 条（250 条 + 1 条超长），保留最近 200 条 → 第一条是原数组第 51 条。
+    const total = MAX_SUPER_ARCHIVE_DIAGNOSTICS + 50 + 1;
+    expect(diags[0]?.at).toBe(total - MAX_SUPER_ARCHIVE_DIAGNOSTICS);
+    expect(diags.some((d) => d.at === 0)).toBe(false);
+    // 最后一条是超长那条，文本被截到上限以内。
+    const last = diags[diags.length - 1]!;
+    expect(last.at).toBe(9999);
+    expect(last.message.length).toBeLessThanOrEqual(MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT);
+    expect(last.detail?.length).toBeLessThanOrEqual(MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT);
+  });
+
+  it("失败分类的说明文本也截断（不让一条超长错误把归档撑大）", () => {
+    const long = "y".repeat(MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT * 2);
+    const sanitized = sanitizeSuperArchiveRecord(
+      record({ lastError: { kind: "terminal", message: long, at: 1 } }),
+    );
+    expect(sanitized.lastError?.kind).toBe("terminal");
+    expect(sanitized.lastError?.message.length).toBeLessThanOrEqual(
+      MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT,
+    );
+  });
+
+  it("恢复分类：工作目录与分支都在 → 可原地恢复", () => {
+    const result = classifySuperRecovery(record({ status: "running" }), {
+      worktreeExists: true,
+      branchExists: true,
+    });
+    expect(result.state).toBe("recoverable");
+    expect(result.reason).toBeTruthy();
+  });
+
+  it("恢复分类：工作目录没了 → 只剩分支，如实说明缺的是哪一样", () => {
+    const result = classifySuperRecovery(record({ status: "running" }), {
+      worktreeExists: false,
+      branchExists: true,
+    });
+    expect(result.state).toBe("lost");
+    expect(result.reason).toContain("工作目录已不存在");
+    expect(result.reason).toContain("仅保留分支");
+  });
+
+  it("恢复分类：分支没了 → 只剩记录，如实说明缺的是哪一样", () => {
+    const result = classifySuperRecovery(record({ status: "running" }), {
+      worktreeExists: true,
+      branchExists: false,
+    });
+    expect(result.state).toBe("lost");
+    expect(result.reason).toContain("分支已不存在");
+    expect(result.reason).toContain("仅保留记录");
+  });
+
+  it("恢复分类：已终态且磁盘上什么都没剩 → 没有可恢复的内容", () => {
+    const result = classifySuperRecovery(record({ status: "completed" }), {
+      worktreeExists: false,
+      branchExists: false,
+    });
+    expect(result.state).toBe("none");
+    expect(result.reason).toBeTruthy();
+  });
+
+  it("恢复分类：非终态但磁盘上什么都没剩 → 只剩记录（不能说成「没什么可恢复」）", () => {
+    const result = classifySuperRecovery(record({ status: "running" }), {
+      worktreeExists: false,
+      branchExists: false,
+    });
+    expect(result.state).toBe("lost");
+  });
+
+  it("回归：子会话被清理后该主会话归档写成空数组（下次恢复不会又冒出已清理的子会话）", async () => {
+    await writeSuperSessionArchive(baseDir, "main-1", [record({ id: "super-1" })]);
+    await writeSuperSessionArchive(baseDir, "main-1", []);
+    const loaded = await readSuperSessionArchive(baseDir, "main-1");
+    expect(loaded.sessions).toEqual([]);
+    expect(loaded.damaged).toBe(false);
+    const raw = JSON.parse(
+      readFileSync(path.join(superSessionsDir(baseDir), superSessionFileName("main-1")), "utf8"),
+    ) as { version: number; sessions: unknown[] };
+    expect(raw.version).toBe(1);
+    expect(raw.sessions).toEqual([]);
+  });
+
+  it("回归：带新字段的并发写仍然原子（落盘内容始终是完整的一份）", async () => {
+    const payloads = Array.from({ length: 8 }, (_, i) => [
+      record({
+        id: `super-${i}`,
+        wave: i,
+        runId: `run-${i}`,
+        diagnostics: [{ at: i, kind: "spawn", level: "info", message: `第 ${i} 批` }],
+      }),
+    ]);
+    await Promise.all(
+      payloads.map((sessions) => writeSuperSessionArchive(baseDir, "main-1", sessions)),
+    );
+    const raw = readFileSync(
+      path.join(superSessionsDir(baseDir), superSessionFileName("main-1")),
+      "utf8",
+    );
+    const parsed = JSON.parse(raw) as { version: number; sessions: SuperArchiveRecord[] };
+    expect(parsed.version).toBe(1);
+    expect(parsed.sessions).toHaveLength(1);
+    // 落盘内容是**某一次**写入的完整内容（新字段也一致）。
+    const expected = payloads.find((batch) => batch[0]?.id === parsed.sessions[0]?.id);
+    expect(expected).toBeDefined();
+    expect(parsed.sessions[0]?.wave).toBe(expected![0]!.wave);
+    expect(parsed.sessions[0]?.diagnostics?.[0]?.message).toBe(expected![0]!.diagnostics?.[0]?.message);
+    // 没有临时文件残留。
+    const leftovers = (await listSuperSessionArchiveFiles(baseDir)).filter((n) => n.endsWith(".tmp"));
+    expect(leftovers).toEqual([]);
   });
 });
