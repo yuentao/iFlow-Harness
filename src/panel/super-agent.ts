@@ -143,6 +143,7 @@ import {
   SUPER_BRANCH_PREFIX,
   superBranchName,
   superIsolationDir,
+  superWorktreeRoot,
   worktreeHasUncommittedChanges,
   worktreePathFor,
 } from "./worktree.js";
@@ -1534,7 +1535,7 @@ export class SuperAgentManager {
     const result: SuperSweepResult = { removed: 0, kept: 0, orphans: [] };
     if (this.disposed) return result;
 
-    const root = superIsolationDir(this.deps.repoRoot, "worktrees");
+    const root = superWorktreeRoot(this.deps.repoRoot);
     let entries: Dirent[];
     try {
       entries = await readdir(root, { withFileTypes: true });
@@ -1764,7 +1765,8 @@ export class SuperAgentManager {
   async countResidue(): Promise<SuperResidueCount> {
     const countDirs = async (kind: "worktrees" | "dirs" | "attachments"): Promise<number> => {
       try {
-        const entries = await readdir(superIsolationDir(this.deps.repoRoot, kind), {
+        const root = kind === "worktrees" ? superWorktreeRoot(this.deps.repoRoot) : superIsolationDir(this.deps.repoRoot, kind);
+        const entries = await readdir(root, {
           withFileTypes: true,
         });
         return entries.filter((entry) => entry.isDirectory()).length;
@@ -1824,7 +1826,7 @@ export class SuperAgentManager {
     // 2 + 4. 三类子树里剩下的目录（孤儿 worktree、dirs、attachments）全删。
     // worktrees/ 里第 1 步已删掉的目录这里会 readdir 不到，天然幂等。
     for (const kind of ["worktrees", "dirs", "attachments"] as const) {
-      const root = superIsolationDir(this.deps.repoRoot, kind);
+      const root = kind === "worktrees" ? superWorktreeRoot(this.deps.repoRoot) : superIsolationDir(this.deps.repoRoot, kind);
       let entries: Dirent[];
       try {
         entries = await readdir(root, { withFileTypes: true });

@@ -118,6 +118,86 @@ export function superIsolationDir(
   return path.join(repoRoot, SUPER_ISOLATION_ROOT, kind);
 }
 
+// ---------------------------------------------------------------------------
+// worktree 根位置：默认移到主仓之外的兄弟目录，避免祖先 AGENTS.md 重复注入
+// ---------------------------------------------------------------------------
+
+/**
+ * 新的 worktree 根（主仓之外的兄弟目录）。
+ *
+ * 机制（bundle 静态实测 CLI 0.5.19）：子会话 cwd 落在 worktree 里时，CLI 记忆
+ * 加载器从 cwd 向上收集 AGENTS.md / IFLOW.md。旧实现把 worktree 放进主仓的
+ * `.iflow/super/worktrees/`，于是主仓根的 AGENTS.md（祖先 additional）与
+ * worktree 自带那份（内容相同、相对路径标签不同）被去重逻辑当成两份都注入，
+ * 白白多耗数万 tokens。挪到主仓外的兄弟目录后，祖先链上没有主仓那份，只注入
+ * worktree 自己那份。
+ */
+export function externalSuperWorktreeRoot(repoRoot: string): string {
+  return path.join(path.dirname(repoRoot), `${path.basename(repoRoot)}-super-worktrees`);
+}
+
+/** fs 探测注入口（单测注入假实现，生产走 existsSync）。 */
+export interface SuperWorktreeRootProbe {
+  exists: (candidate: string) => boolean;
+}
+
+const DEFAULT_SUPER_WORKTREE_PROBE: SuperWorktreeRootProbe = {
+  exists: (candidate) => existsSync(candidate),
+};
+
+/**
+ * 纯函数：从新根的父目录一路向上走到盘根，检查每一层是否会让 CLI 记忆加载器
+ * 多注入一份祖先记忆 —— AGENTS.md / IFLOW.md 文件，或 .git 目录（会让项目根
+ * 判定再扩一层）。任一层命中即判为不安全。
+ */
+export function isSuperWorktreeRootSafe(
+  repoRoot: string,
+  probe: SuperWorktreeRootProbe,
+): boolean {
+  const external = externalSuperWorktreeRoot(repoRoot);
+  let dir = path.dirname(external);
+  const drive = path.parse(dir).root;
+  for (;;) {
+    if (
+      probe.exists(path.join(dir, "AGENTS.md")) ||
+      probe.exists(path.join(dir, "IFLOW.md")) ||
+      probe.exists(path.join(dir, ".git"))
+    ) {
+      return false;
+    }
+    if (dir === drive) return true;
+    const parent = path.dirname(dir);
+    if (parent === dir) return true; // POSIX 根目录兜底
+    dir = parent;
+  }
+}
+
+/** 纯函数：安全检查通过 → 新位置；不通过 → 回退到主仓内的旧位置。 */
+export function resolveSuperWorktreeRoot(
+  repoRoot: string,
+  probe: SuperWorktreeRootProbe = DEFAULT_SUPER_WORKTREE_PROBE,
+): { root: string; external: boolean } {
+  if (isSuperWorktreeRootSafe(repoRoot, probe)) {
+    return { root: externalSuperWorktreeRoot(repoRoot), external: true };
+  }
+  return { root: superIsolationDir(repoRoot, "worktrees"), external: false };
+}
+
+const warnedSuperWorktreeRoots = new Set<string>();
+
+/** 生产用：解析 worktree 根；回退到主仓内时记一条清晰 warning（不静默）。 */
+export function superWorktreeRoot(repoRoot: string): string {
+  const { root, external } = resolveSuperWorktreeRoot(repoRoot);
+  if (!external && !warnedSuperWorktreeRoots.has(repoRoot)) {
+    warnedSuperWorktreeRoots.add(repoRoot);
+    console.warn(
+      `super agent: worktree 根回退到主仓内 ${root}（` +
+        `新根祖先链含 AGENTS.md / IFLOW.md 或 .git 目录，会有祖先记忆重复注入风险）`,
+    );
+  }
+  return root;
+}
+
 /**
  * 把隔离子树写进仓库的本地 exclude（`.git/info/exclude`）。
  *
@@ -192,9 +272,9 @@ const superIgnoreWritten = new Set<string>();
 /** 同一目标的 exclude 追加串行链（并发 prepare 时不重复读 / 写）。 */
 const pendingSuperIgnore = new Map<string, Promise<void>>();
 
-/** worktree 的落盘路径：`<repoRoot>/.iflow/super/worktrees/<slug>-<unique>`。 */
+/** worktree 的落盘路径：`<worktreeRoot>/<slug>-<unique>`（根默认在主仓外，见 resolveSuperWorktreeRoot）。 */
 export function worktreePathFor(repoRoot: string, slug: string, unique: string): string {
-  return path.join(superIsolationDir(repoRoot, "worktrees"), `${slug}-${unique}`);
+  return path.join(superWorktreeRoot(repoRoot), `${slug}-${unique}`);
 }
 
 /** git 在 Windows 上更稳地接受正斜杠路径。 */
