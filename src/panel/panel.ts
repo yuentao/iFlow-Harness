@@ -53,7 +53,7 @@ import type {
   McpServerStatusView,
   SessionSettings,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
@@ -847,6 +847,17 @@ export class ChatPanel implements vscode.Disposable {
     if (!this._superHost) this._superHost = this.buildSuperHost();
     return this._superHost;
   }
+
+  /**
+   * 残留清单的一次性令牌（批次1B：`superResidueList` ↔ `superResidueHandle`）。
+   * 宿主下发清单时换发新令牌、旧令牌立即作废；webview 的「一键合并 / 丢弃」
+   * 必须原样回传，校验通过即消费 —— 保证用户确实看过清单这道二次确认。
+   * 映射同时把 UI 的 `sessionId` 翻译回宿主的残留 `key`（孤儿项无 sessionId
+   * 时二者相同），使 webview 回传的 id 能定位到 listResidueItems 的条目。
+   */
+  private superResidueListToken: string | null = null;
+  private superResidueListKeys = new Map<string, string>();
+  private superResidueListSeq = 0;
   private buildSuperHost(): SuperAgentHost {
     return new SuperAgentHost({
       log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m), error: (m) => this.log.error(m) },
@@ -2314,6 +2325,10 @@ export class ChatPanel implements vscode.Disposable {
       // --- Super Agent 看板 / 动作 ---
       case "stopSubagent":
       case "superAgent":
+      case "superRetryWave":
+      case "superRetryFailed":
+      case "requestSuperResidueList":
+      case "superResidueHandle":
       case "respondSuperResidueConfirm":
         await this.handleSuperMessage(msg);
         break;
@@ -2807,9 +2822,71 @@ export class ChatPanel implements vscode.Disposable {
       case "superAgent":
         await this.handleSuperAgentAction(msg);
         break;
+      case "superRetryWave":
+        await this.superHost.retrySuperWave({ runId: msg.runId, wave: msg.wave });
+        break;
+      case "superRetryFailed":
+        await this.superHost.retrySuperFailed({ runId: msg.runId });
+        break;
+      case "requestSuperResidueList":
+        await this.handleRequestSuperResidueList(msg.requestId);
+        break;
+      case "superResidueHandle":
+        await this.handleSuperResidueHandle(msg);
+        break;
       case "respondSuperResidueConfirm":
         this.handleSuperResidueConfirmResponse(msg.requestId, msg.confirmed);
         break;
+    }
+  }
+
+  /**
+   * 批次1B `requestSuperResidueList`：只读聚合残留明细，按 `requestId` 回包
+   * `superResidueList`（分支清单 + 一次性 `confirmToken`）。这里只做数据整形
+   * 与令牌换发；真正的 git 判定在宿主的 `listResidueItems` 里。
+   */
+  private async handleRequestSuperResidueList(requestId: string): Promise<void> {
+    const items = await this.superHost.listSuperResidue();
+    const keys = new Map<string, string>();
+    const branches: SuperResidueBranchUi[] = items.map((item) => {
+      // 孤儿残留没有子会话 id，回退到宿主键，保证 webview 回传时能定位。
+      const uiSessionId = item.sessionId ?? item.key;
+      keys.set(uiSessionId, item.key);
+      return {
+        sessionId: uiSessionId,
+        branch: item.branch ?? "",
+        worktree: item.path,
+        title: item.title,
+        unmerged: item.unmerged,
+        worktreeExists: existsSync(item.path),
+      };
+    });
+    const confirmToken = `super-residue-list-${++this.superResidueListSeq}`;
+    this.superResidueListToken = confirmToken;
+    this.superResidueListKeys = keys;
+    this.postToWebview({ type: "superResidueList", requestId, branches, confirmToken });
+  }
+
+  /**
+   * 批次1B `superResidueHandle`：一次性 `confirmToken` 校验后逐条转发给宿主
+   * 的一键合并/丢弃 handler。校验不过一律拒绝（旧令牌 / 未请求过清单）；
+   * 丢弃的二次确认令牌与「未提交改动 / git 中间态硬拒绝」纪律完全交给宿主的
+   * `handleSuperResidueAction`，这里不重写任何业务逻辑。
+   */
+  private async handleSuperResidueHandle(msg: Extract<WebviewToHost, { type: "superResidueHandle" }>): Promise<void> {
+    if (!this.superResidueListToken || msg.confirmToken !== this.superResidueListToken) {
+      this.log.warn("webview → host: superResidueHandle 的 confirmToken 无效（过期或未请求清单）");
+      this.store.sendToast("warning", vscode.l10n.t("残留清单已过期，请重新获取后再操作"));
+      return;
+    }
+    // 一次性：无论本次转发结果如何都立即作废，旧令牌不可复用。
+    this.superResidueListToken = null;
+    const keys = this.superResidueListKeys;
+    this.superResidueListKeys = new Map();
+    const ids = Array.isArray(msg.sessionIds) ? msg.sessionIds : [];
+    for (const uiSessionId of ids) {
+      const key = keys.get(uiSessionId) ?? uiSessionId;
+      await this.superHost.handleSuperResidueAction({ key, action: msg.action });
     }
   }
 
