@@ -565,6 +565,32 @@ export interface SuperSessionUi {
    * 可重启），但仍然可以清理工作目录 / 让智能体合并分支（分支确实还在 git 里）。
    */
   restored?: boolean;
+  /**
+   * 运行组 id —— **一次委派块 = 一个运行组**。
+   *
+   * 同一次委派里派出来的所有子会话共用一个 runId；跨块重试 / 批量重试靠它
+   * 圈定范围（「重试这一波」「重试整组失败任务」都按 runId 过滤）。
+   */
+  runId?: string;
+  /** 所属波次（0 基）。缺省 = 宿主还没排波次。 */
+  wave?: number;
+  /** 声明的批次号（1 基，来自载荷的 `batch` 字段）。 */
+  batch?: number;
+  /** 依赖的任务标识（来自载荷的 `dependsOn` 字段）。 */
+  dependsOn?: string[];
+  /** 最大尝试次数（宿主策略；缺省 = 不限）。 */
+  maxAttempts?: number;
+  /** 最近一次失败信息（失败分类 + 一句话）。 */
+  lastError?: SuperFailureInfo;
+  /**
+   * 诊断事件（追加式，环形截断）。
+   *
+   * 诊断**不改变状态机**：终态会话收到 error 事件也只追加诊断，不会被改回
+   * 运行中（与 {@link applySuperEvent} 的终态粘性同一条纪律）。
+   */
+  diagnostics?: SuperDiagnosticEvent[];
+  /** 面向人的状态说明（如「上游任务失败，已跳过」）。 */
+  statusDetail?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -759,6 +785,135 @@ export function retrySuperSession(session: SuperSessionUi, at: number): SuperSes
 }
 
 // ---------------------------------------------------------------------------
+// 诊断事件与失败分类
+// ---------------------------------------------------------------------------
+
+/**
+ * 诊断事件的类别。
+ *
+ * 覆盖子会话生命周期的关键节点：派发（spawn）、会话建立（session）、汇报
+ * （report）、合并（merge）、重试（retry），以及四类异常（error / timeout /
+ * blocked / restore）。诊断是**追加式**的：它不参与状态机，只给看板与事后
+ * 排查留痕。
+ */
+export type SuperDiagnosticKind =
+  | "spawn"
+  | "session"
+  | "report"
+  | "merge"
+  | "retry"
+  | "error"
+  | "timeout"
+  | "restore"
+  | "blocked";
+
+/** 一条诊断事件。 */
+export interface SuperDiagnosticEvent {
+  /** 事件发生时刻（epoch ms）。 */
+  at: number;
+  /** 事件类别。 */
+  kind: SuperDiagnosticKind;
+  /** 级别。 */
+  level: "info" | "warn" | "error";
+  /** 一句话（面向人）。 */
+  message: string;
+  /** 可选补充。 */
+  detail?: string;
+}
+
+/**
+ * 失败分类。
+ *
+ * - `retryable`：可重试（网络抖动 / 内核瞬时错误 / 上游限流）；
+ * - `terminal`：终态失败（前提失效，重试也不会变好）；
+ * - `blocked`：等人（等提问 / 等审批）；
+ * - `interrupted`：被中断（用户喊停 / 面板关闭 / 宿主回收）。
+ */
+export type SuperFailureKind = "retryable" | "terminal" | "blocked" | "interrupted";
+
+/** 一次失败的结构化描述。 */
+export interface SuperFailureInfo {
+  /** 失败分类。 */
+  kind: SuperFailureKind;
+  /** 一句话（面向人）。 */
+  message: string;
+  /** 发生时刻（epoch ms）。 */
+  at: number;
+}
+
+/**
+ * 单个子会话保留的诊断事件上限（超出时从最早处丢弃）。
+ *
+ * 诊断是追加式的，长跑任务能把它撑到几百条 —— 不设上限，看板投影与归档
+ * 都会跟着膨胀。
+ */
+export const SUPER_DIAGNOSTICS_MAX_EVENTS = 200;
+
+/**
+ * 追加一条诊断事件（纯函数）。
+ *
+ * **终态粘性**：诊断**不改变会话状态** —— 终态会话收到 error 事件也只追加
+ * 诊断，不会被改回运行中。这与 {@link applySuperEvent} 的纪律同源（迟到的
+ * 事件不许改写已定的终态），只是这里连 `updatedAt` 之外的状态字段都不碰。
+ *
+ * 超出 {@link SUPER_DIAGNOSTICS_MAX_EVENTS} 时从**最早处**丢弃（保留最近的
+ * 事件 —— 排查时最近的那几条才是关键）。
+ */
+export function applySuperDiagnostic(
+  session: SuperSessionUi,
+  event: SuperDiagnosticEvent,
+): SuperSessionUi {
+  const existing = session.diagnostics ?? [];
+  const merged = [...existing, event];
+  const diagnostics =
+    merged.length > SUPER_DIAGNOSTICS_MAX_EVENTS
+      ? merged.slice(merged.length - SUPER_DIAGNOSTICS_MAX_EVENTS)
+      : merged;
+  return { ...session, diagnostics, updatedAt: Math.max(session.updatedAt, event.at) };
+}
+
+/** 失败分类 → 诊断类别 / 级别。 */
+function superFailureDiagnostic(
+  failure: SuperFailureInfo,
+): { kind: SuperDiagnosticKind; level: "info" | "warn" | "error" } {
+  switch (failure.kind) {
+    case "blocked":
+      return { kind: "blocked", level: "warn" };
+    case "retryable":
+      return { kind: "retry", level: "warn" };
+    case "interrupted":
+      return { kind: "error", level: "warn" };
+    case "terminal":
+      return { kind: "error", level: "error" };
+  }
+}
+
+/**
+ * 记一次失败（纯函数）：写入 `lastError` 并追加一条对应诊断。
+ *
+ * 与 {@link applySuperDiagnostic} 一样**不改变状态机** —— 失败分类是给上层
+ * 决定「要不要重试 / 怎么重试」的依据，状态迁移仍由 {@link applySuperEvent}
+ * 负责。
+ */
+export function applySuperFailure(
+  session: SuperSessionUi,
+  failure: SuperFailureInfo,
+): SuperSessionUi {
+  const diagnostic = superFailureDiagnostic(failure);
+  const next: SuperSessionUi = {
+    ...session,
+    lastError: failure,
+    updatedAt: Math.max(session.updatedAt, failure.at),
+  };
+  return applySuperDiagnostic(next, {
+    at: failure.at,
+    kind: diagnostic.kind,
+    level: diagnostic.level,
+    message: failure.message,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 归档（重启后恢复子会话）
 // ---------------------------------------------------------------------------
 
@@ -793,6 +948,25 @@ export interface PersistedSuperSession {
   reports: SuperReport[];
   /** 子会话的 todolist 快照（记录性内容，重启后仍要能在时间轴上看到）。 */
   todos?: SuperTodoUi[];
+  /**
+   * 运行组 id（一次委派块 = 一个运行组）。重启后仍然成立 —— 重启 / 批量重试
+   * 靠它圈定范围。
+   */
+  runId?: string;
+  /** 所属波次（0 基）。 */
+  wave?: number;
+  /** 声明的批次号（1 基）。 */
+  batch?: number;
+  /** 依赖的任务标识。 */
+  dependsOn?: string[];
+  /** 最大尝试次数。 */
+  maxAttempts?: number;
+  /** 最近一次失败信息（失败分类 + 一句话）。 */
+  lastError?: SuperFailureInfo;
+  /** 诊断事件（追加式；恢复后仍要能看到「当时发生了什么」）。 */
+  diagnostics?: SuperDiagnosticEvent[];
+  /** 面向人的状态说明。 */
+  statusDetail?: string;
 }
 
 /**
@@ -855,6 +1029,14 @@ export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuper
     integration: session.integration,
     reports: session.reports,
     todos: session.todos,
+    runId: session.runId,
+    wave: session.wave,
+    batch: session.batch,
+    dependsOn: session.dependsOn,
+    maxAttempts: session.maxAttempts,
+    lastError: session.lastError,
+    diagnostics: session.diagnostics,
+    statusDetail: session.statusDetail,
   };
 }
 
@@ -943,7 +1125,27 @@ export function fromPersistedSuperSession(
     integration: record.integration,
     reports: record.reports,
     todos: normalizeRestoredTodos(record.todos),
+    runId: record.runId,
+    wave: record.wave,
+    batch: record.batch,
+    dependsOn: record.dependsOn,
+    maxAttempts: record.maxAttempts,
+    lastError: record.lastError,
+    // 恢复时按上限裁一次：归档是磁盘文件，可能被人手改过，不给它无限膨胀
+    // 看板投影的机会。
+    diagnostics: normalizeRestoredDiagnostics(record.diagnostics),
+    statusDetail: record.statusDetail,
   };
+}
+
+/** 恢复出来的诊断数组：按上限裁剪，保留最近的事件。 */
+function normalizeRestoredDiagnostics(
+  diagnostics: SuperDiagnosticEvent[] | undefined,
+): SuperDiagnosticEvent[] | undefined {
+  if (!diagnostics || diagnostics.length === 0) return undefined;
+  return diagnostics.length > SUPER_DIAGNOSTICS_MAX_EVENTS
+    ? diagnostics.slice(diagnostics.length - SUPER_DIAGNOSTICS_MAX_EVENTS)
+    : diagnostics;
 }
 
 // ---------------------------------------------------------------------------
@@ -976,6 +1178,385 @@ export interface SuperTaskSpec {
   task: string;
   /** 随任务交给子会话的附件（指令里只允许写路径，内联图片由宿主补）。 */
   attachments?: SuperAttachment[];
+  /**
+   * 任务稳定标识（**块内唯一**）。
+   *
+   * 缺省时用 `title` 充当标识（见 {@link superTaskKey}）。标识是依赖解析的
+   * 第一依据：`dependsOn` 先按 `id` 找，找不到再按 `title` 找 —— 这也是
+   * title 重复必须报错的原因（两个同 title 的任务会让解析变得有歧义）。
+   */
+  id?: string;
+  /**
+   * 依赖的任务标识数组。
+   *
+   * 只在「依赖模式」下有意义（块内至少一个任务带 `dependsOn`）。每个标识先按
+   * `id` 解析，解析不到再按 `title` 解析；解析不到 = **块级错误**（整块拒绝，
+   * 不得静默部分派发）。
+   */
+  dependsOn?: string[];
+  /**
+   * 声明的批次号（1 基）。
+   *
+   * 只在「批次模式」下有意义（块内没有任何任务带 `dependsOn`，但至少一个带
+   * `batch`）。波次 = batch 值的离散排名（升序压缩成 0..n-1）；没填 batch 的
+   * 任务归 wave 0。
+   */
+  batch?: number;
+}
+
+// ---------------------------------------------------------------------------
+// 任务依赖 / 批次 / 波次（waves）
+// ---------------------------------------------------------------------------
+
+/**
+ * 委派块的依赖模式。
+ *
+ * - `flat`：**平铺** —— 没有任何任务声明依赖或批次，全部同波（wave 0）。这是
+ *   改造前的唯一形态，行为必须逐字不变。
+ * - `dependency`：**依赖模式** —— 至少一个任务带 `dependsOn`。波次 = 最长依赖
+ *   路径：无依赖 = wave 0，依赖 wave N 的任务 = wave N+1。
+ * - `batch`：**批次模式** —— 没有任何任务带 `dependsOn`，但至少一个带 `batch`。
+ *   波次 = batch 值的离散排名（升序压缩成 0..n-1）；没填 batch 的任务归 wave 0。
+ *
+ * 一个块内只允许一种模式：同时出现 `dependsOn` 与 `batch` = 混合模式 =
+ * **块级错误**（整块拒绝，不得静默部分派发）。
+ */
+export type SuperTaskMode = "flat" | "dependency" | "batch";
+
+/**
+ * 字段级诊断的错误码。
+ *
+ * 枚举值沿用本文件既有的 snake_case 风格（与 `SuperStatus` /
+ * `SuperIsolationKind` 一致）。是否阻止派发只看 {@link SuperParseIssue.blockLevel}。
+ */
+export type SuperParseIssueKind =
+  /** 块内同时出现 dependsOn 与 batch（两种模式混用）。 */
+  | "mixed_mode"
+  /** 同一个任务同时带 dependsOn 与 batch。 */
+  | "task_dual_mode"
+  /** id 不是字符串。 */
+  | "invalid_id"
+  /** dependsOn 不是字符串数组。 */
+  | "invalid_depends_on"
+  /** batch 不是正整数。 */
+  | "invalid_batch"
+  /** 依赖成环。 */
+  | "dependency_cycle"
+  /** 依赖引用不存在（诊断里列出未解析的标识）。 */
+  | "dependency_missing"
+  /** title 重复（title 参与标识解析）。 */
+  | "duplicate_title"
+  /** id 重复（id 必须块内唯一）。 */
+  | "duplicate_id"
+  /** 任务缺 task。 */
+  | "missing_task"
+  /** 任务缺 title。 */
+  | "missing_title"
+  /** 任务条目不是对象。 */
+  | "invalid_entry"
+  /** 附件列表非法。 */
+  | "invalid_attachments";
+
+/**
+ * 一条字段级诊断。
+ *
+ * 分层只看 `blockLevel`：
+ *  - `true` = **块级错误**：整个委派块必须拒绝（不得静默部分派发），宿主把
+ *    `message` 回报主会话 / 用户；
+ *  - `false` = **条级错误**：只丢这一条任务，其余照派，`message` 记进 issues。
+ *
+ * `message` 是中文（源语言），与本文件既有 issue 文案同风格；`kind` 给宿主
+ * 做分支（不必去解析文案）。
+ */
+export interface SuperParseIssue {
+  /** 机器可读错误码。 */
+  kind: SuperParseIssueKind;
+  /** 给人看的一句话（中文，源语言）。 */
+  message: string;
+  /** true = 块级错误（整块拒绝）；false = 条级错误（只丢这一条）。 */
+  blockLevel: boolean;
+  /** 定位到具体字段（可选），如 `tasks[1].dependsOn`。 */
+  path?: string;
+}
+
+/** 诊断 → 宿主既有 issue 通道（字符串数组）。 */
+export function superParseIssueMessages(issues: readonly SuperParseIssue[]): string[] {
+  return issues.map((issue) => issue.message);
+}
+
+/**
+ * 任务的稳定标识：优先 `id`，缺省用 `title`。
+ *
+ * `id` 是块内唯一标识；没有 `id` 时 title 兼任标识 —— 这也是 title 重复必须
+ * 报错的原因（两个同 title 的任务会让 `dependsOn` 的解析变得有歧义）。
+ */
+export function superTaskKey(task: { id?: string; title: string }): string {
+  const id = typeof task.id === "string" ? task.id.trim() : "";
+  return id || task.title.trim();
+}
+
+/**
+ * 一个委派块的波次计划。
+ *
+ * `waves` 的下标即波次号（0 基），`taskWave` 是「任务标识 → 波次序号」的
+ * 查表（键用 {@link superTaskKey}：有 id 用 id，没有用 title）。
+ */
+export interface SuperWavePlan {
+  /** 块的依赖模式。 */
+  mode: SuperTaskMode;
+  /** 每个波次内的任务标识列表（按波次顺序）。 */
+  waves: string[][];
+  /** 任务标识 → 波次序号（0 基）。 */
+  taskWave: Record<string, number>;
+  /** 字段级诊断（块级错误存在时 waves/taskWave 为空）。 */
+  issues: SuperParseIssue[];
+}
+
+/**
+ * 计算一个委派块的波次计划（纯函数）。
+ *
+ * 模式判定只看「是否出现」：块内至少一个任务带 `dependsOn` → 依赖模式；
+ * 没有任何 `dependsOn` 但至少一个带 `batch` → 批次模式；两者皆无 → 平铺模式
+ * （全部 wave 0，行为与改造前完全一致）。依赖模式下「部分任务没有
+ * dependsOn」是合法的 —— 它们在 wave 0。
+ *
+ * 依赖模式的波次 = **最长依赖路径**：无依赖 = 0，依赖 wave N 的任务 = N+1。
+ * 批次模式的波次 = batch 值的离散排名（升序压缩 0..n-1），没填 batch 的任务
+ * 归 wave 0。
+ *
+ * 块级错误（混合模式 / 同任务双带 / 依赖成环 / 悬空依赖 / title 重复 /
+ * id 重复 / batch 非法）会让 `waves` 与 `taskWave` 为空，并在 `issues` 里给出
+ * 可读原因 —— 宿主据此整块拒绝，**不得**部分派发。
+ */
+export function planSuperWaves(tasks: SuperTaskSpec[]): SuperWavePlan {
+  return planSuperWavesInternal(tasks).plan;
+}
+
+/**
+ * 波次计算的内部实现。
+ *
+ * `extraTitles` 是「原始标题」旁路表（与 `tasks` 同下标）：parse 阶段的标题
+ * 会被 {@link normalizeSuperTitle} 截到 40 字，而模型写进 `dependsOn` 的
+ * 往往是**原始**标题 —— 用它兜底，避免「明明有这条任务」却报悬空依赖。
+ */
+function planSuperWavesInternal(
+  tasks: readonly SuperTaskSpec[],
+  extraTitles?: readonly string[],
+): { plan: SuperWavePlan; canonicalTasks: SuperTaskSpec[] } {
+  const issues: SuperParseIssue[] = [];
+  const count = tasks.length;
+  const keys = tasks.map((task) => superTaskKey(task));
+
+  // —— 模式判定（只看字段是否出现）——
+  const hasDepends = tasks.some((task) => task.dependsOn !== undefined);
+  const hasBatch = tasks.some((task) => task.batch !== undefined);
+  const mode: SuperTaskMode = hasDepends ? "dependency" : hasBatch ? "batch" : "flat";
+
+  // —— 块级错误 ①：混合模式 ——
+  if (hasDepends && hasBatch) {
+    issues.push({
+      kind: "mixed_mode",
+      message: "同一个委派块里不得同时使用 dependsOn 与 batch（两种模式只能选一种）",
+      blockLevel: true,
+    });
+  }
+
+  // —— 块级错误 ②：同一任务同时带 dependsOn 与 batch ——
+  tasks.forEach((task, index) => {
+    if (task.dependsOn === undefined || task.batch === undefined) return;
+    issues.push({
+      kind: "task_dual_mode",
+      message: `tasks[${index}] 同时声明了 dependsOn 与 batch（一个任务只能属于一种模式）`,
+      blockLevel: true,
+      path: `tasks[${index}]`,
+    });
+  });
+
+  // —— 块级错误 ③：batch 必须是正整数（1 基）——
+  tasks.forEach((task, index) => {
+    if (task.batch === undefined) return;
+    if (Number.isInteger(task.batch) && task.batch >= 1) return;
+    issues.push({
+      kind: "invalid_batch",
+      message: `tasks[${index}].batch 必须是正整数（1 基），当前是 ${JSON.stringify(task.batch)}`,
+      blockLevel: true,
+      path: `tasks[${index}].batch`,
+    });
+  });
+
+  // —— 块级错误 ④：标识唯一性（title 参与标识解析，id 必须块内唯一）——
+  const firstTitle = new Map<string, number>();
+  const firstId = new Map<string, number>();
+  tasks.forEach((task, index) => {
+    const title = task.title.trim();
+    if (title) {
+      const seen = firstTitle.get(title);
+      if (seen === undefined) {
+        firstTitle.set(title, index);
+      } else {
+        issues.push({
+          kind: "duplicate_title",
+          message: `tasks[${index}].title 与 tasks[${seen}].title 重复（title 参与标识解析，必须块内唯一）`,
+          blockLevel: true,
+          path: `tasks[${index}].title`,
+        });
+      }
+    }
+    const id = typeof task.id === "string" ? task.id.trim() : "";
+    if (!id) return;
+    const seen = firstId.get(id);
+    if (seen === undefined) {
+      firstId.set(id, index);
+    } else {
+      issues.push({
+        kind: "duplicate_id",
+        message: `tasks[${index}].id 与 tasks[${seen}].id 重复（id 必须块内唯一）`,
+        blockLevel: true,
+        path: `tasks[${index}].id`,
+      });
+    }
+  });
+
+  // —— 依赖解析索引：id 优先，其次 title ——
+  const byId = new Map<string, number>();
+  const byTitle = new Map<string, number>();
+  tasks.forEach((task, index) => {
+    const id = typeof task.id === "string" ? task.id.trim() : "";
+    if (id && !byId.has(id)) byId.set(id, index);
+    const title = task.title.trim();
+    if (title && !byTitle.has(title)) byTitle.set(title, index);
+  });
+  // 原始标题旁路（第二遍）：已登记的存储标题优先，原始标题只做兜底。
+  if (extraTitles) {
+    extraTitles.forEach((raw, index) => {
+      const title = (raw ?? "").trim();
+      if (title && !byTitle.has(title)) byTitle.set(title, index);
+    });
+  }
+
+  // —— 依赖解析（id 优先，其次 title；解析不到的绝不静默忽略）——
+  const depTargets: number[][] = [];
+  const resolvedRefs: string[][] = [];
+  const invalidRefs: { index: number; ref: string }[] = [];
+  const missingRefs: { index: number; ref: string }[] = [];
+  tasks.forEach((task, index) => {
+    const targets: number[] = [];
+    const refs: string[] = [];
+    for (const raw of task.dependsOn ?? []) {
+      const trimmed = typeof raw === "string" ? raw.trim() : "";
+      if (!trimmed) {
+        // 空标识不是「没有依赖」，是写坏了 —— 必须报出来。
+        invalidRefs.push({ index, ref: typeof raw === "string" ? raw : String(raw) });
+        refs.push(typeof raw === "string" ? raw : String(raw));
+        continue;
+      }
+      const hit = byId.get(trimmed) ?? byTitle.get(trimmed);
+      if (hit === undefined) {
+        missingRefs.push({ index, ref: trimmed });
+        refs.push(trimmed);
+        continue;
+      }
+      targets.push(hit);
+      refs.push(keys[hit]!);
+    }
+    depTargets.push(targets);
+    resolvedRefs.push(refs);
+  });
+
+  if (invalidRefs.length > 0) {
+    issues.push({
+      kind: "invalid_depends_on",
+      message: `dependsOn 里有空标识：${invalidRefs.map((entry) => `tasks[${entry.index}].dependsOn`).join("、")}`,
+      blockLevel: true,
+      path: "tasks[].dependsOn",
+    });
+  }
+  if (missingRefs.length > 0) {
+    issues.push({
+      kind: "dependency_missing",
+      message: `依赖引用不存在：${missingRefs.map((entry) => `tasks[${entry.index}].dependsOn → ${entry.ref}`).join("、")}`,
+      blockLevel: true,
+      path: "tasks[].dependsOn",
+    });
+  }
+
+  // —— 波次计算 ——
+  const waveOf = new Array<number>(count).fill(0);
+  if (mode === "dependency") {
+    // 最长依赖路径（DFS + 颜色标记，成环即块级错误）。
+    const color = new Array<0 | 1 | 2>(count).fill(0); // 0 未访问 / 1 在栈上 / 2 已完成
+    const stack: number[] = [];
+    // 成环路径用数组承载（不用 `let x: T[] | null = null`：赋值发生在闭包里，
+    // 控制流分析会把外面的 `x` 收窄成 null，成环路径反而读不出来）。
+    const cyclePath: number[] = [];
+    const visit = (index: number): boolean => {
+      if (color[index] === 2) return true;
+      if (color[index] === 1) {
+        const at = stack.indexOf(index);
+        cyclePath.push(...stack.slice(at), index);
+        return false;
+      }
+      color[index] = 1;
+      stack.push(index);
+      for (const dep of depTargets[index]!) {
+        if (!visit(dep)) return false;
+      }
+      stack.pop();
+      color[index] = 2;
+      const deps = depTargets[index]!;
+      waveOf[index] = deps.length === 0 ? 0 : Math.max(...deps.map((dep) => waveOf[dep]!)) + 1;
+      return true;
+    };
+    for (let index = 0; index < count; index += 1) {
+      if (!visit(index)) break;
+    }
+    if (cyclePath.length > 0) {
+      issues.push({
+        kind: "dependency_cycle",
+        message: `依赖成环：${cyclePath.map((index) => tasks[index]!.title).join(" → ")}`,
+        blockLevel: true,
+        path: "tasks[].dependsOn",
+      });
+    }
+  } else if (mode === "batch") {
+    // batch 的离散排名（升序压缩成 0..n-1）；没填 batch 的任务归 wave 0。
+    const batchValues = [
+      ...new Set(tasks.filter((task) => task.batch !== undefined).map((task) => task.batch!)),
+    ].sort((a, b) => a - b);
+    const rank = new Map<number, number>();
+    batchValues.forEach((value, index) => rank.set(value, index));
+    tasks.forEach((task, index) => {
+      waveOf[index] = task.batch === undefined ? 0 : (rank.get(task.batch) ?? 0);
+    });
+  }
+
+  // —— 汇总波次表 ——
+  const waves: string[][] = [];
+  const taskWave: Record<string, number> = {};
+  tasks.forEach((task, index) => {
+    const wave = waveOf[index]!;
+    while (waves.length <= wave) waves.push([]);
+    waves[wave]!.push(keys[index]!);
+    taskWave[keys[index]!] = wave;
+  });
+
+  const canonicalTasks = tasks.map((task, index) => {
+    if (task.dependsOn === undefined) return task;
+    const refs = resolvedRefs[index]!;
+    const unchanged = refs.length === task.dependsOn.length && refs.every((ref, i) => ref === task.dependsOn![i]);
+    return unchanged ? task : { ...task, dependsOn: refs };
+  });
+
+  const hasBlockError = issues.some((issue) => issue.blockLevel);
+  return {
+    plan: {
+      mode,
+      waves: hasBlockError ? [] : waves,
+      taskWave: hasBlockError ? {} : taskWave,
+      issues,
+    },
+    canonicalTasks,
+  };
 }
 
 /** 收栏标记（必须独占一行）。 */
@@ -1062,6 +1643,12 @@ export function normalizeSuperTitle(raw: string, fallback = "超流体"): string
  * 归一化只折叠「语义相同、写法不同」的差异：空白折叠、路径分隔符统一、
  * 附件顺序排序（宿主按内容复制，不看顺序）。附件名、路径、内联数据与 MIME
  * 都参与指纹 —— 只差附件的两份委派不是同一份载荷。
+ *
+ * **刻意不把依赖字段（id / dependsOn / batch）算进指纹**：内置工具的 schema
+ * 不声明它们（见 `vendor/iflow-fork/bundle/super-agent-loader.cjs`），网关侧
+ * 可能把多出来的字段剔掉 —— 同一份委派走「工具通道」与走「围栏通道」就会因
+ * 为字段被剔而算出两个指纹，判重失效 → 同一批任务被派发两次。指纹只认
+ * title / task / attachments，两条通道的判重口径因此保持一致。
  */
 export function superDirectiveDedupeKey(tasks: readonly SuperTaskSpec[]): string {
   const normalizeText = (value: string | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
@@ -2070,6 +2657,91 @@ function parseDirectiveBody(body: string): DirectiveParse {
   return parseDirectiveValue(parsed.value);
 }
 
+/**
+ * 任务 `id` 的解析：非字符串 = 块级错误；空白串按「没写」处理。
+ *
+ * 新字段一律**显式解析 + 校验** —— 未知字段被静默忽略正是这次改造要消灭的
+ * 失败模式（模型写了 dependsOn，宿主却当没看见，依赖语义整段丢失）。
+ */
+function parseSuperTaskId(
+  raw: unknown,
+  where: string,
+  blockIssues: SuperParseIssue[],
+): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string") {
+    blockIssues.push({
+      kind: "invalid_id",
+      message: `${where}.id 必须是字符串`,
+      blockLevel: true,
+      path: `${where}.id`,
+    });
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * 任务 `dependsOn` 的解析：必须是字符串数组；否则块级错误。
+ *
+ * 元素不是字符串（数字 / 对象 / null）同样非法 —— 依赖标识是**标识**，
+ * 写坏了就不能猜。
+ */
+function parseSuperTaskDependsOn(
+  raw: unknown,
+  where: string,
+  blockIssues: SuperParseIssue[],
+): string[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    blockIssues.push({
+      kind: "invalid_depends_on",
+      message: `${where}.dependsOn 必须是字符串数组`,
+      blockLevel: true,
+      path: `${where}.dependsOn`,
+    });
+    return undefined;
+  }
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string") {
+      blockIssues.push({
+        kind: "invalid_depends_on",
+        message: `${where}.dependsOn 必须是字符串数组`,
+        blockLevel: true,
+        path: `${where}.dependsOn`,
+      });
+      return undefined;
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+/**
+ * 任务 `batch` 的解析：必须是数字（是不是正整数由波次计算统一判）。
+ *
+ * 非数字 = 块级错误（模型把批次写成了字符串 / 布尔，猜不出意图）。
+ */
+function parseSuperTaskBatch(
+  raw: unknown,
+  where: string,
+  blockIssues: SuperParseIssue[],
+): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    blockIssues.push({
+      kind: "invalid_batch",
+      message: `${where}.batch 必须是正整数（1 基）`,
+      blockLevel: true,
+      path: `${where}.batch`,
+    });
+    return undefined;
+  }
+  return raw;
+}
+
 /** 指令块正文（载荷本身已是 JSON 值）的解析 —— 校验逻辑与文本入口完全同源。 */
 function parseDirectiveValue(value: unknown): DirectiveParse {
   const rawTasks = Array.isArray(value)
@@ -2080,7 +2752,11 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
   if (!rawTasks) return { ok: false, reason: "缺少 tasks 数组", issues: [] };
 
   const tasks: SuperTaskSpec[] = [];
+  /** 与 {@link tasks} 同下标的**原始标题**（未截断）——依赖引用的兜底索引。 */
+  const rawTitles: string[] = [];
   const issues: string[] = [];
+  /** 块级错误（新增字段的类型问题）：一旦出现，整块拒绝。 */
+  const blockIssues: SuperParseIssue[] = [];
   for (let index = 0; index < rawTasks.length; index++) {
     const entry = rawTasks[index];
     const where = `tasks[${index}]`;
@@ -2094,7 +2770,14 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
       issues.push(`${where} 必须是对象`);
       continue;
     }
-    const record = entry as { title?: unknown; task?: unknown; attachments?: unknown };
+    const record = entry as {
+      title?: unknown;
+      task?: unknown;
+      attachments?: unknown;
+      id?: unknown;
+      dependsOn?: unknown;
+      batch?: unknown;
+    };
     if (typeof record.task !== "string") {
       issues.push(`${where}.task 必须是字符串`);
       continue;
@@ -2107,6 +2790,10 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
     // 附件是任务的附属信息：非法元素由 parseDirectiveAttachments 逐个跳过（既有
     // 兼容行为），这里只补一条诊断，不因为一个坏附件就把整条合法任务丢掉。
     if (attachmentIssue) issues.push(`${where}.${attachmentIssue}`);
+    // 新字段（id / dependsOn / batch）：显式解析 + 校验，写坏了绝不静默忽略。
+    const id = parseSuperTaskId(record.id, where, blockIssues);
+    const dependsOn = parseSuperTaskDependsOn(record.dependsOn, where, blockIssues);
+    const batch = parseSuperTaskBatch(record.batch, where, blockIssues);
     const task = record.task.trim();
     // A task that is still a placeholder (the model echoed the documented
     // example back) is skipped — opening a child session for "<任务说明>"
@@ -2124,7 +2811,20 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
       title: normalizeSuperTitle(rawTitle),
       task,
       ...(attachments.length > 0 ? { attachments } : {}),
+      ...(id ? { id } : {}),
+      ...(dependsOn ? { dependsOn } : {}),
+      ...(batch !== undefined ? { batch } : {}),
     });
+    rawTitles.push(rawTitle);
+  }
+  // 块级错误优先：整块拒绝，绝不部分派发（半派发 = 依赖语义静默丢失）。
+  if (blockIssues.length > 0) {
+    const blockMessages = superParseIssueMessages(blockIssues);
+    return {
+      ok: false,
+      reason: `载荷格式错误：${summarizeIssues(blockMessages)}`,
+      issues: [...issues, ...blockMessages],
+    };
   }
   // 一条都派不出去不是「成功但为空」：模型可能只给了标题、或把协议示例原样
   // 抄了回来。宿主需要知道这件事（否则用户只看到「什么都没发生」）。畸形条目
@@ -2139,7 +2839,18 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
       issues,
     };
   }
-  return { ok: true, tasks, issues };
+  // 波次计算 + 依赖校验：混合模式 / 成环 / 悬空依赖 / 重复标识 / 非法批次
+  // 都是**块级**错误 —— 整块拒绝并回报，绝不静默部分派发。
+  const { plan, canonicalTasks } = planSuperWavesInternal(tasks, rawTitles);
+  if (plan.issues.some((issue) => issue.blockLevel)) {
+    const planMessages = superParseIssueMessages(plan.issues);
+    return {
+      ok: false,
+      reason: `载荷格式错误：${summarizeIssues(planMessages)}`,
+      issues: [...issues, ...planMessages],
+    };
+  }
+  return { ok: true, tasks: canonicalTasks, issues };
 }
 
 /**
@@ -3015,6 +3726,31 @@ export class SuperReportBuffer {
 }
 
 /**
+ * 按波次分组（纯聚合）。
+ *
+ * `waveOf` 返回 undefined / 非法值 = 该条目没有声明波次 → 归入 **wave 0** 组。
+ * 返回数组的下标即波次号；中间没有条目的波次保留空数组（长度 = 最大波次 + 1）。
+ *
+ * **刻意不改** {@link SuperReportBuffer.takeSettled} 的「逐个即时交付」语义：
+ * 汇报仍然一条一条即时投给主会话，聚合只是上层做「按波次过滤 / 批量重试」
+ * 时的视图。
+ */
+export function groupSuperReportsByWave<T>(
+  entries: T[],
+  waveOf: (entry: T) => number | undefined,
+): T[][] {
+  const groups: T[][] = [];
+  for (const entry of entries) {
+    const raw = waveOf(entry);
+    const wave =
+      typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
+    while (groups.length <= wave) groups.push([]);
+    groups[wave]!.push(entry);
+  }
+  return groups;
+}
+
+/**
  * 看板顶部的计数摘要。
  *
  * `cancelled` 单独计数、不计入 `failed`：用户主动停止（或面板关闭时被终止）
@@ -3221,7 +3957,7 @@ export function describeSuperSessionLine(session: SuperSessionUi): string {
  * 模型照抄示例就会零派发。改用带引号的占位符 —— 示例本身可解析，而原样
  * 抄回仍会被占位符规则拒掉，不会派发一条垃圾任务。
  */
-const SUPER_DIGEST_HINT = "Dispatch by calling the `super-agent` tool with body {\"tasks\":[{\"title\":\"<title>\",\"task\":\"<self-contained brief>\"}]}; if that tool is not in your list, write the same JSON as a ```super-agent fenced block instead. To manage children, call the `super-agent` tool with {\"actions\":[...]} when its schema exposes `actions`; otherwise emit a ```super-agent-actions fenced block — never call a separate `super-agent-actions` tool. Every task MUST have a non-empty title — a task without one is REJECTED and never dispatched.";
+const SUPER_DIGEST_HINT = "Dispatch by calling the `super-agent` tool with body {\"tasks\":[{\"title\":\"<title>\",\"task\":\"<self-contained brief>\"}]}; if that tool is not in your list, write the same JSON as a ```super-agent fenced block instead. To manage children, call the `super-agent` tool with {\"actions\":[...]} when its schema exposes `actions`; otherwise emit a ```super-agent-actions fenced block — never call a separate `super-agent-actions` tool. Every task MUST have a non-empty title — a task without one is REJECTED and never dispatched. One block may declare `dependsOn` (another task's `id` or `title` in the same block) or `batch` (1-based) — never both. Dependency example: {\"tasks\":[{\"title\":\"实现数据层\",\"task\":\"按任务书实现数据层\"},{\"title\":\"实现接口层\",\"task\":\"依赖数据层，实现接口层\",\"dependsOn\":[\"实现数据层\"]}]} Batch example: {\"tasks\":[{\"title\":\"实现 A\",\"task\":\"第一批任务\"},{\"title\":\"实现 B\",\"task\":\"第二批任务\",\"batch\":2}]}";
 
 const SUPER_DIGEST_FOOTER = [
   "",
@@ -3278,17 +4014,39 @@ const SUPER_BOARD_LABEL_EN = "[child-session board]";
 export const SUPER_BOARD_TASK_PREVIEW_MAX_CHARS = 200;
 
 /**
- * 看板投影：任务书压成单行预览，其余字段原样。
+ * 看板投影里诊断事件的条数上限。
  *
- * 只在需要裁剪时才换对象（短任务书原引用返回），调用点可以安全地把它当作
- * 每次投影的 mapper。末尾的 `…` 如实标记「这里还有被截掉的内容」，不装作
- * 全文都在。
+ * 诊断是追加式的（长跑任务能攒到几百条），而 `superSessions` 是**非 blocks
+ * 元数据** —— 随每次 snapshot / blockPatch 整份重发。不在投影里裁剪，看板
+ * 体积会被诊断数组撑爆。超出时保留**最近**的若干条（排查时最近的那几条才
+ * 是关键）。
+ */
+export const SUPER_BOARD_DIAGNOSTICS_MAX_EVENTS = 20;
+
+/**
+ * 看板投影：任务书压成单行预览 + 诊断数组裁剪，其余字段原样。
+ *
+ * 只在需要裁剪时才换对象（短任务书 + 诊断未超限 → 原引用返回），调用点可以
+ * 安全地把它当作每次投影的 mapper。末尾的 `…` 如实标记「这里还有被截掉的
+ * 内容」，不装作全文都在。
  */
 export function toSuperBoardSession(session: SuperSessionUi): SuperSessionUi {
   const task = session.task ?? "";
-  if (task.length <= SUPER_BOARD_TASK_PREVIEW_MAX_CHARS) return session;
-  const preview = `${task.slice(0, SUPER_BOARD_TASK_PREVIEW_MAX_CHARS - 1).trimEnd()}…`;
-  return { ...session, task: preview };
+  const diagnostics = session.diagnostics ?? [];
+  const clippedDiagnostics =
+    diagnostics.length > SUPER_BOARD_DIAGNOSTICS_MAX_EVENTS
+      ? diagnostics.slice(diagnostics.length - SUPER_BOARD_DIAGNOSTICS_MAX_EVENTS)
+      : diagnostics;
+  const taskClipped = task.length > SUPER_BOARD_TASK_PREVIEW_MAX_CHARS;
+  const diagnosticsClipped = clippedDiagnostics.length !== diagnostics.length;
+  if (!taskClipped && !diagnosticsClipped) return session;
+  return {
+    ...session,
+    ...(taskClipped
+      ? { task: `${task.slice(0, SUPER_BOARD_TASK_PREVIEW_MAX_CHARS - 1).trimEnd()}…` }
+      : {}),
+    ...(diagnosticsClipped ? { diagnostics: clippedDiagnostics } : {}),
+  };
 }
 
 /**
