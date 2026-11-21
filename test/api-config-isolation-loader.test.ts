@@ -112,7 +112,10 @@ describe("api-config-isolation-loader", () => {
 
     expect(out).toBeDefined();
     expect(out!.settings.apiProfiles).toEqual(onDisk);
-    expect(out!.settings.language).toBe("en");
+    // Rule 1 — `language` is an authoritative-disk key now: with no on-disk
+    // value there is nothing to re-inject, so the child's snapshot value is
+    // deliberately not written back (same semantics as apiProfiles).
+    expect(out!.settings).not.toHaveProperty("language");
   });
 
   it("returns undefined when the MOD is disabled or harness mode is off", () => {
