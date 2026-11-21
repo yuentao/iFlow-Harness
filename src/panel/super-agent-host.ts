@@ -38,6 +38,7 @@ import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, locateNodeExecutable } from "../acp/cli-locator.js";
 import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
 import { loadCredentials } from "../acp/auth.js";
+import { tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
 import { parseCostTable, resolveCost } from "../../shared/context-window.js";
 import {
   type Block,
@@ -1116,6 +1117,10 @@ export class SuperAgentHost {
       // 铺在 options.env 之下，这里用 undefined 显式抹掉该键（Node 的 spawn
       // 会跳过值为 undefined 的环境变量），即便用户 shell 里设了也不继承。
       IFLOW_SUPER_TOOL: undefined,
+      // Same effective context window as the main session: without this the
+      // child falls back to 128000 (threshold 102400) and compresses its
+      // ~103000-token baseline immediately on start.
+      ...tokensLimitEnvFromSettings(),
     };
     if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
     const client = new AcpClient(
