@@ -22,14 +22,22 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Block } from "../../shared/messages.js";
+import { isTerminalSuperStatus } from "../../shared/super-agent.js";
 import type { PersistedSuperSession } from "../../shared/super-agent.js";
 
-/** 归档文件格式版本。读到的版本不认识就当没有归档（宁可少显示，不显示坏的）。 */
+/**
+ * 归档文件格式版本。读到的版本不认识就当没有归档（宁可少显示，不显示坏的）。
+ *
+ * **v2 的新字段一律可选，所以版本号仍然是 1**：老归档（没有 runId / wave /
+ * diagnostics 等字段）必须能原样读回 —— 升版本会把所有老归档变成
+ * 「unknown-version」损坏态，用户重启后一屏子会话全没了。版本号只在**形状
+ * 本身**不兼容时才动。
+ */
 const ARCHIVE_VERSION = 1;
 
 interface ArchiveFile {
   version: number;
-  sessions: PersistedSuperSession[];
+  sessions: SuperArchiveRecord[];
 }
 
 /**
@@ -51,7 +59,7 @@ export type SuperArchiveDamage =
 /** 一次归档读取的结果。 */
 export interface SuperSessionArchiveRead {
   /** 能读出来的子会话记录（损坏时为空 —— 但 `damaged` 为 true）。 */
-  sessions: PersistedSuperSession[];
+  sessions: SuperArchiveRecord[];
   /** 归档是否**读不出来**（false = 真的没有子会话）。 */
   damaged: boolean;
   /** 读不出来的原因（damaged 为 true 时有值）。 */
@@ -175,7 +183,11 @@ export async function readSuperSessionArchive(
     return await damaged(actualTarget, "bad-shape");
   }
   return {
-    sessions: file.sessions.filter((s): s is PersistedSuperSession => !!s && typeof s.id === "string"),
+    sessions: file.sessions
+      .filter((s): s is SuperArchiveRecord => !!s && typeof s.id === "string")
+      // 读侧也裁一次：归档可能来自更高版本，或被手工改过 —— 进内存的记录
+      // 必须始终满足「诊断 ≤200 条、单条文本 ≤500 字」这条不变量。
+      .map((s) => sanitizeSuperArchiveRecord(s)),
     damaged: false,
   };
 }
@@ -205,10 +217,16 @@ async function damaged(target: string, damage: SuperArchiveDamage): Promise<Supe
 export async function writeSuperSessionArchive(
   baseDir: string,
   sessionId: string,
-  sessions: PersistedSuperSession[],
+  sessions: readonly SuperArchiveRecord[],
 ): Promise<void> {
   const target = archivePath(baseDir, sessionId);
-  const payload = JSON.stringify({ version: ARCHIVE_VERSION, sessions } satisfies ArchiveFile);
+  // 落盘前裁剪（v2）：诊断事件流是高频 + 可能很长的东西，不能让它把归档撑大。
+  // 裁剪只动 v2 的新字段，v1 字段逐字保留 —— 归档是「那次运行发生过什么」的
+  // 记录，不是缓存。
+  const payload = JSON.stringify({
+    version: ARCHIVE_VERSION,
+    sessions: sessions.map((s) => sanitizeSuperArchiveRecord(s)),
+  } satisfies ArchiveFile);
   // 内容没变就不写 —— 但要先确认文件还在：文件可能已被会话删除 / 孤儿清扫
   // 删掉，这时「跳过」会让归档再也回不来。
   if (lastWritten.get(target) === payload && existsSync(target)) return;
@@ -276,6 +294,311 @@ export async function listSuperSessionArchiveFiles(baseDir: string): Promise<str
   } catch {
     return []; // 目录还没建
   }
+}
+
+// ---------------------------------------------------------------------------
+// 归档持久化 v2：波次 / 依赖 / 尝试 / 失败分类 / 诊断事件流 / 恢复分类
+// ---------------------------------------------------------------------------
+//
+// **为什么要有 v2**：v1 归档只记「这个子会话存在过、在哪个分支上、结束状态是
+// 什么」。一旦引入多波次调度 + 依赖 + 重试，就缺三样东西：
+//
+//  1. **它在第几波、依赖谁** —— 恢复后要能重建「谁挡着谁」的关系，否则用户
+//     只看到一排孤立的卡片，不知道该先处理哪个；
+//  2. **它是第几次尝试、上次为什么挂** —— 没有失败分类，重试只能盲试；
+//  3. **磁盘上还剩什么** —— 归档写「已完成」但 worktree 已被清理时，用户
+//     无从判断这份改动还在不在（见 {@link classifySuperRecovery}）。
+//
+// **持久化记录类型定义在哪**：`PersistedSuperSession` 仍定义在
+// `shared/super-agent.ts`（本文件只 import，**不改 shared**）。v2 的新字段在
+// 这里由 {@link SuperArchiveRecord}（= v1 记录 + 一组**可选**新字段）承载；
+// shared 层一旦导出等价的 `SuperFailureInfo` / `SuperDiagnosticEvent`，两者
+// 结构兼容，可直接换用（换用清单见任务报告的「接线说明」）。
+//
+// **老归档零迁移**：新字段全部可选，版本号不动 —— 老记录照常读回，指纹对缺失
+// 字段按默认值处理，绝不报错。
+
+/**
+ * 失败分类（v2）。
+ *
+ * v1 只有一句 `error?: string`（人类可读文本），机器分不出「重试有意义」与
+ * 「重试也是白试」—— 重试策略只能靠人读文本猜。v2 把失败拆成结构化分类：
+ *
+ *  - `retryable`：环境类失败（超时、限流、临时不可用）→ 重试有意义；
+ *  - `terminal`：任务本身失败（需求不成立、断言不通过）→ 重试只会再失败一次；
+ *  - `blocked`：需要人先做点什么（等凭据、等上游产物）→ 重试前要先解阻塞；
+ *  - `interrupted`：被中断（用户停的 / 面板关了）→ 通常可原地重试。
+ */
+export type SuperArchiveFailureKind = "retryable" | "terminal" | "blocked" | "interrupted";
+
+/** 一次失败的分类化描述（落盘用）。 */
+export interface SuperArchiveFailureInfo {
+  /** 失败分类。 */
+  kind: SuperArchiveFailureKind;
+  /** 人类可读的失败说明。 */
+  message: string;
+  /** 发生时刻（epoch ms）。 */
+  at: number;
+}
+
+/** 诊断事件的类别（v2）。 */
+export type SuperArchiveDiagnosticKind =
+  /** 子会话进程拉起。 */
+  | "spawn"
+  /** ACP 会话建立 / 恢复。 */
+  | "session"
+  /** 汇报流转。 */
+  | "report"
+  /** 合并 / 集成。 */
+  | "merge"
+  /** 重试。 */
+  | "retry"
+  /** 一般错误。 */
+  | "error"
+  /** 超时。 */
+  | "timeout"
+  /** 归档恢复。 */
+  | "restore"
+  /** 被阻塞。 */
+  | "blocked";
+
+/** 诊断事件的严重级别（v2）。 */
+export type SuperArchiveDiagnosticLevel = "info" | "warn" | "error";
+
+/**
+ * 一条诊断事件（v2）。
+ *
+ * 定位是「排查用的事件流」，不是面向用户的文案：它回答「这个子会话在重启
+ * 之前到底经历了什么」，让恢复后的看板与汇报能说清失败链路。
+ */
+export interface SuperArchiveDiagnosticEvent {
+  /** 发生时刻（epoch ms）。 */
+  at: number;
+  /** 事件类别。 */
+  kind: SuperArchiveDiagnosticKind;
+  /** 严重级别。 */
+  level: SuperArchiveDiagnosticLevel;
+  /** 一句话说明。 */
+  message: string;
+  /** 可选细节（堆栈片段、原始错误文本等）。 */
+  detail?: string;
+}
+
+/**
+ * v2 归档记录 = v1 记录 + 一组**可选**新字段。
+ *
+ * 全部可选是硬要求：老归档（v1 写出的记录）必须能原样读回，不需要迁移脚本。
+ */
+export interface SuperArchiveRecord extends PersistedSuperSession {
+  /** 运行组标识（一次委派块 = 一个运行组）。 */
+  runId?: string;
+  /** 所属波次序号（0 基）。 */
+  wave?: number;
+  /** 声明的批次号（1 基）。 */
+  batch?: number;
+  /** 依赖的任务标识（依赖谁先做完）。 */
+  dependsOn?: string[];
+  /** 已尝试次数（继承自 v1，这里只是显式声明契约）。 */
+  attempts?: number;
+  /** 最大尝试次数上限（超过即不再自动重试）。 */
+  maxAttempts?: number;
+  /** 最近一次失败的分类化描述。 */
+  lastError?: SuperArchiveFailureInfo;
+  /** 诊断事件流（落盘前裁剪，见 {@link MAX_SUPER_ARCHIVE_DIAGNOSTICS}）。 */
+  diagnostics?: SuperArchiveDiagnosticEvent[];
+  /** 面向人的状态说明（如「上游任务失败，已跳过」）。 */
+  statusDetail?: string;
+}
+
+/**
+ * 诊断事件最多保留多少条（落盘裁剪，保留**最近**的这些条）。
+ *
+ * **与 shared 层常量保持一致** —— shared 层落地 `MAX_SUPER_DIAGNOSTICS` 后
+ * 统一到同一处；在此之前由本文件独立兜底（宁可这里多裁一点，也不能让归档
+ * 无限膨胀）。
+ */
+export const MAX_SUPER_ARCHIVE_DIAGNOSTICS = 200;
+
+/**
+ * 单条诊断的 `message` / `detail` 长度上限（字符）。
+ *
+ * 诊断里常会塞进原始错误文本 / 堆栈片段，不设上限的话**一条**诊断就能把整
+ * 份归档撑到几十 MB。
+ */
+export const MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT = 500;
+
+/** 截断文本到上限长度（末尾补一个省略号，总长不超过 max）。 */
+function truncateArchiveText(text: string, max: number): string {
+  if (typeof text !== "string") return "";
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+/**
+ * 把一条归档记录裁剪到「可安全落盘」的形状（纯函数，不改入参）。
+ *
+ * 只动 v2 的新字段：
+ *  - `diagnostics`：只保留最近 {@link MAX_SUPER_ARCHIVE_DIAGNOSTICS} 条，单条
+ *    `message` / `detail` 截到 {@link MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT} 字；
+ *  - `lastError.message`：同样截断；
+ *  - `dependsOn`：只保留字符串项。
+ *
+ * v1 字段逐字保留 —— 归档是「那次运行发生过什么」的记录，不是缓存。
+ */
+export function sanitizeSuperArchiveRecord(record: SuperArchiveRecord): SuperArchiveRecord {
+  const next: SuperArchiveRecord = { ...record };
+  if (record.dependsOn !== undefined) {
+    next.dependsOn = Array.isArray(record.dependsOn)
+      ? record.dependsOn.filter((dep): dep is string => typeof dep === "string")
+      : [];
+  }
+  if (record.lastError !== undefined && record.lastError && typeof record.lastError === "object") {
+    next.lastError = {
+      kind: record.lastError.kind,
+      message: truncateArchiveText(record.lastError.message, MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT),
+      at: typeof record.lastError.at === "number" ? record.lastError.at : 0,
+    };
+  }
+  if (record.diagnostics !== undefined) {
+    next.diagnostics = Array.isArray(record.diagnostics)
+      ? record.diagnostics
+          .filter((d): d is SuperArchiveDiagnosticEvent => !!d && typeof d === "object")
+          .slice(-MAX_SUPER_ARCHIVE_DIAGNOSTICS)
+          .map((d) => ({
+            at: typeof d.at === "number" ? d.at : 0,
+            kind: d.kind,
+            level: d.level,
+            message: truncateArchiveText(d.message, MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT),
+            ...(typeof d.detail === "string"
+              ? { detail: truncateArchiveText(d.detail, MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT) }
+              : {}),
+          }))
+      : [];
+  }
+  return next;
+}
+
+/**
+ * 单条记录的「关键内容」指纹（v2 规则）。
+ *
+ * **参与指纹**（变了就必须更新归档）：状态、集成结果、归属、尝试次数、运行
+ * 组、波次、批次、依赖、失败分类、状态说明。
+ *
+ * **刻意不参与**：诊断事件流（高频，进指纹会把节流写盘打爆）、汇报历史、
+ * 摘要、更新时间戳（每帧都在变，进了等于节流失效）。
+ *
+ * 算法是**稳定**的：同样的内容永远算出同样的字符串，不掺时间戳 / 随机值。
+ * 依赖集合按字典序排序后再拼 —— 依赖是集合语义，顺序不同不该算变化。
+ */
+export function superArchiveRecordFingerprint(record: SuperArchiveRecord): string {
+  return [
+    record.id,
+    record.status,
+    record.mainSessionId ?? "",
+    record.isolation.kind,
+    record.isolation.branch ?? "",
+    record.integration?.state ?? "",
+    record.integration?.needsAction ? "1" : "0",
+    record.attempts ?? "",
+    record.maxAttempts ?? "",
+    record.runId ?? "",
+    record.wave ?? "",
+    record.batch ?? "",
+    [...(record.dependsOn ?? [])].sort().join(","),
+    record.lastError
+      ? `${record.lastError.kind}@${record.lastError.at}:${record.lastError.message}`
+      : "",
+    record.statusDetail ?? "",
+    record.endedAt ?? "",
+  ].join("|");
+}
+
+/**
+ * 一批归档的「关键内容」指纹（v2 规则）。
+ *
+ * 与 shared 层的 `superArchiveFingerprint` 同一职责（判定「有没有必须立刻
+ * 落盘的变化」），但**多算**了波次 / 尝试上限 / 失败分类 / 状态说明这些 v2
+ * 字段。shared 层的版本仍在用（宿主 `super-agent-host.ts`），等 shared 层把
+ * 同样规则并进去之后，两边应当合并为一份 —— 在此之前宿主要用新规则就调这里。
+ */
+export function superArchiveStoreFingerprint(
+  archives: readonly { mainSessionId: string; sessions: readonly SuperArchiveRecord[] }[],
+): string {
+  const parts: string[] = [];
+  for (const archive of archives) {
+    parts.push(`owner:${archive.mainSessionId}`);
+    for (const session of archive.sessions) {
+      parts.push(superArchiveRecordFingerprint(session));
+    }
+  }
+  return parts.join("\n");
+}
+
+/** 恢复分类：这份记录还剩多少「可恢复的东西」。 */
+export type SuperRecoveryState =
+  /** 没有可恢复的内容（已终态且磁盘上也没留下工作目录 / 分支）。 */
+  | "none"
+  /** 工作目录与分支都在 → 可以原地重试（半成品保留）。 */
+  | "recoverable"
+  /** 缺了工作目录或分支 → 只剩记录，重试要重建。 */
+  | "lost";
+
+/** 磁盘事实（由宿主探测后传入 —— 本函数不碰磁盘）。 */
+export interface SuperRecoveryFacts {
+  /** 归档里的工作目录此刻是否还在磁盘上。 */
+  worktreeExists: boolean;
+  /** 归档里的 git 分支此刻是否还存在。 */
+  branchExists: boolean;
+}
+
+/** 恢复分类的结果。 */
+export interface SuperRecoveryClassification {
+  /** 分类。 */
+  state: SuperRecoveryState;
+  /** 人类可读的原因（面向用户 / 汇报文案）。 */
+  reason?: string;
+}
+
+/**
+ * 判断一份归档记录**还能恢复多少**（纯函数，不碰磁盘）。
+ *
+ * 判定表：
+ *
+ * | 工作目录 | 分支 | 记录状态 | 分类 | 含义 |
+ * | --- | --- | --- | --- | --- |
+ * | 在 | 在 | 任意 | `recoverable` | 实物齐全，可原地重试 / 合并 |
+ * | 无 | 无 | 终态 | `none` | 已结束且什么都没留下，没有可恢复的内容 |
+ * | 无 | 无 | 非终态 | `lost` | 实物没了，只剩记录，重试要重建 |
+ * | 无 | 在 | 任意 | `lost` | 工作目录已不存在，仅保留分支 |
+ * | 在 | 无 | 任意 | `lost` | 分支已不存在，仅保留记录 |
+ *
+ * **不改变现有恢复语义**：非终态记录恢复时仍一律归一为「已中断」（归一化在
+ * shared 层的 `fromPersistedSuperSession` 里，**本任务不动它**）；本函数只
+ * 负责回答「归一之后，这份记录还剩多少可恢复的东西」，供宿主把结论挂到
+ * 看板 / 汇报上。
+ *
+ * **`repo` 档注意**：合并子会话走 `isolation.kind === "repo"`（没有自己的
+ * worktree，也没有自己的分支），宿主应当把「主仓存在 / 当前分支存在」映射成
+ * 这两个事实再传入。
+ */
+export function classifySuperRecovery(
+  record: SuperArchiveRecord,
+  facts: SuperRecoveryFacts,
+): SuperRecoveryClassification {
+  const terminal = isTerminalSuperStatus(record.status);
+  if (facts.worktreeExists && facts.branchExists) {
+    return { state: "recoverable", reason: "工作目录与分支均仍在，可原地恢复" };
+  }
+  if (!facts.worktreeExists && !facts.branchExists) {
+    if (terminal) {
+      return { state: "none", reason: "已终态且工作目录与分支均已不存在，没有可恢复的内容" };
+    }
+    return { state: "lost", reason: "工作目录与分支均已不存在，仅保留记录" };
+  }
+  if (!facts.worktreeExists) {
+    return { state: "lost", reason: "工作目录已不存在，仅保留分支" };
+  }
+  return { state: "lost", reason: "分支已不存在，仅保留记录" };
 }
 
 // --- 子会话转录快照（旁路展示数据，与归档记录生命周期不同） ----------------
