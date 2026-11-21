@@ -134,15 +134,45 @@ describe("super agent · 委派提示词模板（依赖 / 批次表达）", () =
       expect(scan.blocks[0]).toHaveLength(2);
     }
 
-    // TODO(shared 层字段落地后改成真解析断言)：宿主当前的 SuperTaskSpec 只带
-    // title / task / attachments，`dependsOn` 与 `batch` 尚未进入解析结果 ——
-    // shared 层子会话把这两个字段落地后，这里应改成断言
-    // `payload.tasks[1].dependsOn` / `payload.tasks[1].batch` 的真实取值，
-    // 并补一条「成环 / 悬空依赖整块拒绝」的用例。当前先断言字段确实在载荷里。
-    const dependency = JSON.parse(DEPENDENCY_EXAMPLE) as {
-      tasks: Array<{ dependsOn?: string[] }>;
-    };
-    expect(dependency.tasks[1]?.dependsOn).toEqual(["实现数据层"]);
+    // 真解析断言：`dependsOn` / `batch` 已经是 SuperTaskSpec 的字段，解析器会
+    // 把它们带进结果（`shared/super-agent.ts` 的 parseDirectiveValue 显式解析
+    // 这两个字段，canonicalTasks 保留取值），不再只是「字段在原始载荷里」。
+    const dependencyPayload = parseSuperDelegationPayload(DEPENDENCY_EXAMPLE);
+    expect(dependencyPayload.ok).toBe(true);
+    if (dependencyPayload.ok) {
+      // 依赖标识按 id 优先、其次 title 解析；示例没有 id，故保留 title。
+      expect(dependencyPayload.tasks[1]?.dependsOn).toEqual(["实现数据层"]);
+      // 没有声明依赖的任务不带 dependsOn 字段。
+      expect(dependencyPayload.tasks[0]?.dependsOn).toBeUndefined();
+    }
+
+    const batchPayload = parseSuperDelegationPayload(BATCH_EXAMPLE);
+    expect(batchPayload.ok).toBe(true);
+    if (batchPayload.ok) {
+      expect(batchPayload.tasks[1]?.batch).toBe(2);
+      // 不写 batch = 第一批（字段缺省，不伪造 0）。
+      expect(batchPayload.tasks[0]?.batch).toBeUndefined();
+    }
+
+    // 成环依赖是块级错误：整块拒绝，绝不部分派发。
+    const cyclic = parseSuperDelegationPayload(
+      '{"tasks":[{"title":"A","task":"a","dependsOn":["B"]},{"title":"B","task":"b","dependsOn":["A"]}]}',
+    );
+    expect(cyclic.ok).toBe(false);
+    if (!cyclic.ok) {
+      expect(cyclic.reason).toContain("依赖成环");
+      expect(cyclic.issues.some((issue) => issue.includes("依赖成环"))).toBe(true);
+    }
+
+    // 悬空依赖（引用了块内不存在的任务）同样是块级错误。
+    const dangling = parseSuperDelegationPayload(
+      '{"tasks":[{"title":"A","task":"a","dependsOn":["不存在的任务"]}]}',
+    );
+    expect(dangling.ok).toBe(false);
+    if (!dangling.ok) {
+      expect(dangling.reason).toContain("依赖引用不存在");
+      expect(dangling.issues.some((issue) => issue.includes("依赖引用不存在"))).toBe(true);
+    }
   });
 
   it("system-prompt.md 的 Super Agent 段讲清了 dependsOn / batch 与「不得混用」", () => {
