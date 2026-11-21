@@ -52,7 +52,11 @@ import type {
 } from "../acp/protocol.js";
 import type { OsNotifyEvent } from "../../shared/notifications.js";
 import type { OpenAiCompatCredentials } from "../acp/auth.js";
-import { SuperAgentManager, type SuperResidueCount } from "./super-agent.js";
+import {
+  SuperAgentManager,
+  type SuperResidueCount,
+  type SuperResidueItem,
+} from "./super-agent.js";
 import {
   buildSuperActionReceiptPrompt,
   buildSuperDigest,
@@ -234,6 +238,8 @@ export class SuperAgentHost {
   deferredAutoTurnsToastId: number | null = null;
   superArchiveTimer: NodeJS.Timeout | null = null;
   superArchiveFingerprint = "";
+  /** 终态 / 失败分类 / 改动去向的上一次指纹（批次2A 项6，触发 urgent 写）。 */
+  superCriticalFingerprint = "";
   /** 运行组 id 序号 —— 一次委派块 = 一个 runId。 */
   private superRunSeq = 0;
   sweepInFlight = false;
@@ -257,6 +263,19 @@ export class SuperAgentHost {
     timer: NodeJS.Timeout;
   }>();
   superResidueConfirmSeq = 0;
+  /**
+   * 丢弃残留的二次确认令牌表（批次2A，项5）。posted 的 superResidueConfirm 消息
+   * 带 requestId，webview 回 `respondSuperResidueConfirm` 时凭它认领；确认为真才
+   * 执行丢弃，超时/取消一律按不丢弃处理。
+   */
+  readonly pendingSuperDiscardConfirms = new Map<string, {
+    items: SuperResidueItem[];
+    resolve: (confirmed: boolean) => void;
+    timer: NodeJS.Timeout;
+  }>();
+  superDiscardConfirmSeq = 0;
+  /** 心跳维护的「最近活动」投影（时间戳来自 manager.activitySnapshot()）。 */
+  readonly superLastActivity = new Map<string, number>();
   autoTurnsStoppedFor: string | null = null;
 
   // --- Panel proxies (call-time forwarding; bodies below stay verbatim) ----
@@ -439,10 +458,20 @@ export class SuperAgentHost {
 
   handleSuperResidueConfirmResponse(requestId: string, confirmed: boolean): void {
     const pending = this.pendingSuperResidueConfirms.get(requestId);
-    if (!pending) return;
-    this.pendingSuperResidueConfirms.delete(requestId);
-    clearTimeout(pending.timer);
-    pending.resolve(confirmed);
+    if (pending) {
+      this.pendingSuperResidueConfirms.delete(requestId);
+      clearTimeout(pending.timer);
+      pending.resolve(confirmed);
+      return;
+    }
+    // 丢弃残留用的是同一条 superResidueConfirm 消息 / respondSuperResidueConfirm
+    // 回包，只是 requestId 前缀不同；确认为真才真正执行丢弃。
+    const discard = this.pendingSuperDiscardConfirms.get(requestId);
+    if (discard) {
+      this.pendingSuperDiscardConfirms.delete(requestId);
+      clearTimeout(discard.timer);
+      discard.resolve(confirmed);
+    }
   }
 
 
@@ -452,6 +481,11 @@ export class SuperAgentHost {
       pending.resolve(false);
     }
     this.pendingSuperResidueConfirms.clear();
+    for (const pending of this.pendingSuperDiscardConfirms.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve(false);
+    }
+    this.pendingSuperDiscardConfirms.clear();
   }
 
 
@@ -494,8 +528,183 @@ export class SuperAgentHost {
     }
   }
 
+  // --- 残留聚合与一键处理（批次2A 项5）-------------------------------------
+
+  /**
+   * 宿主侧残留明细：未合并 / 已中断 / 放弃的 super worktree 与孤儿目录。
+   * 只读聚合，绝不在这里删任何东西。
+   */
+  async listSuperResidue(): Promise<SuperResidueItem[]> {
+    const manager = this.deps.getSuperAgent();
+    if (!manager || typeof manager.listResidueItems !== "function") return [];
+    return manager.listResidueItems().catch(() => []);
+  }
+
+  /**
+   * 发起「丢弃残留」二次确认，返回令牌（requestId）。webview 必须把令牌随
+   * `respondSuperResidueConfirm` 回传（`handleSuperResidueConfirmResponse` 认领）；
+   * 超时 / 取消一律按不丢弃处理，确认为真才执行。
+   */
+  requestSuperResidueDiscardConfirm(items: SuperResidueItem[]): string {
+    this.cancelAllSuperResidueConfirms();
+    const requestId = `super-residue-discard-${++this.superDiscardConfirmSeq}`;
+    const title = vscode.l10n.t("丢弃残留工作目录？");
+    const names = items.map((item) => item.branch ?? item.title ?? item.key).join("、");
+    const message = vscode.l10n.t(
+      "即将丢弃 {0} 项残留（{1}）。含未提交改动的目录会被保护、不会删除；其余工作将被永久删除且不可恢复。请确认不再需要。",
+      items.length,
+      names,
+    );
+    const timer = setTimeout(() => {
+      this.pendingSuperDiscardConfirms.delete(requestId);
+    }, 60_000);
+    if (typeof timer.unref === "function") timer.unref();
+    this.pendingSuperDiscardConfirms.set(requestId, {
+      items,
+      resolve: (confirmed) => {
+        if (!confirmed) return;
+        void this.executeSuperResidueDiscard(items);
+      },
+      timer,
+    });
+    this.postToWebview({
+      type: "superResidueConfirm",
+      requestId,
+      title,
+      message,
+      confirmLabel: vscode.l10n.t("丢弃"),
+      cancelLabel: vscode.l10n.t("取消"),
+    });
+    return requestId;
+  }
+
+  /** 二次确认通过后逐条丢弃；单条失败记日志并汇总，绝不批量吞错。 */
+  private async executeSuperResidueDiscard(items: SuperResidueItem[]): Promise<void> {
+    const manager = this.deps.getSuperAgent();
+    if (!manager || typeof manager.discardResidueItem !== "function") return;
+    let done = 0;
+    let failed = 0;
+    let lastReason = "";
+    for (const item of items) {
+      try {
+        const result = await manager.discardResidueItem(item);
+        if (result.ok) done += 1;
+        else {
+          failed += 1;
+          lastReason = result.reason ?? "未知原因";
+        }
+      } catch (error) {
+        failed += 1;
+        lastReason = errorMessage(error);
+      }
+    }
+    await this.persistSuperSessions({ force: true });
+    if (failed > 0) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("已丢弃 {0} 项残留，{1} 项未能丢弃（{2}）", done, failed, lastReason),
+      );
+    } else {
+      this.store.sendToast("info", vscode.l10n.t("已丢弃 {0} 项残留", done));
+    }
+  }
+
+  /**
+   * 一键处理一条残留。`merge` 走既有「让智能体合并」通道 —— 宿主绝不机械合并
+   * 用户工作区；`discard` 的硬性前置是业务侧二次确认令牌：首次调用只发确认框并
+   * 返回 token，绝不直接删。
+   */
+  async handleSuperResidueAction(input: {
+    key: string;
+    action: "merge" | "discard";
+  }): Promise<{ ok: boolean; token?: string; reason?: string }> {
+    const items = await this.listSuperResidue();
+    const item = items.find((candidate) => candidate.key === input.key);
+    if (!item) return { ok: false, reason: "该残留已不存在" };
+    if (input.action === "merge") {
+      if (!item.sessionId) {
+        return { ok: false, reason: "孤儿分支没有关联子会话，宿主不能机械合并" };
+      }
+      // requestSuperMerge 内部已含 merge-tree 预演与中间态检测纪律。
+      await this.requestSuperMerge(item.sessionId);
+      return { ok: true };
+    }
+    const token = this.requestSuperResidueDiscardConfirm([item]);
+    return { ok: false, token, reason: "待二次确认" };
+  }
+
+  // --- 重试 / 判定卡死 handler（批次2A 项1、项2）--------------------------
+
+  /** WebviewToHost `superRetryWave` 的宿主入口（按波次重排重试）。 */
+  async retrySuperWave(input: { runId?: string; wave: number }): Promise<void> {
+    const manager = this.deps.getSuperAgent();
+    if (!manager || typeof manager.retryWave !== "function") return;
+    const ids = await manager.retryWave(input);
+    if (ids.length === 0) {
+      this.store.sendToast("warning", vscode.l10n.t("该波次没有可重试的任务"));
+    } else {
+      this.store.sendToast("info", vscode.l10n.t("已重新派发第 {0} 波的 {1} 个任务", input.wave, ids.length));
+    }
+    await this.persistSuperSessions({ force: true });
+  }
+
+  /** WebviewToHost `superRetryFailed` 的宿主入口（整组失败重试）。 */
+  async retrySuperFailed(input: { runId?: string } = {}): Promise<void> {
+    const manager = this.deps.getSuperAgent();
+    if (!manager || typeof manager.retryFailed !== "function") return;
+    const ids = await manager.retryFailed(input);
+    if (ids.length === 0) {
+      this.store.sendToast("warning", vscode.l10n.t("当前运行组没有可重试的任务"));
+    } else {
+      this.store.sendToast("info", vscode.l10n.t("已重新派发 {0} 个失败任务", ids.length));
+    }
+    await this.persistSuperSessions({ force: true });
+  }
+
+  /**
+   * 用户主动「判定卡死」：如实先记一条用户判定的 timeout 诊断，再按 user 来源
+   * 中断，走与看板「中断」完全相同的收口（不是静默杀进程）。
+   */
+  async judgeSuperStuck(sessionId: string): Promise<void> {
+    const manager = this.deps.getSuperAgent();
+    if (!manager || typeof manager.judgeStuck !== "function") return;
+    const outcome = await manager.judgeStuck(sessionId);
+    if (outcome.reason === "cancelled") {
+      this.store.sendToast("info", vscode.l10n.t("已按「判定卡死」中断超流体，并在诊断中记录原因"));
+    } else if (outcome.reason === "already-terminal") {
+      this.store.sendToast("info", vscode.l10n.t("这个超流体已经结束了，无需判定卡死"));
+    } else {
+      this.store.sendToast("warning", vscode.l10n.t("该超流体不存在或已被清理"));
+    }
+    await this.persistSuperSessions({ force: true });
+  }
+
   // --- Diff revert ----------------------------------------------------------------
 
+
+  /**
+   * 批次2A 项6：计算「终态 / 失败分类 / 改动去向 / 结束时刻」的关键指纹，返回是否
+   * 发生了必须**立即**落盘的变化。批次1A 的 superArchiveFingerprint 刻意不含
+   * diagnostics（高频追加流），这里用独立指纹兜住「重启后必须还在」的事实。
+   */
+  noteSuperCriticalChange(sessions: readonly SuperSessionUi[]): boolean {
+    const critical = sessions
+      .map((s) =>
+        [
+          s.id,
+          s.status,
+          s.lastError ? `${s.lastError.kind}@${s.lastError.at}` : "",
+          s.integration?.state ?? "",
+          s.integration?.needsAction ? "1" : "0",
+          s.endedAt ?? "",
+        ].join("|"),
+      )
+      .sort()
+      .join("\n");
+    const urgent = critical !== this.superCriticalFingerprint;
+    this.superCriticalFingerprint = critical;
+    return urgent;
+  }
 
   /**
    * 把看板投影推给 webview（按当前主会话取历史子会话）。
@@ -939,9 +1148,10 @@ export class SuperAgentHost {
       childMcpServers: () => this.mcpBroker?.sessionServers() ?? [],
       onSessionsChanged: (sessions) => {
         this.store.setSuperSessions(sessions);
-        // 子会话状态一变就把记录落盘：扩展随时可能被重启（窗口关闭、宿主
-        // 崩溃），不落盘就等于「那次运行发生过什么」永远丢了。
-        this.persistSuperSessions();
+        // 批次2A 项6：终态转换 / 失败分类（lastError）/ 改动去向（integration）
+        // 变化时强制立即落盘。子会话状态一变就把记录落盘：扩展随时可能被重启
+        // （窗口关闭、宿主崩溃），不落盘就等于「那次运行发生过什么」永远丢了。
+        this.persistSuperSessions({ force: this.noteSuperCriticalChange(sessions) });
         // Child progress frames arrive continuously; the heartbeat is what
         // turns "main turn ended, children still working" into a visible
         // waiting state and keeps the report delivery retrying.
@@ -978,10 +1188,16 @@ export class SuperAgentHost {
       },
       // 自动集成没能把子会话的改动带回主分支 → 自动请智能体合并，
       // 不再把这件事留给用户点看板上的按钮。
-      onNeedAgentMerge: (session, reason) => this.scheduleSuperMerge(session.id, reason),
+      onNeedAgentMerge: (session, reason) => {
+        this.scheduleSuperMerge(session.id, reason);
+        // 集成诉求也是「改动去向」的一部分，必须立刻落盘（批次2A 项6）。
+        void this.persistSuperSessions({ force: true });
+      },
       // 合并子会话跑完：宿主用只读 git 检测的结果如实告知（成功 / 失败 /
       // 分支仍保留），并把队列里的下一个合并请求放出去。
       onMergeResult: (info) => {
+        // integration 结果落地：强制写，绝不拖到节流窗口（批次2A 项6）。
+        void this.persistSuperSessions({ force: true });
         if (info.merged) {
           this.store.sendToast(
             "info",
@@ -2673,6 +2889,20 @@ export class SuperAgentHost {
     // refreshSuperWaitHeartbeat / syncSuperWaitingState 这类同步 UI 刷新。
     try {
       this.deps.refreshSuperWaitHeartbeat();
+      // 活性采集（批次2A 项3）：每拍从管理器只读快照刷新「最近活动」时间戳投影。
+      // 真正在动的证据只来自 session/update（manager.touchWatchdog），心跳这里
+      // 只搬运，不伪造时间戳。
+      const manager = this.superAgent;
+      if (manager && typeof manager.activitySnapshot === "function") {
+        const live = new Set<string>();
+        for (const snap of manager.activitySnapshot()) {
+          this.superLastActivity.set(snap.id, snap.lastActivityAt);
+          live.add(snap.id);
+        }
+        for (const id of this.superLastActivity.keys()) {
+          if (!live.has(id)) this.superLastActivity.delete(id);
+        }
+      }
       // G2：每拍复核 delivered-unacked —— 回合 settle 才 confirm，中途 Stop /
       // 失败则重投，避免汇报在「sendPrompt 起来了但回合没跑完」的窗口里丢失。
       this.reconcileReportDelivery();
@@ -2931,6 +3161,9 @@ export class SuperAgentHost {
   /** Route a Super Agent action from the board. */
 
   async handleSuperAgentAction(msg: Extract<WebviewToHost, { type: "superAgent" }>): Promise<void> {
+    // 共享消息联合里 superAgent 的 action 尚无 "stuck"（批次1B 声明的消息只到
+    // cancel / retry 等既有动作）。这里只在宿主侧识别这个扩展动作并委托
+    // judgeSuperStuck，既有 cancel 分支逐字不变 —— 不变动 shared/ 契约。
     // 接管期间本机侧不执行任何看板动作。webview 已把看板与待答条整体 inert，
     // 但那是 UI 层的门 —— portal 出来的浮层、旧快照里残留的按钮、以及任何
     // 绕开 UI 的通道都能把消息发到这里。远端正在推进的流程不能被本机的
@@ -2945,7 +3178,10 @@ export class SuperAgentHost {
     }
     const manager = this.deps.getSuperAgent();
     if (!manager) return;
-    switch (msg.action) {
+    // 宿主侧扩展 action：只多认领一个 "stuck"（判定卡死），其余动作与共享
+    // 联合类型逐字一致；shared/ 契约不变。
+    const action = msg.action as Extract<WebviewToHost, { type: "superAgent" }>["action"] | "stuck";
+    switch (action) {
       case "transcript": {
         if (!msg.sessionId) return;
         this.postToWebview({
@@ -2954,6 +3190,12 @@ export class SuperAgentHost {
           from: 0,
           blocks: manager.transcriptBlocks(msg.sessionId),
         });
+        break;
+      }
+      case "stuck": {
+        // 用户主动判定卡死：先记 timeout 诊断（用户判定），再按 user 来源中断。
+        if (!msg.sessionId) return;
+        await this.judgeSuperStuck(msg.sessionId);
         break;
       }
       case "cancel": {

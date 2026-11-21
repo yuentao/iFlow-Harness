@@ -91,6 +91,7 @@ import {
   groupSuperReportsByWave,
   reportForSession,
   retrySuperSession,
+  shouldRetrySuperFailure,
   superTaskKey,
   toPersistedSuperSession,
   toSuperBoardSession,
@@ -186,8 +187,25 @@ export const SUPER_MCP_READY_POLL_MS = 120;
  * 卡死；且看门狗到点还会先用「进程是否存活」二次确认（见 onWatchdogTick）。
  * 这是实例字段的默认值（见 SuperAgentManager.stallTimeoutMs），单测注入极小值
  * 即可确定性验证超时路径，生产路径永不改写。
+ *
+ * 分级（批次2A）：准备阶段（spawn / newSession / MCP 就绪 / setMode / 首轮 prompt
+ * 之前）没有在途 SSE 可产出事件，比在途 prompt 更早、更容易卡在内核握手上，因此
+ * 用更短的阈值；进入 running（收到 started）后恢复到更保守的运行阈值。两档都保留
+ * 「静默超时 + 进程存活二次确认才杀」的安全网（见 onWatchdogTick），绝不降低门槛。
  */
-export const SUPER_STALL_WATCHDOG_MS = 30 * 60_000;
+export const SUPER_STALL_WATCHDOG_PREPARE_MS = 5 * 60_000;
+export const SUPER_STALL_WATCHDOG_RUNNING_MS = 30 * 60_000;
+/** @deprecated 兼容旧名：等价运行档阈值（既有测试/调用仍可引用，语义不变）。 */
+export const SUPER_STALL_WATCHDOG_MS = SUPER_STALL_WATCHDOG_RUNNING_MS;
+
+/** 看门狗所处的子会话阶段（准备 / 运行中），决定用哪一档静默阈值。 */
+export type SuperWatchdogPhase = "prepare" | "running";
+
+/**
+ * 活性诊断的节流窗口（毫秒）：session/update 每帧都追加诊断会把看板与归档撑爆，
+ * 因此同类活动（工具调用 / 文本帧）在这个窗口内只记一条。
+ */
+export const SUPER_ACTIVITY_DIAG_THROTTLE_MS = 5_000;
 
 /**
  * 失败自动重试的退避窗口（毫秒）：retryable 失败归一后在后台等待这么久再自动
@@ -615,6 +633,31 @@ export interface SuperResiduePurgeResult {
 }
 
 /**
+ * 一条残留明细（批次2A 宿主侧聚合）。
+ *
+ * 只描述「磁盘上还在、但已中断/放弃/孤儿」的隔离产物，供看板逐条展示与一键
+ * 处理；**不**在这里执行合并或删除 —— 丢弃必须等业务侧二次确认令牌，合并沿用
+ * 现有的 merge-tree 预演与中间态检测纪律。
+ */
+export interface SuperResidueItem {
+  /** 稳定标识：worktree = path，孤儿目录 = path，供 UI 回传定位。 */
+  key: string;
+  kind: "worktree" | "directory" | "attachment";
+  path: string;
+  branch?: string;
+  /** 关联的子会话（能从隔离路径反查到时给出；孤儿为空）。 */
+  sessionId?: string;
+  title?: string;
+  status?: SuperStatus;
+  /** 分支上是否有未合并进当前 HEAD 的提交（git 不可用时保守为 true）。 */
+  unmerged: boolean;
+  /** 工作目录是否有未提交改动 —— 丢弃必须保护它。 */
+  uncommitted: boolean;
+  /** 主仓是否停在 merge/rebase/cherry-pick 中间态 —— 丢弃/合并都必须让路。 */
+  inProgress: boolean;
+}
+
+/**
  * 「中断子会话」的结果。
  *
  * `ok` 的口径是「**意图是否达成**」，不是「宿主有没有真的动过手」：
@@ -894,9 +937,21 @@ export class SuperAgentManager {
    * 收到任意 session/update 即刷新 lastProgressAt；attempt 用于防止重试后
    * 旧一轮的定时器误杀新尝试。
    */
-  private readonly watchdogs = new Map<string, { lastProgressAt: number; attempt: number }>();
+  private readonly watchdogs = new Map<string, {
+    lastProgressAt: number;
+    /** 最近一次收到真实 session/update 的时刻（活性采集，心跳可读）。 */
+    lastActivityAt: number;
+    attempt: number;
+    /** 当前阶段：准备 / 运行，决定静默阈值。 */
+    phase: SuperWatchdogPhase;
+  }>();
   /** 看门狗定时器（每个子会话最多一个在飞，unref，不阻塞宿主退出）。 */
   private readonly watchdogTimers = new Map<string, NodeJS.Timeout>();
+  /**
+   * 活性诊断的节流戳：同一子会话在 {@link SUPER_ACTIVITY_DIAG_THROTTLE_MS} 窗口内
+   * 只追加一条活动诊断，避免流式每帧都写。
+   */
+  private readonly lastActivityDiagAt = new Map<string, number>();
   /** 每个子会话的实时转录缓冲（详情看板的数据源）。 */
   private readonly transcripts = new Map<string, SuperTranscript>();
   /** 转录推送的节流定时器（流式块高频到达，合并成一次消息）。 */
@@ -938,11 +993,18 @@ export class SuperAgentManager {
   mcpReadyTimeoutMs = SUPER_MCP_READY_TIMEOUT_MS;
   mcpReadyPollMs = SUPER_MCP_READY_POLL_MS;
   /**
-   * 卡死看门狗的无进展阈值（公开且非常量，测试注入极小值即可确定性验证超时
-   * 路径；生产路径永不改写）。默认 {@link SUPER_STALL_WATCHDOG_MS}，足够保守，
-   * 只作用于子会话 —— 主会话 prompt 刻意无限等待（见 AGENTS.md 陷阱 #13）。
+   * 运行档（收到 started 之后）的卡死看门狗无进展阈值。公开且非常量，测试注入
+   * 极小值即可确定性验证超时路径；生产路径永不改写。默认
+   * {@link SUPER_STALL_WATCHDOG_RUNNING_MS}，足够保守，只作用于子会话 —— 主会话
+   * prompt 刻意无限等待（见 AGENTS.md 陷阱 #13）。
    */
-  stallTimeoutMs = SUPER_STALL_WATCHDOG_MS;
+  stallTimeoutMs = SUPER_STALL_WATCHDOG_RUNNING_MS;
+  /**
+   * 准备档（spawn → started 之前）的卡死看门狗无进展阈值。这一阶段没有 SSE 帧
+   * 可刷新活性，内核握手 / MCP 就绪卡住时比在途 prompt 更容易发现，因此阈值更短。
+   * 同样可由测试注入极小值；生产路径永不改写。
+   */
+  prepareStallTimeoutMs = SUPER_STALL_WATCHDOG_PREPARE_MS;
   /**
    * 「分支上没有任何独有提交」的隔离，等子进程退出后再释放。
    *
@@ -1452,6 +1514,74 @@ export class SuperAgentManager {
   }
 
   /**
+   * 最近一个仍有会话的运行组 id（`superRetryWave` / `superRetryFailed` 的 runId
+   * 缺省值）。取 updatedAt 最大者，即最近一次委派块，与消息契约「当前运行组」一致。
+   */
+  private latestRunId(): string | undefined {
+    let latest: { runId: string; updatedAt: number } | undefined;
+    for (const session of this.sessions.values()) {
+      if (!session.runId) continue;
+      if (!latest || session.updatedAt >= latest.updatedAt) {
+        latest = { runId: session.runId, updatedAt: session.updatedAt };
+      }
+    }
+    return latest?.runId;
+  }
+
+  /**
+   * 批量重试某一波次（WebviewToHost `superRetryWave` 的宿主实现）。
+   *
+   * 圈定范围：runId 缺省为最近运行组；只取该波次里处于 failed / cancelled 的
+   * 会话（下游被上游失败阻塞时也是 failed + lastError.kind="blocked"，因此会被
+   * 正确纳入「波次重排」）。用户显式点重试 → 失败分类（blocked / interrupted）
+   * 不再挡路，但**尝试上限仍按批次1A 的 shouldRetrySuperFailure 精确执行** ——
+   * 这里借它的次数判定（kind 传 retryable），不放宽 maxAttempts。
+   */
+  async retryWave(options: { runId?: string; wave: number }): Promise<string[]> {
+    const runId = options.runId ?? this.latestRunId();
+    const ids = [...this.sessions.values()]
+      .filter((s) => s.runId === runId && (s.wave ?? 0) === options.wave)
+      .filter((s) => canRetrySuperSession(s))
+      .filter((s) =>
+        shouldRetrySuperFailure(
+          "retryable",
+          s.attempts ?? 1,
+          s.maxAttempts ?? this.deps.maxAttempts?.() ?? Infinity,
+        ),
+      )
+      .map((s) => s.id);
+    const retried: string[] = [];
+    for (const id of ids) {
+      if (await this.retry(id)) retried.push(id);
+    }
+    return retried;
+  }
+
+  /**
+   * 重试当前运行组里所有失败任务（WebviewToHost `superRetryFailed` 的宿主实现）。
+   * 与 {@link retryWave} 只差「不限波次」，同样守终态与 maxAttempts 上限。
+   */
+  async retryFailed(options: { runId?: string } = {}): Promise<string[]> {
+    const runId = options.runId ?? this.latestRunId();
+    const ids = [...this.sessions.values()]
+      .filter((s) => s.runId === runId)
+      .filter((s) => canRetrySuperSession(s))
+      .filter((s) =>
+        shouldRetrySuperFailure(
+          "retryable",
+          s.attempts ?? 1,
+          s.maxAttempts ?? this.deps.maxAttempts?.() ?? Infinity,
+        ),
+      )
+      .map((s) => s.id);
+    const retried: string[] = [];
+    for (const id of ids) {
+      if (await this.retry(id)) retried.push(id);
+    }
+    return retried;
+  }
+
+  /**
    * retryable 失败的自动重试决策：失败已在 apply() 里归一为 lastError.kind ===
    * "retryable"，这里用任务 A 的 canRetrySuperSession 决策函数复核终态，再核对
    * 尝试上限，满足则退避一个窗口后自动 retry。其余分类（terminal / blocked /
@@ -1464,9 +1594,17 @@ export class SuperAgentManager {
     if (this.disposed) return;
     const session = this.sessions.get(id);
     if (!session || !canRetrySuperSession(session)) return;
-    if (session.lastError?.kind !== "retryable") return;
     const maxAttempts = session.maxAttempts ?? this.deps.maxAttempts?.() ?? 1;
-    if (maxAttempts <= 1 || (session.attempts ?? 1) >= maxAttempts) return;
+    // 批次1A 的确切决策签名：只有 retryable 且 attempts < maxAttempts 才自动重试。
+    // terminal / blocked / interrupted 或已达上限一律不重试（NaN 等非法上限由纯函数
+    // 内部的 `<` 自然退化为「不重试」）。
+    if (
+      !shouldRetrySuperFailure(
+        session.lastError?.kind ?? "terminal",
+        session.attempts ?? 1,
+        maxAttempts,
+      )
+    ) return;
     if (this.autoRetryTimers.has(id)) return; // 退避已安排，避免重复
     const timer = setTimeout(() => {
       this.autoRetryTimers.delete(id);
@@ -1912,6 +2050,149 @@ export class SuperAgentManager {
       countDirs("attachments"),
     ]);
     return { worktrees, dirs, attachments, total: worktrees + dirs + attachments };
+  }
+
+  /**
+   * 残留明细聚合（批次2A，只读）：列出磁盘上仍在的 super worktree / 孤儿目录，
+   * 并逐条补齐「分支是否未合并、目录是否有未提交改动、主仓是否停在中间态」。
+   *
+   * 只读、不删任何东西；丢弃动作必须经过业务侧二次确认令牌（见宿主
+   * `handleSuperResidueDiscard`），且未提交改动 / 中间态一律拒绝丢弃。
+   */
+  async listResidueItems(): Promise<SuperResidueItem[]> {
+    if (this.disposed) return [];
+    const [registered, tree] = await Promise.all([
+      listWorktrees(this.deps.repoRoot).catch(() => [] as { path: string; branch: string | null }[]),
+      inspectWorkingTree(this.deps.repoRoot).catch(() => ({
+        available: false,
+        clean: true,
+        dirtyCount: 0,
+        inProgress: null,
+        trackedPaths: [] as string[],
+        untrackedCount: 0,
+      })),
+    ]);
+    const inProgress = tree.inProgress !== null;
+    const items: SuperResidueItem[] = [];
+    const seenPaths = new Set<string>();
+
+    for (const wt of registered) {
+      if (!wt.branch?.startsWith(SUPER_BRANCH_PREFIX)) continue;
+      seenPaths.add(path.resolve(wt.path));
+      const [unmerged, uncommitted] = await Promise.all([
+        branchHasUnmergedCommits({
+          repoRoot: this.deps.repoRoot,
+          branch: wt.branch,
+          baseRef: "HEAD",
+        }),
+        worktreeHasUncommittedChanges(wt.path),
+      ]);
+      const linked = this.findSessionByIsolationPath(wt.path);
+      items.push({
+        key: wt.path,
+        kind: "worktree",
+        path: wt.path,
+        branch: wt.branch,
+        sessionId: linked?.id,
+        title: linked?.title,
+        status: linked?.status,
+        unmerged,
+        uncommitted,
+        inProgress,
+      });
+    }
+
+    for (const kind of ["worktrees", "dirs", "attachments"] as const) {
+      const roots =
+        kind === "worktrees"
+          ? superWorktreeRoots(this.deps.repoRoot)
+          : [superIsolationDir(this.deps.repoRoot, kind)];
+      for (const root of roots) {
+        let entries: Dirent[];
+        try {
+          entries = await readdir(root, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const target = path.join(root, entry.name);
+          if (kind === "worktrees" && seenPaths.has(path.resolve(target))) continue;
+          const linked = this.findSessionByIsolationPath(target);
+          const itemKind = kind === "worktrees" ? "worktree" : kind === "dirs" ? "directory" : "attachment";
+          items.push({
+            key: target,
+            kind: itemKind,
+            path: target,
+            sessionId: linked?.id,
+            title: linked?.title,
+            status: linked?.status,
+            unmerged: false,
+            uncommitted:
+              kind === "worktrees"
+                ? await worktreeHasUncommittedChanges(target).catch(() => false)
+                : false,
+            inProgress,
+          });
+        }
+      }
+    }
+    return items;
+  }
+
+  /** 从隔离路径反查关联的子会话（live 记录优先）。 */
+  private findSessionByIsolationPath(target: string): SuperSessionUi | undefined {
+    const abs = path.resolve(target);
+    for (const session of this.sessions.values()) {
+      if (path.resolve(session.isolation.path) === abs) return session;
+    }
+    return undefined;
+  }
+
+  /**
+   * 丢弃一条残留（**调用方必须先拿到业务侧二次确认令牌**）。
+   *
+   * 硬保护（任一命中即拒绝，令牌也不放行）：
+   *  - 主仓停在 merge/rebase/cherry-pick 中间态；
+   *  - 目标目录有未提交改动 —— 绝不以「清空残留」之名丢用户的工作；
+   *  - merge-tree 预演不可用且工作区不干净（旧版 git / criss-cross 的保守回退）。
+   *
+   * 通过后再删 worktree（含分支 force 删除）或孤儿目录，并 markWorktreeReleased。
+   */
+  async discardResidueItem(item: SuperResidueItem): Promise<{ ok: boolean; reason?: string }> {
+    if (this.disposed) return { ok: false, reason: "子会话管理器已释放" };
+    if (item.inProgress) return { ok: false, reason: "主仓停在 git 中间态，不能丢弃" };
+    if (item.uncommitted) return { ok: false, reason: "目录有未提交改动，已保护不丢弃" };
+
+    if (item.kind === "worktree" && item.branch) {
+      const [preview, tree] = await Promise.all([
+        previewMerge({ repoRoot: this.deps.repoRoot, branch: item.branch }),
+        inspectWorkingTree(this.deps.repoRoot).catch(() => null),
+      ]);
+      if (!preview.available && tree && !tree.clean) {
+        return { ok: false, reason: "合并预演不可用且工作区不干净，已保守拒绝" };
+      }
+      const removal = await removeWorktree({
+        repoRoot: this.deps.repoRoot,
+        targetPath: item.path,
+        branch: item.branch,
+        keepBranch: false,
+        // 二次确认已授权；未提交改动 / 中间态的硬保护已在上面拦下。
+        branchDeletionVerified: true,
+      }).catch(() => ({ removed: false, reason: "删除命令失败" }));
+      this.markWorktreeReleased(item.path);
+      return removal.removed
+        ? { ok: true }
+        : { ok: false, reason: removal.reason ?? "删除 worktree 失败" };
+    }
+
+    try {
+      await rm(item.path, { recursive: true, force: true, maxRetries: 3 });
+      this.markWorktreeReleased(item.path);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: errorMessage(error) };
+    }
   }
 
   /**
@@ -2742,6 +3023,28 @@ export class SuperAgentManager {
         // 仍在产出事件」的证据，不该被算成无进展。
         this.touchWatchdog(id);
         const update = notification.update;
+        // 活性采集（批次2A）：在刷活性时间戳的同时，按节流窗口留一条可查询的
+        // 诊断，说明这条 update 属于哪类活动 / 哪个工具调用。共享契约没有单列
+        // activity/tool_call 枚举，recordActivityDiagnostic 用确切的 "session"
+        // kind + 具体消息落地，既不臆造新 kind，也让看板能看出「它在动」。
+        const activityWhat = (() => {
+          const toolName = "toolName" in update ? String(update.toolName ?? "") : "";
+          const status = "status" in update ? String(update.status ?? "") : "";
+          switch (update.sessionUpdate) {
+            case "tool_call":
+            case "tool_call_update":
+              return `工具调用${toolName ? ` ${toolName}` : ""}${status ? `（${status}）` : ""}`;
+            case "agent_message_chunk":
+              return "文本流输出";
+            case "agent_thought_chunk":
+              return "思考流输出";
+            case "plan":
+              return "计划更新";
+            default:
+              return String(update.sessionUpdate);
+          }
+        })();
+        this.recordActivityDiagnostic(id, activityWhat);
         const session = this.sessions.get(id);
         // **所有隔离档位都要过预检**：此前这里跳过了 repo 档（`kind !== "repo"`），
         // 而 repo 档（主仓工作区 / 合并子会话）恰恰是唯一一档「命令直接作用于
@@ -4000,6 +4303,9 @@ export class SuperAgentManager {
           level: "info",
           message: `内核会话已建立（${event.cliSessionId}）`,
         });
+        // 会话建立 = 从准备档切到运行档：首轮 prompt 的首 token 等待改用更保守的
+        // 运行阈值，避免用准备档的短阈值误杀慢模型。
+        this.promoteWatchdogToRunning(id);
         break;
       case "report":
         next = applySuperDiagnostic(next, {
@@ -4216,31 +4522,127 @@ export class SuperAgentManager {
 
   // --- 卡死看门狗（SA-1，只作用于子会话）------------------------------------
 
-  /** 布防子会话看门狗（进程就绪、首个 ACP 请求前调用）。 */
-  private armWatchdog(id: string, attempt: number): void {
+  /** 当前阶段对应的静默阈值（分级：准备档更短，运行档更保守）。 */
+  private watchdogDelay(id: string): number {
+    const phase = this.watchdogs.get(id)?.phase;
+    return phase === "running" ? this.stallTimeoutMs : this.prepareStallTimeoutMs;
+  }
+
+  /** 布防子会话看门狗（进程就绪、首个 ACP 请求前调用，初始为 prepare 档）。 */
+  private armWatchdog(id: string, attempt: number, phase: SuperWatchdogPhase = "prepare"): void {
     this.clearWatchdog(id);
-    this.watchdogs.set(id, { lastProgressAt: Date.now(), attempt });
+    const now = Date.now();
+    this.watchdogs.set(id, { lastProgressAt: now, lastActivityAt: now, attempt, phase });
     this.resetWatchdogTimer(id);
   }
 
-  /** 收到任意 session/update：刷新最近进展时刻并重置定时器。 */
+  /**
+   * 提升为 running 档（收到 started 事件时调用）：从更短的准备阈值切到更保守的
+   * 运行阈值，并把「最近进展 / 最近活动」重新计时 —— 首轮 prompt 可能要等模型
+   * 首 token，这段静默不应被算进准备档。
+   */
+  private promoteWatchdogToRunning(id: string): void {
+    const state = this.watchdogs.get(id);
+    if (!state || state.phase === "running") return;
+    const now = Date.now();
+    state.phase = "running";
+    state.lastProgressAt = now;
+    state.lastActivityAt = now;
+    this.resetWatchdogTimer(id);
+  }
+
+  /** 收到任意 session/update：刷新最近进展 / 最近活动时刻并重置定时器。 */
   private touchWatchdog(id: string): void {
     const state = this.watchdogs.get(id);
     if (!state) return;
-    state.lastProgressAt = Date.now();
+    const now = Date.now();
+    state.lastProgressAt = now;
+    state.lastActivityAt = now;
     this.resetWatchdogTimer(id);
   }
 
   /** 重设某个子会话的看门狗定时器（clear + 重新 setTimeout，恒 unref）。 */
-  private resetWatchdogTimer(id: string, delayMs: number = this.stallTimeoutMs): void {
+  private resetWatchdogTimer(id: string, delayMs?: number): void {
     const prev = this.watchdogTimers.get(id);
     if (prev) clearTimeout(prev);
     const timer = setTimeout(() => {
       this.watchdogTimers.delete(id);
       this.onWatchdogTick(id);
-    }, Math.max(1, delayMs));
+    }, Math.max(1, delayMs ?? this.watchdogDelay(id)));
     if (typeof timer.unref === "function") timer.unref();
     this.watchdogTimers.set(id, timer);
+  }
+
+  /**
+   * 活性快照（宿主心跳读取）：每个仍受看门狗监控的子会话的最近活动时刻、阶段
+   * 与静默时长。只读，不刷新任何时间戳 —— 真正在动的证据只能来自 session/update，
+   * 心跳读它只是为了「最近活动」在宿主侧有一份可查询的投影。
+   */
+  activitySnapshot(): {
+    id: string;
+    lastActivityAt: number;
+    phase: SuperWatchdogPhase;
+    silentForMs: number;
+  }[] {
+    const now = Date.now();
+    const out: {
+      id: string;
+      lastActivityAt: number;
+      phase: SuperWatchdogPhase;
+      silentForMs: number;
+    }[] = [];
+    for (const [id, state] of this.watchdogs) {
+      out.push({
+        id,
+        lastActivityAt: state.lastActivityAt,
+        phase: state.phase,
+        silentForMs: now - state.lastActivityAt,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * 追加一条「活性 / 工具调用」诊断（纯诊断，不改状态机）。
+   *
+   * 共享契约 {@link SuperDiagnosticKind} 未单列 activity / tool_call 两个枚举值
+   * （当前为 spawn/session/report/merge/retry/error/timeout/restore/blocked），因此
+   * 这里按确切签名用 `kind: "session"` 记录会话活性，并在消息里写明具体是哪一类
+   * update —— 既不臆造新枚举，也让看板能看出「它在动、刚做了什么」。
+   *
+   * 节流按子会话 + 窗口：窗口内重复到达的活动帧只刷新看门狗时间戳（touchWatchdog
+   * 已在 onSessionUpdate 顶部调用），不重复写诊断、不重复 emit。
+   */
+  private recordActivityDiagnostic(id: string, what: string, at: number = Date.now()): void {
+    const prev = this.lastActivityDiagAt.get(id) ?? 0;
+    if (at - prev < SUPER_ACTIVITY_DIAG_THROTTLE_MS) return;
+    const session = this.sessions.get(id);
+    if (!session || isTerminalSuperStatus(session.status)) return;
+    this.lastActivityDiagAt.set(id, at);
+    this.sessions.set(
+      id,
+      applySuperDiagnostic(session, {
+        at,
+        kind: "session",
+        level: "info",
+        message: `活动：${what}`.slice(0, SUPER_DIAGNOSTIC_TEXT_MAX_CHARS),
+      }),
+    );
+    this.emit();
+  }
+
+  /**
+   * 用户主动「判定卡死」：如实先记一条 timeout 诊断（写明是用户判定，不是内核
+   * 超时），再按 user 来源中断，走与看板「中断」完全相同的 cancel 收口。
+   * 返回 cancel 的真实结果（幂等 / not-found 都照实上报）。
+   */
+  async judgeStuck(id: string): Promise<SuperCancelOutcome> {
+    const session = this.sessions.get(id);
+    if (session && !isTerminalSuperStatus(session.status)) {
+      this.recordDiagnostic(id, "timeout", "warn", "用户判定卡死，主动中断");
+    }
+    this.lastActivityDiagAt.delete(id);
+    return this.cancel(id, "user");
   }
 
   /** 清除某个子会话的看门狗（终态 / 清理 / dispose 的统一入口）。 */
@@ -4283,14 +4685,25 @@ export class SuperAgentManager {
     const client = this.clients.get(id);
     const alive = client ? isClientAlive(client) : false;
     const silentFor = Date.now() - state.lastProgressAt;
-    if (alive && silentFor < this.stallTimeoutMs) {
+    // 分级阈值：准备档 / 运行档各自独立，二次确认的两个条件（进程存活 + 实际
+    // 静默不足阈值）一个都不放宽 —— 若因定时器漂移导致提前到点，一律重新
+    // 布防剩余时间，绝不因为分级就降低门槛。
+    const thresholdMs = this.watchdogDelay(id);
+    if (alive && silentFor < thresholdMs) {
       // 定时器漂移：静默还不够久，重新布防剩余时间。
-      this.resetWatchdogTimer(id, this.stallTimeoutMs - silentFor);
+      this.resetWatchdogTimer(id, thresholdMs - silentFor);
       return;
     }
+    const phaseLabel = state.phase === "running" ? "运行中" : "准备中";
     const reason = alive
-      ? `子会话无响应超时（${Math.round(this.stallTimeoutMs / 1000)} 秒无进展）`
+      ? `子会话${phaseLabel}无响应超时（${Math.round(thresholdMs / 1000)} 秒无进展）`
       : "子会话进程已退出但状态未归一（看门狗兜底）";
+    this.recordDiagnostic(
+      id,
+      "timeout",
+      "warn",
+      `看门狗判定${phaseLabel}卡死：静默 ${Math.round(silentFor / 1000)}s ≥ 阈值 ${Math.round(thresholdMs / 1000)}s（进程${alive ? "存活" : "已退出"}）`,
+    );
     this.deps.log.warn(`[${id}] 子会话看门狗触发：${reason}`);
     this.apply(id, { type: "failed", error: reason, at: Date.now() }, `看门狗：${reason}`);
     this.discardQuestionResolver(id);

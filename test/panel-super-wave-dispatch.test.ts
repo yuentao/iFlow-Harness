@@ -144,7 +144,7 @@ describe("波次调度 · pump 分层门控（上游未终态 → 下游留队�
       { title: "下游", task: "等上游", dependsOn: ["up"] },
       { runId: "run-b", wave: 1 },
     );
-    await tick();
+    await poll(() => clients.length >= 1);
     // 上游进程起来了并在 hold；下游因依赖未终态仍 preparing + queued。
     expect(clients.length).toBe(1);
     const projected = manager.get(down.id)!;
@@ -163,7 +163,7 @@ describe("波次调度 · pump 分层门控（上游未终态 → 下游留队�
       { title: "下游跳过", task: "不该跑", dependsOn: ["up-fail"] },
       { runId: "run-c", wave: 1 },
     );
-    await tick(80);
+    await poll(() => manager.get(down.id)?.status === "failed", 1500);
     const projected = manager.get(down.id)!;
     expect(projected.status).toBe("failed");
     expect(projected.lastError?.kind).toBe("blocked");
@@ -199,6 +199,76 @@ describe("波次调度 · pump 分层门控（上游未终态 → 下游留队�
     );
     await poll(() => clients.length === 2);
     expect(clients.length).toBe(2);
+    await manager.dispose();
+  });
+});
+
+describe("批次2A · 波次批量重试 handler 与尝试上限", () => {
+  it("retryWave 按波次重排：先重试上游解开依赖，再重试被阻塞的下一波", async () => {
+    const { manager } = makeManager({
+      plans: ["fail", "complete", "complete", "complete"],
+      maxAttempts: () => 2,
+    });
+    manager.autoRetryBackoffMs = 60_000; // 关掉自动重试，隔离手动波次重试
+    const up = manager.spawn(
+      { id: "up-r", title: "上游先失败", task: "炸一次" },
+      { runId: "run-r", wave: 0 },
+    );
+    const d1 = manager.spawn(
+      { title: "下游一", task: "等上游" },
+      { runId: "run-r", wave: 1 },
+    );
+    const d2 = manager.spawn(
+      { title: "下游二", task: "等上游" },
+      { runId: "run-r", wave: 1 },
+    );
+    await poll(() => manager.get(up.id)?.status === "failed");
+    await poll(() => manager.get(d1.id)?.status === "failed");
+    expect(manager.get(d1.id)!.lastError?.kind).toBe("blocked");
+
+    const retriedUp = await manager.retryWave({ runId: "run-r", wave: 0 });
+    expect(retriedUp).toEqual([up.id]);
+    await poll(() => manager.get(up.id)?.status === "completed");
+
+    const retriedDown = await manager.retryWave({ runId: "run-r", wave: 1 });
+    expect(retriedDown.sort()).toEqual([d1.id, d2.id].sort());
+    await poll(() =>
+      manager.get(d1.id)!.status === "completed" && manager.get(d2.id)!.status === "completed",
+    );
+    expect(manager.get(up.id)!.attempts).toBe(2);
+    expect(manager.get(d1.id)!.attempts).toBe(2);
+    await manager.dispose();
+  });
+
+  it("达到 maxAttempts 时 retryWave / retryFailed 不再重试（上限守门）", async () => {
+    const { manager } = makeManager({ plans: "fail", maxAttempts: () => 1 });
+    const child = manager.spawn(
+      { id: "cap", title: "上限", task: "炸" },
+      { runId: "run-cap", wave: 0 },
+    );
+    await poll(() => manager.get(child.id)?.status === "failed");
+    expect(await manager.retryWave({ runId: "run-cap", wave: 0 })).toEqual([]);
+    expect(await manager.retryFailed({ runId: "run-cap" })).toEqual([]);
+    expect(manager.get(child.id)!.attempts).toBe(1);
+    await manager.dispose();
+  });
+
+  it("retryFailed 重试整组所有失败任务（不限波次）", async () => {
+    const { manager } = makeManager({
+      plans: ["fail", "fail", "complete", "complete"],
+      maxAttempts: () => 2,
+    });
+    manager.autoRetryBackoffMs = 60_000;
+    const a = manager.spawn({ id: "fail-a", title: "失败 A", task: "x" }, { runId: "run-f", wave: 0 });
+    const b = manager.spawn({ id: "fail-b", title: "失败 B", task: "y" }, { runId: "run-f", wave: 0 });
+    await poll(() =>
+      manager.get(a.id)?.status === "failed" && manager.get(b.id)?.status === "failed",
+    );
+    const retried = await manager.retryFailed({ runId: "run-f" });
+    expect(retried.sort()).toEqual([a.id, b.id].sort());
+    await poll(() =>
+      manager.get(a.id)!.status === "completed" && manager.get(b.id)!.status === "completed",
+    );
     await manager.dispose();
   });
 });
