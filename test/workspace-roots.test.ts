@@ -5,8 +5,10 @@
  *
  * 全部通过注入 realpath / 直接构造根列表完成，不碰磁盘。
  */
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import {
   aliasForRootPath,
   buildAddDirs,
@@ -161,5 +163,127 @@ describe("buildWorkspaceRootsUi", () => {
     const ui = buildWorkspaceRootsUi(roots, all, all);
     expect(ui.roots).toEqual(roots);
     expect(ui.roots[0]).not.toBe(roots[0]);
+  });
+});
+
+/** 注入恒等 realpath：这些用例只看词法层，不碰磁盘。 */
+const identityRealpath = (p: string): string => p;
+
+describe("rewriteRootMentions — 词法安全边界（Windows）", () => {
+  const winRoots = [
+    { path: "D:\\work\\app", name: "app" },
+    { path: "D:\\work\\app2", name: "app2" },
+    { path: "D:\\work\\other", name: "other" },
+  ];
+  const rewrite = (text: string): string =>
+    rewriteRootMentions(text, winRoots, null, identityRealpath);
+
+  it.skipIf(process.platform !== "win32")("`..` 穿越不被重写成越界绝对路径", () => {
+    for (const payload of [
+      "@app/../x",
+      "@app/../../etc/passwd",
+      "@app/..\\..\\secret.txt",
+      "@app/..\\..\\..\\Windows\\System32\\config",
+      "@other/../../Users/Administrator/.ssh/id_rsa",
+    ]) {
+      expect(rewrite(payload)).toBe(payload);
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")("兄弟目录前缀（app vs app2）不会被误命中", () => {
+    // 逃到 app2：root=app 时这条必须原样保留，而不是认成 app 根内路径。
+    expect(rewrite("@app/../app2/x")).toBe("@app/../app2/x");
+    // 正主是 app2 时正常还原（不越界）。
+    expect(rewrite("@app2/src/f.ts")).toBe("@D:\\work\\app2\\src\\f.ts");
+  });
+
+  it.skipIf(process.platform !== "win32")("大小写变体行为一致且不越界", () => {
+    expect(rewrite("@APP/src/f.ts")).toBe("@D:\\work\\app\\src\\f.ts");
+    expect(rewrite("@App/../APP2/x")).toBe("@App/../APP2/x");
+  });
+
+  it.skipIf(process.platform !== "win32")("UNC / 驱动器绝对路径不被放行", () => {
+    for (const payload of [
+      "@app/\\\\server\\share\\secret.txt",
+      "@app/D:\\Windows\\system32\\drivers\\etc\\hosts",
+      "@app/..\\..\\..\\..\\server\\share",
+    ]) {
+      expect(rewrite(payload)).toBe(payload);
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")("合法输入照旧还原为根内绝对路径", () => {
+    expect(rewrite("看 @app/src/f.ts")).toBe("看 @D:\\work\\app\\src\\f.ts");
+  });
+});
+
+describe("rewriteRootMentions — 词法安全边界（POSIX）", () => {
+  const posixRoots = [
+    { path: "/work/app", name: "app" },
+    { path: "/work/app2", name: "app2" },
+  ];
+  const rewrite = (text: string): string =>
+    rewriteRootMentions(text, posixRoots, null, identityRealpath);
+
+  it.skipIf(process.platform === "win32")("`..` 穿越与兄弟前缀都不越界", () => {
+    for (const payload of [
+      "@app/../../etc/passwd",
+      "@app/../../../root/.ssh/id_rsa",
+      "@app/../app2/x",
+    ]) {
+      expect(rewrite(payload)).toBe(payload);
+    }
+    expect(rewrite("@app/src/f.ts")).toBe("@/work/app/src/f.ts");
+  });
+});
+
+describe("rewriteRootMentions — realpath 不可用时退到词法层", () => {
+  it("realpath 全抛错：合法仍还原，穿越仍拒绝", () => {
+    const roots = [
+      { path: path.resolve("app"), name: "app" },
+      { path: path.resolve("other"), name: "other" },
+    ];
+    const boom = (): string => {
+      throw new Error("no fs");
+    };
+    expect(rewriteRootMentions("@app/src/f.ts", roots, null, boom)).toBe(
+      `@${path.join(path.resolve("app"), "src/f.ts")}`,
+    );
+    expect(rewriteRootMentions("@app/../../etc/passwd", roots, null, boom)).toBe(
+      "@app/../../etc/passwd",
+    );
+  });
+});
+
+describe("rewriteRootMentions — 物理边界（根内符号链接/联接点）", () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "iflow-root-mention-"));
+  const rootDir = path.join(tmp, "app");
+  const outsideDir = path.join(tmp, "outside");
+  mkdirSync(path.join(rootDir, "src"), { recursive: true });
+  mkdirSync(outsideDir, { recursive: true });
+  writeFileSync(path.join(outsideDir, "secret.txt"), "secret", "utf8");
+  let linked = true;
+  try {
+    symlinkSync(outsideDir, path.join(rootDir, "link"), process.platform === "win32" ? "junction" : "dir");
+  } catch {
+    linked = false; // 无权限建链接的环境（部分 Windows 配置）跳过该断言，不谎报通过
+  }
+  afterAll(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+  const roots = [
+    { path: rootDir, name: "app" },
+    { path: path.join(tmp, "other"), name: "other" },
+  ];
+
+  it.skipIf(!linked)("根内链接指向根外：已存在与未创建的文件都拒绝重写", () => {
+    expect(rewriteRootMentions("@app/link/secret.txt", roots, null)).toBe("@app/link/secret.txt");
+    expect(rewriteRootMentions("@app/link/new-file.ts", roots, null)).toBe("@app/link/new-file.ts");
+  });
+
+  it("根内普通（尚未创建的）路径照旧还原", () => {
+    expect(rewriteRootMentions("@app/src/fresh.ts", roots, null)).toBe(
+      `@${path.join(rootDir, "src", "fresh.ts")}`,
+    );
   });
 });
