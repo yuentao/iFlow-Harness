@@ -850,15 +850,6 @@ export interface SuperFailureInfo {
 export const SUPER_DIAGNOSTICS_MAX_EVENTS = 200;
 
 /**
- * 单条诊断的 `message` / `detail` 长度上限（字符）。
- *
- * 诊断里常会塞进原始错误文本 / 堆栈片段，不设上限的话**一条**诊断就能把整份
- * 归档撑到几十 MB。宿主落盘裁剪（`src/panel/super-store.ts`）直接复用这个
- * 常量 —— 两处各写一个 500 曾出现漂移风险。
- */
-export const SUPER_DIAGNOSTIC_TEXT_MAX_CHARS = 500;
-
-/**
  * 追加一条诊断事件（纯函数）。
  *
  * **终态粘性**：诊断**不改变会话状态** —— 终态会话收到 error 事件也只追加

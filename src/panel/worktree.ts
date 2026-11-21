@@ -809,21 +809,6 @@ function worktreeAddArgs(
 }
 
 /**
- * `git worktree add <path> <branch>` 的参数（挂已有分支，不建新分支）。
- *
- * 与 {@link worktreeAddArgs} 同一条 Windows 长路径纪律；区别只是没有 `-b`。
- */
-function worktreeAttachArgs(
-  options: { targetPath: string; branch: string },
-  platform: NodeJS.Platform,
-): string[] {
-  const args: string[] = [];
-  if (platform === "win32") args.push("-c", "core.longpaths=true");
-  args.push("worktree", "add", gitPath(options.targetPath), options.branch);
-  return args;
-}
-
-/**
  * 清掉一次失败尝试的现场：残留目录、worktree 元数据、以及**空**分支。
  *
  * `git worktree add` 失败时可能已经建了一半目录，也可能已经建出分支却没能
@@ -973,83 +958,6 @@ export async function createWorktree(options: {
       `worktree creation failed after ${WORKTREE_CREATE_MAX_ATTEMPTS} attempts: ${errorMessage(lastError)}`,
     );
   });
-}
-
-/**
- * 把一条**已存在的分支**挂到一个新的工作目录上（`git worktree add <path> <branch>`）。
- *
- * 与 {@link createWorktree} 的区别只有一处：**不建分支**，直接 checkout 已有
- * 分支 —— 分支上的提交（子会话中断前的工作）原样保留。恢复分类为 `lost`
- * （分支还在、工作目录被删了）的子会话重试时走这条路径；新建一条空分支等于
- * 把那些工作藏起来，本函数刻意不提供那个退化。
- *
- * 纪律：
- *  - 目标路径必须**不存在**（git 的硬要求）。这里显式检查并抛错，绝不为了
- *    让命令跑通而递归删掉一个可能还装着未提交改动的目录；
- *  - 与 `createWorktree` 共用模块级串行锁（同一个仓库里并发 `worktree add`
- *    会争 index / 锁目录）；
- *  - 失败只清目标目录与 worktree 元数据，**绝不删分支**（分支是这次重建的
- *    唯一依据，删掉就真丢了）。
- */
-export async function createWorktreeFromBranch(options: {
-  repoRoot: string;
-  targetPath: string;
-  branch: string;
-  /** 单测注入（生产代码不传）。 */
-  deps?: WorktreeCreateDeps;
-}): Promise<WorktreeCreateResult> {
-  const runGit = options.deps?.gitRunner ?? defaultGitRunner;
-  const removeDir = options.deps?.removeDir ?? defaultRemoveDir;
-  const platform = options.deps?.platform ?? process.platform;
-  const args = worktreeAttachArgs(options, platform);
-
-  return withCreateLock(async () => {
-    if (existsSync(options.targetPath)) {
-      throw new Error(
-        `the worktree target already exists: ${options.targetPath}（不会自动删除它，请先确认里面没有未提交的工作）`,
-      );
-    }
-    await mkdir(path.dirname(options.targetPath), { recursive: true });
-    try {
-      await runGit(options.repoRoot, args, WORKTREE_CREATE_TIMEOUT_MS);
-      const dependencies = await presetWorktreeDependencies({
-        repoRoot: options.repoRoot,
-        worktreePath: options.targetPath,
-      });
-      return {
-        path: options.targetPath,
-        branch: options.branch,
-        // 已有分支就是这次重建的起点：隔离记录用它判断「分支上有没有独有
-        // 提交」时，baseRef..branch 为空（分支自己到自己是 0 条）——与
-        // `reusableIsolation` 复用现场时的语义一致。
-        baseRef: options.branch,
-        attempts: 1,
-        dependencies,
-      };
-    } catch (error) {
-      // 只清目录与 worktree 元数据；分支必须保留。
-      await removeDir(options.targetPath).catch(() => undefined);
-      await runGit(options.repoRoot, ["worktree", "prune"], GIT_TIMEOUT_MS).catch(
-        () => undefined,
-      );
-      throw new Error(
-        `attaching the worktree to the existing branch ${options.branch} failed: ${errorMessage(error)}`,
-      );
-    }
-  });
-}
-
-/**
- * 本地分支是否存在（只读 `git show-ref --verify refs/heads/<branch>`）。
- *
- * 恢复分类与 lost 重试共用：**只读**，不写仓库、不改工作区。任何失败（不是
- * git 仓库 / 分支不存在 / git 不可用）都按 false 保守处理 —— 宁可让用户看到
- * 「分支不存在」，也不要谎称分支还在。
- */
-export async function branchExists(repoRoot: string, branch: string): Promise<boolean> {
-  if (!branch) return false;
-  const probe = await gitRaw(repoRoot, ["show-ref", "--verify", `refs/heads/${branch}`]);
-  return probe.code === 0;
 }
 
 /** worktree 是否还有未合并到 baseRef 的提交。 */
