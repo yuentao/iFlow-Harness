@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode
 import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, Sparkles, Trash2 } from "lucide-react";
 import type {
   AuthUiState,
+  HostSettingsUi,
   ThinkingModelRuleUi,
   UiCliLanguage,
   UiOsNotifications,
@@ -583,6 +584,36 @@ function DependentRow({ children }: { children: ReactNode }) {
   return <div className="divide-y divide-border/50 pl-4">{children}</div>;
 }
 
+/**
+ * `iflow.superAgent.dependencyPolicy` 的取值，与 package.json 的枚举逐字一致。
+ */
+type SuperDependencyPolicy = "block" | "continue";
+
+/**
+ * Super Agent 的「最大尝试次数」与「依赖策略」两个设置。
+ *
+ * 宿主接线（`shared/messages.ts` 的 `HostSettingsUi` + `src/panel/panel.ts` 的
+ * 读写）由 host 侧负责；这里用「可选扩展视图」读取：字段还没进 `HostSettingsUi`
+ * 时回落到下面的默认值（与 package.json 的 `default` 一致），接线后字段自然出现，
+ * 本文件不需要再改一次。
+ */
+type SuperAgentRetryUi = {
+  /** `iflow.superAgent.maxAttempts`：失败后最多自动尝试几次（含首次）。 */
+  superAgentMaxAttempts?: number;
+  /** `iflow.superAgent.dependencyPolicy`：上游失败时下游任务怎么处理。 */
+  superAgentDependencyPolicy?: SuperDependencyPolicy;
+};
+
+/** 写回宿主设置用的补丁类型。两个字段目前还没进 `HostSettingsUi`，纯扩展类型
+ * 又会被 TS 的弱类型检测拦下，所以用交叉类型把它们一起送出去。 */
+type SuperAgentRetryPatch = Partial<HostSettingsUi> & SuperAgentRetryUi;
+
+/** manifest 声明的默认值：宿主接线前的兜底读数。 */
+const SUPER_MAX_ATTEMPTS_DEFAULT = 2;
+const SUPER_MAX_ATTEMPTS_MIN = 1;
+const SUPER_MAX_ATTEMPTS_MAX = 5;
+const SUPER_DEPENDENCY_POLICY_DEFAULT: SuperDependencyPolicy = "block";
+
 /** Chat / turn-end behavior. 4.7: 自动生成标题 is a per-session action, not a
  * turn-end one — it moved to its own 会话 group so the group name stays
  * accurate. Descriptions are trimmed to one short line; the cost/threshold
@@ -590,6 +621,15 @@ function DependentRow({ children }: { children: ReactNode }) {
 function ChatSection() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
+  // Super Agent 的两个新设置：宿主把字段接进 HostSettingsUi 之前，用可选扩展
+  // 视图读取并回落到 manifest 声明的默认值。
+  const superRetry = settings as HostSettingsUi & SuperAgentRetryUi;
+  const superMaxAttempts = Math.min(
+    SUPER_MAX_ATTEMPTS_MAX,
+    Math.max(SUPER_MAX_ATTEMPTS_MIN, Math.round(superRetry.superAgentMaxAttempts ?? SUPER_MAX_ATTEMPTS_DEFAULT)),
+  );
+  const superDependencyPolicy = superRetry.superAgentDependencyPolicy ?? SUPER_DEPENDENCY_POLICY_DEFAULT;
+  const updateSuper = (patch: SuperAgentRetryPatch) => update(patch);
   return (
     <div className="space-y-4">
       <SettingsGroup title={t("会话")}>
@@ -623,6 +663,27 @@ function ChatSection() {
             { value: "manual", label: t("手动") },
           ]}
           onChange={(superAgentIntegration) => update({ superAgentIntegration })}
+        />
+        <NumberRow
+          label={t("最大尝试次数")}
+          description={t("超流体失败后最多自动尝试几次（含首次）。")}
+          detail={t("默认 2，可设 1–5；填 1 表示不自动重试。修改后对下一个启动的超流体生效。")}
+          value={superMaxAttempts}
+          min={SUPER_MAX_ATTEMPTS_MIN}
+          max={SUPER_MAX_ATTEMPTS_MAX}
+          unit={t("次")}
+          onCommit={(superAgentMaxAttempts) => updateSuper({ superAgentMaxAttempts })}
+        />
+        <ChoiceRow
+          label={t("依赖策略")}
+          description={t("上游任务失败时，依赖它的超流体怎么处理。")}
+          detail={t("阻塞：跳过后续任务并标记为阻塞；继续：让它照常执行。默认阻塞。")}
+          value={superDependencyPolicy}
+          options={[
+            { value: "block", label: t("阻塞") },
+            { value: "continue", label: t("继续") },
+          ]}
+          onChange={(superAgentDependencyPolicy) => updateSuper({ superAgentDependencyPolicy })}
         />
         <NumberRow
           label={t("工作目录上限")}

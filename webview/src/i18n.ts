@@ -499,8 +499,8 @@ const en: Record<string, string> = {
   "在终端中打开（预填命令，不自动执行）": "Open in terminal (prefills the command, does not run it)",
   "在集成终端重跑该命令": "Re-run this command in the integrated terminal",
   "输入 URL 后回车附加": "Type a URL, then press Enter to attach",
-  // M2 P0-3 message queue strip
-  "继续": "Resume",
+  // M2 P0-3 message queue strip（队列条已下线；该键现由超流体依赖策略复用）
+  "继续": "Continue",
   "（附件消息）": "(attachment message)",
   "排队中": "Queued",
   "排队 {0}": "Queued {0}",
@@ -676,6 +676,16 @@ const en: Record<string, string> = {
   "自动合并": "Auto-merge",
   "创建 PR": "Open PR",
   "手动": "Manual",
+  "最大尝试次数": "Max attempts",
+  "次": "attempts",
+  "超流体失败后最多自动尝试几次（含首次）。": "How many times a failed child session is retried automatically, including the first attempt.",
+  "默认 2，可设 1–5；填 1 表示不自动重试。修改后对下一个启动的超流体生效。":
+    "Defaults to 2, range 1–5; 1 means no automatic retry. Takes effect on the next child session that starts.",
+  "依赖策略": "Dependency policy",
+  "上游任务失败时，依赖它的超流体怎么处理。": "What happens to a child session whose upstream task failed.",
+  "阻塞：跳过后续任务并标记为阻塞；继续：让它照常执行。默认阻塞。":
+    "Block: skip the dependent task and mark it as blocked; Continue: run it anyway. Blocking is the default.",
+  "阻塞": "Block",
   "工作目录上限": "Worktree limit",
   "磁盘上最多保留几个已结束超流体的工作目录。": "How many finished child-session worktrees to keep on disk at most.",
   "默认 10，可设 0–100；填 0 表示不限。超出时按修改时间从旧到新回收，分支一律保留，有未提交改动的目录不会被回收。":
