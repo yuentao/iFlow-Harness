@@ -159,6 +159,9 @@ export const workspace = {
   getConfiguration: (_section?: string) => new WorkspaceConfiguration(configOverrides),
   createFileSystemWatcher: (_pattern: unknown) => new FileSystemWatcher(_pattern),
   onDidChangeConfiguration: () => new Disposable(),
+  // 多仓库协作：根集合变化监听 + @ 文件搜索（默认空结果）。
+  onDidChangeWorkspaceFolders: (_listener: unknown) => new Disposable(),
+  findFiles: async (_include?: unknown, _exclude?: unknown, _maxResults?: number) => [] as Uri[],
   asRelativePath: (p: string | { fsPath: string }) =>
     (typeof p === "string" ? p : p.fsPath).replace(/\\/g, "/"),
 };

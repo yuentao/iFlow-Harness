@@ -43,6 +43,7 @@ import {
   setPendingQuestions,
   setPlanEntryStatus,
   setSessions,
+  setWorkspaceRoots,
 } from "../../shared/session-state.js";
 import { classifyErrorAdvice } from "../../shared/error-advice.js";
 import type { PendingApprovalUi, PendingProfileSwitchUi, PendingQuestionsUi, MemoryScope, ToolDiffUi } from "../../shared/messages.js";
@@ -227,6 +228,12 @@ export class SessionStore {
   setSessions(sessions: SessionState["sessions"], activeSessionId?: string | null): void {
     setSessions(this.state, sessions);
     if (activeSessionId !== undefined) this.state.activeSessionId = activeSessionId;
+    this.flush();
+  }
+
+  /** 多仓库协作：写入根子集投影（非 blocks 元数据，走 blockPatch tail）。 */
+  setWorkspaceRoots(value: SessionState["workspaceRoots"]): void {
+    setWorkspaceRoots(this.state, value);
     this.flush();
   }
 

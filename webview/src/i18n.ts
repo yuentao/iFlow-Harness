@@ -1366,6 +1366,13 @@ const en: Record<string, string> = {
   "打开 PR": "Open PR",
   "诊断事件可能滞后于最后一次归档写入":
     "Diagnostic events may lag behind the last archived write",
+  // --- 多仓库协作 ---
+  "目标根": "Target roots",
+  "目标根（多仓库）": "Target roots (multi-repo)",
+  "目标根 {0}": "Target root {0}",
+  "新会话生效": "Applies to new sessions",
+  "根变更对已建立的会话无效，新建会话后生效":
+    "Root changes do not affect an established session — they take effect in a new session",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

@@ -1177,6 +1177,17 @@ function createMockHost(): HostApi {
   const demoMeta = {
     sessionId: "mock-session",
     superSessions: demoSuperSessions,
+    // 多仓库协作：demo 根集合（真实宿主会覆盖）。selected 与 applied 故意不同，
+    // 让「新会话生效」提示在 mock 里可见。
+    workspaceRoots: {
+      roots: [
+        { path: "J:\\git\\iflow-harness", name: "iflow-harness" },
+        { path: "J:\\git\\iflow-fork", name: "iflow-fork" },
+      ],
+      selected: ["J:\\git\\iflow-harness", "J:\\git\\iflow-fork"],
+      applied: ["J:\\git\\iflow-harness"],
+      pendingChange: true,
+    },
     qqTasks: [] as SessionState["qqTasks"],
     modes: { currentModeId: "smart", availableModes: [
       { id: "smart", name: "Smart" }, { id: "yolo", name: "YOLO" },

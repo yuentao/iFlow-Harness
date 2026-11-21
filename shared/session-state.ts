@@ -2419,6 +2419,10 @@ export function newSessionState(state: SessionState): SessionState {
   // QQ 远程任务看板同理是面板级、非转录级的投影：会话切换 / 恢复不能把它清空
   // （清空后要等下一次宿主写入才恢复，而终态任务不会再写）。
   fresh.qqTasks = state.qqTasks;
+  // 多仓库协作：根集合投影同样是面板级的 —— 这里就在会话切换中途调用，
+  // 丢掉它会让根选择器闪一下再回来。各会话建立路径（新建 / 恢复）随后用
+  // 自己真实的 applied 覆盖它。
+  fresh.workspaceRoots = state.workspaceRoots ?? null;
   fresh.replaying = state.replaying;
   // 新建会话流程的投影是「流程级」而非转录级：本函数就在该流程中途被调用
   // （清空转录），这里若丢掉它，加载态会在流程还没结束时闪回空闲、按钮重新
@@ -2442,6 +2446,14 @@ export function newSessionState(state: SessionState): SessionState {
 /** Replace the recent-session list (M4 switcher, ordered newest-first). */
 export function setSessions(state: SessionState, sessions: SessionSummaryUi[]): void {
   state.sessions = sessions;
+}
+
+/**
+ * 多仓库协作：写入根子集投影。`null` 表示单根工作区 / 不适用（webview 不渲染
+ * 选择器）。这是非 blocks 元数据，跟着 blockPatch 的 tail 通道走。
+ */
+export function setWorkspaceRoots(state: SessionState, value: SessionState["workspaceRoots"]): void {
+  state.workspaceRoots = value ?? null;
 }
 
 /**
@@ -3085,9 +3097,15 @@ export function findCliHistoryCut(
   chatHistory: unknown,
   allUserTexts: readonly string[],
   targetIndex: number,
+  /** 可选的转录→agent 侧文本重写（多仓库协作：`@别名/rel` → 绝对路径）。
+   * 宿主发送前会改写提及，而转录保留用户看到的别名形态；比较前必须过同一个
+   * 重写，否则带跨根提及的轮次会被误判成「不在模型上下文中」。 */
+  rewrite?: (text: string) => string,
 ): CliHistoryCut {
   if (!Array.isArray(chatHistory)) return { kind: "skip" };
-  const turns = allUserTexts.map(normalizeUserPromptText);
+  const turns = allUserTexts
+    .map((text) => normalizeUserPromptText(text))
+    .map((text) => (rewrite ? rewrite(text) : text));
   if (turns.some((text) => !text)) return { kind: "refuse", reason: "empty" };
   // CLI user turns with their chatHistory index preserved for the splice.
   const cli: { index: number; text: string }[] = [];

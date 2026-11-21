@@ -9,6 +9,7 @@ import {
   FileCode,
   FileText,
   Folder as FolderIcon,
+  FolderTree,
   GitBranch,
   Globe,
   Image as ImageIcon,
@@ -29,7 +30,7 @@ import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Button, CANVAS_CHIP, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, SearchInput, fuzzyScore } from "./ui";
+import { Button, CANVAS_CHIP, Chip, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, SearchInput, ToggleChip, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -434,6 +435,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const pending = useChat((s) => s.pending);
   const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
+  // 多仓库协作：根子集投影（宿主持有，单根工作区为 null → 不渲染选择器）。
+  const workspaceRoots = useChat((s) => s.state?.workspaceRoots ?? null);
   // Stop is only meaningful for a real generation: beginReplay() also reports
   // status "streaming", so replaying and initializing must be excluded.
   //
@@ -1557,6 +1560,45 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       {dragOver && (
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg bg-primary/5 text-ui-label font-medium text-primary">
           {t("拖放文件以添加附件")}
+        </div>
+      )}
+      {/* 多仓库协作：目标根子集。只在多根工作区出现；多选用 ToggleChip，
+          选择写回宿主并持久化。改根只影响**之后新建**的会话（已有会话的根
+          与 cwd 一律不迁移），因此与 applied 不一致时给出「新会话生效」提示。 */}
+      {workspaceRoots && workspaceRoots.roots.length > 1 && (
+        <div className="mb-2 flex flex-wrap items-center gap-1.5" aria-label={t("目标根（多仓库）")}>
+          <span className="inline-flex shrink-0 items-center gap-1 text-ui-caption text-muted-foreground">
+            <FolderTree className="size-3" />
+            {t("目标根")}
+          </span>
+          {workspaceRoots.roots.map((root) => {
+            const active = workspaceRoots.selected.includes(root.path);
+            return (
+              <ToggleChip
+                key={root.path}
+                active={active}
+                mono
+                title={root.path}
+                aria-label={t("目标根 {0}", root.name)}
+                onClick={() => {
+                  // 至少保留一个根：取消最后一个等于「只剩 cwd」，语义容易被
+                  // 误读成「工作区丢了」，宿主也会把空选择归一为全量根。
+                  if (active && workspaceRoots.selected.length <= 1) return;
+                  const next = active
+                    ? workspaceRoots.selected.filter((p) => p !== root.path)
+                    : [...workspaceRoots.selected, root.path];
+                  send({ type: "setSessionRoots", roots: next });
+                }}
+              >
+                {root.name}
+              </ToggleChip>
+            );
+          })}
+          {workspaceRoots.pendingChange && (
+            <Chip tone="info" title={t("根变更对已建立的会话无效，新建会话后生效")}>
+              {t("新会话生效")}
+            </Chip>
+          )}
         </div>
       )}
       {/* non-image attachment chips + rejected-file note */}

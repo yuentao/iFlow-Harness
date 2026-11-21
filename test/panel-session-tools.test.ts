@@ -387,6 +387,25 @@ describe("主会话 session settings · 剔除 task 与读写执行工具", () =
     expect(JSON.stringify(settings)).not.toContain("new_page");
   });
 
+  it("多仓库协作：未选目标根时 mainSessionSettings 与今天逐字节一致（不写 add_dirs）", () => {
+    // 默认必须保持「完全不写这个键」——CLI 缺省时回退 argv 的
+    // --include-directories（全量根）；一旦写入（哪怕 []）就会收紧会话。
+    expect(mainSessionSettings()).toEqual(EXPECTED_SETTINGS);
+    expect("add_dirs" in mainSessionSettings()).toBe(false);
+    expect(mainSessionSettings(null)).toEqual(EXPECTED_SETTINGS);
+    expect("add_dirs" in mainSessionSettings(null)).toBe(false);
+  });
+
+  it("多仓库协作：选中严格子集时 mainSessionSettings 写入 add_dirs（含空数组=只留 cwd）", () => {
+    const dirs = [path.resolve("repo-b")];
+    expect(mainSessionSettings(dirs)).toEqual({ ...EXPECTED_SETTINGS, add_dirs: dirs });
+    expect(mainSessionSettings([])).toEqual({ ...EXPECTED_SETTINGS, add_dirs: [] });
+    // 工厂每次返回新数组，调用方改不到别人的副本。
+    const own = mainSessionSettings(dirs);
+    own.add_dirs!.push(path.resolve("repo-x"));
+    expect(dirs).toHaveLength(1);
+  });
+
   it("自动注入卡不再查询 mcp-status，也不带入任何 MCP 条目", async () => {
     // 主会话的 CLI 进程在 spawn 时就移除了全部 MCP 服务器（buildAcpCommand 的
     // disableMcpServers），因此这个「模型实际看到什么」的卡片里根本不该有 MCP
@@ -540,7 +559,9 @@ describe("主会话 session settings · 静态守卫（每个创建点都必须�
     ];
     expect(calls.length).toBeGreaterThanOrEqual(6);
     const offenders = calls
-      .filter((call) => !/settings\s*:\s*(?:mainSessionSettings|this\.deps\.getMainSessionSettings)\(\s*\)/.test(call.args))
+      // 多仓库协作后这两个工厂可以带可选参数（settings.add_dirs），守卫只要求
+      // 「必须调用同一个门控工厂」，不再要求空参数。
+      .filter((call) => !/settings\s*:\s*(?:mainSessionSettings|this\.deps\.getMainSessionSettings)\(/.test(call.args))
       .map((call) => `${call.callee} at ${call.file}:${call.line}`);
     expect(offenders).toEqual([]);
   });

@@ -71,6 +71,31 @@ describe("folder listing (P0-4 @/)", () => {
     expect(normalizeFolderRel("  ")).toBe("");
   });
 
+  it("多仓库协作：根别名前缀原样保留（多根工作区的 @ 提及带别名）", () => {
+    expect(normalizeFolderRel("repo-b/src/")).toBe("repo-b/src");
+    expect(normalizeFolderRel("./repo-b//src")).toBe("repo-b/src");
+    expect(normalizeFolderRel("repo-b")).toBe("repo-b");
+  });
+
+  it("多仓库协作：别名根下的目录列表按段匹配", () => {
+    const rels = [
+      "src/App.tsx",
+      "repo-b/src/b.ts",
+      "repo-b/src/deep/c.ts",
+      "repo-b/package.json",
+    ];
+    expect(buildFolderListing(rels, "repo-b").split("\n")).toEqual([
+      "- src/",
+      "- package.json",
+    ]);
+    expect(buildFolderListing(rels, "repo-b/src").split("\n")).toEqual([
+      "- deep/",
+      "- b.ts",
+    ]);
+    // 根层视角：cwd 首段与别名根并列出现（目录优先，再按字母序）
+    expect(buildFolderListing(rels, "").split("\n")).toEqual(["- repo-b/", "- src/"]);
+  });
+
   it("lists direct children only: dirs (trailing /) first, hidden entries dropped", () => {
     const rels = [
       "src/App.tsx",
