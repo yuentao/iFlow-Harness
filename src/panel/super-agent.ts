@@ -132,6 +132,7 @@ import {
   SUPER_BRANCH_PREFIX,
   superBranchName,
   superIsolationDir,
+  superWorktreeRoots,
   worktreeHasUncommittedChanges,
   worktreePathFor,
 } from "./worktree.js";
@@ -1523,14 +1524,18 @@ export class SuperAgentManager {
     const result: SuperSweepResult = { removed: 0, kept: 0, orphans: [] };
     if (this.disposed) return result;
 
-    const root = superIsolationDir(this.deps.repoRoot, "worktrees");
-    let entries: Dirent[];
-    try {
-      entries = await readdir(root, { withFileTypes: true });
-    } catch {
-      // 没有隔离子树 → 没有残留。
-      return result;
+    const roots = superWorktreeRoots(this.deps.repoRoot);
+    const entries: { root: string; entry: Dirent }[] = [];
+    for (const root of roots) {
+      try {
+        for (const entry of await readdir(root, { withFileTypes: true })) {
+          entries.push({ root, entry });
+        }
+      } catch {
+        // 某个隔离子树不存在 → 跳过（回退场景下旧根可能从未建过）。
+      }
     }
+    if (entries.length === 0) return result;
 
     const registered = await listWorktrees(this.deps.repoRoot);
     const registeredByPath = new Map<string, string | null>();
@@ -1550,7 +1555,7 @@ export class SuperAgentManager {
       livePaths.add(await comparisonPathKey(session.isolation.path));
     }
 
-    for (const entry of entries) {
+    for (const { root, entry } of entries) {
       if (!entry.isDirectory()) continue;
       const target = path.join(root, entry.name);
       const key = await comparisonPathKey(target);
@@ -1615,7 +1620,7 @@ export class SuperAgentManager {
     const maxKeep = options.maxKeep ?? 0;
     if (maxKeep > 0) {
       const recyclable: { path: string; branch: string; mtimeMs: number }[] = [];
-      for (const entry of entries) {
+      for (const { root, entry } of entries) {
         if (!entry.isDirectory()) continue;
         const target = path.join(root, entry.name);
         const key = await comparisonPathKey(target);
@@ -1752,14 +1757,20 @@ export class SuperAgentManager {
    */
   async countResidue(): Promise<SuperResidueCount> {
     const countDirs = async (kind: "worktrees" | "dirs" | "attachments"): Promise<number> => {
-      try {
-        const entries = await readdir(superIsolationDir(this.deps.repoRoot, kind), {
-          withFileTypes: true,
-        });
-        return entries.filter((entry) => entry.isDirectory()).length;
-      } catch {
-        return 0; // 子树不存在 = 零残留。
+      const roots =
+        kind === "worktrees"
+          ? superWorktreeRoots(this.deps.repoRoot)
+          : [superIsolationDir(this.deps.repoRoot, kind)];
+      let total = 0;
+      for (const root of roots) {
+        try {
+          const entries = await readdir(root, { withFileTypes: true });
+          total += entries.filter((entry) => entry.isDirectory()).length;
+        } catch {
+          // 子树不存在 = 零残留。
+        }
       }
+      return total;
     };
     const [worktrees, dirs, attachments] = await Promise.all([
       countDirs("worktrees"),
@@ -1813,25 +1824,30 @@ export class SuperAgentManager {
     // 2 + 4. 三类子树里剩下的目录（孤儿 worktree、dirs、attachments）全删。
     // worktrees/ 里第 1 步已删掉的目录这里会 readdir 不到，天然幂等。
     for (const kind of ["worktrees", "dirs", "attachments"] as const) {
-      const root = superIsolationDir(this.deps.repoRoot, kind);
-      let entries: Dirent[];
-      try {
-        entries = await readdir(root, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const target = path.join(root, entry.name);
+      const roots =
+        kind === "worktrees"
+          ? superWorktreeRoots(this.deps.repoRoot)
+          : [superIsolationDir(this.deps.repoRoot, kind)];
+      for (const root of roots) {
+        let entries: Dirent[];
         try {
-          await rm(target, { recursive: true, force: true, maxRetries: 3 });
-          if (kind === "worktrees") result.worktrees += 1;
-          else if (kind === "dirs") result.dirs += 1;
-          else result.attachments += 1;
-          this.markWorktreeReleased(target);
-        } catch (error) {
-          result.failed += 1;
-          this.deps.log.warn(`super agent: 清空 ${kind} 目录 ${target} 失败：${errorMessage(error)}`);
+          entries = await readdir(root, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const target = path.join(root, entry.name);
+          try {
+            await rm(target, { recursive: true, force: true, maxRetries: 3 });
+            if (kind === "worktrees") result.worktrees += 1;
+            else if (kind === "dirs") result.dirs += 1;
+            else result.attachments += 1;
+            this.markWorktreeReleased(target);
+          } catch (error) {
+            result.failed += 1;
+            this.deps.log.warn(`super agent: 清空 ${kind} 目录 ${target} 失败：${errorMessage(error)}`);
+          }
         }
       }
     }

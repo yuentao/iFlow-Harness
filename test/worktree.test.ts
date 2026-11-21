@@ -141,10 +141,10 @@ describe("worktree · 命名（纯函数）", () => {
     expect(superBranchName("fix-login")).toBe("iflow/super/fix-login");
   });
 
-  it("worktree 路径落在项目内的隔离子树里", () => {
+  it("worktree 路径默认落在主仓外的兄弟目录（避免祖先 AGENTS.md 重复注入）", () => {
     const repo = path.join("C:", "work", "api");
     const p = worktreePathFor(repo, "fix-login", "abc");
-    expect(p).toBe(path.join(repo, ".iflow", "super", "worktrees", "fix-login-abc"));
+    expect(p).toBe(path.join(path.dirname(repo), "api-super-worktrees", "fix-login-abc"));
   });
 });
 
