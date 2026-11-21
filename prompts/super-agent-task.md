@@ -9,6 +9,14 @@ Task description:
 {{isolation}}
 {{retry}}
 
+Execution context (waves and dependencies):
+
+This task may be part of a plan whose tasks depend on each other. When it is, the host adds a plain-text wave/dependency context block to this brief, directly below the task description. That block names the wave (batch) this task belongs to and the upstream tasks it depends on. Its exact wording belongs to the host — treat the facts it states, not its phrasing, as the source of truth.
+
+- Every upstream task listed there has already completed successfully; the host only started this task after they finished.
+- If an upstream task failed, this task is not run at all: the host marks it as blocked and reports that instead of running it.
+- When no such block is present, this task has no upstream dependency and no wave ordering — do exactly the task above and nothing more.
+
 Rules:
 - Work only inside your working directory. Never read or modify files outside it, especially not the main workspace.
 - Never run destructive git commands (`git reset --hard`, `git clean -fd`, `git checkout -- .`) when your working directory is the main repository workspace (no isolation): they would irreversibly discard the user's uncommitted work. Report the repository state instead of throwing changes away.

@@ -216,6 +216,31 @@ Replace the angle-bracket placeholders with real content — a placeholder is ig
 - Keep the title short — it labels the child session in the panel. **Every task MUST have a non-empty, non-placeholder `title`; a task with a missing or blank `title` is rejected and will NOT be dispatched** (the host never uses the task description as a title).
 - Concurrency is the host's job, not a number you enforce: the user setting `iflow.superAgent.maxConcurrent` decides how many child sessions run at once (default 5, adjustable from 1 to 20), and the host queues extra dispatches in FIFO order and starts them as slots free up. Split the work into independently completable units and dispatch all of them; never truncate the delegation to a hard-coded count, and never hold tasks back waiting for a free slot.
 - Child sessions run **without tool approval**: they never ask the user to confirm a write, a command or a plan. Do not tell the user that a child's actions will be reviewed first.
+- To order the work **inside one delegation block** (dependencies or batches), see **Expressing task dependencies and batches** below.
+
+## Expressing task dependencies and batches
+
+A single delegation block can also order the work it dispatches. Pick **one** of the two modes per block — a block uses dependency mode, batch mode, or neither, never both.
+
+**Dependency mode** — a task may carry `dependsOn`: an array of the `title` (or `id`) of other tasks **in the same block**. The host starts a task only after every task it depends on has finished successfully.
+
+```super-agent
+{"tasks":[{"title":"实现数据层","task":"按任务书实现数据层"},{"title":"实现接口层","task":"依赖数据层，实现接口层","dependsOn":["实现数据层"]}]}
+```
+
+**Batch mode** — a task may carry `batch`, a 1-based batch number. A task without `batch` belongs to the first batch. Tasks of the same batch run in parallel, and a batch starts only after the previous batch has finished.
+
+```super-agent
+{"tasks":[{"title":"实现 A","task":"第一批任务"},{"title":"实现 B","task":"第二批任务","batch":2}]}
+```
+
+Rules:
+
+- A dependency must point at a task that exists **in the same block**. A reference to a task from another block is dangling, and the whole block is rejected.
+- Do **not** mix `dependsOn` and `batch` in the same block — one mode per block.
+- A cyclic or dangling dependency invalidates the **whole** block: the host rejects it and reports why, instead of dispatching part of it and leaving the rest in silence.
+- **Exception to "the tool is the primary channel":** when a block carries `dependsOn` or `batch`, write it as a `super-agent` fenced block instead of calling the built-in tool. The tool's CLI-side schema may drop fields it does not declare, and a silently dropped `dependsOn` turns "after A" into "at the same time as A".
+- Keep the payload **valid JSON** — the host parses the body as JSON and rejects anything else as an invalid payload. The two examples above are copy-paste ready: copy them verbatim instead of retyping them.
 
 ## What stays in this session
 
