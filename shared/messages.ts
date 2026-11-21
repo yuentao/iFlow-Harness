@@ -158,6 +158,29 @@ export interface SuperDelegatedTaskUi {
   attachmentCount: number;
 }
 
+/**
+ * Super Agent — 残留分支清单里的一条（一键处理面板的数据源）。
+ *
+ * 只带 UI 需要的最小事实：分支名、工作目录路径、归属会话、是否仍有未合并提交。
+ * 全部由宿主从归档 + `git worktree list` 解析，webview 不自行判断「是否残留」。
+ */
+export interface SuperResidueBranchUi {
+  /** 子会话 id（归档记录用的那个，一键处理时按它定位）。 */
+  sessionId: string;
+  /** git 分支名（如 `iflow/super/<slug>-<unique>`）。 */
+  branch: string;
+  /** worktree 绝对路径；目录已不存在时为空串。 */
+  worktree: string;
+  /** 任务标题（归档没有时回退到分支 slug）。 */
+  title?: string;
+  /** 归属主会话 id（用于分组展示）。 */
+  mainSessionId?: string;
+  /** 是否仍有未合并提交（`git merge-base --is-ancestor` 判定）。 */
+  unmerged: boolean;
+  /** worktree 目录是否还在磁盘上。 */
+  worktreeExists: boolean;
+}
+
 export interface ToolBlock extends BlockBase {
   kind: "tool";
   toolCallId: string;
@@ -1965,6 +1988,21 @@ export type HostToWebview =
       confirmLabel: string;
       cancelLabel: string;
     }
+  /**
+   * Super Agent — 残留分支清单（一键处理面板的数据源）。
+   *
+   * 宿主枚举跨历史会话遗留、仍未合并的子会话分支 / worktree 后随这条消息下发
+   * 完整清单。`confirmToken` 是**一次性令牌**：webview 的任何「一键合并 / 一键
+   * 丢弃」请求都必须原样回传它，宿主据此确认用户确实看过清单（二次确认）。
+   * 每次下发都换发新令牌，旧令牌立即失效。
+   */
+  | {
+      type: "superResidueList";
+      /** 与 `requestSuperResidueList` 的 requestId 对应，供 UI 配对请求。 */
+      requestId: string;
+      branches: SuperResidueBranchUi[];
+      confirmToken: string;
+    }
   | {
       type: "toast";
       level: "info" | "warning" | "error";
@@ -2309,6 +2347,22 @@ export type WebviewToHost =
 | { type: "respondProfileSwitch"; id: string; keepSession: boolean | null }
 /** 回答 `superResidueConfirm`：`confirmed=true` = 先全量清空再新建；false = 只新建不清空。 */
 | { type: "respondSuperResidueConfirm"; requestId: string; confirmed: boolean }
+/**
+ * 请求宿主枚举残留分支清单；回包是 `superResidueList`（含一次性 `confirmToken`）。
+ * `requestId` 由 webview 生成，宿主原样回显供 UI 配对加载态。
+ */
+| { type: "requestSuperResidueList"; requestId: string }
+/**
+ * 一键处理残留分支：`merge` 让主智能体把所选分支合回当前分支，`discard` 清掉
+ * 工作目录与分支。`sessionIds` 引用 `superResidueList` 里的条目；`confirmToken`
+ * 必须是最近一条 `superResidueList` 下发的令牌，宿主校验不过即拒绝（二次确认）。
+ */
+| {
+    type: "superResidueHandle";
+    action: "merge" | "discard";
+    sessionIds: string[];
+    confirmToken: string;
+  }
   /** Revert a completed tool call that carried a structured diff. */
   | { type: "revertTool"; toolCallId: string }
   /**
