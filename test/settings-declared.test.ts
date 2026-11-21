@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
  * 与 `qq-settings-declared.test.ts` 的分工（采用覆盖全部项的方案 b）：
  * - QQ 专项钉住 9 个 iflow.qq.* 设置的**精确契约值**（type/default/range/enum 的具体值、
  *   文案措辞），是纵向的专项锁；
- * - 本测试钉住全部 41 个 iflow.* 设置的**结构完整性 + 双语 nls 键集合一致性 + 引用可达性**，
+ * - 本测试钉住全部 43 个 iflow.* 设置的**结构完整性 + 双语 nls 键集合一致性 + 引用可达性**，
  *   是横向的全局锁。「两份 bundle 互为翻译键集合一致」本质上是全局不变量，必须覆盖含 QQ
  *   键的整份 bundle 才真正有效，因此 QQ 项在两边都出现是可接受的冗余：两边检查的维度不同，
  *   不会因同一原因同时失效而互相掩盖。
@@ -51,6 +51,8 @@ const ALL_KEYS: string[] = [
   "iflow.language",
   "iflow.superAgent.integration",
   "iflow.superAgent.maxConcurrent",
+  "iflow.superAgent.maxAttempts",
+  "iflow.superAgent.dependencyPolicy",
   "iflow.superAgent.keepWorktree",
   "iflow.superAgent.maxWorktrees",
   "iflow.qq.enabled",

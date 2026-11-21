@@ -206,6 +206,22 @@
           "maximum": 20,
           "markdownDescription": "%iflow.configuration.superAgentMaxConcurrent.description%"
         },
+        "iflow.superAgent.maxAttempts": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 5,
+          "markdownDescription": "%iflow.configuration.superAgentMaxAttempts.description%"
+        },
+        "iflow.superAgent.dependencyPolicy": {
+          "type": "string",
+          "enum": [
+            "block",
+            "continue"
+          ],
+          "default": "block",
+          "markdownDescription": "%iflow.configuration.superAgentDependencyPolicy.description%"
+        },
         "iflow.superAgent.keepWorktree": {
           "type": "boolean",
           "default": false,
