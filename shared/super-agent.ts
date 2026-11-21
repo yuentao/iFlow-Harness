@@ -913,6 +913,29 @@ export function applySuperFailure(
   });
 }
 
+/**
+ * 失败重试决策（纯函数）：只回答「这一次失败要不要再试一次」。
+ *
+ * 规则只有一条：`failureKind === "retryable"` **且** `attempts < maxAttempts`。
+ * - `terminal`（前提失效，重试不会变好）、`blocked`（等用户回答）、
+ *   `interrupted`（用户中断 / 面板关闭）一律不自动重试 —— 阻断类必须等人，
+ *   中断类自动重跑等于没听用户的话；
+ * - `attempts` 是**已执行次数**（首次 = 1，见 {@link retrySuperSession}），
+ *   `maxAttempts` 是允许的总次数上限，等于 / 超过上限即停。
+ *
+ * 本函数刻意不碰状态机，也不产生副作用：宿主拿到 true 后再调
+ * {@link retrySuperSession} 做状态迁移；判定与执行分离，便于上层按波次 / 组
+ * 批量决策而不用真的建进程。入参非有限数（如 NaN）时 `<` 比较为 false，
+ * 自然退化为「不重试」的保守分支。
+ */
+export function shouldRetrySuperFailure(
+  failureKind: SuperFailureKind,
+  attempts: number,
+  maxAttempts: number,
+): boolean {
+  return failureKind === "retryable" && attempts < maxAttempts;
+}
+
 // ---------------------------------------------------------------------------
 // 归档（重启后恢复子会话）
 // ---------------------------------------------------------------------------
@@ -4471,19 +4494,50 @@ export function buildSuperReportPrompt(
   // 「本次给最终汇报」，否则模型照 pendingNote 压制最终正文、标记与提示词矛盾。
   // 仅该路径显式传 true；普通汇报轮（包括非 QQ 的 super-agent）逐字节不变。
   const promptPendingCount = options?.finalOverride === true ? 0 : pendingCount;
-  const lines = entries.map(({ session, report }) => {
-    const human = report.humanAction ? `\n   needs user action: ${report.humanAction}` : "";
-    const integration = session.integration
-      ? `\n   changes: ${superIntegrationLabelEn(session.integration)}${
-          session.integration.detail ? ` (${session.integration.detail})` : ""
-        }${session.integration.url ? ` ${session.integration.url}` : ""}`
-      : "";
-    return `- Child session #${session.id} "${session.title}" ${superReportLabel(report.state)}: ${report.summary}${human}${integration}`;
+  // 计数与用量复用看板同源的两个聚合函数（cancelled 单独计、不计入 failed；
+  // 成本只有在每个产生了用量的会话都能算出单价时才给数值），让主会话在第一
+  // 行就知道这一批的规模与开销，不必从逐条汇报里自己数。
+  const sessions = entries.map((entry) => entry.session);
+  const counts = summarizeSuperSessions(sessions);
+  const usage = sumSuperUsage(sessions);
+  const cost = usage.estimatedCost === null ? "" : ` · est. $${usage.estimatedCost.toFixed(4)}`;
+  const summaryLine =
+    `Batch summary: ${counts.total} total ` +
+    `(${counts.done} completed, ${counts.failed} failed, ${counts.cancelled} cancelled, ` +
+    `${counts.running} running, ${counts.awaiting} awaiting) · ` +
+    `tokens ↑${usage.input} ↓${usage.output}${cost}.`;
+
+  // 按 wave 分组渲染（没有声明波次的条目归 wave 0，见 groupSuperReportsByWave）。
+  // 中间没有条目的波次（如只有 wave 0 / wave 2）不渲染空标题，避免噪音。
+  // 每条汇报都带上 lastError.kind 简述：主会话据此判断要不要派「重试」任务，
+  // terminal / blocked / interrupted 三类不会被误当成可重试的网络抖动。
+  const waves = groupSuperReportsByWave(entries, (entry) => entry.session.wave);
+  const lines: string[] = [];
+  waves.forEach((waveEntries, wave) => {
+    if (waveEntries.length === 0) return;
+    lines.push(`Wave ${wave} (${waveEntries.length} child session(s)):`);
+    for (const { session, report } of waveEntries) {
+      const human = report.humanAction ? `\n   needs user action: ${report.humanAction}` : "";
+      const integration = session.integration
+        ? `\n   changes: ${superIntegrationLabelEn(session.integration)}${
+            session.integration.detail ? ` (${session.integration.detail})` : ""
+          }${session.integration.url ? ` ${session.integration.url}` : ""}`
+        : "";
+      const lastError = session.lastError
+        ? ` [last error: ${session.lastError.kind}${
+            session.lastError.message ? ` — ${session.lastError.message}` : ""
+          }]`
+        : "";
+      lines.push(
+        `- Child session #${session.id} "${session.title}" ${superReportLabel(report.state)}: ${report.summary}${human}${integration}${lastError}`,
+      );
+    }
   });
   const head = [
     "[子会话状态上报]",
     "Below is the final state of the child sessions as observed by the host — this is not a user message, and not something you said earlier.",
     `These are the final states of the ${entries.length} child session(s) that just finished in this batch.`,
+    summaryLine,
     ...lines,
     "",
   ];
