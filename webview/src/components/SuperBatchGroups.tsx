@@ -25,6 +25,7 @@ import type {
   SuperBoardCounts,
   SuperBoardGroup,
   SuperBoardSession,
+  SuperBoardUsage,
   SuperBoardWave,
 } from "../../../shared/super-board";
 import { ICON_INLINE, Chip, DisclosureButton } from "./ui";
@@ -49,6 +50,53 @@ function rangeText(startedAt: number | undefined, endedAt: number | undefined): 
   if (start && end) return t("{0} → {1}", start, end);
   if (start) return t("始于 {0}", start);
   return "";
+}
+
+/** 紧凑 token 计数（与 SuperAgentBoard 同口径）：1234 → 1.2K，1234567 → 1.2M。 */
+function formatBoardTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return `${k < 10 ? k.toFixed(1) : Math.round(k)}K`;
+  }
+  const m = n / 1_000_000;
+  return `${m < 10 ? m.toFixed(1) : Math.round(m)}M`;
+}
+
+/** 成本显示（与看板汇总同口径）：不足 1 美元保留 4 位小数。 */
+function formatBoardCost(usd: number): string {
+  if (usd > 0 && usd < 1) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
+/**
+ * 一层（运行组 / 波次）的 token 用量摘要。
+ *
+ * 数据来自 buildSuperBoardAggregate 已经算好的 `usage`（与 sumSuperUsage 同
+ * 口径），这里只渲染、绝不重算。没有用量时不渲染，旧数据不会多出一排 0。
+ */
+function UsageSummary({
+  usage,
+  className = "",
+}: {
+  usage: SuperBoardUsage;
+  className?: string;
+}) {
+  if (usage.input <= 0 && usage.output <= 0) return null;
+  return (
+    <span
+      className={`shrink-0 text-ui-micro tabular-nums text-muted-foreground${className ? ` ${className}` : ""}`}
+      title={t("输入 {0} · 输出 {1}", formatBoardTokens(usage.input), formatBoardTokens(usage.output))}
+    >
+      ↑{formatBoardTokens(usage.input)} ↓{formatBoardTokens(usage.output)}
+      {usage.estimatedCost !== null && (
+        <span title={t("预估费用：token 估算 × 公开单价，仅供参考")}>
+          {" "}{formatBoardCost(usage.estimatedCost)}
+        </span>
+      )}
+    </span>
+  );
 }
 
 /** 一层统计的状态 chip 簇（只为非零项渲染；三重编码：形状 + 文案 + 色调）。 */
@@ -109,6 +157,7 @@ function WaveHeader({ wave }: { wave: SuperBoardWave }) {
         <span className="tabular-nums">{wave.counts.total}</span>
       </Chip>
       <StatusChips counts={wave.counts} compact />
+      <UsageSummary usage={wave.usage} className="max-[380px]:hidden" />
       {range && (
         <span className="ml-auto shrink-0 text-ui-micro tabular-nums text-muted-foreground" title={range}>
           {range}
@@ -174,6 +223,7 @@ export function SuperBatchGroups({
                 <span className="tabular-nums">{group.counts.total}</span>
               </Chip>
               <StatusChips counts={group.counts} />
+              <UsageSummary usage={group.usage} className="max-[380px]:hidden" />
               {range && (
                 <span
                   className="ml-auto shrink-0 text-ui-micro tabular-nums text-muted-foreground max-[380px]:hidden"

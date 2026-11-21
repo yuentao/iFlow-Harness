@@ -209,6 +209,44 @@ describe("按波次视图 · 运行组与波次分层", () => {
     expect(panel().textContent).toContain("未分组");
     expect(panel().textContent).toContain("旧任务");
   });
+
+  it("组标题与波次标题渲染聚合好的 token 用量（不重算，行折叠时不重复）", () => {
+    render([
+      session({
+        id: "a",
+        title: "甲任务",
+        runId: "run-u",
+        wave: 1,
+        status: "completed",
+        createdAt: 1000,
+        endedAt: 2000,
+        tokens: { input: 1500, output: 200 },
+      }),
+      session({
+        id: "b",
+        title: "乙任务",
+        runId: "run-u",
+        wave: 2,
+        status: "completed",
+        createdAt: 1500,
+        endedAt: 2500,
+        tokens: { input: 2000, output: 400 },
+      }),
+    ]);
+    expand();
+    viewTab("按波次");
+
+    // 组默认折叠：组标题渲染组级合计（1500+2000 / 200+400）。
+    expect(panel().textContent).toContain("↑3.5K ↓600");
+
+    act(() => buttonByLabel("展开运行组 run-u").click());
+    const scope = panel();
+    // 两个波次标题各自渲染自己的用量。
+    expect(scope.textContent).toContain("↑1.5K ↓200");
+    expect(scope.textContent).toContain("↑2.0K ↓400");
+    // 行仍是折叠态，行内用量不渲染 —— 波次用量只出现一次。
+    expect((scope.textContent ?? "").split("↑1.5K").length - 1).toBe(1);
+  });
 });
 
 describe("诊断视图 · 跨子会话时间线", () => {
@@ -246,6 +284,8 @@ describe("诊断视图 · 跨子会话时间线", () => {
     expect(scope.textContent).toContain("错误");
     expect(scope.textContent).toContain("警告");
     expect(scope.textContent).toContain("最近错误：网关 503");
+    // 归档指纹只纳入终态错误，diagnostics 不进指纹：如实提示可能滞后。
+    expect(scope.textContent).toContain("诊断事件可能滞后于最后一次归档写入");
   });
 
   it("无诊断事件时给出空态文案，而不是空白或 undefined", () => {

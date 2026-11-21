@@ -1288,6 +1288,59 @@ const en: Record<string, string> = {
   "上下文": "Context",
   "集成": "Integration",
   "审批": "Approval",
+  // 看板：清理确认 / 残留分支 / 判定卡死 / 最近活动 / 集成结果
+  "冲突": "Conflict",
+  "移除超流体「{0}」的看板记录？它的工作目录与分支之前已经清理过，这次只删除记录。":
+    "Remove the board record for child session “{0}”? Its worktree and branch were already cleaned up; this only removes the record.",
+  "移除超流体「{0}」的看板记录？它直接跑在主工作区（没有独立工作目录与分支），清理不会删除主仓里的任何文件。":
+    "Remove the board record for child session “{0}”? It ran directly in the main workspace (no separate worktree or branch); cleanup will not delete any files in the main repo.",
+  "删除超流体「{0}」的独立目录？它只有目录隔离、没有分支，目录里的全部内容会被删掉，无法恢复。":
+    "Delete the standalone directory of child session “{0}”? It has directory isolation only and no branch; everything inside will be deleted and cannot be recovered.",
+  "删除超流体「{0}」的工作目录？工作目录里有未提交的改动时会被拒绝清理（请先提交或丢弃）；分支上还有未合并的提交时只删工作目录、保留分支，已合并或没有提交时分支一并删除。":
+    "Delete the worktree of child session “{0}”? Cleanup is refused while the worktree has uncommitted changes (commit or discard them first); if the branch still has unmerged commits only the worktree is deleted and the branch is kept, otherwise the branch is deleted too.",
+  "删除 {0} 个 git 工作目录：有未提交的改动时会被拒绝清理；分支上还有未合并的提交时只删目录、保留分支，已合并或没有提交时分支一并删除":
+    "Delete {0} git worktree(s): cleanup is refused when a worktree has uncommitted changes; a branch with unmerged commits is kept while only its worktree is deleted, otherwise the branch is deleted too",
+  "删除 {0} 个只有目录隔离的独立目录：它们没有分支，目录内容会全部删除":
+    "Delete {0} standalone director(ies) with directory isolation only: they have no branch and their contents will be deleted",
+  "将清理 {0} 个超流体：{1}。": "About to clean up {0} child session(s): {1}.",
+  "活动未知": "Activity unknown",
+  "最近活动 {0} 前": "Last activity {0} ago",
+  "判定卡死": "Mark as stuck",
+  "判定「{0}」卡死？这会先记一条「用户判定超时」诊断，再像中断一样停止它；本次改动不会提交或合并，工作目录里已有的内容会保留，之后可以重试。":
+    "Mark “{0}” as stuck? This first records a “user-declared timeout” diagnostic, then stops it like an interrupt; this run's changes are neither committed nor merged, and whatever is already in the worktree is kept so you can retry later.",
+  "判定卡死并中断": "Mark as stuck and interrupt",
+  "合并残留分支": "Merge leftover branch",
+  "让智能体把残留分支 {0} 合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。":
+    "Let the agent merge leftover branch {0} into the current branch? It will perform the merge and handle conflicts itself; your current working branch will be modified.",
+  "丢弃残留分支": "Discard leftover branch",
+  "丢弃「{0}」的残留分支 {1}？工作目录会被删除；若分支上还有未合并的提交，git 分支会被保留以便事后审查。此操作不可撤销。":
+    "Discard leftover branch {1} of “{0}”? Its worktree will be deleted; if the branch still has unmerged commits, the git branch is kept for later review. This cannot be undone.",
+  "丢弃": "Discard",
+  "已静默 {0}，可能卡住，可随时中断（最近：{1}）":
+    "Silent for {0} — it may be stuck; you can interrupt it at any time (latest: {1})",
+  "已静默 {0}，可能卡住，可随时中断":
+    "Silent for {0} — it may be stuck; you can interrupt it at any time",
+  "距最近一次诊断或进度更新的时间（最近：{0}）":
+    "Time since the last diagnostic event or progress update (latest: {0})",
+  "距最近一次诊断或进度更新的时间":
+    "Time since the last diagnostic event or progress update",
+  "残留分支清单": "Leftover branches",
+  "{0} 个待处置分支": "{0} branch(es) to handle",
+  "{0} 个待处置": "{0} to handle",
+  "这些分支来自已中断或放弃的超流体，改动尚未并入当前分支":
+    "These branches come from interrupted or abandoned child sessions; their changes are not merged into the current branch yet",
+  "合并残留分支 {0}": "Merge leftover branch {0}",
+  "合并": "Merge",
+  "丢弃残留分支 {0}": "Discard leftover branch {0}",
+  "中断中": "Interrupting",
+  "这个超流体没有产生改动，不需要合并":
+    "This child session produced no changes; no merge is needed",
+  "改动已经提到 PR，请打开 PR 处理合并":
+    "The changes are in a PR — open the PR to handle the merge",
+  "已运行时长": "Elapsed",
+  "打开 PR": "Open PR",
+  "诊断事件可能滞后于最后一次归档写入":
+    "Diagnostic events may lag behind the last archived write",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {
