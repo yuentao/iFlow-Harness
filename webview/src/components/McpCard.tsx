@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { ChevronRight, MoreHorizontal, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
+import { ChevronRight, ExternalLink, MoreHorizontal, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { useChat } from "../store";
 import { entriesToServers, sameMcpServers, serversToEntries, type McpEntry } from "./mcp-servers";
 import { MCP_CATALOG, buildCatalogConfig, catalogFieldLabel } from "../../../shared/mcp-catalog";
+import {
+  MCP_CONTEXT_HINT,
+  MCP_CONTEXT_TOKENS_WARN,
+  MCP_SCHEMA_OMITTED_HINT,
+  diagnoseMcpServer,
+} from "../../../shared/mcp-diagnosis";
 import { t } from "../i18n";
 import { ActionRow, Button, Chip, ConfirmDialog, Dropdown, Field, Hint, ICON_INLINE, IconButton, Segmented, SettingsGroup, SettingsRow, TextArea, TextInput, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
@@ -205,6 +211,21 @@ function transportOf(config: unknown): string {
 /** Compact token count (1234 → "1.2k") for the context-length chip. */
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
+}
+
+/** Catalog grouping order — the most useful families first. Chinese source
+ * labels are translated through the webview dictionary. */
+const MCP_CATEGORY_ORDER = ["core", "browser", "workflow"] as const;
+type McpCategory = (typeof MCP_CATEGORY_ORDER)[number];
+const MCP_CATEGORY_LABEL: Record<McpCategory, string> = {
+  core: "核心",
+  browser: "浏览器",
+  workflow: "工作流",
+};
+
+/** True when at least one tool's declaration was dropped over the JSON budget. */
+function hasOmittedSchema(view: { tools?: McpToolView[] } | undefined): boolean {
+  return Boolean(view?.tools?.some((tool) => tool.schemaOmitted === true));
 }
 
 /** Connection label per server, shared by the list dot and the detail view.
@@ -586,40 +607,58 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           )}
 
           {catalogBrowse && catalogForm === null ? (
-            <div className="mt-2 space-y-2">
-              {MCP_CATALOG.map((template) => {
-                const transport =
-                  template.transport === "url"
-                    ? template.url ?? ""
-                    : [template.command ?? "", ...(template.args ?? [])].filter(Boolean).join(" ");
+            <div className="mt-2 space-y-3">
+              {MCP_CATEGORY_ORDER.map((category) => {
+                const templates = MCP_CATALOG.filter((template) => template.category === category);
+                if (templates.length === 0) return null;
                 return (
-                  <div key={template.id} className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card">
-                    <div className="flex items-center gap-1.5">
-                      <span className="min-w-0 flex-1 truncate text-ui-body font-semibold text-foreground">
-                        {template.title}
-                      </span>
-                      <IconButton
-                        icon={<Plus className={ICON_INLINE} />}
-                        label={t("安装")}
-                        size="sm"
-                        disabled={saving}
-                        onClick={() => {
-                          setCatalogForm({ entryId: template.id, values: {}, name: template.name });
-                          setEditError(null);
-                        }}
-                      />
-                    </div>
-                    {template.description && (
-                      <div className="truncate text-ui-label text-muted-foreground">{template.description}</div>
-                    )}
-                    <div className="mt-1 truncate font-mono text-ui-caption text-muted-foreground/80" title={transport}>
-                      {transport}
-                    </div>
-                    {template.docsUrl && (
-                      <div className="mt-1 truncate font-mono text-ui-caption text-muted-foreground/60" title={t("官方文档")}>
-                        {template.docsUrl}
-                      </div>
-                    )}
+                  <div key={category} className="space-y-2">
+                    <div className="text-ui-label font-semibold text-foreground">{t(MCP_CATEGORY_LABEL[category])}</div>
+                    {templates.map((template) => {
+                      const transport =
+                        template.transport === "url"
+                          ? template.url ?? ""
+                          : [template.command ?? "", ...(template.args ?? [])].filter(Boolean).join(" ");
+                      const docsUrl = template.docsUrl;
+                      return (
+                        <div key={template.id} className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card">
+                          <div className="flex items-center gap-1.5">
+                            <span className="min-w-0 flex-1 truncate text-ui-body font-semibold text-foreground">
+                              {template.title}
+                            </span>
+                            {template.recommended && <Chip tone="primary">{t("推荐")}</Chip>}
+                            <IconButton
+                              icon={<Plus className={ICON_INLINE} />}
+                              label={t("安装")}
+                              size="sm"
+                              disabled={saving}
+                              onClick={() => {
+                                setCatalogForm({ entryId: template.id, values: {}, name: template.name });
+                                setEditError(null);
+                              }}
+                            />
+                          </div>
+                          {template.description && (
+                            <div className="truncate text-ui-label text-muted-foreground">{template.description}</div>
+                          )}
+                          <div className="mt-1 truncate font-mono text-ui-caption text-muted-foreground/80" title={transport}>
+                            {transport}
+                          </div>
+                          {docsUrl && (
+                            <div className="mt-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                icon={<ExternalLink className={ICON_INLINE} />}
+                                onClick={() => send({ type: "openExternal", uri: docsUrl })}
+                              >
+                                {t("官方文档")}
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 );
               })}
@@ -692,14 +731,25 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                           </Chip>
                         );
                       })()}
-                      {view?.contextTokens !== undefined && (
-                        <span
-                          className="ml-1 shrink-0 text-ui-label font-mono text-muted-foreground"
-                          title={t("这些工具说明会在超流体中占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
-                        >
-                          ≈{fmtTokens(view.contextTokens)}
-                        </span>
-                      )}
+                      {view?.contextTokens !== undefined && (() => {
+                        const tokensTitle = t("这些工具说明会在超流体中占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens));
+                        const connectedInChild = view.childConnected === true || view.status === "connected";
+                        if (connectedInChild && view.contextTokens >= MCP_CONTEXT_TOKENS_WARN) {
+                          return (
+                            <Chip tone="warning" className="ml-1 font-mono" title={t(MCP_CONTEXT_HINT)}>
+                              ≈{fmtTokens(view.contextTokens)}
+                            </Chip>
+                          );
+                        }
+                        return (
+                          <span
+                            className="ml-1 shrink-0 text-ui-label font-mono text-muted-foreground"
+                            title={tokensTitle}
+                          >
+                            ≈{fmtTokens(view.contextTokens)}
+                          </span>
+                        );
+                      })()}
                       <IconButton
                         icon={<ChevronRight className={ICON_INLINE} />}
                         label={t("详情")}
@@ -787,6 +837,16 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             })();
             const tools: McpToolView[] = view?.tools ?? [];
             const prompts: McpPromptView[] = view?.prompts ?? [];
+            const diag = view
+              ? diagnoseMcpServer({
+                  status: view.status,
+                  errorKind: view.errorKind,
+                  error: view.error,
+                  toolCount: view.toolCount,
+                  schemaOmitted: hasOmittedSchema(view),
+                  contextTokens: view.contextTokens,
+                })
+              : null;
             return (
               <div className="space-y-2">
                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -834,11 +894,47 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }}
                   />
                 </div>
+                {hasOmittedSchema(view) && (
+                  <div className="rounded-lg border border-warning/50 bg-warning/10 px-2 py-1.5 text-ui-label text-warning">
+                    {t(MCP_SCHEMA_OMITTED_HINT)}
+                  </div>
+                )}
                 {view?.error && (
                   <div className="rounded-lg border border-destructive/50 bg-destructive/8 px-2 py-1.5 text-ui-label text-destructive" title={view.error}>
-                    {view.childConnected === false ? t("超流体连接失败：") : t("连接失败：")}
-                    <span className="font-mono">{view.error}</span>
-                    {view.errorKind ? ` (${view.errorKind})` : ""}
+                    <div>
+                      {view.childConnected === false ? t("超流体连接失败：") : t("连接失败：")}
+                      <span className="font-mono">{view.error}</span>
+                      {view.errorKind ? ` (${view.errorKind})` : ""}
+                    </div>
+                    {diag?.hint && <div className="mt-1 text-ui-label text-destructive/90">{t(diag.hint)}</div>}
+                    {diag?.action && (
+                      <div className="mt-1.5">
+                        {diag.action === "refresh" ? (
+                          <Button
+                            variant="danger-soft"
+                            size="sm"
+                            icon={<RefreshCw className={ICON_INLINE} />}
+                            onClick={refresh}
+                          >
+                            {t("刷新")}
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="danger-soft"
+                            size="sm"
+                            icon={<Pencil className={ICON_INLINE} />}
+                            onClick={() => {
+                              setEditing(detail);
+                              setDetail(null);
+                              setIsNew(false);
+                              setEditError(null);
+                            }}
+                          >
+                            {t("修改配置")}
+                          </Button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
                 {transport && (

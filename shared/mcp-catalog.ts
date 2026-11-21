@@ -31,6 +31,10 @@ export interface McpCatalogEntry {
   /** Brand name — locale-neutral, never translated. */
   title: string;
   category: "browser" | "core" | "workflow";
+  /** Marked in the catalog with a 「推荐」 chip — the entries most users want
+   * first (filesystem access, browser automation). Advisory only: it never
+   * changes install behavior. */
+  recommended?: boolean;
   /** Chinese source string for the row description. */
   description: string;
   docsUrl?: string;
@@ -52,6 +56,7 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
     name: "filesystem",
     title: "Filesystem",
     category: "core",
+    recommended: true,
     description: "让智能体在你指定的本机目录里读写、搜索文件",
     docsUrl: "https://github.com/modelcontextprotocol/servers",
     transport: "stdio",
@@ -71,6 +76,7 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
     name: "playwright",
     title: "Playwright",
     category: "browser",
+    recommended: true,
     description: "浏览器自动化：打开页面、点击、截图，改完前端立刻看效果",
     docsUrl: "https://github.com/microsoft/playwright-mcp",
     transport: "stdio",
