@@ -2868,10 +2868,16 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 批次1B `superResidueHandle`：一次性 `confirmToken` 校验后逐条转发给宿主
-   * 的一键合并/丢弃 handler。校验不过一律拒绝（旧令牌 / 未请求过清单）；
-   * 丢弃的二次确认令牌与「未提交改动 / git 中间态硬拒绝」纪律完全交给宿主的
-   * `handleSuperResidueAction`，这里不重写任何业务逻辑。
+   * 批次1B `superResidueHandle`：一次性 `confirmToken` 校验后批量处置。
+   *
+   * - `merge`：逐条转发给宿主的 `handleSuperResidueAction`（每条派一个合并
+   *   子会话，顺序执行）。
+   * - `discard`：把选中的条目聚合成**一次** `handleSuperResidueDiscardBatch`
+   *   —— 逐条调用会让每次丢弃确认取消上一次待确认请求，批量时只有最后一项
+   *   能弹出确认框、其余被静默取消。
+   *
+   * 校验不过一律拒绝（旧令牌 / 未请求过清单）；丢弃的二次确认令牌与「未提交
+   * 改动 / git 中间态硬拒绝」纪律完全交给宿主的 handler，这里不重写业务逻辑。
    */
   private async handleSuperResidueHandle(msg: Extract<WebviewToHost, { type: "superResidueHandle" }>): Promise<void> {
     if (!this.superResidueListToken || msg.confirmToken !== this.superResidueListToken) {
@@ -2881,12 +2887,17 @@ export class ChatPanel implements vscode.Disposable {
     }
     // 一次性：无论本次转发结果如何都立即作废，旧令牌不可复用。
     this.superResidueListToken = null;
-    const keys = this.superResidueListKeys;
+    const keyMap = this.superResidueListKeys;
     this.superResidueListKeys = new Map();
     const ids = Array.isArray(msg.sessionIds) ? msg.sessionIds : [];
-    for (const uiSessionId of ids) {
-      const key = keys.get(uiSessionId) ?? uiSessionId;
-      await this.superHost.handleSuperResidueAction({ key, action: msg.action });
+    const keys = ids.map((uiSessionId) => keyMap.get(uiSessionId) ?? uiSessionId);
+    if (keys.length === 0) return;
+    if (msg.action === "discard") {
+      await this.superHost.handleSuperResidueDiscardBatch({ keys });
+      return;
+    }
+    for (const key of keys) {
+      await this.superHost.handleSuperResidueAction({ key, action: "merge" });
     }
   }
 

@@ -508,6 +508,46 @@ describe("批次2A · 残留二次确认令牌与 urgent 写", () => {
     expect(discarded).toEqual([ITEM.key]);
   });
 
+  it("批量丢弃聚合成一次确认：未确认不删，确认后逐条执行", async () => {
+    const ITEM2: SuperResidueItem = {
+      ...ITEM,
+      key: "/tmp/wt-2",
+      path: "/tmp/wt-2",
+      branch: "iflow/super/legacy-y",
+    };
+    const discarded: string[] = [];
+    const managerStub = {
+      listResidueItems: async () => [ITEM, ITEM2],
+      discardResidueItem: async (item: SuperResidueItem) => {
+        discarded.push(item.key);
+        return { ok: true };
+      },
+    };
+    const { host, deps } = makeHostHarness();
+    (deps as unknown as Record<string, unknown>).getSuperAgent = () => managerStub;
+
+    const first = await host.handleSuperResidueDiscardBatch({ keys: [ITEM.key, ITEM2.key] });
+    expect(first.ok).toBe(false);
+    expect(first.token).toMatch(/^super-residue-discard-/);
+    expect(discarded).toHaveLength(0); // 只有一次确认框，未确认不删任何条目
+
+    host.handleSuperResidueConfirmResponse(first.token!, true);
+    await settle(20);
+    expect(discarded).toEqual([ITEM.key, ITEM2.key]);
+  });
+
+  it("批量丢弃忽略已不存在的 key，全部不存在时直接拒绝", async () => {
+    const managerStub = {
+      listResidueItems: async () => [ITEM],
+      discardResidueItem: async () => ({ ok: true }),
+    };
+    const { host, deps } = makeHostHarness();
+    (deps as unknown as Record<string, unknown>).getSuperAgent = () => managerStub;
+    const result = await host.handleSuperResidueDiscardBatch({ keys: ["/tmp/gone"] });
+    expect(result.ok).toBe(false);
+    expect(result.token).toBeUndefined();
+  });
+
   it("urgent 写关键指纹：终态 / 失败分类 / 集成变化才触发强制落盘", () => {
     const { host } = makeHostHarness();
     const base = SETTLED_SESSION();

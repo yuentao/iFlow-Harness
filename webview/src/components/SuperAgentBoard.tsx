@@ -23,6 +23,7 @@ import {
   Hourglass,
   Info,
   Loader2,
+  RefreshCw,
   RotateCcw,
   ShieldOff,
   Square,
@@ -30,7 +31,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import type { Block } from "../../../shared/messages";
+import type { Block, SuperResidueBranchUi } from "../../../shared/messages";
 import { findQqTaskForSuperSession } from "../../../shared/qq-task";
 import { maskQqOpenId } from "../../../shared/qq-access";
 import type {
@@ -73,6 +74,7 @@ import { SuperDiagnosticTimeline } from "./SuperDiagnosticTimeline";
 import { BlockView } from "./MessageList";
 import {
   Button,
+  Checkbox,
   Chip,
   ConfirmDialog,
   CountdownBar,
@@ -606,23 +608,6 @@ function isActive(session: SuperSessionUi): boolean {
  */
 function holdsWorktree(isolation: SuperIsolation): boolean {
   return isolation.kind !== "repo" && !isolation.released;
-}
-
-/**
- * 一条「残留分支」记录：已中断 / 放弃的子会话，分支还在磁盘 / git 里，
- * 但改动没有成功并入当前分支 —— 需要人决定「合并」还是「丢弃」。
- *
- * 判定只用真实存在的 SuperSessionUi 字段，不依赖任何尚不存在的 residue
- * 消息或字段：终态、git worktree 档、分支名存在、且未成功合并（merged /
- * pr_created 视为已落地；not_needed 表示本就没提交，无需处置）。
- */
-function isResidualSuperBranch(session: SuperSessionUi): boolean {
-  if (!isTerminalSuperStatus(session.status)) return false;
-  if (session.isolation.kind !== "git_worktree") return false;
-  if (!session.isolation.branch) return false;
-  const state = session.integration?.state;
-  if (state === "merged" || state === "pr_created" || state === "not_needed") return false;
-  return true;
 }
 
 /**
@@ -1307,12 +1292,9 @@ export function SuperAgentBoard({
     () => worktreeSessions.filter((s) => isTerminalSuperStatus(s.status)),
     [worktreeSessions],
   );
-  // 残留分支清单：已中断 / 放弃、分支还在但改动未落地的子会话。清单在
-  // 「诊断」视图顶部给出一键「合并 / 丢弃」，让人不必逐行翻找。数据完全从
-  // 现有 superSessions 派生，无需宿主新增推送消息。
-  const residueSessions = useMemo(() => list.filter(isResidualSuperBranch), [list]);
-  const [confirmResidueMerge, setConfirmResidueMerge] = useState<SuperSessionUi | null>(null);
-  const [confirmResidueDiscard, setConfirmResidueDiscard] = useState<SuperSessionUi | null>(null);
+  // 残留分支清单（「诊断」视图顶部）：数据来自宿主的新协议
+  // （requestSuperResidueList ↔ superResidueList），跨历史会话的完整清单
+  // 由宿主枚举；SuperResidueList 自己负责请求、多选与批量处置。
   // Live-region text: announce CHANGES, not the whole board. On mount there
   // is nothing to announce (the rows are right there to be read), and a
   // change-only feed keeps the board's own text free of a second copy of
@@ -1687,10 +1669,10 @@ export function SuperAgentBoard({
                     {t("诊断事件可能滞后于最后一次归档写入")}
                   </Hint>
                   <SuperResidueList
-                    sessions={residueSessions}
-                    now={now}
-                    onMerge={setConfirmResidueMerge}
-                    onDiscard={setConfirmResidueDiscard}
+                    onMergeStarted={(ids) => {
+                      for (const id of ids) beginMerge(id, undefined);
+                    }}
+                    onDiscardStarted={beginCleanup}
                   />
                   <SuperDiagnosticTimeline
                     entries={diagnosticTimeline}
@@ -1908,49 +1890,6 @@ export function SuperAgentBoard({
           onCancel={() => setConfirmCleanupAll(null)}
         />
       )}
-      {/* 残留分支的一键处置：合并 / 丢弃都先二次确认。合并是推进（primary），
-          丢弃是破坏性清理（danger）。二者复用宿主既有的 superAgent 通道。 */}
-      {confirmResidueMerge && (
-        <ConfirmDialog
-          title={t("合并残留分支")}
-          message={t(
-            "让智能体把残留分支 {0} 合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。",
-            confirmResidueMerge.isolation.branch ?? confirmResidueMerge.title,
-          )}
-          actions={[
-            {
-              label: t("让智能体合并分支"),
-              variant: "primary",
-              onClick: () => {
-                beginMerge(confirmResidueMerge.id, confirmResidueMerge.integration?.at);
-                send({ type: "superAgent", action: "merge", sessionId: confirmResidueMerge.id });
-                setConfirmResidueMerge(null);
-              },
-            },
-          ]}
-          onCancel={() => setConfirmResidueMerge(null)}
-        />
-      )}
-      {confirmResidueDiscard && (
-        <ConfirmDialog
-          title={t("丢弃残留分支")}
-          message={t(
-            "丢弃「{0}」的残留分支 {1}？工作目录会被删除；若分支上还有未合并的提交，git 分支会被保留以便事后审查。此操作不可撤销。",
-            confirmResidueDiscard.title,
-            confirmResidueDiscard.isolation.branch ?? "",
-          )}
-          confirmLabel={t("丢弃")}
-          onConfirm={() => {
-            // 单分支丢弃没有独立的「确认令牌」消息：ConfirmDialog 本身就是
-            // 二次确认，回包走既有的 superAgent/cleanup（keepBranch 缺省，
-            // 由宿主按「有未合并提交则保留分支」的规则处理）。
-            send({ type: "superAgent", action: "cleanup", sessionId: confirmResidueDiscard.id });
-            beginCleanup([confirmResidueDiscard.id]);
-            setConfirmResidueDiscard(null);
-          }}
-          onCancel={() => setConfirmResidueDiscard(null)}
-        />
-      )}
     </>
   );
 }
@@ -2004,71 +1943,184 @@ function RecentActivity({ session, now }: { session: SuperBoardSession; now: num
   );
 }
 
+/** 空清单常量：避免每次渲染新建数组，让 `branches` 依赖保持稳定。 */
+const EMPTY_RESIDUE_BRANCHES: readonly SuperResidueBranchUi[] = [];
+
 /**
- * 诊断视图顶部的「残留分支」清单。
+ * 诊断视图顶部的「残留分支」清单（宿主新协议）。
  *
- * 列出已中断 / 放弃、分支还在但改动未落地的子会话，每条给「合并 / 丢弃」
- * 两个动作。合并走宿主既有的 superAgent/merge（派合并子会话），丢弃走
- * superAgent/cleanup（删工作目录、保留有未合并提交的分支）——二者都在下面
- * 经 ConfirmDialog 二次确认后才发送。空列表不渲染，不给看板添噪音。
+ * 数据来源是宿主枚举的完整残留清单（`requestSuperResidueList` 请求、
+ * `superResidueList` 回包，按 `requestId` 配对），跨历史会话、含孤儿分支，
+ * webview 不再从 `superSessions` 本地聚合。多选后「合并选中 / 丢弃选中」
+ * 批量处置：合并走宿主既有的合并子会话通道，丢弃先经本组件的 ConfirmDialog
+ * 再交给宿主的一次性 `confirmToken` 校验（宿主随后还会弹自己的确认框作为
+ * 硬性前置）。单条行的「合并 / 丢弃」复用同一通道（单元素 `sessionIds`）。
  *
- * 注明：新协议 superResidueList / requestSuperResidueList / superResidueHandle
- * 三层齐备但当前 webview 不消费，是为批量令牌化场景保留的；这里仍走 superAgent
- * 的 cleanup / merge 旧协议，两套并存、功能等价，勿因「没用到」就删除其一。
+ * 令牌是一次性的：每次 `superResidueHandle` 后 store 会立即换发新清单，
+ * 保证紧接着的操作不会拿着死令牌被宿主拒绝；令牌缺失时如实提示并重新请求。
  */
 function SuperResidueList({
-  sessions,
-  now,
-  onMerge,
-  onDiscard,
+  onMergeStarted,
+  onDiscardStarted,
 }: {
-  sessions: readonly SuperBoardSession[];
-  now: number;
-  onMerge: (session: SuperBoardSession) => void;
-  onDiscard: (session: SuperBoardSession) => void;
+  onMergeStarted: (ids: string[]) => void;
+  onDiscardStarted: (ids: string[]) => void;
 }) {
-  if (sessions.length === 0) return null;
+  const list = useChat((s) => s.superResidueList);
+  const loading = useChat((s) => s.superResidueLoading);
+  const requestList = useChat((s) => s.requestSuperResidueList);
+  const handleAction = useChat((s) => s.handleSuperResidueAction);
+  const branches = list?.branches ?? EMPTY_RESIDUE_BRANCHES;
+  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
+  const [confirm, setConfirm] = useState<{ action: "merge" | "discard"; ids: string[] } | null>(
+    null,
+  );
+
+  // 诊断视图挂载即请求一次清单（组件只在 diagnostics tab 渲染）。
+  useEffect(() => {
+    requestList();
+  }, [requestList]);
+
+  // 清单刷新后（处置完成 / 宿主重新枚举）把已不存在的条目从选择里清掉。
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const present = new Set(branches.map((branch) => branch.sessionId));
+      const next = new Set<string>();
+      let changed = false;
+      for (const id of prev) {
+        if (present.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [branches]);
+
+  const allSelected = branches.length > 0 && selected.size === branches.length;
+
+  const toggleAll = (checked: boolean): void => {
+    setSelected(checked ? new Set(branches.map((branch) => branch.sessionId)) : new Set());
+  };
+
+  const toggleOne = (id: string, checked: boolean): void => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const runConfirmed = (): void => {
+    if (!confirm) return;
+    const ids = confirm.ids;
+    if (confirm.action === "merge") onMergeStarted(ids);
+    else onDiscardStarted(ids);
+    handleAction(confirm.action, ids);
+    setSelected(new Set());
+    setConfirm(null);
+  };
+
+  // 空清单：加载中给一行占位，否则完全不渲染（不给看板添噪音）。
+  if (branches.length === 0) {
+    if (!loading) return null;
+    return (
+      <div
+        className="mb-2 flex items-center gap-2 rounded-sm border border-border/50 px-2 py-1.5 text-ui-micro text-muted-foreground"
+        aria-busy="true"
+      >
+        <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
+        {t("正在获取残留分支…")}
+      </div>
+    );
+  }
+
   return (
     <section className="mb-2 rounded-sm border border-warning/30 bg-warning/5" aria-label={t("残留分支清单")}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-warning/20 px-2 py-1.5">
         <GitBranch className={`${ICON_INLINE} text-warning`} aria-hidden="true" />
-        <span className="text-ui-label font-medium text-foreground">
-          {t("残留分支清单")}
-        </span>
-        <Chip tone="warning" title={t("{0} 个待处置分支", sessions.length)}>
-          {t("{0} 个待处置", sessions.length)}
+        <span className="text-ui-label font-medium text-foreground">{t("残留分支清单")}</span>
+        <Chip tone="warning" title={t("{0} 个待处置分支", branches.length)}>
+          {t("{0} 个待处置", branches.length)}
         </Chip>
         <span className="text-ui-micro text-muted-foreground">
           {t("这些分支来自已中断或放弃的超流体，改动尚未并入当前分支")}
         </span>
+        <span className="ml-auto flex items-center gap-1">
+          <IconButton
+            label={t("刷新残留清单")}
+            size="sm"
+            disabled={loading}
+            icon={<RefreshCw className={`${ICON_INLINE}${loading ? " animate-spin" : ""}`} />}
+            onClick={() => requestList()}
+          />
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-warning/20 px-2 py-1.5">
+        <Checkbox checked={allSelected} onChange={toggleAll} label={t("全选")} />
+        <Button
+          variant="secondary"
+          size="sm"
+          icon={<GitMerge className={ICON_INLINE} />}
+          disabled={selected.size === 0}
+          onClick={() => setConfirm({ action: "merge", ids: [...selected] })}
+        >
+          {t("合并选中（{0}）", selected.size)}
+        </Button>
+        <Button
+          variant="danger-soft"
+          size="sm"
+          icon={<Trash2 className={ICON_INLINE} />}
+          disabled={selected.size === 0}
+          onClick={() => setConfirm({ action: "discard", ids: [...selected] })}
+        >
+          {t("丢弃选中（{0}）", selected.size)}
+        </Button>
       </div>
       <ul className="divide-y divide-border/40">
-        {sessions.map((session) => {
-          const activity = recentActivityText(session, now);
-          const issue = collapsedIntegrationIssue(session);
+        {branches.map((branch) => {
+          const name = branch.title || branch.branch || branch.sessionId;
+          const checked = selected.has(branch.sessionId);
           return (
-            <li key={session.id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5">
+            <li
+              key={branch.sessionId}
+              className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5"
+            >
+              <Checkbox
+                checked={checked}
+                onChange={(value) => toggleOne(branch.sessionId, value)}
+                ariaLabel={t("选择残留分支 {0}", name)}
+                title={name}
+              />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-ui-label font-medium text-foreground" title={session.title}>
-                  {session.title}
+                <span
+                  className="block truncate text-ui-label font-medium text-foreground"
+                  title={name}
+                >
+                  {name}
                 </span>
                 <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-ui-micro text-muted-foreground">
-                  {session.isolation.branch && (
-                    <span className="inline-flex items-center gap-1 font-mono" title={session.isolation.branch}>
+                  {branch.branch && (
+                    <span
+                      className="inline-flex items-center gap-1 font-mono"
+                      title={branch.branch}
+                    >
                       <GitBranch className={ICON_INLINE} aria-hidden="true" />
-                      {shortBranch(session.isolation.branch)}
+                      {shortBranch(branch.branch)}
                     </span>
                   )}
-                  <span data-super-residue-activity={session.id}>{activity.text}</span>
-                  {issue && <span className={issue.tone === "danger" ? "text-destructive" : "text-warning"}>{issue.label}</span>}
+                  {branch.unmerged && <Chip tone="warning">{t("未合并")}</Chip>}
+                  {!branch.worktreeExists && (
+                    <span className="text-warning">{t("工作目录已不存在")}</span>
+                  )}
                 </span>
               </span>
               <Button
                 variant="secondary"
                 size="sm"
                 icon={<GitMerge className={ICON_INLINE} />}
-                aria-label={t("合并残留分支 {0}", session.title)}
-                onClick={() => onMerge(session)}
+                aria-label={t("合并残留分支 {0}", name)}
+                onClick={() => setConfirm({ action: "merge", ids: [branch.sessionId] })}
               >
                 {t("合并")}
               </Button>
@@ -2076,8 +2128,8 @@ function SuperResidueList({
                 variant="danger-soft"
                 size="sm"
                 icon={<Trash2 className={ICON_INLINE} />}
-                aria-label={t("丢弃残留分支 {0}", session.title)}
-                onClick={() => onDiscard(session)}
+                aria-label={t("丢弃残留分支 {0}", name)}
+                onClick={() => setConfirm({ action: "discard", ids: [branch.sessionId] })}
               >
                 {t("丢弃")}
               </Button>
@@ -2085,6 +2137,30 @@ function SuperResidueList({
           );
         })}
       </ul>
+      {confirm && (
+        <ConfirmDialog
+          title={confirm.action === "merge" ? t("合并残留分支") : t("丢弃残留分支")}
+          message={
+            confirm.action === "merge"
+              ? t(
+                  "让智能体把选中的 {0} 个分支合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。",
+                  confirm.ids.length,
+                )
+              : t(
+                  "丢弃选中的 {0} 项残留？工作目录会被删除；若分支上还有未合并的提交，git 分支会被保留以便事后审查。此操作不可撤销。",
+                  confirm.ids.length,
+                )
+          }
+          {...(confirm.action === "merge"
+            ? {
+                actions: [
+                  { label: t("让智能体合并分支"), variant: "primary" as const, onClick: runConfirmed },
+                ],
+              }
+            : { confirmLabel: t("丢弃"), onConfirm: runConfirmed })}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
     </section>
   );
 }

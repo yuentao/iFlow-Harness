@@ -30,13 +30,23 @@ const item: SuperResidueItem = {
   inProgress: false,
 };
 
-function makeHarness() {
+const item2: SuperResidueItem = {
+  ...item,
+  key: "J:\\repo-super-worktrees\\demo-cd34",
+  path: "J:\\repo-super-worktrees\\demo-cd34",
+  branch: "iflow/super/demo-cd34",
+  sessionId: "child-2",
+  title: "demo2",
+};
+
+function makeHarness(items: SuperResidueItem[] = [item]) {
   const posted: HostToWebview[] = [];
   const host = {
     retrySuperWave: vi.fn(async (_input: { runId?: string; wave: number }) => {}),
     retrySuperFailed: vi.fn(async (_input: { runId?: string }) => {}),
-    listSuperResidue: vi.fn(async (): Promise<SuperResidueItem[]> => [item]),
+    listSuperResidue: vi.fn(async (): Promise<SuperResidueItem[]> => items),
     handleSuperResidueAction: vi.fn(async (_input: { key: string; action: "merge" | "discard" }) => ({ ok: true })),
+    handleSuperResidueDiscardBatch: vi.fn(async (_input: { keys: string[] }) => ({ ok: false, token: "tok" })),
   };
   const panel = Object.create(ChatPanel.prototype) as unknown as PanelInternals;
   panel._superHost = host;
@@ -113,5 +123,38 @@ describe("补齐 panel 消息路由 · Super Agent 新消息", () => {
     await route(handle);
     await route(handle);
     expect(host.handleSuperResidueAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("superResidueHandle 批量合并：逐个把 UI sessionId 翻译成宿主键并转发", async () => {
+    const { host, posted, route } = makeHarness([item, item2]);
+    await route({ type: "requestSuperResidueList", requestId: "req-1" });
+    const token = (posted[0] as Extract<HostToWebview, { type: "superResidueList" }>).confirmToken;
+    await route({
+      type: "superResidueHandle",
+      action: "merge",
+      sessionIds: ["child-1", "child-2"],
+      confirmToken: token,
+    });
+    expect(host.handleSuperResidueAction).toHaveBeenCalledTimes(2);
+    expect(host.handleSuperResidueAction).toHaveBeenNthCalledWith(1, { key: item.key, action: "merge" });
+    expect(host.handleSuperResidueAction).toHaveBeenNthCalledWith(2, { key: item2.key, action: "merge" });
+    expect(host.handleSuperResidueDiscardBatch).not.toHaveBeenCalled();
+  });
+
+  it("superResidueHandle 批量丢弃：聚合成一次批量确认，不逐条丢弃", async () => {
+    const { host, posted, route } = makeHarness([item, item2]);
+    await route({ type: "requestSuperResidueList", requestId: "req-1" });
+    const token = (posted[0] as Extract<HostToWebview, { type: "superResidueList" }>).confirmToken;
+    await route({
+      type: "superResidueHandle",
+      action: "discard",
+      sessionIds: ["child-1", "child-2"],
+      confirmToken: token,
+    });
+    expect(host.handleSuperResidueDiscardBatch).toHaveBeenCalledTimes(1);
+    expect(host.handleSuperResidueDiscardBatch).toHaveBeenCalledWith({
+      keys: [item.key, item2.key],
+    });
+    expect(host.handleSuperResidueAction).not.toHaveBeenCalled();
   });
 });
