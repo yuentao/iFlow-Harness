@@ -35,8 +35,39 @@
  *   panel just edited/deleted. Because saveSettings rewrites the whole file,
  *   the disk value must be re-injected whenever it exists; when the disk has
  *   no such key we must NOT write the in-memory value either (that would
- *   revive a profile the panel already deleted). Every other field (language,
- *   approvalMode, mcpServers, tokensLimit…) persists normally.
+ *   revive a profile the panel already deleted).
+ *
+ *   2026-11-21 — the protected set was WIDENED and a disk-first fallback was
+ *   added. saveSettings() rewrites the WHOLE file from the child's
+ *   process-start snapshot, so every key that is not in STRIP_KEYS gets
+ *   reverted to that stale snapshot on every authenticate(). That wiped the
+ *   user's `tokensLimit` (the CLI then fell back to its hard-coded 128000
+ *   ceiling, so the auto-compress threshold collapsed to 0.8 * 128000 =
+ *   102400 and every super-agent sub-session was compressed the moment it
+ *   started — the sub-session baseline is ~103000), and it also wiped
+ *   `mcpServers` / `language` / `approvalMode` / `contextFileName` /
+ *   `compressionTokenThreshold` / `contextWindowLength` / `outputTokensLimit`.
+ *   The super-agent host
+ *   spawns AND authenticates one CLI per sub-session
+ *   (src/panel/super-agent-host.ts), so the overwrite fired once per
+ *   sub-session.
+ *
+ *   Rule 1 — STRIP_KEYS is the authoritative-disk set: for those keys the
+ *   on-disk value always wins, and it is re-injected even when the child's
+ *   payload does not carry the key at all.
+ *   Rule 2 — disk-first fallback for everything else: a key that exists on
+ *   disk but NOT in the child's payload keeps its disk value instead of
+ *   being dropped by the schema-normalised whole-file write. This keeps
+ *   Mod-owned keys (and any key the CLI's settings schema does not know
+ *   about) alive. It never overrides a key the payload does carry — the
+ *   CLI's own edits still win, except for the Rule 1 keys above.
+ *
+ *   Keep this list in sync with the extension's settings surface. Whenever
+ *   the vendored snapshot under vendor/iflow-fork/ is regenerated from the
+ *   upstream fork (`npm run vendor:cli`), this loader must be re-synced from
+ *   the iFlow-Mods source (`api-config-isolation-refactor`) — otherwise the
+ *   whole-file overwrite comes back and the context-window / MCP keys are
+ *   wiped again.
  *
  * Scope:
  *   - Active ONLY when IFLOW_HARNESS is truthy (set by the harness
@@ -50,6 +81,12 @@
  * the NDJSON protocol stream, and any stray line corrupts the wire.
  */
 
+// Rule 1 — the authoritative-disk set. For every key listed here the value
+// already on disk wins; the child's process-start snapshot never overwrites
+// it (the list grew on 2026-11-21: the snapshot rewrite used to wipe the
+// user's tokensLimit / mcpServers / language / approvalMode /
+// contextFileName / compressionTokenThreshold / contextWindowLength /
+// outputTokensLimit).
 const STRIP_KEYS = [
   "selectedAuthType",
   "apiKey",
@@ -58,6 +95,14 @@ const STRIP_KEYS = [
   "modelName",
   "currentApiProfile",
   "apiProfiles",
+  "mcpServers",
+  "language",
+  "approvalMode",
+  "contextFileName",
+  "tokensLimit",
+  "compressionTokenThreshold",
+  "contextWindowLength",
+  "outputTokensLimit",
 ];
 
 function isDisabledByEnv() {
@@ -111,17 +156,23 @@ function intercept(t) {
   // panel-owned key. The disk side matters because saveSettings overwrites
   // the whole file — a disk-only apiProfiles (created by the panel after the
   // CLI started) must still be re-injected.
-  const touchesPanelField = STRIP_KEYS.some(
-    (k) => k in s || Object.prototype.hasOwnProperty.call(disk, k),
-  );
-  if (!touchesPanelField) return undefined;
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+  const touchesPanelField = STRIP_KEYS.some((k) => k in s || has(disk, k));
+  // Rule 2 — disk-only keys (Mod-owned, or unknown to the CLI's settings
+  // schema) must survive the schema-normalised whole-file write as well.
+  const diskOnlyKeys = Object.keys(disk).filter((k) => !has(s, k));
+  if (!touchesPanelField && diskOnlyKeys.length === 0) return undefined;
   const merged = {};
   for (const k of Object.keys(s)) {
     if (!STRIP_KEYS.includes(k)) merged[k] = s[k];
   }
+  // Rule 1 — re-inject the authoritative disk values.
   for (const k of STRIP_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(disk, k)) merged[k] = disk[k];
+    if (has(disk, k)) merged[k] = disk[k];
   }
+  // Rule 2 — keep the disk-only keys the child's payload does not carry.
+  // Never overrides a key the payload does carry: the CLI's own edits win.
+  for (const k of diskOnlyKeys) merged[k] = disk[k];
   return { path: t.path, settings: merged };
 }
 
