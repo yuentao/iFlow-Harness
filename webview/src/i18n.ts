@@ -1072,6 +1072,23 @@ const en: Record<string, string> = {
   "这个模板已经找不到了": "This template is no longer available",
   "安装": "Install",
   "官方文档": "Official docs",
+  "推荐": "Recommended",
+  "核心": "Core",
+  "浏览器": "Browser",
+  "工作流": "Workflow",
+  "修改配置": "Edit configuration",
+  "命令不可用：确认 Node/npx 已安装，或在服务器配置里把命令改成绝对路径":
+    "Command unavailable: make sure Node/npx is installed, or set the command to an absolute path in the server config",
+  "连接超时：首次 npx 下载可能较慢，稍后刷新重试；持续超时请检查命令或网络":
+    "Connection timed out: the first npx download can be slow — refresh and retry later; if it keeps timing out, check the command or network",
+  "协议错误：检查服务 URL/请求头与服务端 MCP 版本是否匹配":
+    "Protocol error: check that the server URL/headers match the server's MCP version",
+  "网络错误：检查网络与代理设置后刷新":
+    "Network error: check your network and proxy settings, then refresh",
+  "该服务器工具声明较大，会持续占用上下文预算，可考虑精简或禁用不常用的服务器":
+    "This server's tool declarations are large and keep consuming context budget — consider trimming it or disabling servers you rarely use",
+  "部分工具参数结构过大已省略，模型可能无法正确调用这些工具":
+    "Some tool schemas are too large and were omitted — the model may fail to call those tools correctly",
   "连接状态不可获取（内核未连接或状态上报未启用）": "Connection status unavailable (core not connected or status reporting disabled)",
   "参数 {0}": "Argument {0}",
   "环境变量 {0}": "Environment variable {0}",

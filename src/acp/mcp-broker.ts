@@ -236,20 +236,43 @@ function asStringArray(value: unknown): string[] {
  * MCP server's tools/list carries `inputSchema`. Prefer the loader's key,
  * accept the others as fallbacks — the token estimate then counts the same
  * JSON the model actually sees.
+ *
+ * Same per-server JSON budget as the CLI loader (`mcp-status-loader.cjs`,
+ * `TOOLS_JSON_BUDGET = 4MB`): one server's declaration dump must not blow the
+ * ACP client's 8MB NDJSON frame cap. A schema that no longer fits is dropped
+ * for that tool only and flagged `schemaOmitted`, so the detail view can say
+ * why it is missing instead of silently showing nothing.
  */
+const TOOLS_JSON_BUDGET = 4 * 1024 * 1024;
+
 function toolViewsFromListing(result: unknown): McpToolView[] {
   const record = asRecord(result);
   const rawTools = Array.isArray(record?.tools) ? record.tools : [];
   const views: McpToolView[] = [];
+  let budget = TOOLS_JSON_BUDGET;
   for (const raw of rawTools) {
     const tool = asRecord(raw);
     if (!tool || typeof tool.name !== "string") continue;
     const schema = tool.parametersJsonSchema ?? tool.inputSchema ?? tool.parameters;
-    views.push({
+    const view: McpToolView = {
       name: tool.name,
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
-      ...(schema !== undefined && schema !== null ? { schema } : {}),
-    });
+    };
+    if (schema !== undefined && schema !== null) {
+      let json: string | undefined;
+      try {
+        json = JSON.stringify(schema);
+      } catch {
+        json = undefined;
+      }
+      if (json !== undefined && json.length <= budget) {
+        view.schema = schema;
+        budget -= json.length;
+      } else {
+        view.schemaOmitted = true;
+      }
+    }
+    views.push(view);
   }
   return views;
 }
