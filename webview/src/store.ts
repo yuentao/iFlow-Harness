@@ -230,6 +230,12 @@ function createMockHost(): HostApi {
   const mockHostSettings: HostSettingsUi = { ...DEFAULT_HOST_SETTINGS };
   /** 「联网补充模型数据」 mock: one in-flight timer (cancel clears it). */
   let mockMetadataTimer: number | null = null;
+  /**
+   * 残留清单新协议（`superResidueList` ↔ `superResidueHandle`）的 mock 令牌：
+   * 每次请求换发，消费一次即作废 —— 与宿主的一次性 confirmToken 同语义。
+   */
+  let mockResidueSeq = 0;
+  let mockResidueToken: string | null = null;
   // Mock QQ settings (browser preview): the QQ tab renders straight from
   // `qqSettings`, so seed the access-control tables with real entries —
   // two users with notes plus one without (exercises the masked fallback)
@@ -2398,6 +2404,68 @@ function createMockHost(): HostApi {
         broadcastDemo(mockStatus, null);
         return;
       }
+      if (m.type === "requestSuperResidueList") {
+        // 新协议 demo：从同一批 demoSuperSessions 派生「失败/中断 + git
+        // worktree + 有分支 + 未成功合并」的残留条目，回包带请求 id 与一次性
+        // 令牌（每次请求换发）。
+        mockResidueSeq += 1;
+        const token = `mock-residue-list-${mockResidueSeq}`;
+        mockResidueToken = token;
+        const branches = demoSuperSessions
+          .filter((s) => {
+            const state = s.integration?.state;
+            return (
+              (s.status === "failed" || s.status === "cancelled") &&
+              s.isolation.kind === "git_worktree" &&
+              !!s.isolation.branch &&
+              state !== "merged" &&
+              state !== "pr_created" &&
+              state !== "not_needed"
+            );
+          })
+          .map((s) => ({
+            sessionId: s.id,
+            branch: s.isolation.branch ?? "",
+            worktree: s.isolation.path,
+            title: s.title,
+            mainSessionId: demoMeta.activeSessionId,
+            unmerged: true,
+            worktreeExists: true,
+          }));
+        const requestId = m.requestId;
+        window.setTimeout(
+          () => broadcast({ type: "superResidueList", requestId, branches, confirmToken: token }),
+          80,
+        );
+        return;
+      }
+      if (m.type === "superResidueHandle") {
+        // 一次性令牌：与宿主一样，校验不过如实提示并拒绝；通过即作废。
+        if (!mockResidueToken || m.confirmToken !== mockResidueToken) {
+          broadcast({ type: "toast", level: "warning", message: "残留清单已过期，请重新获取后再操作" });
+          return;
+        }
+        mockResidueToken = null;
+        const ids = new Set(m.sessionIds);
+        if (m.action === "merge") {
+          for (const session of demoSuperSessions) {
+            if (!ids.has(session.id)) continue;
+            session.integration = {
+              mode: "merge",
+              state: "merged",
+              detail: "智能体已合入 main（mock）",
+              at: Date.now(),
+            };
+            session.updatedAt = Date.now();
+          }
+        } else {
+          for (let i = demoSuperSessions.length - 1; i >= 0; i -= 1) {
+            if (ids.has(demoSuperSessions[i]!.id)) demoSuperSessions.splice(i, 1);
+          }
+        }
+        window.setTimeout(() => broadcastDemo(mockStatus, null), 300);
+        return;
+      }
       if (m.type === "cancel") {
         // Mirror the real host: stop → idle with stopReason "cancelled", the
         // pending permission request is settled, and the queue keeps
@@ -2646,6 +2714,12 @@ let lastSentKey = "";
 let lastSentAt = 0;
 let lastResyncAt = 0;
 let toastSeq = 0;
+/**
+ * 残留清单请求序号：`requestSuperResidueList` 每次自增，生成唯一的
+ * `requestId`。宿主把同一个 id 原样回显在 `superResidueList` 里，webview
+ * 只接受与最近一次请求配对的回包 —— 迟到的旧回包不能覆盖新清单。
+ */
+let superResidueRequestSeq = 0;
 /** Lifetime of a WebView-local notice (UI-audit 4.9: transient, ~4s). */
 const LOCAL_TOAST_MS = 4000;
 
@@ -2702,6 +2776,28 @@ interface ChatStore {
   superResidueConfirm: Extract<HostToWebview, { type: "superResidueConfirm" }> | null;
   /** 回答残留清空确认框：清空展示态并只回传一次 respondSuperResidueConfirm。 */
   respondSuperResidueConfirm: (confirmed: boolean) => void;
+  /**
+   * 残留分支清单的新协议回包（`superResidueList`）。
+   *
+   * 只保存与最近一次 `requestSuperResidueList` 的 `requestId` 配对的回包：
+   * 清单 + 一次性 `confirmToken`。批量合并/丢弃必须原样回传该令牌，宿主
+   * 校验不过即拒绝（二次确认）；每次下发换发新令牌，旧令牌立即失效。
+   */
+  superResidueList: Extract<HostToWebview, { type: "superResidueList" }> | null;
+  /** 最近一次 `requestSuperResidueList` 的 requestId；null = 从未请求。 */
+  superResidueRequestId: string | null;
+  /** 清单请求在飞（刷新按钮 / 首屏加载态）。 */
+  superResidueLoading: boolean;
+  /** 请求宿主重新枚举残留分支清单（自增 requestId）。 */
+  requestSuperResidueList: () => void;
+  /**
+   * 批量处置选中的残留分支：`sessionIds` 引用清单条目（孤儿项回退到宿主键）。
+   * 令牌缺失/过期时如实提示并自动重新请求，不静默失败。
+   */
+  handleSuperResidueAction: (
+    action: "merge" | "discard",
+    sessionIds: string[],
+  ) => void;
   /**
    * QQ 远程任务设置快照（Wave3-C）。独立于 `state`：`snapshot` / `blockPatch`
    * 只换转录与会话元数据，绝不覆盖它。默认值由 `pickQqSettingsUi` 归一，
@@ -2799,7 +2895,7 @@ interface ChatStore {
   send: (msg: WebviewToHost) => void;
 }
 
-import { setLocale } from "./i18n";
+import { setLocale, t } from "./i18n";
 
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
@@ -2811,6 +2907,9 @@ export const useChat = create<ChatStore>((set, get) => ({
   qqManagedStatus: null,
   superTranscripts: {},
   superResidueConfirm: null,
+  superResidueList: null,
+  superResidueRequestId: null,
+  superResidueLoading: false,
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
   modelMetadata: { state: "idle" },
@@ -2926,6 +3025,13 @@ export const useChat = create<ChatStore>((set, get) => ({
       // 宿主组装好的文案（含警示）原样存入，SuperResidueConfirmDialog 读取它
       // 弹出阻断式确认框；answer 后由 respondSuperResidueConfirm 清空。
       set({ superResidueConfirm: msg });
+      return;
+    }
+    if (msg.type === "superResidueList") {
+      // 只认领最近一次请求的回包：requestId 不匹配说明是迟到的旧清单
+      // （刷新期间到达），用它覆盖会把旧令牌塞回视图，下一次操作被宿主拒绝。
+      if (get().superResidueRequestId !== msg.requestId) return;
+      set({ superResidueList: msg, superResidueLoading: false });
       return;
     }
     if (msg.type === "qqSettings") {
@@ -3077,6 +3183,37 @@ export const useChat = create<ChatStore>((set, get) => ({
     // de-dupes by requestId, but the webview never relies on that.
     set({ superResidueConfirm: null });
     get().send({ type: "respondSuperResidueConfirm", requestId: request.requestId, confirmed });
+    // 这条确认框也服务于「丢弃残留」：确认后宿主的清单已经变了，刷新一次
+    // 让看板显示真实结果（清空并新建那条流程没有请求过清单，不会触发）。
+    if (confirmed && get().superResidueRequestId !== null) get().requestSuperResidueList();
+  },
+  requestSuperResidueList: () => {
+    const requestId = `webview-residue-${++superResidueRequestSeq}`;
+    set({ superResidueRequestId: requestId, superResidueLoading: true });
+    get().send({ type: "requestSuperResidueList", requestId });
+  },
+  handleSuperResidueAction: (action, sessionIds) => {
+    const ids = sessionIds.filter((id) => typeof id === "string" && id.length > 0);
+    if (ids.length === 0) return;
+    const list = get().superResidueList;
+    if (!list || !list.confirmToken) {
+      // 没有令牌 = 用户还没拿到清单（或回包被丢弃）：如实提示并重新请求，
+      // 绝不发一条注定被宿主拒绝的处置消息。
+      get().notify(t("残留清单已过期，正在重新获取"), "warning");
+      get().requestSuperResidueList();
+      return;
+    }
+    get().send({
+      type: "superResidueHandle",
+      action,
+      sessionIds: ids,
+      confirmToken: list.confirmToken,
+    });
+    // 令牌是一次性的：宿主消费后旧令牌立即失效。先清掉本地令牌（保留清单
+    // 行让视图不闪空），再立刻换发新清单 —— 刷新回包到达前的第二次点击会
+    // 走「令牌缺失」分支重新请求，而不是拿死令牌再发一条被宿主拒绝的消息。
+    set({ superResidueList: { ...list, confirmToken: "" } });
+    get().requestSuperResidueList();
   },
   beginPending: (kind, target) => {
     if (pendingTimer) clearTimeout(pendingTimer);

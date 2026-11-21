@@ -2,20 +2,22 @@
 /**
  * 看板「最近活动」与「残留分支清单」回归（jsdom）。
  *
- * 这两个能力完全由真实字段驱动，不依赖尚不存在的新增协议：
  *   · 最近活动 = max(updatedAt, diagnostics[].at)，看板每秒节流刷新；
- *   · 残留分支 = 终态 + git worktree + 有分支 + 未成功合并；
- *   · 一键「合并 / 丢弃」走宿主既有的 superAgent/merge、superAgent/cleanup，
- *     二者都经 ConfirmDialog 二次确认后才发消息。
+ *   · 残留分支 = 宿主新协议（requestSuperResidueList ↔ superResidueList）下发
+ *     的完整清单，webview 不再从 superSessions 本地聚合；
+ *   · 多选后「合并选中 / 丢弃选中」批量处置，单条行动作复用同一通道
+ *     （单元素 sessionIds）；两者都先经 ConfirmDialog 再发 superResidueHandle
+ *     （带 sessionIds + 一次性 confirmToken）。
  *
- * 这里钉真实 DOM 交互：折叠行的「最近活动」文案与静默警示、诊断视图的
- * 残留清单渲染、丢弃二次确认（点按钮只弹框、不发包，确认后才发包）、
- * 以及「无 console error / 无横向溢出（语义：无越界的固定宽度行）」。
+ * 这里钉真实 DOM 交互：打开视图发请求、回包渲染、多选/全选、批量与单条
+ * 合并/丢弃的消息载荷、二次确认（点按钮只弹框、不发包）、刷新重发，以及
+ * 「无 console error / 无横向溢出（语义：无越界的固定宽度行）」。
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SuperBoardSession } from "../shared/super-board";
+import type { SuperResidueBranchUi } from "../shared/messages";
 import { SuperAgentBoard } from "../webview/src/components/SuperAgentBoard";
 
 const store = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
@@ -39,6 +41,8 @@ const translate = vi.hoisted(() =>
 vi.mock("../webview/src/i18n", () => ({ t: translate }));
 
 const send = vi.fn();
+const requestList = vi.fn();
+const handleAction = vi.fn();
 
 /** 固定「现在」，让最近活动的相对时间可断言。 */
 const NOW = 1_700_000_000_000;
@@ -83,6 +87,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   send.mockReset();
+  requestList.mockReset();
+  handleAction.mockReset();
   translate.mockClear();
   consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
   class Observer {
@@ -104,10 +110,39 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function render(sessions: SuperBoardSession[]): void {
+/** 一条宿主回包的残留分支。 */
+function branch(overrides: Partial<SuperResidueBranchUi> = {}): SuperResidueBranchUi {
+  return {
+    sessionId: "res-1",
+    branch: "iflow/super/refactor-z9",
+    worktree: "/tmp/wt-res",
+    title: "被中断的重构",
+    unmerged: true,
+    worktreeExists: true,
+    ...overrides,
+  };
+}
+
+function render(sessions: SuperBoardSession[], residue: SuperResidueBranchUi[] = []): void {
+  // 看板在本地没有任何子会话时只渲染委派动效（控制按钮不出现）；残留清单
+  // 是看板的一部分，需要看板存在才可达。只看残留清单的用例补一个占位会话。
+  const boardSessions =
+    sessions.length > 0 ? sessions : [session({ id: "board-placeholder" })];
   store.current = {
-    state: { superSessions: sessions, qqTasks: [] },
+    state: { superSessions: boardSessions, qqTasks: [] },
     superTranscripts: {},
+    superResidueList:
+      residue.length > 0
+        ? {
+            type: "superResidueList",
+            requestId: "req-test",
+            branches: residue,
+            confirmToken: "token-test",
+          }
+        : null,
+    superResidueLoading: false,
+    requestSuperResidueList: requestList,
+    handleSuperResidueAction: handleAction,
     send,
   };
   act(() => root.render(<SuperAgentBoard />));
@@ -245,11 +280,23 @@ describe("判定卡死", () => {
   });
 });
 
-describe("残留分支清单", () => {
-  it("诊断视图顶部列出未合并的残留分支，带短分支名与合并/丢弃动作", () => {
-    render([residual()]);
+describe("残留分支清单（新协议）", () => {
+  const twoBranches = (): SuperResidueBranchUi[] => [
+    branch(),
+    branch({ sessionId: "res-2", title: "另一条残留", branch: "iflow/super/other-x1" }),
+  ];
+
+  function selectAll(): void {
+    const all = panel().querySelector<HTMLInputElement>('input[type="checkbox"]');
+    expect(all).toBeTruthy();
+    act(() => all!.click());
+  }
+
+  it("打开诊断视图即请求清单，并渲染宿主回包的分支（短分支名 + 单条动作）", () => {
+    render([], [branch()]);
     expand();
     viewTab("诊断");
+    expect(requestList).toHaveBeenCalled();
 
     const text = panel().textContent ?? "";
     expect(text).toContain("残留分支清单");
@@ -257,46 +304,62 @@ describe("残留分支清单", () => {
     expect(text).toContain("1 个待处置");
     // 短分支名（super/…后缀）出现，完整 ref 不铺开。
     expect(text).toContain("super/");
-    // 两条真实动作入口都在。
     expect(buttonByLabel("合并残留分支 被中断的重构")).toBeTruthy();
     expect(buttonByLabel("丢弃残留分支 被中断的重构")).toBeTruthy();
   });
 
-  it("已合并 / 无需合并 / 无提交的分支不进残留清单", () => {
-    render([
-      residual({ id: "merged", title: "已合并的", integration: { mode: "merge", state: "merged", at: NOW } }),
-      residual({ id: "nn", title: "无提交的", integration: { mode: "merge", state: "not_needed", at: NOW } }),
-      residual({ id: "pr", title: "已开 PR", integration: { mode: "pr", state: "pr_created", at: NOW } }),
-    ]);
-    expand();
-    viewTab("诊断");
-    const text = panel().textContent ?? "";
-    expect(text).not.toContain("已合并的");
-    expect(text).not.toContain("无提交的");
-    expect(text).not.toContain("已开 PR");
-    expect(text).not.toContain("残留分支清单");
-  });
-
-  it("无残留会话时清单不渲染，不留空标题", () => {
-    render([session({ status: "completed", integration: { mode: "merge", state: "merged", at: NOW } })]);
+  it("无清单时清单不渲染，不留空标题", () => {
+    render([session({ status: "completed" })], []);
     expand();
     viewTab("诊断");
     expect(panel().textContent).not.toContain("残留分支清单");
   });
 
-  it("丢弃先弹二次确认框，此时不发包；确认后才发 superAgent/cleanup", () => {
-    render([residual()]);
+  it("多选：行首勾选与全选联动，批量按钮按选中数启用", () => {
+    render([], twoBranches());
     expand();
     viewTab("诊断");
-    act(() => buttonByLabel("丢弃残留分支 被中断的重构").click());
 
-    // 只弹框，不发包。
-    expect(send).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("丢弃残留分支");
+    expect(buttonByText("合并选中（0）").disabled).toBe(true);
+    expect(buttonByText("丢弃选中（0）").disabled).toBe(true);
+
+    const rowBox = panel().querySelector<HTMLInputElement>(
+      'input[aria-label="选择残留分支 被中断的重构"]',
+    );
+    expect(rowBox).toBeTruthy();
+    act(() => rowBox!.click());
+    expect(buttonByText("合并选中（1）").disabled).toBe(false);
+
+    selectAll();
+    expect(buttonByText("合并选中（2）").disabled).toBe(false);
+    selectAll();
+    expect(buttonByText("合并选中（0）").disabled).toBe(true);
+  });
+
+  it("批量合并：确认前不发，确认后发一次 handleSuperResidueAction('merge', ids)", () => {
+    render([], twoBranches());
+    expand();
+    viewTab("诊断");
+    selectAll();
+
+    act(() => buttonByText("合并选中（2）").click());
+    expect(handleAction).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("合并残留分支");
+
+    act(() => buttonByText("让智能体合并分支").click());
+    expect(handleAction).toHaveBeenCalledWith("merge", ["res-1", "res-2"]);
+  });
+
+  it("批量丢弃：确认前不发，确认后发一次 handleSuperResidueAction('discard', ids)", () => {
+    render([], twoBranches());
+    expand();
+    viewTab("诊断");
+    selectAll();
+
+    act(() => buttonByText("丢弃选中（2）").click());
+    expect(handleAction).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("此操作不可撤销");
 
-    // 确认按钮（危险色默认确认）→ 发真实 cleanup 消息。限定在 alertdialog
-    // 内查找，避免误点清单行里同样叫「丢弃」的按钮。
     const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]');
     expect(dialog).toBeTruthy();
     const confirm = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
@@ -304,40 +367,64 @@ describe("残留分支清单", () => {
     );
     expect(confirm).toBeTruthy();
     act(() => confirm!.click());
-    expect(send).toHaveBeenCalledWith({ type: "superAgent", action: "cleanup", sessionId: "res-1" });
+    expect(handleAction).toHaveBeenCalledWith("discard", ["res-1", "res-2"]);
   });
 
-  it("丢弃确认框点取消不发任何消息", () => {
-    render([residual()]);
-    expand();
-    viewTab("诊断");
-    act(() => buttonByLabel("丢弃残留分支 被中断的重构").click());
-
-    const cancel = allButtons().find((b) => (b.textContent ?? "").trim() === "取消");
-    expect(cancel).toBeTruthy();
-    act(() => cancel!.click());
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  it("合并先弹二次确认框，确认后才发 superAgent/merge", () => {
-    render([residual()]);
+  it("单条合并走同一通道：单元素 sessionIds", () => {
+    render([], [branch()]);
     expand();
     viewTab("诊断");
     act(() => buttonByLabel("合并残留分支 被中断的重构").click());
-    expect(send).not.toHaveBeenCalled();
+    expect(handleAction).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("合并残留分支");
 
     act(() => buttonByText("让智能体合并分支").click());
-    expect(send).toHaveBeenCalledWith({ type: "superAgent", action: "merge", sessionId: "res-1" });
+    expect(handleAction).toHaveBeenCalledWith("merge", ["res-1"]);
+  });
+
+  it("单条丢弃确认后发单元素 sessionIds；取消不发", () => {
+    render([], [branch()]);
+    expand();
+    viewTab("诊断");
+    act(() => buttonByLabel("丢弃残留分支 被中断的重构").click());
+    expect(handleAction).not.toHaveBeenCalled();
+
+    const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]');
+    expect(dialog).toBeTruthy();
+    const confirm = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "丢弃",
+    );
+    act(() => confirm!.click());
+    expect(handleAction).toHaveBeenCalledWith("discard", ["res-1"]);
+
+    // 取消路径：再次打开确认框后点取消，不追加任何处置调用。
+    handleAction.mockClear();
+    act(() => buttonByLabel("丢弃残留分支 被中断的重构").click());
+    const cancel = allButtons().find((b) => (b.textContent ?? "").trim() === "取消");
+    expect(cancel).toBeTruthy();
+    act(() => cancel!.click());
+    expect(handleAction).not.toHaveBeenCalled();
+  });
+
+  it("刷新按钮重发 requestSuperResidueList", () => {
+    render([], [branch()]);
+    expand();
+    viewTab("诊断");
+    requestList.mockClear();
+    act(() => buttonByLabel("刷新残留清单").click());
+    expect(requestList).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("渲染卫生", () => {
   it("两功能全程无 console.error、无 undefined/NaN 文本、无越界固定宽度行", () => {
-    render([
-      session({ id: "live", updatedAt: NOW - 10_000 }),
-      residual({ id: "res", status: "failed", lastError: { kind: "terminal", message: "崩了", at: NOW } }),
-    ]);
+    render(
+      [
+        session({ id: "live", updatedAt: NOW - 10_000 }),
+        residual({ id: "res", status: "failed", lastError: { kind: "terminal", message: "崩了", at: NOW } }),
+      ],
+      [branch()],
+    );
     expand();
     viewTab("诊断");
 

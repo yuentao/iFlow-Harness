@@ -83,6 +83,10 @@ function render(sessions: SuperBoardSession[]): void {
   store.current = {
     state: { superSessions: sessions, qqTasks: [] },
     superTranscripts: {},
+    superResidueList: null,
+    superResidueLoading: false,
+    requestSuperResidueList: () => {},
+    handleSuperResidueAction: () => {},
     send,
   };
   act(() => root.render(<SuperAgentBoard />));

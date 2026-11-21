@@ -638,6 +638,26 @@ export class SuperAgentHost {
     return { ok: false, token, reason: "待二次确认" };
   }
 
+  /**
+   * 批量丢弃：把一次请求里选中的多个残留聚合到**同一条**二次确认。
+   *
+   * 逐条调用 `handleSuperResidueAction` 会让每次 `requestSuperResidueDiscardConfirm`
+   * 先 `cancelAllSuperResidueConfirms()` 取消上一次待确认请求 —— 批量时只有
+   * 最后一项能弹出确认框，其余被静默取消（用户以为全部丢弃，实际只丢了最后
+   * 一条）。`requestSuperResidueDiscardConfirm` 本身接受数组并在确认后逐条执行，
+   * 因此这里先解析出全部条目、只发一次确认。
+   */
+  async handleSuperResidueDiscardBatch(input: {
+    keys: string[];
+  }): Promise<{ ok: boolean; token?: string; reason?: string }> {
+    const items = await this.listSuperResidue();
+    const wanted = new Set(input.keys);
+    const selected = items.filter((item) => wanted.has(item.key));
+    if (selected.length === 0) return { ok: false, reason: "这些残留已不存在" };
+    const token = this.requestSuperResidueDiscardConfirm(selected);
+    return { ok: false, token, reason: "待二次确认" };
+  }
+
   // --- 重试 / 判定卡死 handler（批次2A 项1、项2）--------------------------
 
   /** WebviewToHost `superRetryWave` 的宿主入口（按波次重排重试）。 */
