@@ -78,9 +78,11 @@ describe("api-config-isolation-loader", () => {
     const settings = out!.settings;
     expect(settings.apiProfiles).toEqual(edited);
     expect(JSON.stringify(settings.apiProfiles)).not.toContain("sk-old");
-    // Non-panel fields keep the child's values.
-    expect(settings.language).toBe("en");
-    expect(settings.mcpServers).toEqual({ demo: { command: "npx" } });
+    // Rule 1 — the disk is authoritative for the protected keys: `language`
+    // keeps the on-disk value, and a payload-only `mcpServers` (the disk has
+    // none) is not written back.
+    expect(settings.language).toBe("zh-cn");
+    expect(settings).not.toHaveProperty("mcpServers");
   });
 
   it("never writes in-memory apiProfiles when the disk has no such key", () => {
@@ -110,7 +112,10 @@ describe("api-config-isolation-loader", () => {
 
     expect(out).toBeDefined();
     expect(out!.settings.apiProfiles).toEqual(onDisk);
-    expect(out!.settings.language).toBe("en");
+    // Rule 1 — `language` is an authoritative-disk key now: with no on-disk
+    // value there is nothing to re-inject, so the child's snapshot value is
+    // deliberately not written back (same semantics as apiProfiles).
+    expect(out!.settings).not.toHaveProperty("language");
   });
 
   it("returns undefined when the MOD is disabled or harness mode is off", () => {
@@ -152,5 +157,97 @@ describe("api-config-isolation-loader", () => {
     expect(out).toBeDefined();
     expect(out!.settings.currentApiProfile).toBe("disk-profile");
     expect(out!.settings.apiProfiles).toEqual({ disk: {} });
+  });
+
+  it("keeps a disk-only tokensLimit that the child payload does not carry", () => {
+    // The whole-file overwrite used to drop the user's tokensLimit, so the
+    // CLI fell back to its hard-coded 128000 ceiling (auto-compress
+    // threshold 0.8 * 128000 = 102400) and every sub-session was compressed
+    // on start (baseline ~103000).
+    writeDisk({ tokensLimit: 1000000, language: "zh-cn" });
+
+    const out = loader.intercept({
+      path: settingsPath,
+      settings: { language: "zh-cn" },
+    });
+
+    expect(out).toBeDefined();
+    expect(out!.settings.tokensLimit).toBe(1000000);
+  });
+
+  it("keeps the on-disk mcpServers catalogue over the stale child payload", () => {
+    const onDisk = {
+      alpha: { command: "npx", args: ["-y", "alpha"] },
+      beta: { command: "npx", args: ["-y", "beta"] },
+      gamma: { command: "npx", args: ["-y", "gamma"] },
+      delta: { command: "npx", args: ["-y", "delta"] },
+      epsilon: { command: "npx", args: ["-y", "epsilon"] },
+    };
+    writeDisk({ mcpServers: onDisk });
+
+    const out = loader.intercept({
+      path: settingsPath,
+      settings: { mcpServers: { alpha: { command: "npx", args: ["-y", "alpha"] } } },
+    });
+
+    expect(out).toBeDefined();
+    expect(Object.keys(out!.settings.mcpServers as Record<string, unknown>)).toHaveLength(5);
+    expect(out!.settings.mcpServers).toEqual(onDisk);
+  });
+
+  it("keeps the panel-owned keys on disk while the CLI's own keys stay authoritative", () => {
+    const diskApiProfiles = {
+      A: { baseUrl: "https://a.example/v1", apiKey: "sk-disk-a" },
+    };
+    writeDisk({
+      apiKey: "sk-disk",
+      baseUrl: "https://disk.example/v1",
+      currentApiProfile: "disk-profile",
+      apiProfiles: diskApiProfiles,
+      searchApiKey: "disk-search",
+      selectedAuthType: "openai-compatible",
+      modelName: "disk-model",
+      outputTokensLimit: 32000,
+    });
+
+    const out = loader.intercept({
+      path: settingsPath,
+      settings: {
+        apiKey: "sk-memory",
+        baseUrl: "https://memory.example/v1",
+        currentApiProfile: "memory-profile",
+        apiProfiles: { A: { baseUrl: "https://a.example/v1", apiKey: "sk-memory-a" } },
+        searchApiKey: "memory-search",
+        selectedAuthType: "memory",
+        modelName: "memory-model",
+        outputTokensLimit: 8000,
+        // Not a protected key: the CLI's own value must survive Rule 2.
+        theme: "dark",
+      },
+    });
+
+    expect(out).toBeDefined();
+    const settings = out!.settings;
+    expect(settings.apiKey).toBe("sk-disk");
+    expect(settings.baseUrl).toBe("https://disk.example/v1");
+    expect(settings.currentApiProfile).toBe("disk-profile");
+    expect(settings.apiProfiles).toEqual(diskApiProfiles);
+    expect(settings.searchApiKey).toBe("disk-search");
+    expect(settings.selectedAuthType).toBe("openai-compatible");
+    expect(settings.modelName).toBe("disk-model");
+    expect(settings.outputTokensLimit).toBe(32000);
+    expect(settings.theme).toBe("dark");
+  });
+
+  it("preserves disk-only keys the CLI schema does not know about", () => {
+    writeDisk({ modOwnedKey: { enabled: true }, language: "zh-cn" });
+
+    const out = loader.intercept({
+      path: settingsPath,
+      settings: { language: "zh-cn" },
+    });
+
+    expect(out).toBeDefined();
+    expect(out!.settings.modOwnedKey).toEqual({ enabled: true });
   });
 });
