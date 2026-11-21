@@ -2056,6 +2056,61 @@ pre {
   transition: width 0.2s var(--ease-out-expo);
 }
 
+/* --- transcript image lightbox (multimodal plan A) --- */
+/* Portaled to document.body: a `.acrylic` ancestor's backdrop-filter would
+   otherwise become the containing block for this fixed overlay (and clip it).
+   Out here the blur frosts the transcript instead of ghosting text through. */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in oklab, var(--background) 78%, transparent);
+  backdrop-filter: blur(10px) saturate(1.2);
+  animation: fade-in 0.16s ease-out;
+}
+
+.image-lightbox-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(960px, 100%);
+  height: min(720px, 100%);
+  min-height: 0;
+  padding: 8px;
+  border-radius: var(--radius-overlay);
+  border: 1px solid var(--border);
+  background-color: var(--acrylic-pop-tint);
+  background-image: var(--acrylic-highlight);
+  box-shadow:
+    inset 0 0 0 1px var(--acrylic-edge),
+    var(--shadow-panel);
+  animation: modal-in 0.22s var(--ease-out-expo);
+}
+
+.image-lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+}
+
+.image-lightbox-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background-color: var(--card);
+  box-shadow: var(--shadow-card);
+}
+
+.image-lightbox-nav:hover {
+  background-color: var(--surface);
+}
+
 /* --- auth modal (centered dialog over a dimmed backdrop) --- */
 
 .auth-backdrop {

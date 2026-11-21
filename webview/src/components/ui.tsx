@@ -5,6 +5,7 @@ import {
   isValidElement,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ButtonHTMLAttributes,
@@ -25,13 +26,16 @@ import {
   Check,
   CheckSquare,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Circle,
   CircleDot,
   Eye,
   EyeOff,
+  ExternalLink,
   FileCode2,
   HelpCircle,
+  ImageOff,
   Info,
   Loader2,
   Search,
@@ -789,6 +793,175 @@ export function ConfirmDialog({
           )}
       </div>
     </ModalShell>,
+    document.body,
+  );
+}
+
+/**
+ * Transcript image lightbox (multimodal plan A). Clicking a thumbnail in the
+ * user bubble used to hand its data URL to the host, which opened VSCode's
+ * image preview — the panel lost the reading context for a picture the user
+ * had just pasted. This overlay keeps it in-panel: dimmed backdrop, one large
+ * image, arrow-key paging across the turn's attachments.
+ *
+ * Portaled to document.body on purpose: the transcript sits inside `.acrylic`
+ * surfaces whose `backdrop-filter` creates a containing block for `fixed`
+ * descendants (and `overflow-hidden` would clip it) — a plain fixed overlay
+ * would be trapped inside the bubble.
+ *
+ * Only `data:image/` payloads render. A transcript string must never become a
+ * live remote `<img src>`: that would make the webview fetch arbitrary URLs
+ * from model output.
+ */
+export function ImageLightbox({
+  open,
+  images,
+  index,
+  onIndexChange,
+  onClose,
+  ariaLabel,
+  onOpenExternal,
+}: {
+  open: boolean;
+  images: string[];
+  index: number;
+  onIndexChange?: (next: number) => void;
+  onClose: () => void;
+  ariaLabel: string;
+  /** Secondary entry: hand the current data URL back to the host (VSCode image preview). */
+  onOpenExternal?: (src: string) => void;
+}) {
+  // Filter BEFORE indexing: a non-data URL is dropped entirely rather than
+  // rendered as a remote fetch.
+  const safe = useMemo(() => images.filter((src) => src.startsWith("data:image/")), [images]);
+  const [active, setActiveState] = useState(index);
+  const [failed, setFailed] = useState<Record<number, boolean>>({});
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // Latest values for the mount-only document key handler: re-registering the
+  // listener on every `active` change would re-capture the focus-restore target
+  // (the trigger) and hand focus back to the wrong element.
+  const live = useRef({ active, count: safe.length, onIndexChange, onClose });
+  live.current = { active, count: safe.length, onIndexChange, onClose };
+
+  const setActive = (next: number) => {
+    setActiveState(next);
+    live.current.onIndexChange?.(next);
+  };
+
+  // Re-sync when the caller opens a different thumbnail (or the source list
+  // changes while the lightbox stays open).
+  useEffect(() => {
+    if (!open) return;
+    setActiveState(Math.max(0, Math.min(index, Math.max(0, safe.length - 1))));
+    setFailed({});
+  }, [open, index, safe.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    const prevFocus = document.activeElement as HTMLElement | null;
+    dialogRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      const s = live.current;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Swallow ESC so the window-level "Esc stops generation" shortcut
+        // never fires behind the overlay.
+        e.stopPropagation();
+        s.onClose();
+        return;
+      }
+      if (s.count < 2) return;
+      const delta = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
+      if (!delta) return;
+      e.preventDefault();
+      setActive((s.active + delta + s.count) % s.count);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      prevFocus?.focus?.();
+    };
+  }, [open]);
+
+  if (!open || safe.length === 0) return null;
+
+  const current = Math.min(active, safe.length - 1);
+  const src = safe[current]!;
+  const go = (delta: number) => setActive((current + delta + safe.length) % safe.length);
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="image-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label={ariaLabel}
+      tabIndex={-1}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="image-lightbox-panel">
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="text-ui-caption text-muted-foreground">
+            {safe.length > 1 ? t("第 {0} / {1} 张", current + 1, safe.length) : t("附件图片")}
+          </span>
+          <IconButton
+            className="ml-auto"
+            icon={<X className={ICON_INLINE} />}
+            label={t("关闭")}
+            size="sm"
+            onClick={onClose}
+          />
+        </div>
+        <div className="relative flex min-h-0 flex-1 items-center justify-center">
+          {failed[current] ? (
+            <span className="flex flex-col items-center gap-2 text-ui-label text-muted-foreground">
+              <ImageOff className={ICON_DISPLAY} />
+              {t("图片加载失败")}
+            </span>
+          ) : (
+            <img
+              className="image-lightbox-img"
+              src={src}
+              alt={t("附件图片 {0}", current + 1)}
+              onError={() => setFailed((prev) => ({ ...prev, [current]: true }))}
+            />
+          )}
+          {safe.length > 1 && (
+            <>
+              <IconButton
+                className="image-lightbox-nav left-0"
+                icon={<ChevronLeft className={ICON_INLINE} />}
+                label={t("上一张")}
+                size="sm"
+                onClick={() => go(-1)}
+              />
+              <IconButton
+                className="image-lightbox-nav right-0"
+                icon={<ChevronRight className={ICON_INLINE} />}
+                label={t("下一张")}
+                size="sm"
+                onClick={() => go(1)}
+              />
+            </>
+          )}
+        </div>
+        {onOpenExternal && (
+          <div className="flex shrink-0 justify-end">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<ExternalLink className={ICON_INLINE} />}
+              onClick={() => onOpenExternal(src)}
+            >
+              {t("在 VSCode 中打开")}
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>,
     document.body,
   );
 }

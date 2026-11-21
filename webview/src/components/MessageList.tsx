@@ -64,7 +64,7 @@ import { DiffView } from "./DiffView";
 import { TurnChanges } from "./TurnChanges";
 import { canReviewTurn, turnsWithChanges } from "../../../shared/turn-changes";
 import { classifySuperToolName, resolveSuperToolCallKind } from "../../../shared/super-tool-call";
-import { Button, Chip, ConfirmDialog, CountdownSeconds, FileRef, FloatChip, FloatPill, ICON_INLINE, IconButton, TextArea, ToastStack } from "./ui";
+import { Button, Chip, ConfirmDialog, CountdownSeconds, FileRef, FloatChip, FloatPill, ICON_INLINE, IconButton, ImageLightbox, TextArea, ToastStack } from "./ui";
 import logo from "../assets/iflow.svg";
 
 /** How long the copy action keeps its "已复制" state before reverting. */
@@ -1058,6 +1058,11 @@ function UserMessage({
   // and one dangerous-action language across the product beats three.
   const [confirmRollback, setConfirmRollback] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Multimodal plan A: in-panel lightbox instead of leaving the panel for
+  // VSCode's image preview. `failedImages` keeps a broken thumbnail from
+  // rendering as an empty bordered box.
+  const [lightbox, setLightbox] = useState<number | null>(null);
+  const [failedImages, setFailedImages] = useState<Record<number, boolean>>({});
   // M4 P1-9: draft for the inline editor; null = not editing.
   const [draft, setDraft] = useState<string | null>(null);
   useEffect(() => {
@@ -1146,27 +1151,72 @@ function UserMessage({
           </div>
         )}
         <Markdown text={block.text} />
-        {block.images && block.images.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {block.images.map((src, i) => (
-              <img
-                key={i}
-                className="h-16 max-w-[160px] cursor-zoom-in rounded-md border border-border object-cover transition-transform hover:-translate-y-px"
-                src={src}
-                alt={t("附件图片 {0}", i + 1)}
-                title={t("在 VSCode 中打开")}
-                onClick={() => send({ type: "openImage", dataUrl: src })}
-              />
-            ))}
-          </div>
-        )}
+        {block.images && block.images.length > 0 && (() => {
+          // Only data: payloads render — a transcript string must never turn
+          // into a live remote <img src> fetch.
+          const images = block.images.filter((src) => src.startsWith("data:image/"));
+          if (images.length === 0) return null;
+          const single = images.length === 1;
+          return (
+            <div className={`mt-2 ${single ? "" : "grid grid-cols-3 gap-1.5"}`}>
+              {images.map((src, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className={`group relative block cursor-zoom-in overflow-hidden rounded-md border border-border bg-editor transition duration-200 hover:ring-1 hover:ring-primary/60 focus-visible:ring-1 focus-visible:ring-primary/60 ${
+                    single ? "h-32 w-fit max-w-[260px]" : "size-16"
+                  }`}
+                  aria-label={t("查看第 {0} 张图片", i + 1)}
+                  title={t("查看第 {0} 张图片", i + 1)}
+                  onClick={() => setLightbox(i)}
+                >
+                  {failedImages[i] ? (
+                    <span
+                      className={
+                        single
+                          ? "flex h-32 w-40 items-center justify-center px-3 text-ui-micro text-muted-foreground"
+                          : "flex size-full items-center justify-center px-1 text-center text-ui-micro text-muted-foreground"
+                      }
+                    >
+                      {t("加载失败")}
+                    </span>
+                  ) : (
+                    <img
+                      className={
+                        single
+                          ? "h-32 w-auto max-w-[260px] object-cover transition-transform duration-200 group-hover:scale-105"
+                          : "size-full object-cover transition-transform duration-200 group-hover:scale-105"
+                      }
+                      src={src}
+                      alt={t("附件图片 {0}", i + 1)}
+                      onError={() => setFailedImages((prev) => ({ ...prev, [i]: true }))}
+                    />
+                  )}
+                </button>
+              ))}
+            </div>
+          );
+        })()}
         {block.evicted && (!block.images || block.images.length === 0) && (
           <div className="mt-2">
-            <span title={t("为了不让长会话占用太多内存，附件图片已从界面释放；完整记录仍然保留")}>
-              <Chip tone="muted">{t("附件图片已释放")}</Chip>
-            </span>
+            <Chip
+              tone="muted"
+              title={t("为了不让长会话占用太多内存，附件图片已从界面释放；完整记录仍然保留")}
+              ariaLabel={t("附件图片已释放")}
+            >
+              {t("附件图片已释放")}
+            </Chip>
           </div>
         )}
+        <ImageLightbox
+          open={lightbox !== null}
+          images={block.images ?? []}
+          index={lightbox ?? 0}
+          onIndexChange={setLightbox}
+          onClose={() => setLightbox(null)}
+          ariaLabel={t("图片预览")}
+          onOpenExternal={(src) => send({ type: "openImage", dataUrl: src })}
+        />
         {/* subtle inner highlight so the bubble reads as a solid plane */}
         <div className="pointer-events-none absolute inset-0 rounded-2xl rounded-br-lg shadow-inner" />
         {/* UI-audit 4.3 P1 / hover bar: absolutely positioned so a hidden bar
