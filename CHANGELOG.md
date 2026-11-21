@@ -3,6 +3,12 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [3.11.0] - 2026-11-21
+
+- 多仓库协作 MVP：会话级目标根子集（`settings.add_dirs`，只收紧不放宽）、Composer 根选择器、`@<根别名>/<路径>` 文件引用与含 realpath 的路径边界校验、根集合单一来源 `workspaceRoots()`
+- 多模态深度集成：转录图片网格与面板内灯箱（Esc/方向键/焦点归还/失败态/已释放态）、图片说明 `imageCaptions` 随发送生成模型侧序号清单、粘贴即预览、超 4 张与超 5MB 降级不再静默、子会话任务书携带附件说明
+- MCP 生态集成：服务器模板按类别分组与「推荐」标记、健康诊断（spawn_failed/timeout/protocol_error/network_error → 可操作引导 + 刷新/修改配置）、schema 预算阈值提示、broker 侧 4MB `schemaOmitted` 置位
+
 ## [3.10.0] - 2026-11-20
 
 - 修正 qq-access 超时常量与 EVICT_MIN_KEEP 两处陈旧注释，使代码注释与实际取值保持一致
