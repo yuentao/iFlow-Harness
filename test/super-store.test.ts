@@ -515,7 +515,92 @@ describe("super agent · 归档持久化 v2", () => {
     expect(parsed.sessions[0]?.wave).toBe(expected![0]!.wave);
     expect(parsed.sessions[0]?.diagnostics?.[0]?.message).toBe(expected![0]!.diagnostics?.[0]?.message);
     // 没有临时文件残留。
-    const leftovers = (await listSuperSessionArchiveFiles(baseDir)).filter((n) => n.endsWith(".tmp"));
-    expect(leftovers).toEqual([]);
-  });
-});
+        const leftovers = (await listSuperSessionArchiveFiles(baseDir)).filter((n) => n.endsWith(".tmp"));
+        expect(leftovers).toEqual([]);
+      });
+    });
+    
+    describe("super agent · 归档指纹与恢复元数据", () => {
+      let baseDir: string;
+    
+      beforeEach(() => {
+        baseDir = mkdtempSync(path.join(tmpdir(), "iflow-super-store-fp-"));
+      });
+    
+      afterEach(() => {
+        rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      });
+    
+      const fingerprintOf = (session: SuperArchiveRecord): string =>
+        superArchiveStoreFingerprint([{ mainSessionId: "main-1", sessions: [session] }]);
+    
+      it("指纹纳入 error：只有人类可读错误的终态也立即落盘", () => {
+        const baseline = fingerprintOf(record({ status: "failed" }));
+        expect(fingerprintOf(record({ status: "failed", error: "网关超时" }))).not.toBe(baseline);
+      });
+    
+      it("终态进度尾与归一元数据随归档往返保留（多轮重启仍如实）", async () => {
+        await writeSuperSessionArchive(baseDir, "main-1", [
+          record({
+            status: "cancelled",
+            interruptedBy: "system",
+            progressTail: { text: "最后停在读取登录流程", at: 1999 },
+            restoredFromStatus: "running",
+            restoreReason: "restart",
+          }),
+        ]);
+        const loaded = await readSuperSessionArchive(baseDir, "main-1");
+        const got = loaded.sessions[0]!;
+        expect(got.progressTail).toEqual({ text: "最后停在读取登录流程", at: 1999 });
+        expect(got.restoredFromStatus).toBe("running");
+        expect(got.restoreReason).toBe("restart");
+      });
+    
+      it("activity / tool_call 的结构化细节随归档回来，超长文本被截断", async () => {
+        const long = "z".repeat(MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT * 2);
+        await writeSuperSessionArchive(baseDir, "main-1", [
+          record({
+            diagnostics: [
+              {
+                at: 1,
+                kind: "activity",
+                level: "info",
+                message: "最近活动",
+                activityDetail: { source: "tool_result", excerpt: long, at: 1 },
+              },
+              {
+                at: 2,
+                kind: "tool_call",
+                level: "warn",
+                message: "工具失败",
+                toolCallDetail: {
+                  name: "read_file",
+                  toolCallId: "call-1",
+                  state: "failed",
+                  excerpt: long,
+                },
+              },
+            ],
+          }),
+        ]);
+        const loaded = await readSuperSessionArchive(baseDir, "main-1");
+        const [activity, toolCall] = loaded.sessions[0]?.diagnostics ?? [];
+        expect(activity?.kind).toBe("activity");
+        expect(activity?.activityDetail?.source).toBe("tool_result");
+        expect(activity?.activityDetail?.excerpt.length).toBeLessThanOrEqual(
+          MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT,
+        );
+        expect(toolCall?.kind).toBe("tool_call");
+        expect(toolCall?.toolCallDetail?.state).toBe("failed");
+        expect(toolCall?.toolCallDetail?.toolCallId).toBe("call-1");
+        expect(toolCall?.toolCallDetail?.excerpt?.length).toBeLessThanOrEqual(
+          MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT,
+        );
+        // 结构化细节不进指纹：高频活动帧不会触发立即落盘。
+        const base = record({ diagnostics: [] });
+        expect(fingerprintOf(record({ diagnostics: [activity!, toolCall!] }))).toBe(
+          fingerprintOf(base),
+        );
+      });
+    });
+    

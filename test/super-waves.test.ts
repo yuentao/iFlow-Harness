@@ -26,6 +26,8 @@ import {
   toSuperBoardSession,
   SUPER_BOARD_DIAGNOSTICS_MAX_EVENTS,
   SUPER_DIAGNOSTICS_MAX_EVENTS,
+  SUPER_PROGRESS_TAIL_MAX_CHARS,
+  type PersistedSuperSession,
   type SuperDiagnosticEvent,
   type SuperSessionUi,
   type SuperTaskSpec,
@@ -531,5 +533,226 @@ describe("super waves · issue 文案", () => {
     expect(spec.dependsOn).toBeUndefined();
     expect(spec.batch).toBeUndefined();
     expect(spec.id).toBeUndefined();
+  });
+});
+
+describe("super waves · 恢复如实性：非终态归一要能区分原因", () => {
+  const persisted = (overrides: Partial<PersistedSuperSession> = {}): PersistedSuperSession => ({
+    id: "super-1",
+    title: "修复登录跳转",
+    task: "修好它",
+    status: "running",
+    isolation: { kind: "git_worktree", path: "/tmp/wt", branch: "iflow/super/a", baseRef: "abc" },
+    createdAt: 1000,
+    updatedAt: 2000,
+    reports: [],
+    ...overrides,
+  });
+
+  it("重启时还在跑 → cancelled + interruptedBy=system + restoreReason=restart", () => {
+    const restored = fromPersistedSuperSession(persisted({ status: "running" }));
+    expect(restored.status).toBe("cancelled");
+    expect(restored.interruptedBy).toBe("system");
+    expect(restored.restoredFromStatus).toBe("running");
+    expect(restored.restoreReason).toBe("restart");
+    expect(restored.restored).toBe(true);
+    // 旧行为保留：非终态归档的 endedAt 仍取 updatedAt。
+    expect(restored.endedAt).toBe(2000);
+  });
+
+  it("归档已带 interruptedBy（用户 / 智能体）→ 原样沿用，归因为 recorded", () => {
+    const byUser = fromPersistedSuperSession(
+      persisted({ status: "awaiting_input", interruptedBy: "user" }),
+    );
+    expect(byUser.status).toBe("cancelled");
+    expect(byUser.interruptedBy).toBe("user");
+    expect(byUser.restoredFromStatus).toBe("awaiting_input");
+    expect(byUser.restoreReason).toBe("recorded");
+
+    const byAgent = fromPersistedSuperSession(
+      persisted({ status: "preparing", interruptedBy: "agent" }),
+    );
+    expect(byAgent.interruptedBy).toBe("agent");
+    expect(byAgent.restoreReason).toBe("recorded");
+  });
+
+  it("宿主主动收口（非终态 + interruptedBy=system）与重启归一可区分", () => {
+    const hostStopped = fromPersistedSuperSession(
+      persisted({ status: "running", interruptedBy: "system" }),
+    );
+    const restarted = fromPersistedSuperSession(persisted({ status: "running" }));
+    expect(hostStopped.interruptedBy).toBe(restarted.interruptedBy); // 都是 system
+    expect(hostStopped.restoreReason).toBe("recorded"); // 但原因不同
+    expect(restarted.restoreReason).toBe("restart");
+  });
+
+  it("原生终态取消（用户喊停）不带归一元数据，可与重启区分", () => {
+    const restored = fromPersistedSuperSession(persisted({ status: "cancelled", interruptedBy: "user" }));
+    expect(restored.status).toBe("cancelled");
+    expect(restored.interruptedBy).toBe("user");
+    expect(restored.restoreReason).toBeUndefined();
+    expect(restored.restoredFromStatus).toBeUndefined();
+  });
+
+  it("旧归档缺新字段时退回现行为（cancelled + interruptedBy=system），不抛异常", () => {
+    // persisted() 故意只给 v1 字段：没有 progressTail / restoreReason / restoredFromStatus。
+    const legacy = persisted({ status: "preparing", summary: undefined });
+    expect(Object.keys(legacy)).not.toContain("restoreReason");
+    const restored = fromPersistedSuperSession(legacy);
+    expect(restored.status).toBe("cancelled");
+    expect(restored.interruptedBy).toBe("system");
+    expect(restored.restoredFromStatus).toBe("preparing");
+    expect(restored.restoreReason).toBe("restart");
+  });
+
+  it("多次重启：归一元数据随归档往返原样保留", () => {
+    const first = fromPersistedSuperSession(persisted({ status: "running", interruptedBy: "user" }));
+    const second = fromPersistedSuperSession(toPersistedSuperSession(first));
+    expect(second.status).toBe("cancelled");
+    expect(second.interruptedBy).toBe("user");
+    expect(second.restoredFromStatus).toBe("running");
+    expect(second.restoreReason).toBe("recorded");
+  });
+});
+
+describe("super waves · 终态进度尾落盘", () => {
+  it("终态进度被截成尾部快照（最后 N 字符 + updatedAt 时间戳）", () => {
+    const long = `${"x".repeat(SUPER_PROGRESS_TAIL_MAX_CHARS + 500)}TAIL`;
+    const persisted = toPersistedSuperSession(
+      session({ status: "completed", progress: long, updatedAt: 9999 }),
+    );
+    expect(persisted.progressTail).toBeDefined();
+    expect(persisted.progressTail?.at).toBe(9999);
+    expect(persisted.progressTail?.text.length).toBe(SUPER_PROGRESS_TAIL_MAX_CHARS);
+    expect(persisted.progressTail?.text.endsWith("TAIL")).toBe(true);
+  });
+
+  it("非终态不落进度尾（实时流式字段仍不进归档）", () => {
+    expect(
+      toPersistedSuperSession(session({ status: "running", progress: "临时进度" })).progressTail,
+    ).toBeUndefined();
+  });
+
+  it("恢复时从进度尾还原最后进度；老归档没有进度尾则 progress 缺省", () => {
+    const base: PersistedSuperSession = {
+      id: "super-1",
+      title: "修复登录跳转",
+      task: "修好它",
+      status: "completed",
+      isolation: { kind: "git_worktree", path: "/tmp/wt", branch: "iflow/super/a" },
+      createdAt: 1000,
+      updatedAt: 2000,
+      reports: [],
+    };
+    expect(fromPersistedSuperSession(base).progress).toBeUndefined();
+    expect(
+      fromPersistedSuperSession({
+        ...base,
+        progressTail: { text: "最后停在读取登录流程", at: 1999 },
+      }).progress,
+    ).toBe("最后停在读取登录流程");
+  });
+});
+
+describe("super waves · 诊断 kind 扩展（activity / tool_call）", () => {
+  it("两种新 kind 都能追加，结构化细节原样保留，不改状态机", () => {
+    const activity: SuperDiagnosticEvent = {
+      at: 10,
+      kind: "activity",
+      level: "info",
+      message: "最近活动：读到 3 个文件",
+      activityDetail: { source: "tool_result", excerpt: "读到 3 个文件", at: 9 },
+    };
+    const toolCall: SuperDiagnosticEvent = {
+      at: 11,
+      kind: "tool_call",
+      level: "warn",
+      message: "read_file 超时",
+      toolCallDetail: {
+        name: "read_file",
+        toolCallId: "call-1",
+        state: "failed",
+        excerpt: "ETIMEDOUT",
+      },
+    };
+    const next = applySuperDiagnostic(applySuperDiagnostic(session(), activity), toolCall);
+    expect(next.status).toBe("preparing");
+    expect(next.diagnostics?.[0]?.kind).toBe("activity");
+    expect(next.diagnostics?.[0]?.activityDetail?.source).toBe("tool_result");
+    expect(next.diagnostics?.[1]?.kind).toBe("tool_call");
+    expect(next.diagnostics?.[1]?.toolCallDetail?.state).toBe("failed");
+    expect(next.diagnostics?.[1]?.toolCallDetail?.toolCallId).toBe("call-1");
+  });
+
+  it("新 kind 同样受 200 条环形缓冲约束（保留最近）", () => {
+    let current = session();
+    for (let i = 0; i < SUPER_DIAGNOSTICS_MAX_EVENTS + 30; i += 1) {
+      current = applySuperDiagnostic(current, {
+        at: 1000 + i,
+        kind: i % 2 === 0 ? "activity" : "tool_call",
+        level: "info",
+        message: `事件 ${i}`,
+        ...(i % 2 === 0
+          ? { activityDetail: { source: "status" as const, excerpt: `e${i}`, at: 1000 + i } }
+          : { toolCallDetail: { name: "read_file", state: "completed" as const } }),
+      });
+    }
+    expect(current.diagnostics).toHaveLength(SUPER_DIAGNOSTICS_MAX_EVENTS);
+    expect(current.diagnostics?.[0]?.message).toBe("事件 30");
+  });
+
+  it("终态粘性与新 kind 无关：终态收到 activity 只追加不改状态", () => {
+    const done = session({ status: "completed", endedAt: 2000 });
+    const next = applySuperDiagnostic(done, {
+      at: 3000,
+      kind: "activity",
+      level: "info",
+      message: "迟到的活动",
+      activityDetail: { source: "status", excerpt: "已完成", at: 2999 },
+    });
+    expect(next.status).toBe("completed");
+    expect(next.endedAt).toBe(2000);
+    expect(next.diagnostics).toHaveLength(1);
+  });
+
+  it("结构化细节随归档往返保留", () => {
+    const original = session({
+      status: "failed",
+      diagnostics: [
+        {
+          at: 10,
+          kind: "tool_call",
+          level: "error",
+          message: "工具失败",
+          toolCallDetail: { name: "run_shell_command", state: "failed", excerpt: "exit 1" },
+        },
+      ],
+    });
+    const restored = fromPersistedSuperSession(toPersistedSuperSession(original));
+    expect(restored.diagnostics?.[0]?.toolCallDetail).toEqual({
+      name: "run_shell_command",
+      state: "failed",
+      excerpt: "exit 1",
+    });
+  });
+});
+
+describe("super waves · 归档指纹纳入终态错误", () => {
+  const fingerprintOf = (target: SuperSessionUi): string =>
+    superArchiveFingerprint([{ mainSessionId: "main-1", sessions: [toPersistedSuperSession(target)] }]);
+
+  it("error 变化改变指纹（只有人类可读错误的终态也能立即落盘）", () => {
+    const baseline = fingerprintOf(session({ status: "failed" }));
+    expect(fingerprintOf(session({ status: "failed", error: "网关超时" }))).not.toBe(baseline);
+  });
+
+  it("lastError / statusDetail 变化同样改变指纹", () => {
+    const baseline = fingerprintOf(session({ status: "running" }));
+    expect(
+      fingerprintOf(
+        session({ status: "running", lastError: { kind: "retryable", message: "boom", at: 5 } }),
+      ),
+    ).not.toBe(baseline);
+    expect(fingerprintOf(session({ status: "running", statusDetail: "已跳过" }))).not.toBe(baseline);
   });
 });

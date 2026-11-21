@@ -24,6 +24,7 @@ import path from "node:path";
 import type { Block } from "../../shared/messages.js";
 import { isTerminalSuperStatus } from "../../shared/super-agent.js";
 import type { PersistedSuperSession } from "../../shared/super-agent.js";
+import type { SuperActivityDetail, SuperToolCallDetail } from "../../shared/super-agent.js";
 
 /**
  * 归档文件格式版本。读到的版本不认识就当没有归档（宁可少显示，不显示坏的）。
@@ -360,7 +361,11 @@ export type SuperArchiveDiagnosticKind =
   /** 归档恢复。 */
   | "restore"
   /** 被阻塞。 */
-  | "blocked";
+  | "blocked"
+  /** 最近一次可见活动（工具结果 / 状态推进）。 */
+  | "activity"
+  /** 一次工具调用。 */
+  | "tool_call";
 
 /** 诊断事件的严重级别（v2）。 */
 export type SuperArchiveDiagnosticLevel = "info" | "warn" | "error";
@@ -382,6 +387,10 @@ export interface SuperArchiveDiagnosticEvent {
   message: string;
   /** 可选细节（堆栈片段、原始错误文本等）。 */
   detail?: string;
+  /** `kind === "activity"` 的结构化细节（类型与 shared 同源）。 */
+  activityDetail?: SuperActivityDetail;
+  /** `kind === "tool_call"` 的结构化细节（类型与 shared 同源）。 */
+  toolCallDetail?: SuperToolCallDetail;
 }
 
 /**
@@ -472,6 +481,56 @@ export function sanitizeSuperArchiveRecord(record: SuperArchiveRecord): SuperArc
             ...(typeof d.detail === "string"
               ? { detail: truncateArchiveText(d.detail, MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT) }
               : {}),
+            ...(d.activityDetail && typeof d.activityDetail === "object"
+              ? {
+                  activityDetail: {
+                    source:
+                      d.activityDetail.source === "assistant" ||
+                      d.activityDetail.source === "tool_result" ||
+                      d.activityDetail.source === "status"
+                        ? d.activityDetail.source
+                        : "status",
+                    excerpt: truncateArchiveText(
+                      String(d.activityDetail.excerpt ?? ""),
+                      MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT,
+                    ),
+                    at: typeof d.activityDetail.at === "number" ? d.activityDetail.at : 0,
+                  },
+                }
+              : {}),
+            ...(d.toolCallDetail && typeof d.toolCallDetail === "object"
+              ? {
+                  toolCallDetail: {
+                    name: truncateArchiveText(
+                      String(d.toolCallDetail.name ?? ""),
+                      MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT,
+                    ),
+                    ...(typeof d.toolCallDetail.toolCallId === "string"
+                      ? {
+                          toolCallId: truncateArchiveText(
+                            d.toolCallDetail.toolCallId,
+                            MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT,
+                          ),
+                        }
+                      : {}),
+                    state:
+                      d.toolCallDetail.state === "pending" ||
+                      d.toolCallDetail.state === "in_progress" ||
+                      d.toolCallDetail.state === "completed" ||
+                      d.toolCallDetail.state === "failed"
+                        ? d.toolCallDetail.state
+                        : "pending",
+                    ...(typeof d.toolCallDetail.excerpt === "string"
+                      ? {
+                          excerpt: truncateArchiveText(
+                            d.toolCallDetail.excerpt,
+                            MAX_SUPER_ARCHIVE_DIAGNOSTIC_TEXT,
+                          ),
+                        }
+                      : {}),
+                  },
+                }
+              : {}),
           }))
       : [];
   }
@@ -482,7 +541,7 @@ export function sanitizeSuperArchiveRecord(record: SuperArchiveRecord): SuperArc
  * 单条记录的「关键内容」指纹（v2 规则）。
  *
  * **参与指纹**（变了就必须更新归档）：状态、集成结果、归属、尝试次数、运行
- * 组、波次、批次、依赖、失败分类、状态说明。
+ * 组、波次、批次、依赖、失败说明（`error` 与结构化 `lastError`）、状态说明。
  *
  * **刻意不参与**：诊断事件流（高频，进指纹会把节流写盘打爆）、汇报历史、
  * 摘要、更新时间戳（每帧都在变，进了等于节流失效）。
@@ -505,6 +564,7 @@ export function superArchiveRecordFingerprint(record: SuperArchiveRecord): strin
     record.wave ?? "",
     record.batch ?? "",
     [...(record.dependsOn ?? [])].sort().join(","),
+    record.error ?? "",
     record.lastError
       ? `${record.lastError.kind}@${record.lastError.at}:${record.lastError.message}`
       : "",
