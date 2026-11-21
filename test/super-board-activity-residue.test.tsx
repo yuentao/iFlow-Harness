@@ -165,6 +165,31 @@ describe("最近活动", () => {
     expect(panel().textContent).toContain("最近活动 3s 前");
   });
 
+  it("activityDetail.at 优先于诊断事件 at 与其它诊断时间，摘要进入最近活动提示", () => {
+    render([
+      session({
+        updatedAt: NOW - 120_000,
+        diagnostics: [
+          {
+            at: NOW - 60_000,
+            kind: "activity",
+            level: "info",
+            message: "稍早活动",
+            // 真实活动时刻比诊断落盘时刻晚得多：取错字段会得到 1m/20s 前。
+            activityDetail: { source: "assistant", excerpt: "正在写文件", at: NOW - 4_000 },
+          },
+          { at: NOW - 20_000, kind: "report", level: "info", message: "中间心跳" },
+        ],
+      }),
+    ]);
+    expand();
+    // 若误用事件 at，这里会是 1m 前或 20s 前；优先取 activityDetail.at → 4s。
+    expect(panel().textContent).toContain("最近活动 4s 前");
+    const chip = panel().querySelector<HTMLElement>('[data-super-recent-activity]');
+    expect(chip).toBeTruthy();
+    expect(chip!.getAttribute("title")).toContain("正在写文件");
+  });
+
   it("静默超过阈值时给警示（title 提示可中断），不静默时用普通说明", () => {
     render([session({ updatedAt: NOW - 90_000, diagnostics: [] })]);
     expand();
@@ -179,6 +204,44 @@ describe("最近活动", () => {
     render([session({ status: "completed" })]);
     expand();
     expect(panel().querySelector('[data-super-recent-activity]')).toBeNull();
+  });
+});
+
+describe("判定卡死", () => {
+  it("运行中子会话有「判定卡死」按钮，点击先弹二次确认且不发包，确认后发 superAgent/stuck", () => {
+    render([session({ id: "live", status: "running", updatedAt: NOW - 30_000 })]);
+    expand();
+    const btn = buttonByLabel("判定卡死");
+    expect(btn).toBeTruthy();
+
+    act(() => btn.click());
+    expect(send).not.toHaveBeenCalled();
+    const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain("用户判定超时");
+
+    const confirm = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "判定卡死并中断",
+    );
+    expect(confirm).toBeTruthy();
+    act(() => confirm!.click());
+    expect(send).toHaveBeenCalledWith({ type: "superAgent", action: "stuck", sessionId: "live" });
+  });
+
+  it("确认框点取消不发任何消息", () => {
+    render([session({ id: "live", status: "running" })]);
+    expand();
+    act(() => buttonByLabel("判定卡死").click());
+    const cancel = allButtons().find((b) => (b.textContent ?? "").trim() === "取消");
+    expect(cancel).toBeTruthy();
+    act(() => cancel!.click());
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("终态会话不渲染「判定卡死」按钮", () => {
+    render([session({ status: "completed" })]);
+    expand();
+    expect(document.body.querySelector('[aria-label="判定卡死"]')).toBeNull();
   });
 });
 

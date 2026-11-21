@@ -529,6 +529,11 @@ export class SuperAgentHost {
   }
 
   // --- 残留聚合与一键处理（批次2A 项5）-------------------------------------
+  //
+  // 注明：listSuperResidue / requestSuperResidueDiscardConfirm / handleSuperResidueAction
+  // 这条「令牌化残留处置」通道是为批量令牌化场景保留的；当前 webview 的残留处置
+  // 走 superAgent.cleanup / superAgent.merge 旧协议，两套并存、功能等价。勿因
+  // 「当前 UI 未调用」就当作死代码删除。
 
   /**
    * 宿主侧残留明细：未合并 / 已中断 / 放弃的 super worktree 与孤儿目录。
@@ -3161,9 +3166,8 @@ export class SuperAgentHost {
   /** Route a Super Agent action from the board. */
 
   async handleSuperAgentAction(msg: Extract<WebviewToHost, { type: "superAgent" }>): Promise<void> {
-    // 共享消息联合里 superAgent 的 action 尚无 "stuck"（批次1B 声明的消息只到
-    // cancel / retry 等既有动作）。这里只在宿主侧识别这个扩展动作并委托
-    // judgeSuperStuck，既有 cancel 分支逐字不变 —— 不变动 shared/ 契约。
+    // "stuck"（判定卡死）已正式进入共享 superAgent.action 联合，和 cancel /
+    // retry 等动作一样由 shared/ 契约覆盖，宿主侧不再做任何类型扩展。
     // 接管期间本机侧不执行任何看板动作。webview 已把看板与待答条整体 inert，
     // 但那是 UI 层的门 —— portal 出来的浮层、旧快照里残留的按钮、以及任何
     // 绕开 UI 的通道都能把消息发到这里。远端正在推进的流程不能被本机的
@@ -3178,9 +3182,7 @@ export class SuperAgentHost {
     }
     const manager = this.deps.getSuperAgent();
     if (!manager) return;
-    // 宿主侧扩展 action：只多认领一个 "stuck"（判定卡死），其余动作与共享
-    // 联合类型逐字一致；shared/ 契约不变。
-    const action = msg.action as Extract<WebviewToHost, { type: "superAgent" }>["action"] | "stuck";
+    const action = msg.action;
     switch (action) {
       case "transcript": {
         if (!msg.sessionId) return;

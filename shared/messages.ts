@@ -2288,6 +2288,10 @@ export type WebviewToHost =
    *    The host reuses the same record and working directory so any
    *    uncommitted work left by the interrupted run stays visible; the new
    *    child is told it is a retry and to inspect the current state first.
+   *  - `stuck`: the user judges a live child stuck. The host records a
+   *    user-originated `timeout` diagnostic and then cancels it via the same
+   *    user-source path as `cancel` (no silent process kill), so the board's
+   *    「判定卡死」 action is fully covered by the shared contract.
    */
   | {
       type: "superAgent";
@@ -2299,7 +2303,8 @@ export type WebviewToHost =
         | "cleanupBatch"
         | "merge"
         | "transcript"
-        | "retry";
+        | "retry"
+        | "stuck";
       /** Target child session (absent for cancelAll / cleanupBatch). */
       sessionId?: string;
       /** cleanupBatch: the children to clean up in one serial batch. */
