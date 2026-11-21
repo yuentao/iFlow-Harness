@@ -1153,47 +1153,65 @@ function UserMessage({
         <Markdown text={block.text} />
         {block.images && block.images.length > 0 && (() => {
           // Only data: payloads render — a transcript string must never turn
-          // into a live remote <img src> fetch.
-          const images = block.images.filter((src) => src.startsWith("data:image/"));
+          // into a live remote <img src> fetch. Captions stay keyed by the
+          // ORIGINAL index: `imageCaptions` is aligned with `block.images`,
+          // and filtering out non-data entries must not shift them.
+          const images = block.images
+            .map((src, index) => ({ src, index }))
+            .filter((entry) => entry.src.startsWith("data:image/"));
           if (images.length === 0) return null;
           const single = images.length === 1;
           return (
-            <div className={`mt-2 ${single ? "" : "grid grid-cols-3 gap-1.5"}`}>
-              {images.map((src, i) => (
-                <button
-                  key={i}
-                  type="button"
-                  className={`group relative block cursor-zoom-in overflow-hidden rounded-md border border-border bg-editor transition duration-200 hover:ring-1 hover:ring-primary/60 focus-visible:ring-1 focus-visible:ring-primary/60 ${
-                    single ? "h-32 w-fit max-w-[260px]" : "size-16"
-                  }`}
-                  aria-label={t("查看第 {0} 张图片", i + 1)}
-                  title={t("查看第 {0} 张图片", i + 1)}
-                  onClick={() => setLightbox(i)}
-                >
-                  {failedImages[i] ? (
-                    <span
-                      className={
-                        single
-                          ? "flex h-32 w-40 items-center justify-center px-3 text-ui-micro text-muted-foreground"
-                          : "flex size-full items-center justify-center px-1 text-center text-ui-micro text-muted-foreground"
-                      }
+            <div className={`mt-2 ${single ? "flex flex-col items-start gap-1" : "grid grid-cols-3 gap-1.5"}`}>
+              {images.map(({ src, index }, i) => {
+                const caption = (block.imageCaptions?.[index] ?? "").trim();
+                return (
+                  <div key={i} className="flex min-w-0 flex-col gap-1">
+                    <button
+                      type="button"
+                      className={`group relative block cursor-zoom-in overflow-hidden rounded-md border border-border bg-editor transition duration-200 hover:ring-1 hover:ring-primary/60 focus-visible:ring-1 focus-visible:ring-primary/60 ${
+                        single ? "h-32 w-fit max-w-[260px]" : "size-16"
+                      }`}
+                      aria-label={t("查看第 {0} 张图片", i + 1)}
+                      title={t("查看第 {0} 张图片", i + 1)}
+                      onClick={() => setLightbox(i)}
                     >
-                      {t("加载失败")}
-                    </span>
-                  ) : (
-                    <img
-                      className={
-                        single
-                          ? "h-32 w-auto max-w-[260px] object-cover transition-transform duration-200 group-hover:scale-105"
-                          : "size-full object-cover transition-transform duration-200 group-hover:scale-105"
-                      }
-                      src={src}
-                      alt={t("附件图片 {0}", i + 1)}
-                      onError={() => setFailedImages((prev) => ({ ...prev, [i]: true }))}
-                    />
-                  )}
-                </button>
-              ))}
+                      {failedImages[i] ? (
+                        <span
+                          className={
+                            single
+                              ? "flex h-32 w-40 items-center justify-center px-3 text-ui-micro text-muted-foreground"
+                              : "flex size-full items-center justify-center px-1 text-center text-ui-micro text-muted-foreground"
+                          }
+                        >
+                          {t("加载失败")}
+                        </span>
+                      ) : (
+                        <img
+                          className={
+                            single
+                              ? "h-32 w-auto max-w-[260px] object-cover transition-transform duration-200 group-hover:scale-105"
+                              : "size-full object-cover transition-transform duration-200 group-hover:scale-105"
+                          }
+                          src={src}
+                          alt={t("附件图片 {0}", i + 1)}
+                          onError={() => setFailedImages((prev) => ({ ...prev, [i]: true }))}
+                        />
+                      )}
+                    </button>
+                    {caption && (
+                      <span
+                        className={`truncate text-ui-micro text-muted-foreground ${
+                          single ? "max-w-[260px]" : "w-16"
+                        }`}
+                        title={caption}
+                      >
+                        {caption}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           );
         })()}

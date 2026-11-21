@@ -1341,6 +1341,14 @@ export interface SuperAttachment {
   data?: string;
   /** 内联图片的 MIME 类型。 */
   mimeType?: string;
+  /**
+   * 用户给这张图/这个文件写的说明（多模态方案 C）。
+   *
+   * 来自 composer 的逐图说明，随任务书附件清单一起交给子会话 —— 用户侧的
+   * 意图（「报错弹窗」「修复后界面」）必须能让子会话按顺序对上，而不是只剩
+   * 一串文件名。缺失即无说明。
+   */
+  caption?: string;
 }
 
 export interface SuperTaskSpec {
@@ -4724,6 +4732,8 @@ export function buildSuperReportPrompt(
 export function buildDelegatedUserTurnPrompt(input: {
   text: string;
   images: readonly { mimeType: string }[];
+  /** 每张图片的说明，与 `images` 同下标；缺失/短数组按「无说明」处理。 */
+  imageCaptions?: readonly string[];
   files: readonly { name: string; path: string }[];
   /** 超过子会话附件上限、未被交给子会话的数量。 */
   droppedByChild?: number;
@@ -4740,7 +4750,17 @@ export function buildDelegatedUserTurnPrompt(input: {
   ];
   const attachments: string[] = [];
   if (input.images.length > 0) {
-    attachments.push(`- ${input.images.length} image attachment(s) re-attached below as inline image blocks.`);
+    // 有说明时逐图列出（按顺序），让模型能对上用户指的那一张；没有说明时
+    // 保留原来的计数行，不伪造内容。
+    const described = input.images.map((_, index) => (input.imageCaptions?.[index] ?? "").trim());
+    if (described.some(Boolean)) {
+      attachments.push(
+        `- ${input.images.length} image attachment(s) re-attached below as inline image blocks, in this order:`,
+        ...described.map((caption, index) => `  ${index + 1}. ${caption || "（无说明）"}`),
+      );
+    } else {
+      attachments.push(`- ${input.images.length} image attachment(s) re-attached below as inline image blocks.`);
+    }
   }
   for (const file of input.files) {
     attachments.push(`- file: ${file.name} → ${file.path}`);

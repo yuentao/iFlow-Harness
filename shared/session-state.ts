@@ -1471,6 +1471,11 @@ export function beginUserPrompt(
    * 不是本机用户的直接输入。转录里必须可区分（webview 渲染 QQ 徽标）。
    */
   origin?: "qq",
+  /**
+   * 每张图片的说明（多模态方案 C），与 `images` 同下标。缺失/短数组按空串
+   * 处理；只有真的有说明时才写进块，旧转录没有该字段仍可读。
+   */
+  imageCaptions?: string[],
 ): number {
   // Mirror the agent-facing attachment list in the transcript so the user
   // message block shows exactly what the agent was told about the files.
@@ -1480,9 +1485,20 @@ export function beginUserPrompt(
       : "";
   const full = text + fileNote;
   const originField = origin ? { origin } : {};
+  const hasImages = !!images && images.length > 0;
+  const captions = hasImages && imageCaptions && imageCaptions.some((c) => !!c && c.trim() !== "")
+    ? imageCaptions.map((c) => (typeof c === "string" ? c : ""))
+    : undefined;
   state.blocks.push(
-    images && images.length > 0
-      ? { kind: "user", text: full, images, id: nextBlockId(), ...originField }
+    hasImages
+      ? {
+          kind: "user",
+          text: full,
+          images: images!,
+          ...(captions ? { imageCaptions: captions } : {}),
+          id: nextBlockId(),
+          ...originField,
+        }
       : { kind: "user", text: full, id: nextBlockId(), ...originField },
   );
   state.status = "streaming";

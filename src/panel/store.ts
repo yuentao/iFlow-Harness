@@ -162,8 +162,9 @@ export class SessionStore {
     images?: string[],
     files?: { name: string; path: string }[],
     origin?: "qq",
+    imageCaptions?: string[],
   ): number {
-    const index = beginUserPrompt(this.state, text, images, files, origin);
+    const index = beginUserPrompt(this.state, text, images, files, origin, imageCaptions);
     this.noteMutationIndex(index);
     this.flush();
     return index;

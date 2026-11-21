@@ -78,7 +78,7 @@ type PanelInternals = {
     images?: { data: string; mimeType: string }[],
     files?: { name: string; path: string }[],
     contexts?: unknown,
-    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean },
+    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean; imageCaptions?: string[] },
   ) => Promise<boolean>;
   promptWithRetry: (client: unknown, sessionId: string, prompt: unknown) => Promise<{ stopReason: string }>;
   persistActiveTranscript: () => Promise<void>;
@@ -257,6 +257,55 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     expect(calls).toHaveLength(2);
     calls[1]!.resolve({ stopReason: "end_turn" });
     await flush();
+  });
+
+  it("streaming 带图片说明：子会话附件与主会话补投都带 caption", async () => {
+    const sendSpy = vi.spyOn(p, "sendPrompt");
+    const first = send("first turn");
+    await flush();
+    const spawn = vi.fn((_spec: unknown) => ({ id: "super-1" }));
+    Object.assign(p, { getSuperAgent: () => ({ spawn }) });
+
+    await p.handleWebviewMessage({
+      type: "sendPrompt",
+      text: "看两张图",
+      images: [
+        { data: "QUJD", mimeType: "image/png" },
+        { data: "REVG", mimeType: "image/png" },
+      ],
+      imageCaptions: ["报错弹窗", ""],
+      files: [{ name: "note.txt", path: "C:/tmp/note.txt" }],
+    });
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const spec = spawn.mock.calls[0]?.[0] as { attachments?: unknown[] };
+    // 说明按序交给子会话；没有说明的图片不写空 caption 字段（不伪造内容）。
+    expect(spec.attachments).toEqual([
+      { name: "image1", data: "QUJD", mimeType: "image/png", caption: "报错弹窗" },
+      { name: "image2", data: "REVG", mimeType: "image/png" },
+      { name: "note.txt", path: "C:/tmp/note.txt" },
+    ]);
+    expect(calls).toHaveLength(1); // 派发当刻不并发第二个主会话 prompt
+
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await first;
+    await flush();
+
+    // 回合结束后补投主会话：清单按序、缺说明的那张写「（无说明）」。
+    expect(calls).toHaveLength(2);
+    const backfill = calls[1]!.prompt;
+    const text = backfill.map((b) => b.text ?? "").join("\n");
+    expect(text).toContain("1. 报错弹窗");
+    expect(text).toContain("2. （无说明）");
+    // 补投回合的 options 也带上说明（转录里不能再造用户气泡，说明走附件清单）。
+    expect(sendSpy.mock.calls.at(-1)?.[4]).toMatchObject({
+      hidden: true,
+      delegateOnBusy: false,
+      imageCaptions: ["报错弹窗", ""],
+    });
+
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await flush();
+    expect(spawn).toHaveBeenCalledTimes(1);
   });
 
   it("streaming 带附件消息在回合结束后被补投主会话（含附件块/路径，不二次派发）", async () => {

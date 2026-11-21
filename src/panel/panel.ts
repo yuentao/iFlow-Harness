@@ -721,6 +721,25 @@ function asSuperIntegrationMode(value: unknown): SuperIntegrationMode {
   return value === "pr" || value === "manual" ? value : "merge";
 }
 
+/**
+ * 多模态方案 C：模型可见的逐图顺序清单。
+ *
+ * 模型拿到的图片是**不带文件名**的内联块，所以「第几张图是什么」只能靠这段
+ * 文本；说明为用户原文（不翻译、不改写），没有说明的图片如实写「（无说明）」，
+ * 绝不编造内容。固定标签按功能规格用中文。
+ *
+ * 只列**实际内联发送**的图片：调用方传入的就是 `prompt` 里 push 的那些
+ * image 块（与 `images` 同序同长）；超过内联上限、仅以文件路径提供的附件
+ * 不在这个列表里 —— 它们由附件清单（路径行）单独说明。
+ */
+function buildImageCaptionPrompt(captions: readonly string[]): string {
+  if (captions.length === 0) return "";
+  return [
+    "已附图片（按顺序）：",
+    ...captions.map((caption, index) => `${index + 1}. ${caption || "（无说明）"}`),
+  ].join("\n");
+}
+
 /** Cap on the per-workspace recent-session list. */
 const MAX_RECENT_SESSIONS = 20;
 /** Label until the first user prompt names the session. */
@@ -2252,6 +2271,10 @@ export class ChatPanel implements vscode.Disposable {
     if (!picked || picked.length === 0) return;
     const images: { name: string; data: string; mimeType: string }[] = [];
     const files: { name: string; path: string }[] = [];
+    // 降级/读取失败绝不静默：用户选了一张 8MB 截图，结果它变成文件路径，
+    // 必须当场说明，否则会以为图片已经作为图片块发出去了。
+    const degradedImages: string[] = [];
+    const unreadableImages: string[] = [];
     for (const uri of picked) {
       const fsPath = uri.fsPath;
       const name = path.basename(fsPath);
@@ -2267,12 +2290,30 @@ export class ChatPanel implements vscode.Disposable {
           // files.push below, degrading it to a plain file attachment
           // instead of silently skipping it (review 2026-09-19 A6 misread
           // this as a drop; the webview drop/paste path now mirrors it).
+          degradedImages.push(name);
         } catch (error) {
           this.log.warn(`reading picked image failed: ${errorMessage(error)}`);
+          unreadableImages.push(name);
           continue;
         }
       }
       files.push({ name, path: fsPath });
+    }
+    if (degradedImages.length > 0) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t(
+          "图片超过 {0}MB，已作为文件附件发送：{1}",
+          Math.floor(ATTACHMENT_IMAGE_MAX_BYTES / 1024 / 1024),
+          degradedImages.join("、"),
+        ),
+      );
+    }
+    if (unreadableImages.length > 0) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("无法读取图片 {0}，已跳过", unreadableImages.join("、")),
+      );
     }
     this.postToWebview({ type: "filesPicked", images, files });
   }
@@ -2444,7 +2485,9 @@ export class ChatPanel implements vscode.Disposable {
         this.pushQqState();
         break;
       case "sendPrompt":
-        await this.sendPrompt(msg.text, msg.images, msg.files, msg.contexts);
+        await this.sendPrompt(msg.text, msg.images, msg.files, msg.contexts, {
+          ...(msg.imageCaptions ? { imageCaptions: msg.imageCaptions } : {}),
+        });
         break;
       case "queueAction":
         this.handleQueueAction(msg);
@@ -8718,6 +8761,12 @@ export class ChatPanel implements vscode.Disposable {
       displayText?: string;
       quietBusy?: boolean;
       onTurnStarted?: () => void | Promise<void>;
+      /**
+       * 多模态方案 C：与 `images` 同下标的逐图说明。缺省/短数组按空串处理。
+       * 写进转录的同时，按顺序拼进模型可见的 prompt，让模型对上「第几张图是
+       * 什么」；结构化界面上模型看不到图片文件名，只有这条清单。
+       */
+      imageCaptions?: string[];
     },
   ): Promise<boolean> {
     const internal = options?.internal === true;
@@ -8730,6 +8779,12 @@ export class ChatPanel implements vscode.Disposable {
     const trimmed = text.trim();
     const hasContexts = (contexts?.length ?? 0) > 0;
     if (!trimmed && !hasContexts) return false;
+    // 多模态方案 C：把逐图说明对齐到 images 的下标（缺失按空串），一次算好，
+    // 转录与模型侧清单共用同一份口径。
+    const imageCaptions = (images ?? []).map((_, index) =>
+      (options?.imageCaptions?.[index] ?? "").trim(),
+    );
+    const hasImageCaptions = imageCaptions.some((caption) => caption !== "");
     // A `/compress` turn is housekeeping, not conversation: it must not
     // trigger automatic memory extraction. Auto-compression after a real turn
     // is covered separately by maybeAutoCompressOnIdle's return value.
@@ -8808,7 +8863,7 @@ export class ChatPanel implements vscode.Disposable {
       let droppedAttachments = 0;
       const attachments = this.collectSuperAttachments(images, files, (count) => {
         droppedAttachments += count;
-      });
+      }, imageCaptions);
       const task = [contextBlock, trimmed].filter(Boolean).join("\n\n");
       const title = normalizeSuperTitle(trimmed.split("\n")[0] ?? "");
       const manager = this.getSuperAgent();
@@ -8825,6 +8880,7 @@ export class ChatPanel implements vscode.Disposable {
         mainSessionId: this.currentMainSessionId(),
         text: trimmed,
         images: (images ?? []).map((img) => ({ data: img.data, mimeType: img.mimeType })),
+        imageCaptions,
         files: (files ?? []).map((file) => ({ name: file.name, path: file.path })),
         ...(contexts?.length ? { contexts } : {}),
         droppedByChild: droppedAttachments,
@@ -8922,8 +8978,13 @@ export class ChatPanel implements vscode.Disposable {
     // the user bubble). Internal helper requests (titles / enhance / reports)
     // must not carry it: they are not turns of the conversation.
     const superDigest = internal ? "" : this.superAgentsDigest();
+    // 图片在模型眼里只是没有名字的内联块：清单必须紧贴在正文之前，模型才
+    // 能把「第 2 张」对应到用户的说明。没有说明时不插入任何占位段落。
+    const imageCaptionBlock = hasImageCaptions ? buildImageCaptionPrompt(imageCaptions) : "";
     const promptText =
-      [superDigest, agentContextBlock, typedText].filter(Boolean).join("\n\n") + attachmentBlock;
+      [superDigest, agentContextBlock, imageCaptionBlock, typedText]
+        .filter(Boolean)
+        .join("\n\n") + attachmentBlock;
     // C3/C9: the webview's busy lock cannot guard the command channels
     // (`iflow.askSelection`, `@iflow` participant). A prompt during a session
     // reset would hit the about-to-be-discarded sessionId; two overlapping
@@ -8987,6 +9048,7 @@ export class ChatPanel implements vscode.Disposable {
           (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
           files,
           options?.origin,
+          hasImageCaptions ? imageCaptions : undefined,
         );
         if (!internal) void this.labelSessionWithPrompt(fullText);
         void this.persistActiveTranscript(); // user turn lands even on a crash
@@ -9290,13 +9352,19 @@ export class ChatPanel implements vscode.Disposable {
       // 看不到截图/日志。只从 user 块既有形态取回（data URL + 文件注记行），
       // 解析不出来就如实不带，绝不伪造附件。
       const regenImages: { data: string; mimeType: string }[] = [];
-      for (const url of lastUserBlock?.images ?? []) {
+      // 说明按原块下标取（重跑不重写转录，但模型侧清单必须与首次发送同构）。
+      const regenCaptions: string[] = [];
+      for (const [index, url] of (lastUserBlock?.images ?? []).entries()) {
         const match = /^data:([^;,]+);base64,(.*)$/s.exec(url);
         if (!match) continue;
         const mimeType = match[1];
         const data = match[2];
-        if (mimeType && data !== undefined) regenImages.push({ mimeType, data });
+        if (mimeType && data !== undefined) {
+          regenImages.push({ mimeType, data });
+          regenCaptions.push((lastUserBlock?.imageCaptions?.[index] ?? "").trim());
+        }
       }
+      const regenHasCaptions = regenCaptions.some((caption) => caption !== "");
       const regenFiles: { name: string; path: string }[] = [];
       for (const line of (lastUserBlock?.text ?? "").split("\n")) {
         const match = /^（文件：(.*) → (.*)）$/.exec(line);
@@ -9329,7 +9397,7 @@ export class ChatPanel implements vscode.Disposable {
         {
           type: "text",
           text:
-            [regenDigest, regenAgentText]
+            [regenDigest, regenHasCaptions ? buildImageCaptionPrompt(regenCaptions) : "", regenAgentText]
               .filter(Boolean)
               .join("\n\n") + regenAttachmentBlock,
         },

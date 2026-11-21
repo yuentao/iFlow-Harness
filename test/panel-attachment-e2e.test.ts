@@ -190,4 +190,68 @@ describe("agent attachment header · end-to-end (panel → CLI)", () => {
     expect(prompts[1]).toContainEqual({ type: "image", data: "QUJD", mimeType: "image/png" });
     expect(spawn).toHaveBeenCalledTimes(1); // 补投不二次派发
   });
+
+  it("carries per-image captions into the agent prompt and the transcript", async () => {
+    await send({
+      text: "两张截图",
+      images: [
+        { data: "QUJD", mimeType: "image/png" },
+        { data: "REVG", mimeType: "image/png" },
+      ],
+      imageCaptions: ["报错弹窗", ""],
+    });
+    await flush();
+
+    expect(sent).toHaveLength(1);
+    const recorded = sent[0]!;
+    // 模型可见的顺序清单（说明按序、缺失写「（无说明）」）。
+    expect(recorded).toContain("已附图片（按顺序）：");
+    expect(recorded).toContain("1. 报错弹窗");
+    expect(recorded).toContain("2. （无说明）");
+
+    // 转录里的用户块保留逐图说明，与 images 同下标。
+    const userBlocks = panel.store
+      .getState()
+      .blocks.filter((block) => block.kind === "user");
+    expect(userBlocks).toHaveLength(1);
+    const user = userBlocks[0]!;
+    expect(user.kind === "user" ? user.imageCaptions : undefined).toEqual(["报错弹窗", ""]);
+  });
+
+  it("omits the image list when no caption is provided", async () => {
+    await send({
+      text: "看这张",
+      images: [{ data: "QUJD", mimeType: "image/png" }],
+    });
+    await flush();
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toContain("已附图片（按顺序）：");
+    const user = panel.store.getState().blocks.find((block) => block.kind === "user");
+    expect(user && user.kind === "user" ? user.imageCaptions : undefined).toBeUndefined();
+  });
+
+  it("regenerate re-sends the images with the same ordered caption list", async () => {
+    // 用公开 store API 造出「上一轮带图带说明」的转录，并把状态收回 idle，
+    // 让 regenerate() 的 streaming 守卫放行。
+    panel.store.userPrompt(
+      "look at this",
+      ["data:image/png;base64,QUJD", "data:image/png;base64,REVG"],
+      undefined,
+      undefined,
+      ["报错弹窗", "修复后界面"],
+    );
+    panel.store.promptCompleted("end_turn");
+
+    await (panel as unknown as { handleWebviewMessage: (m: unknown) => Promise<void> }).handleWebviewMessage({
+      type: "regenerate",
+    });
+    await flush();
+
+    expect(sent).toHaveLength(1);
+    const recorded = sent[0]!;
+    expect(recorded).toContain("已附图片（按顺序）：");
+    expect(recorded).toContain("1. 报错弹窗");
+    expect(recorded).toContain("2. 修复后界面");
+  });
 });

@@ -539,6 +539,12 @@ const en: Record<string, string> = {
   "下一张": "Next image",
   "图片加载失败": "Failed to load image",
   "加载失败": "Failed to load",
+  // 多模态方案 C：逐图说明与附加提示
+  "已附加 {0} 张图片": "Attached {0} image(s)",
+  "最多 {0} 张图片，已忽略 {1} 张": "At most {0} images — {1} ignored",
+  "图片说明（可选，例如：报错弹窗）": "Caption (optional, e.g. the error dialog)",
+  "第 {0} 张图片的说明": "Caption for image {0}",
+  "图片超过 {0}MB，已作为文件附件发送": "Image over {0}MB — sent as a file attachment instead",
   "在 VSCode 中打开": "Open in VSCode",
   // P0-4: empty-state example chips & capability hint
   "帮我梳理这个仓库的结构与核心模块": "Walk me through this repository's structure and core modules",

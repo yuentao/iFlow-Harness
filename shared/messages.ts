@@ -124,6 +124,14 @@ export interface UserBlock extends BlockBase {
   /** Attached images as data URLs (M5 image input), absent for text-only prompts. */
   images?: string[];
   /**
+   * Per-image captions (multimodal plan C), index-aligned with {@link images}.
+   *
+   * A missing entry (or a shorter array) means "no caption" — old transcripts
+   * without this field stay readable, so readers must treat it as optional and
+   * never migrate anything.
+   */
+  imageCaptions?: string[];
+  /**
    * 这条用户消息的来源渠道（宿主写入，webview 只渲染徽标）。
    *
    * `qq` = 由 QQ 机器人转来、固定注入主会话的外部消息：它在本机
@@ -2247,6 +2255,13 @@ export type WebviewToHost =
       type: "sendPrompt";
       text: string;
       images?: { data: string; mimeType: string }[];
+      /**
+       * Multimodal plan C: per-image captions, index-aligned with `images`.
+       * Optional — a missing/short array means "no caption". The host writes
+       * them into the transcript (`UserBlock.imageCaptions`) and prepends an
+       * ordered image list to the agent-facing prompt.
+       */
+      imageCaptions?: string[];
       files?: { name: string; path: string }[];
       /** M2 P0-4: context cards (right-click selection, @folder/@problems/
        * @git/@url) — the host assembles each into a titled fenced section

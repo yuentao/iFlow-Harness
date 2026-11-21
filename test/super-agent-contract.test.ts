@@ -111,3 +111,21 @@ describe("super agent · 提交契约三处对齐（SA-3）", () => {
     expect(managerSource).toContain("const commit = await this.commitChildWork(id, isolation, attempt);");
   });
 });
+
+describe("子会话任务书 · 附件说明（多模态方案 C）", () => {
+  it("附件清单带上用户说明，无说明时不追加破折号", () => {
+    const brief = buildTaskPrompt("看图", "干活", { kind: "directory", path: "/tmp/dir" }, {
+      copies: [
+        { name: "image1.png", path: "/tmp/att/image1.png", caption: "报错弹窗" },
+        { name: "image2.png", path: "/tmp/att/image2.png" },
+      ],
+      images: [],
+      failures: [],
+    });
+    expect(brief).toContain("- image1.png → /tmp/att/image1.png — 报错弹窗");
+    expect(brief).toContain("- image2.png → /tmp/att/image2.png\n");
+    expect(brief).not.toContain("- image2.png → /tmp/att/image2.png —");
+    // 模板里明确告诉子会话：说明来自用户，用来对应图片顺序。
+    expect(brief).toContain("Any attachment caption comes from the user");
+  });
+});
