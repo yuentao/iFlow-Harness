@@ -158,8 +158,7 @@ import {
   QqHost,
 } from "./qq-host.js";
 // QQ module-level helpers remain part of panel.ts's public surface (tests import them).
-export { QQ_TASK_PROJECTION_LIMIT, isQqHealthHealthy, capQqTaskProjection } from "./qq-host.js";
-export type { QqAnswerDeliverySource } from "./qq-host.js";
+export { isQqHealthHealthy, capQqTaskProjection } from "./qq-host.js";
 
 import type { QqSettingsIo } from "../qq/settings-host.js";
 import type { QqBotBindRuntimeDeps, QqChannelDispatchDeps } from "./qqbot-host.js";
@@ -745,12 +744,6 @@ export interface PanelServices {
  * The handshake's post-connect steps and the session/prompt entry points check
  * it at their checkpoints so a destroyed store is never touched again.
  */
-
-/** `requestSuperMerge` 的真实结果（供 QQ 端口如实回传 detail）。 */
-export type SuperMergeDispatchResult =
-  | { dispatched: true; mergeSessionId: string }
-  | { dispatched: false; queued: boolean; reason: string };
-
 
 export class DisposedError extends Error {
   constructor(message = "panel disposed") {
