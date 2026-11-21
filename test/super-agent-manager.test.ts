@@ -11,6 +11,7 @@ import {
   SUPER_PENDING_TIMEOUT_MS,
   SUPER_TEXT_MAX_CHARS,
 } from "../src/panel/super-agent.js";
+import { externalSuperWorktreeRoot, superWorktreeRoot } from "../src/panel/worktree.js";
 import type { AcpClient, AcpClientCallbacks } from "../src/acp/client.js";
 import type { ContentBlock, McpServer, UserQuestion } from "../src/acp/protocol.js";
 import {
@@ -378,9 +379,12 @@ describe("super agent · 编排", () => {
     expect(session?.isolation.kind).toBe("git_worktree");
     expect(session?.isolation.branch).toContain("iflow/super/");
     expect(existsSync(session?.isolation.path ?? "")).toBe(true);
-    // 工作副本跟着项目走，不写扩展自己的数据目录。
-    expect(path.resolve(session?.isolation.path ?? "").startsWith(path.resolve(repo))).toBe(true);
-    expect(session?.isolation.path).toContain(path.join(".iflow", "super", "worktrees"));
+    // 工作副本落在实现解析出的 worktree 根下：默认主仓外的兄弟目录（避免祖先
+    // AGENTS.md 重复注入），安全检查不通过时才回退主仓内 `.iflow/super/worktrees`。
+    // 不再写死旧位置 —— 那条断言随根位置迁移早已过时。
+    expect(
+      path.resolve(session?.isolation.path ?? "").startsWith(path.resolve(superWorktreeRoot(repo))),
+    ).toBe(true);
 
     const client = harness.clients[0];
     expect(client).toBeDefined();
@@ -901,7 +905,7 @@ describe("super agent · 编排", () => {
     const kept = await harness.manager.dispose();
     expect(harness.clients[0]?.disposed).toBe(true);
     expect(kept).toHaveLength(1);
-    expect(kept[0]?.path).toContain(path.join(".iflow", "super", "worktrees"));
+    expect(path.resolve(kept[0]?.path ?? "").startsWith(path.resolve(superWorktreeRoot(repo)))).toBe(true);
     // worktree 还在 —— 用户可能还没合并里面的工作。
     expect(existsSync(kept[0]?.path ?? "")).toBe(true);
   }, 30000);
@@ -2157,7 +2161,12 @@ describe("super agent · 准备阶段抛错也要回收并发槽位", () => {
 
   it("隔离目录建不出来：会话记为失败，槽位归还给排队的那个", async () => {
     const repo = makeRepo();
-    // 把 `.iflow` 占成一个普通文件 → worktree / 降级目录的 mkdir 都会 ENOTDIR。
+    // worktree 根默认已挪到主仓外的兄弟目录，只占住主仓内的 `.iflow` 拦不住它。
+    // 把真实根也占成普通文件 → createWorktree 落成 ENOTDIR；退回主仓内目录隔离
+    // 时又撞上被占住的 `.iflow`，prepare 抛错，会话如实记失败并归还槽位。
+    const externalRoot = externalSuperWorktreeRoot(repo);
+    writeFileSync(externalRoot, "not a directory\n", "utf8");
+    roots.push(externalRoot); // afterAll 一并清理这个临时文件
     writeFileSync(path.join(repo, ".iflow"), "not a directory\n", "utf8");
     const harness = makeManager(
       repo,
