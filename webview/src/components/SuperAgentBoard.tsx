@@ -732,9 +732,12 @@ function elapsedText(session: SuperSessionUi, now: number): string {
 /**
  * 子会话「最近一次活动」的时刻（epoch ms）。
  *
- * 活动 = 宿主写入的任何一次状态推进：`updatedAt` 在每次事件（含进度帧、
- * 诊断追加）时刷新；`diagnostics[].at` 是逐条诊断事件的时间戳。二者取最大，
- * 让「最近活动」既能反映细粒度的诊断心跳，也能在诊断缺省时退回 updatedAt。
+ * 活动时刻的优先级（高 → 低）：
+ *   ① `diagnostics[].activityDetail.at` —— 结构化活动细节里的原始活动时刻，
+ *      它可与事件写入时刻 `at` 不同（诊断落盘略晚于活动发生），最贴近「模型 /
+ *      工具最近一次真正推进」的时间；
+ *   ② `diagnostics[].at` —— 没有结构化细节时的逐条诊断事件时间戳；
+ *   ③ `updatedAt` —— 每次状态推进刷新，诊断缺省时的兜底。
  *
  * 这里刻意**不**筛 kind：shared 的 SuperDiagnosticKind 是稳定枚举（spawn /
  * session / report / merge / retry / error / timeout / restore / blocked），
@@ -743,12 +746,44 @@ function elapsedText(session: SuperSessionUi, now: number): string {
  */
 function lastActivityAt(session: SuperBoardSession): number {
   let at = session.updatedAt ?? 0;
-  for (const event of session.diagnostics ?? []) {
-    if (event && typeof event.at === "number" && Number.isFinite(event.at) && event.at > at) {
-      at = event.at;
+  for (const raw of session.diagnostics ?? []) {
+    if (!raw) continue;
+    // activityDetail 定义在 shared 的 SuperDiagnosticEvent 上；看板视图模型
+    // SuperBoardDiagnosticEvent 为前向兼容只声明公共字段，这里按可选结构读，
+    // 缺字段时退回事件 at —— 旧数据行为逐字不变。
+    const event = raw as typeof raw & { activityDetail?: { at?: number } };
+    const detailAt = event.activityDetail?.at;
+    const candidate =
+      typeof detailAt === "number" && Number.isFinite(detailAt) ? detailAt : raw.at;
+    if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > at) {
+      at = candidate;
     }
   }
   return Number.isFinite(at) ? at : 0;
+}
+
+/**
+ * 最近活动的一句短摘要（可选）：取最新一条带结构化细节的诊断，优先
+ * activityDetail.excerpt，其次 toolCallDetail 的「工具名 + 摘要」。两者都
+ * 没有时返回空串 —— title 退回通用说明，不给旧数据添噪音。
+ */
+function recentActivityExcerpt(session: SuperBoardSession): string {
+  const diagnostics = session.diagnostics ?? [];
+  for (let i = diagnostics.length - 1; i >= 0; i--) {
+    const raw = diagnostics[i];
+    if (!raw) continue;
+    const event = raw as typeof raw & {
+      activityDetail?: { excerpt?: string };
+      toolCallDetail?: { name?: string; excerpt?: string };
+    };
+    const text =
+      event.activityDetail?.excerpt ??
+      (event.toolCallDetail?.excerpt
+        ? `${event.toolCallDetail.name ?? ""}：${event.toolCallDetail.excerpt}`
+        : "");
+    if (text) return text;
+  }
+  return "";
 }
 
 /**
@@ -1076,6 +1111,10 @@ export function SuperAgentBoard({
   // variant snapshots the active count at open time — recomputing it while the
   // dialog is open could show “0 个” if the children finish on their own.
   const [confirmCancel, setConfirmCancel] = useState<SuperSessionUi | null>(null);
+  // 「判定卡死」与中断同样杀进程，但与「我已经判定它卡住」语义不同：宿主会先
+  // 记一条用户判定的 timeout 诊断，再按 user 来源中断。单独一个确认目标，避免
+  // 与「中断」确认框串台。
+  const [confirmStuck, setConfirmStuck] = useState<SuperSessionUi | null>(null);
   const [confirmCancelAll, setConfirmCancelAll] = useState<number | null>(null);
   // Finished children whose changes are already merged live in one collapsed
   // history row (collapsed by default — nothing in them is actionable).
@@ -1187,6 +1226,7 @@ export function SuperAgentBoard({
       onRetry={() => beginRetry(session)}
       onCleanup={() => setConfirmCleanup(session)}
       onCancel={() => setConfirmCancel(session)}
+      onStuck={() => setConfirmStuck(session)}
     />
   );
 
@@ -1792,6 +1832,22 @@ export function SuperAgentBoard({
           onCancel={() => setConfirmCancel(null)}
         />
       )}
+      {confirmStuck && (
+        <ConfirmDialog
+          title={t("判定卡死")}
+          message={t(
+            "判定「{0}」卡死？这会先记一条「用户判定超时」诊断，再像中断一样停止它；本次改动不会提交或合并，工作目录里已有的内容会保留，之后可以重试。",
+            confirmStuck.title,
+          )}
+          confirmLabel={t("判定卡死并中断")}
+          onConfirm={() => {
+            markCancelPending([confirmStuck]);
+            send({ type: "superAgent", action: "stuck", sessionId: confirmStuck.id });
+            setConfirmStuck(null);
+          }}
+          onCancel={() => setConfirmStuck(null)}
+        />
+      )}
       {confirmCancelAll !== null && (
         <ConfirmDialog
           title={t("全部中断")}
@@ -1924,9 +1980,14 @@ export function shortSuperSessionDescription(session: SuperSessionUi): string {
  */
 function RecentActivity({ session, now }: { session: SuperBoardSession; now: number }) {
   const { text, elapsed, silent } = recentActivityText(session, now);
+  const excerpt = recentActivityExcerpt(session);
   const title = silent
-    ? t("已静默 {0}，可能卡住，可随时中断", elapsed)
-    : t("距最近一次诊断或进度更新的时间");
+    ? excerpt
+      ? t("已静默 {0}，可能卡住，可随时中断（最近：{1}）", elapsed, excerpt)
+      : t("已静默 {0}，可能卡住，可随时中断", elapsed)
+    : excerpt
+      ? t("距最近一次诊断或进度更新的时间（最近：{0}）", excerpt)
+      : t("距最近一次诊断或进度更新的时间");
   return (
     <span
       className={`flex shrink-0 items-center gap-1 text-ui-micro tabular-nums max-[380px]:hidden ${silent ? "text-warning" : "text-muted-foreground"}`}
@@ -1946,6 +2007,10 @@ function RecentActivity({ session, now }: { session: SuperBoardSession; now: num
  * 两个动作。合并走宿主既有的 superAgent/merge（派合并子会话），丢弃走
  * superAgent/cleanup（删工作目录、保留有未合并提交的分支）——二者都在下面
  * 经 ConfirmDialog 二次确认后才发送。空列表不渲染，不给看板添噪音。
+ *
+ * 注明：新协议 superResidueList / requestSuperResidueList / superResidueHandle
+ * 三层齐备但当前 webview 不消费，是为批量令牌化场景保留的；这里仍走 superAgent
+ * 的 cleanup / merge 旧协议，两套并存、功能等价，勿因「没用到」就删除其一。
  */
 function SuperResidueList({
   sessions,
@@ -2047,6 +2112,7 @@ function SuperSessionRow({
   onRetry,
   onCleanup,
   onCancel,
+  onStuck,
 }: {
   /**
    * 看板行视图模型：`SuperSessionUi` 加上全部**可选**的波次 / 尝试 / 诊断
@@ -2070,6 +2136,7 @@ function SuperSessionRow({
   onRetry: () => void;
   onCleanup: () => void;
   onCancel: () => void;
+  onStuck: () => void;
 }) {
   const [showLive, setShowLive] = useState(false);
   // 单行诊断：点开只看这个子会话自己的诊断事件（跨子会话时间线在「诊断」视图）。
@@ -2285,21 +2352,34 @@ function SuperSessionRow({
         {/* Stopping a live child is the one action that must not hide behind
             the detail: the process keeps writing files meanwhile. */}
         {isActive(session) && (
-          <IconButton
-            icon={
-              cancelPending ? (
-                <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
-              ) : (
-                <Square className={ICON_INLINE} />
-              )
-            }
-            label={cancelPending ? t("中断中") : t("中断这个超流体")}
-            size="sm"
-            tone="danger"
-            hoverSurface="row"
-            disabled={cancelPending}
-            onClick={onCancel}
-          />
+          <>
+            <IconButton
+              icon={
+                cancelPending ? (
+                  <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
+                ) : (
+                  <Square className={ICON_INLINE} />
+                )
+              }
+              label={cancelPending ? t("中断中") : t("中断这个超流体")}
+              size="sm"
+              tone="danger"
+              hoverSurface="row"
+              disabled={cancelPending}
+              onClick={onCancel}
+            />
+            {/* 判定卡死：与「中断」不同，它先如实记一条用户判定的 timeout
+                诊断再按 user 来源中断，方便事后区分「看门狗判死」与「人判死」。
+                同样先二次确认，避免误触杀掉正在跑的子会话。 */}
+            <IconButton
+              icon={<Activity className={ICON_INLINE} />}
+              label={t("判定卡死")}
+              size="sm"
+              hoverSurface="row"
+              disabled={cancelPending}
+              onClick={onStuck}
+            />
+          </>
         )}
       </div>
 

@@ -2316,7 +2316,9 @@ function createMockHost(): HostApi {
           });
           return;
         }
-        if (m.action === "cancel") {
+        // demo 模式没有真实宿主，判定卡死与中断在可见效果上一致（取消目标会话）；
+        // 真实宿主的「先记 timeout 诊断」只在扩展进程里发生。
+        if (m.action === "cancel" || m.action === "stuck") {
           const target = demoSuperSessions.find((s) => s.id === m.sessionId);
           if (target) {
             target.status = "cancelled";
