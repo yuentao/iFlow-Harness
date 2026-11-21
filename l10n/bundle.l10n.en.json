@@ -27,6 +27,8 @@
   "已允许（{0}）": "allowed ({0})",
   "无法打开该图片附件（数据格式异常）": "Cannot open this image attachment (malformed data)",
   "图片附件过大（超过 {0} MB），已拒绝打开": "Image attachment too large (over {0} MB), refused to open",
+  "图片超过 {0}MB，已作为文件附件发送：{1}": "Image over {0}MB — sent as a file attachment instead: {1}",
+  "无法读取图片 {0}，已跳过": "Could not read image {0} — skipped",
   "打开图片失败: {0}": "Failed to open image: {0}",
   "无法打开 diff：缺少编辑前内容": "Cannot open diff: original content missing",
   "无法打开 {0}: {1}": "Cannot open {0}: {1}",

@@ -3736,3 +3736,40 @@ describe("super-transcript payload eviction mirrors the main channel", () => {
     }
   });
 });
+
+describe("多模态图片说明（方案 C）", () => {
+  it("beginUserPrompt 把逐图说明写进用户块；旧调用不产生该字段", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "两张图", ["data:a", "data:b"], undefined, undefined, ["报错弹窗", ""]);
+    expect(state.blocks.at(-1)).toMatchObject({
+      kind: "user",
+      images: ["data:a", "data:b"],
+      imageCaptions: ["报错弹窗", ""],
+    });
+
+    // 旧调用（第 6 个参数缺省）：向后兼容，块上根本没有该字段。
+    const legacy = initialSessionState();
+    beginUserPrompt(legacy, "一张图", ["data:a"]);
+    expect((legacy.blocks.at(-1) as { imageCaptions?: string[] }).imageCaptions).toBeUndefined();
+
+    // 全是空白说明 == 没有说明（不写入空字段）。
+    const blank = initialSessionState();
+    beginUserPrompt(blank, "一张图", ["data:a"], undefined, undefined, ["   "]);
+    expect((blank.blocks.at(-1) as { imageCaptions?: string[] }).imageCaptions).toBeUndefined();
+
+    // 没有图片时即便传了说明也不写（说明与图片同下标，无图即无意义）。
+    const noImages = initialSessionState();
+    beginUserPrompt(noImages, "纯文本", undefined, undefined, undefined, ["多余说明"]);
+    expect((noImages.blocks.at(-1) as { imageCaptions?: string[] }).imageCaptions).toBeUndefined();
+  });
+
+  it("没有 imageCaptions 的旧转录仍可解析", () => {
+    const jsonl = [
+      JSON.stringify({ type: "user", message: { content: "老消息" } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "旧回答" }] } }),
+    ].join("\n");
+    const { blocks } = parseTranscriptJsonl(jsonl);
+    expect(blocks.map((b) => b.kind)).toEqual(["user", "text"]);
+    expect((blocks[0] as { imageCaptions?: string[] }).imageCaptions).toBeUndefined();
+  });
+});

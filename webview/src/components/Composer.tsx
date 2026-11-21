@@ -30,12 +30,17 @@ import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Button, CANVAS_CHIP, Chip, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, SearchInput, ToggleChip, fuzzyScore } from "./ui";
+import { Button, CANVAS_CHIP, Chip, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, SearchInput, TextInput, ToggleChip, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
   data: string;
   mimeType: string;
+  /**
+   * 用户为这张图写的单行说明（多模态方案 C）。随 `sendPrompt.imageCaptions`
+   * 发给宿主，写进转录并进入模型可见的图片清单；空/缺失表示无说明。
+   */
+  caption?: string;
 }
 
 const MAX_IMAGES = 4;
@@ -454,6 +459,12 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const [takeoverConfirmOpen, setTakeoverConfirmOpen] = useState(false);
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  /** 图片数量的即时读数：窗口消息监听只挂载一次，闭包里的 `images` 永远是
+   *  首帧值；「已附加 N 张 / 已忽略 N 张」的提示必须按当下数量算。 */
+  const imagesRef = useRef<ImageAttachment[]>([]);
+  useEffect(() => {
+    imagesRef.current = images;
+  }, [images]);
   /** Non-image attachments (chips only — paths ride the sendPrompt message,
    * they never pollute the draft text the user types). The id decouples chip
    * identity from the path: picking the same file twice yields two removable
@@ -798,12 +809,19 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           (img: { name: string; data: string; mimeType: string }) => img.data,
         );
         if (pickedImages.length > 0) {
+          const room = Math.max(0, MAX_IMAGES - imagesRef.current.length);
+          const dropped = pickedImages.length - Math.min(room, pickedImages.length);
           setImages((prev) => [
             ...prev,
             ...pickedImages
               .slice(0, Math.max(0, MAX_IMAGES - prev.length))
               .map((img: { data: string; mimeType: string }) => ({ data: img.data, mimeType: img.mimeType })),
           ]);
+          if (dropped > 0) {
+            showNote(t("最多 {0} 张图片，已忽略 {1} 张", MAX_IMAGES, dropped), "warning");
+          } else {
+            showNote(t("已附加 {0} 张图片", pickedImages.length), "info");
+          }
         }
         if (msg.files.length > 0) {
           setAttachments((prev) => [
@@ -1104,14 +1122,28 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     // screenshot thus still reaches the agent as a file path instead of
     // vanishing; addOtherFiles applies its own 50MB cap + rejection note.
     const oversized = incoming.filter((f) => f.size > MAX_IMAGE_BYTES);
-    if (oversized.length > 0) addOtherFiles(oversized);
-    // Updaters must stay side-effect free: React may run them lazily and, in
-    // StrictMode, more than once. Slots are pure placeholders; the actual
-    // data lands by scanning for the first empty slot below.
+    if (oversized.length > 0) {
+      addOtherFiles(oversized);
+      showNote(
+        t("图片超过 {0}MB，已作为文件附件发送", Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)),
+        "warning",
+      );
+    }
+    if (accepted.length === 0) return;
+    // Slots are pure placeholders; the actual data lands by scanning for the
+    // first empty slot below. Capacity is computed from the live ref so the
+    // "ignored N" note reflects the real cap, not a stale render.
+    const room = Math.max(0, MAX_IMAGES - imagesRef.current.length);
     setImages((prev) => {
-      const room = Math.max(0, MAX_IMAGES - prev.length);
-      return [...prev, ...accepted.slice(0, room).map(() => ({ data: "", mimeType: "image/*" }))];
+      const remaining = Math.max(0, MAX_IMAGES - prev.length);
+      return [...prev, ...accepted.slice(0, remaining).map(() => ({ data: "", mimeType: "image/*" }))];
     });
+    const dropped = accepted.length - Math.min(room, accepted.length);
+    if (dropped > 0) {
+      showNote(t("最多 {0} 张图片，已忽略 {1} 张", MAX_IMAGES, dropped), "warning");
+    } else {
+      showNote(t("已附加 {0} 张图片", accepted.length), "info");
+    }
     for (const file of accepted) {
       const reader = new FileReader();
       reader.onload = () => {
@@ -1121,12 +1153,17 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           const idx = prev.findIndex((img) => img.data === "");
           if (idx < 0) return prev; // over the limit or the slot was removed
           const next = [...prev];
-          next[idx] = { data: base64, mimeType: imageMime(file) };
+          next[idx] = { ...next[idx]!, data: base64, mimeType: imageMime(file) };
           return next;
         });
       };
       reader.readAsDataURL(file);
     }
+  }
+
+  /** Edit one image's caption in place (captions stay index-aligned with images). */
+  function setImageCaption(index: number, caption: string): void {
+    setImages((prev) => prev.map((img, i) => (i === index ? { ...img, caption } : img)));
   }
 
   function removeImage(index: number): void {
@@ -1382,6 +1419,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     // The draft is gone once sent — a rewrite still in flight would
     // ghost-fill the cleared composer, so cancel it first.
     cancelInflightRef.current();
+    // 只发送真的带数据的图片；说明必须与之一一对应（占位槽没有 data，
+    // 不能把它的说明错位给下一张）。
+    const sentImages = images.filter((img) => img.data);
+    const sentCaptions = sentImages.map((img) => (img.caption ?? "").trim());
+    const hasCaptions = sentCaptions.some((caption) => caption !== "");
     send({
       type: "sendPrompt",
       text:
@@ -1391,7 +1433,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           : attachments.length > 0
             ? t("（见附件）")
             : t("（见附图）")),
-      images: images.length > 0 ? images.filter((img) => img.data) : undefined,
+      images: sentImages.length > 0 ? sentImages : undefined,
+      imageCaptions: sentImages.length > 0 && hasCaptions ? sentCaptions : undefined,
       files: attachments.length > 0 ? attachments.map(({ name, path }) => ({ name, path })) : undefined,
       contexts: contexts.length > 0 ? contexts : undefined,
     });
@@ -1743,27 +1786,38 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         </div>
       )}
       {images.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-1.5">
+        <div className="mb-2 flex flex-col gap-1.5">
           {images.map((img, i) => (
-            <span
-              key={i}
-              className="relative inline-flex size-[52px] items-center justify-center overflow-hidden rounded-md border border-border"
-              title={img.mimeType}
-            >
-              {img.data ? (
-                <img src={`data:${img.mimeType};base64,${img.data}`} alt="" className="size-full object-cover" />
-              ) : (
-                <ImageIcon className="size-4 text-muted-foreground" />
-              )}
-              <button
-                className="absolute right-0 top-0 flex size-6 items-center justify-center rounded-bl-lg bg-black/55 text-white transition-colors hover:bg-black/75"
-                title={t("移除")}
-                aria-label={t("移除")}
-                onClick={() => removeImage(i)}
+            <div key={i} className="flex items-center gap-2">
+              <span
+                className="relative inline-flex size-[52px] shrink-0 items-center justify-center overflow-hidden rounded-md border border-border"
+                title={img.mimeType}
               >
-                <X className="size-3.5" />
-              </button>
-            </span>
+                {img.data ? (
+                  <img src={`data:${img.mimeType};base64,${img.data}`} alt="" className="size-full object-cover" />
+                ) : (
+                  <ImageIcon className="size-4 text-muted-foreground" />
+                )}
+                <button
+                  className="absolute right-0 top-0 flex size-6 items-center justify-center rounded-bl-lg bg-black/55 text-white transition-colors hover:bg-black/75"
+                  title={t("移除")}
+                  aria-label={t("移除")}
+                  onClick={() => removeImage(i)}
+                >
+                  <X className="size-3.5" />
+                </button>
+              </span>
+              {/* 说明是可选的单行文本；与图片同序号，发送时按顺序成为模型
+                  看到的「第 N 张图是什么」清单。 */}
+              <TextInput
+                dense
+                className="min-w-0 flex-1"
+                value={img.caption ?? ""}
+                onChange={(event) => setImageCaption(i, event.target.value)}
+                placeholder={t("图片说明（可选，例如：报错弹窗）")}
+                aria-label={t("第 {0} 张图片的说明", i + 1)}
+              />
+            </div>
           ))}
         </div>
       )}

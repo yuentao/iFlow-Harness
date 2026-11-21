@@ -178,6 +178,8 @@ export interface SuperAgentHostCallbacks {
       reportTurn?: boolean;
       finalReport?: boolean;
       finalFallbackText?: string;
+      /** 与 `images` 同下标的逐图说明（多模态方案 C）。 */
+      imageCaptions?: string[];
     },
   ): Promise<boolean>;
 }
@@ -254,6 +256,8 @@ export class SuperAgentHost {
     mainSessionId: string | null;
     text: string;
     images: { data: string; mimeType: string }[];
+    /** 与 `images` 同下标的逐图说明；无说明时为空数组。 */
+    imageCaptions: string[];
     files: { name: string; path: string }[];
     contexts?: ContextRefUi[];
     droppedByChild: number;
@@ -1103,16 +1107,22 @@ export class SuperAgentHost {
     images: { data: string; mimeType: string }[] | undefined,
     files: { name: string; path: string }[] | undefined,
     onDropped: (count: number) => void,
+    /** 与 `images` 同下标的逐图说明（多模态方案 C）。 */
+    imageCaptions?: string[],
   ): SuperAttachment[] {
     const attachments: SuperAttachment[] = [];
     let imageIndex = 0;
     for (const image of images ?? []) {
+      const caption = imageCaptions?.[imageIndex]?.trim();
+      imageIndex += 1;
       attachments.push({
         // The name becomes the file name in the child's attachment dir and is
         // listed in the child's task prompt — model-facing, so English.
-        name: `image${++imageIndex}`,
+        name: `image${imageIndex}`,
         data: image.data,
         mimeType: image.mimeType,
+        // 用户说明原样转交（不是模型侧措辞，不翻译）。
+        ...(caption ? { caption } : {}),
       });
     }
     for (const file of files ?? []) {
@@ -2236,6 +2246,7 @@ export class SuperAgentHost {
         const text = buildDelegatedUserTurnPrompt({
           text: item.text,
           images: item.images,
+          imageCaptions: item.imageCaptions,
           files: item.files,
           droppedByChild: item.droppedByChild,
         });
@@ -2247,7 +2258,11 @@ export class SuperAgentHost {
           item.images.length > 0 ? item.images : undefined,
           item.files.length > 0 ? item.files : undefined,
           item.contexts,
-          { delegateOnBusy: false, hidden: true },
+          {
+            delegateOnBusy: false,
+            hidden: true,
+            ...(item.imageCaptions.some((c) => c.trim() !== "") ? { imageCaptions: item.imageCaptions } : {}),
+          },
         );
         // 没跑起来（主会话被别的回合占着 / 被拒）：留在缓冲里等下一拍重投，
         // 既不丢这条消息，也不会重复派发子会话。

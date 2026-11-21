@@ -5,6 +5,7 @@ Task title: {{title}}
 Task description:
 {{task}}
 {{attachments}}
+Any attachment caption comes from the user: use it to match each image to the user's intent and the order they listed them in.
 {{attachmentFailures}}
 {{isolation}}
 {{retry}}

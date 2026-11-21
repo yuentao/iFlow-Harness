@@ -324,3 +324,70 @@ describe("ESC 停止生成的让位", () => {
     expect(mocked.send).not.toHaveBeenCalledWith({ type: "cancel" });
   });
 });
+
+describe("多模态图片说明（方案 C）", () => {
+  function changeInput(input: HTMLInputElement, value: string): void {
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  function pressEnter(): void {
+    const textarea = container.querySelector("textarea")!;
+    act(() => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+  }
+
+  const imageFiles = (count: number): File[] =>
+    Array.from({ length: count }, (_, i) => new File([new Uint8Array([1, 2, 3])], `shot${i + 1}.png`, { type: "image/png" }));
+
+  async function settleReaders(): Promise<void> {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+  }
+
+  it("粘贴图片后立即显示预览、逐图说明输入与「已附加 N 张」提示", async () => {
+    render();
+    pasteFiles(imageFiles(1));
+    await settleReaders();
+
+    // 预览：data URL 的 <img> 当场出现（不等宿主回包）。
+    expect(container.querySelector('img[src^="data:image/png;base64,"]')).toBeTruthy();
+    // 提示走现有 toast（notify），不自绘浮层。
+    expect(mocked.notify).toHaveBeenCalledWith("已附加 1 张图片", "info");
+    // 说明输入是套件 TextInput（原生 input + aria-label）。
+    const caption = container.querySelector('input[aria-label="第 1 张图片的说明"]') as HTMLInputElement | null;
+    expect(caption).toBeTruthy();
+    expect(caption!.getAttribute("placeholder")).toContain("报错弹窗");
+  });
+
+  it("提交时把逐图说明随 sendPrompt 一起发出", async () => {
+    render();
+    pasteFiles(imageFiles(1));
+    await settleReaders();
+
+    const caption = container.querySelector('input[aria-label="第 1 张图片的说明"]') as HTMLInputElement;
+    changeInput(caption, "报错弹窗");
+    pressEnter();
+
+    const sent = sentOfType("sendPrompt");
+    expect(sent).toBeTruthy();
+    expect(sent!.images).toEqual([expect.objectContaining({ mimeType: "image/png" })]);
+    expect(sent!.imageCaptions).toEqual(["报错弹窗"]);
+    expect((sent!.images as { data: string }[])[0]!.data).not.toBe("");
+  });
+
+  it("超过 4 张时明确提示已忽略的数量", async () => {
+    render();
+    pasteFiles(imageFiles(6));
+    await settleReaders();
+
+    expect(mocked.notify).toHaveBeenCalledWith("最多 4 张图片，已忽略 2 张", "warning");
+    // 只保留 4 个说明输入。
+    expect(container.querySelectorAll('input[aria-label$="图片的说明"]')).toHaveLength(4);
+  });
+});

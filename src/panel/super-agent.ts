@@ -4938,7 +4938,7 @@ export interface SuperAnswer {
 /** 已经落盘的子会话附件（复制到 worktree 之外的专用目录）。 */
 export interface StagedSuperAttachments {
   /** 已复制的文件（路径为绝对路径，位于子会话的附件目录里）。 */
-  copies: { name: string; path: string }[];
+  copies: { name: string; path: string; caption?: string }[];
   /** 作为图片块直接交给模型的图片（视觉模型可直读，无需再调工具）。 */
   images: { data: string; mimeType: string }[];
   /** 复制失败的如实说明（不静默丢用户附件）。 */
@@ -4991,7 +4991,11 @@ async function stageSuperAttachments(
         await copyFile(attachment.path, target);
         size = info.size;
       }
-      staged.copies.push({ name: path.basename(target), path: target });
+      staged.copies.push({
+        name: path.basename(target),
+        path: target,
+        ...(attachment.caption ? { caption: attachment.caption } : {}),
+      });
       const mime = attachment.data
         ? attachment.mimeType ?? "image/png"
         : IMAGE_MIME_BY_EXT.get(path.extname(target).toLowerCase());
@@ -5082,8 +5086,11 @@ function describeAttachments(attachments?: StagedSuperAttachments): string {
   return (
     "\n" +
     [
-      "Files attached to this task (copied outside your working directory; read them as reference only and do not modify them):",
-      ...attachments.copies.map((copy) => `- ${copy.name} → ${copy.path}`),
+      "Files attached to this task (copied outside your working directory; read them as reference only and do not modify them). Any caption after the em dash came from the user and says what that attachment is — use it to map images to the user's intent:",
+      ...attachments.copies.map((copy) => {
+        const caption = copy.caption?.trim();
+        return `- ${copy.name} → ${copy.path}${caption ? ` — ${caption}` : ""}`;
+      }),
     ].join("\n")
   );
 }
