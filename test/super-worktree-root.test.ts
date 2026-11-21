@@ -21,8 +21,12 @@ describe("super worktree root · 移出主仓目录树", () => {
     const repoRoot = path.join(os.tmpdir(), "iflow-root-test", "iflow-harness");
     const root = externalSuperWorktreeRoot(repoRoot);
     expect(root).toBe(path.join(path.dirname(repoRoot), "iflow-harness-super-worktrees"));
-    // ① 默认路径不在 repoRoot 之内
-    expect(root.startsWith(repoRoot)).toBe(false);
+    // ① 默认路径不在 repoRoot 之内（用 path.relative 做边界判定：兄弟目录名
+    // 以 basename 开头，朴素 startsWith(repoRoot) 会字符串前缀误报）
+    const rel = path.relative(repoRoot, root);
+    expect(rel.startsWith("..")).toBe(true);
+    expect(path.isAbsolute(rel)).toBe(false);
+    expect(root.startsWith(repoRoot + path.sep)).toBe(false);
     expect(root.startsWith(path.dirname(repoRoot) + path.sep)).toBe(true);
   });
 
