@@ -8,8 +8,24 @@ import { extractSuperDirectives, parseSuperDelegationPayload } from "../shared/s
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
-const systemText = readFileSync(path.join(root, "prompts", "system-prompt.md"), "utf8");
-const taskTemplateText = readFileSync(path.join(root, "prompts", "super-agent-task.md"), "utf8");
+
+/**
+ * 行尾归一化：CRLF / CR 一律折叠成 LF。
+ *
+ * 仓库根没有 .gitattributes，Windows 上 `core.autocrlf=true` 会把 prompts/*.md
+ * 以 CRLF 检出，而 git 对象库里存的是纯 LF —— 同一份文件在不同机器上读出来的
+ * 字节不同。下面的断言用 `"\n"` 拼出期望串做逐字比较，行尾不一致就会误报。
+ * 这里在读文件处统一归一化：要求的文本本身仍必须一字不差出现，只是不再被
+ * 检出行尾差异干扰（与 prompts/index.ts 里的 normalize() 同口径）。
+ */
+const normalizeEol = (text: string): string => text.replace(/\r\n?/g, "\n");
+
+const systemText = normalizeEol(
+  readFileSync(path.join(root, "prompts", "system-prompt.md"), "utf8"),
+);
+const taskTemplateText = normalizeEol(
+  readFileSync(path.join(root, "prompts", "super-agent-task.md"), "utf8"),
+);
 
 /** 围栏标记（单独放常量，避免在模板字符串里写反引号）。 */
 const FENCE = "```";
@@ -57,6 +73,19 @@ describe("super agent · 委派提示词模板（依赖 / 批次表达）", () =
     const batchFence = FENCE + "super-agent\n" + BATCH_EXAMPLE + "\n" + FENCE;
     expect(systemText).toContain(dependencyFence);
     expect(systemText).toContain(batchFence);
+  });
+
+  it("比较逻辑对行尾宽容：CRLF 内容走同一条归一化路径后逐字断言仍成立", () => {
+    // 防回归钉子：模拟 core.autocrlf=true 的检出结果（整份 CRLF）。
+    // 若把 normalizeEol 去掉，第二个 expect 就会失败 —— 这正是原来在 Windows 上必红的根因。
+    const crlfSystem = systemText.replace(/\n/g, "\r\n");
+    const dependencyFence = FENCE + "super-agent\n" + DEPENDENCY_EXAMPLE + "\n" + FENCE;
+    const batchFence = FENCE + "super-agent\n" + BATCH_EXAMPLE + "\n" + FENCE;
+    // 证据 1：原始 CRLF 文本不包含以 LF 拼出的围栏（复现旧失败）。
+    expect(crlfSystem).not.toContain(dependencyFence);
+    // 证据 2：走与正式断言相同的 normalizeEol → toContain 路径后，逐字包含成立。
+    expect(normalizeEol(crlfSystem)).toContain(dependencyFence);
+    expect(normalizeEol(crlfSystem)).toContain(batchFence);
   });
 
   it("两段示例是合法 JSON，结构符合约定（tasks 数组、元素含 title/task）", () => {
