@@ -67,11 +67,14 @@ const DISPLAY_NAME = "Super Agent";
 const DESCRIPTION =
   "Delegate work to one or more child sessions, or manage existing ones. Each child session runs in its own git " +
   "worktree on its own branch, so several children can change this project at once without stepping on each other. " +
-  "Pass EITHER `tasks` (each with a self-contained `task` brief, an optional short `title`, and optional " +
-  "`attachments` paths) to dispatch children, OR `actions` (each with an `action` of retry/cancel/answer/cleanup " +
-  "and a `sessionId`) to manage children already on the board. One call carries one kind: tasks OR actions, never both. " +
-  "The host performs the real work and reports results back to you; this call only returns an acknowledgement. " +
-  "Prefer this tool over writing a `super-agent` / `super-agent-actions` fenced code block by hand.";
+  "Pass EITHER `tasks` to dispatch children, OR `actions` to manage children already on the board. One call " +
+  "carries one kind: tasks OR actions, never both. Each task needs a self-contained `task` brief plus an optional " +
+  "short `title` and optional `attachments` paths; it can also carry `id` (a stable block-unique label), " +
+  "`dependsOn` (an array of `id`/`title` labels this task waits for), `batch` (a 1-based batch number for " +
+  "batch-mode waves), and `maxAttempts` (the maximum attempts allowed for this task). Use EITHER `dependsOn` " +
+  "OR `batch` across a single call, never both. The host performs the real work and reports results back to you; " +
+  "this call only returns an acknowledgement. Prefer this tool over writing a `super-agent` / " +
+  "`super-agent-actions` fenced code block by hand.";
 
 const ACK = "Delegation request accepted.";
 
@@ -90,6 +93,7 @@ function create(bag) {
   const T_STRING = types.STRING || "STRING";
   const T_ARRAY = types.ARRAY || "ARRAY";
   const T_BOOLEAN = types.BOOLEAN || "BOOLEAN";
+  const T_NUMBER = types.NUMBER || "NUMBER";
 
   class SuperAgentTool extends Base {
     static Name = TOOL_NAME;
@@ -127,6 +131,27 @@ function create(bag) {
                     description:
                       "Optional extra files the child needs, as workspace-relative or absolute paths.",
                     items: { type: T_STRING },
+                  },
+                  id: {
+                    type: T_STRING,
+                    description:
+                      "Optional stable label (unique within this call). dependsOn resolves against id first, then title.",
+                  },
+                  dependsOn: {
+                    type: T_ARRAY,
+                    description:
+                      "Labels (id or title) of tasks this one waits for. Use either dependsOn or batch in one call, not both.",
+                    items: { type: T_STRING },
+                  },
+                  batch: {
+                    type: T_NUMBER,
+                    description:
+                      "1-based batch number for batch-mode waves. Use either batch or dependsOn in one call, not both.",
+                  },
+                  maxAttempts: {
+                    type: T_NUMBER,
+                    description:
+                      "Maximum number of attempts allowed for this task before retry policy stops retrying it.",
                   },
                 },
                 // title 是可选的短标签（宿主缺失时回退到 task 首行），只强制 task。
@@ -193,7 +218,13 @@ function create(bag) {
      *  - 每个 task 必须是非数组对象；
      *  - `task` 必须是非空字符串；
      *  - `title` 可选，但存在时必须是字符串；
-     *  - `attachments` 可选，但存在时必须是字符串数组。
+     *  - `attachments` 可选，但存在时必须是字符串数组；
+     *  - `id` 可选，但存在时必须是字符串；
+     *  - `dependsOn` 可选，但存在时必须是字符串数组；
+     *  - `batch` / `maxAttempts` 可选，但存在时必须是正整数（1 基）。
+     *
+     * 逐字段只校验**类型**；跨任务的语义（dependsOn 引用是否存在、dependsOn 与
+     * batch 是否混用）由共享层 planSuperWaves 出 issue，loader 不重复实现。
      */
     validateToolParams(params) {
       if (!params || typeof params !== "object" || Array.isArray(params)) {
@@ -233,6 +264,34 @@ function create(bag) {
                 return `tasks[${i}].attachments[${j}] must be a string`;
               }
             }
+          }
+          // 依赖 / 批次 / 尝试次数字段的**类型**闸门（共享层 planSuperWaves 仍负责
+          // 跨任务的语义校验，如 dependsOn 引用是否存在、dependsOn 与 batch 混用）：
+          // 这里只挡「类型写坏」——网关或宿主若拿到字符串型的 batch 会静默算错波次。
+          if (task.id !== undefined && typeof task.id !== "string") {
+            return `tasks[${i}].id must be a string`;
+          }
+          if (task.dependsOn !== undefined) {
+            if (!Array.isArray(task.dependsOn)) {
+              return `tasks[${i}].dependsOn must be an array of strings`;
+            }
+            for (let j = 0; j < task.dependsOn.length; j++) {
+              if (typeof task.dependsOn[j] !== "string") {
+                return `tasks[${i}].dependsOn[${j}] must be a string`;
+              }
+            }
+          }
+          if (
+            task.batch !== undefined &&
+            !(Number.isInteger(task.batch) && task.batch >= 1)
+          ) {
+            return `tasks[${i}].batch must be a positive integer (1-based)`;
+          }
+          if (
+            task.maxAttempts !== undefined &&
+            !(Number.isInteger(task.maxAttempts) && task.maxAttempts >= 1)
+          ) {
+            return `tasks[${i}].maxAttempts must be a positive integer`;
           }
         }
       }
