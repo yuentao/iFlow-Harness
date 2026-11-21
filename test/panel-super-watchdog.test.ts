@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   SuperAgentManager,
-  SUPER_STALL_WATCHDOG_MS,
+  SUPER_STALL_WATCHDOG_RUNNING_MS,
 } from "../src/panel/super-agent.js";
 import { AcpClient, type AcpClientCallbacks } from "../src/acp/client.js";
 import type { ContentBlock } from "../src/acp/protocol.js";
@@ -159,7 +159,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
 describe("Super Agent 子会话卡死看门狗（SA-1）", () => {
   it("默认阈值足够保守，且仅作为实例字段默认值存在", () => {
     // 真实长任务可跑数小时；默认阈值必须远大于分钟级，避免误杀正在思考的任务。
-    expect(SUPER_STALL_WATCHDOG_MS).toBeGreaterThanOrEqual(10 * 60_000);
+    expect(SUPER_STALL_WATCHDOG_RUNNING_MS).toBeGreaterThanOrEqual(10 * 60_000);
   });
 
   it("无进展超阈值：归一为 failed + error + 上报 + 回收槽位让队列下一个开跑", async () => {

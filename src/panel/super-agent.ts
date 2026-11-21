@@ -195,8 +195,6 @@ export const SUPER_MCP_READY_POLL_MS = 120;
  */
 export const SUPER_STALL_WATCHDOG_PREPARE_MS = 5 * 60_000;
 export const SUPER_STALL_WATCHDOG_RUNNING_MS = 30 * 60_000;
-/** @deprecated 兼容旧名：等价运行档阈值（既有测试/调用仍可引用，语义不变）。 */
-export const SUPER_STALL_WATCHDOG_MS = SUPER_STALL_WATCHDOG_RUNNING_MS;
 
 /** 看门狗所处的子会话阶段（准备 / 运行中），决定用哪一档静默阈值。 */
 export type SuperWatchdogPhase = "prepare" | "running";
