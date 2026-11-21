@@ -850,6 +850,15 @@ export interface SuperFailureInfo {
 export const SUPER_DIAGNOSTICS_MAX_EVENTS = 200;
 
 /**
+ * 单条诊断的 `message` / `detail` 长度上限（字符）。
+ *
+ * 诊断里常会塞进原始错误文本 / 堆栈片段，不设上限的话**一条**诊断就能把整份
+ * 归档撑到几十 MB。宿主落盘裁剪（`src/panel/super-store.ts`）直接复用这个
+ * 常量 —— 两处各写一个 500 曾出现漂移风险。
+ */
+export const SUPER_DIAGNOSTIC_TEXT_MAX_CHARS = 500;
+
+/**
  * 追加一条诊断事件（纯函数）。
  *
  * **终态粘性**：诊断**不改变会话状态** —— 终态会话收到 error 事件也只追加
@@ -981,6 +990,16 @@ export interface PersistedSuperSession {
  *
  * 刻意**不**纳入 `summary` / `reports` / `updatedAt`：它们每次进度帧都在变，
  * 纳入指纹等于节流失效。
+ *
+ * **纳入**（变了就必须立刻落盘）：状态、归属、隔离环境、集成结果、尝试次数、
+ * 波次 / 批次 / 依赖（调度事实，恢复后要重建「谁挡着谁」）、尝试上限、失败分类、
+ * 状态说明。依赖按字典序排序后再拼 —— 依赖是集合语义，顺序不同不算变化。
+ *
+ * **刻意不纳入** `diagnostics`：它是高频追加的事件流，进指纹会让节流写盘失效
+ * （每来一条诊断就整份重写一次归档）。诊断仍会随下一次写落盘，只是不单独触发。
+ *
+ * 这是**运行时唯一口径**：`src/panel/super-store.ts` 曾有一套本地 v2 指纹
+ * （多算了同样的字段），现已删除，宿主只调这里。
  */
 export function superArchiveFingerprint(
   archives: { mainSessionId: string; sessions: readonly PersistedSuperSession[] }[],
@@ -999,6 +1018,14 @@ export function superArchiveFingerprint(
           session.integration?.state ?? "",
           session.integration?.needsAction ? "1" : "0",
           session.attempts ?? "",
+          session.wave ?? "",
+          session.batch ?? "",
+          [...(session.dependsOn ?? [])].sort().join(","),
+          session.maxAttempts ?? "",
+          session.lastError
+            ? `${session.lastError.kind}@${session.lastError.at}:${session.lastError.message}`
+            : "",
+          session.statusDetail ?? "",
           session.endedAt ?? "",
         ].join("|"),
       );
@@ -4762,6 +4789,20 @@ export interface SuperDirectiveTask {
   title: string;
   task: string;
   attachments: string[];
+  /**
+   * 任务稳定标识（派发事实）。
+   *
+   * 只有**从宿主解析结果（`SuperTaskSpec`）映射出来的**任务才带这组调度字段；
+   * 严格解析失败时的容错预览（`salvaged`）可能缺省 —— 那是「模型写了什么」的
+   * 降级展示，不是「已经排期」的事实，渲染侧不要据此宣称依赖已生效。
+   */
+  id?: string;
+  /** 依赖的任务标识（派发事实）。 */
+  dependsOn?: string[];
+  /** 声明的批次号（1 基，派发事实）。 */
+  batch?: number;
+  /** 由依赖 / 批次算出的波次序号（0 基，派发事实）。 */
+  wave?: number;
 }
 
 export interface SuperDirectiveAction {
@@ -4877,15 +4918,28 @@ function toolStyleRegionEnd(text: string, payloadEnd: number): number {
   return payloadEnd;
 }
 
-/** 宿主解析出的任务 → 卡片可展示的任务书（附件取展示名）。 */
+/**
+ * 宿主解析出的任务 → 卡片可展示的任务书（附件取展示名 + 调度事实）。
+ *
+ * 展示**必须**从宿主解析结果映射，而不是再松散解析一遍原始 JSON —— 后者会
+ * 出现「卡片上有 dependsOn，宿主却没把它排进波次」的两套事实。
+ */
 function tasksFromSpecs(tasks: SuperTaskSpec[]): SuperDirectiveDisplay {
+  const plan = planSuperWaves(tasks);
   return {
     kind: "tasks",
-    tasks: tasks.map((task) => ({
-      title: task.title,
-      task: task.task,
-      attachments: (task.attachments ?? []).map((attachment) => attachment.name),
-    })),
+    tasks: tasks.map((task) => {
+      const wave = plan.taskWave[superTaskKey(task)];
+      return {
+        title: task.title,
+        task: task.task,
+        attachments: (task.attachments ?? []).map((attachment) => attachment.name),
+        ...(task.id ? { id: task.id } : {}),
+        ...(task.dependsOn ? { dependsOn: task.dependsOn } : {}),
+        ...(task.batch !== undefined ? { batch: task.batch } : {}),
+        ...(wave !== undefined ? { wave } : {}),
+      };
+    }),
   };
 }
 
