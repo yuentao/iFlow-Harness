@@ -608,6 +608,23 @@ function holdsWorktree(isolation: SuperIsolation): boolean {
 }
 
 /**
+ * 一条「残留分支」记录：已中断 / 放弃的子会话，分支还在磁盘 / git 里，
+ * 但改动没有成功并入当前分支 —— 需要人决定「合并」还是「丢弃」。
+ *
+ * 判定只用真实存在的 SuperSessionUi 字段，不依赖任何尚不存在的 residue
+ * 消息或字段：终态、git worktree 档、分支名存在、且未成功合并（merged /
+ * pr_created 视为已落地；not_needed 表示本就没提交，无需处置）。
+ */
+function isResidualSuperBranch(session: SuperSessionUi): boolean {
+  if (!isTerminalSuperStatus(session.status)) return false;
+  if (session.isolation.kind !== "git_worktree") return false;
+  if (!session.isolation.branch) return false;
+  const state = session.integration?.state;
+  if (state === "merged" || state === "pr_created" || state === "not_needed") return false;
+  return true;
+}
+
+/**
  * 已释放状态的文案（三态）。
  *
  * - `recycled`：目录被回收，**本地分支仍保留**（分支上有未合并提交，刻意留下待审）。
@@ -710,6 +727,48 @@ function elapsedText(session: SuperSessionUi, now: number): string {
   const at = session.endedAt ?? now;
   if (session.startedAt !== undefined) return formatElapsed(at - session.startedAt);
   return t("排队 {0}", formatElapsed(at - session.createdAt));
+}
+
+/**
+ * 子会话「最近一次活动」的时刻（epoch ms）。
+ *
+ * 活动 = 宿主写入的任何一次状态推进：`updatedAt` 在每次事件（含进度帧、
+ * 诊断追加）时刷新；`diagnostics[].at` 是逐条诊断事件的时间戳。二者取最大，
+ * 让「最近活动」既能反映细粒度的诊断心跳，也能在诊断缺省时退回 updatedAt。
+ *
+ * 这里刻意**不**筛 kind：shared 的 SuperDiagnosticKind 是稳定枚举（spawn /
+ * session / report / merge / retry / error / timeout / restore / blocked），
+ * 任何一条都是一次「活动」。慢任务每隔几十秒有 report / session 心跳，看板
+ * 显示「最近活动 Ns 前」就能让人在卡住时提前手动中断，不必干等看门狗。
+ */
+function lastActivityAt(session: SuperBoardSession): number {
+  let at = session.updatedAt ?? 0;
+  for (const event of session.diagnostics ?? []) {
+    if (event && typeof event.at === "number" && Number.isFinite(event.at) && event.at > at) {
+      at = event.at;
+    }
+  }
+  return Number.isFinite(at) ? at : 0;
+}
+
+/**
+ * 「最近活动 Ns 前」的展示文案。silent=true 表示静默超过阈值（慢任务疑似
+ * 卡住），调用方据此上警示色；文案只用相对时间，避免每行都钉一个绝对时钟。
+ */
+const SUPER_SILENCE_WARN_MS = 60_000;
+
+function recentActivityText(
+  session: SuperBoardSession,
+  now: number,
+): { text: string; elapsed: string; silent: boolean } {
+  const at = lastActivityAt(session);
+  if (at <= 0) return { text: t("活动未知"), elapsed: "", silent: false };
+  const elapsed = formatElapsed(Math.max(0, now - at));
+  return {
+    text: t("最近活动 {0} 前", elapsed),
+    elapsed,
+    silent: Math.max(0, now - at) >= SUPER_SILENCE_WARN_MS,
+  };
 }
 
 /** Compact token count: 1234 → 1.2K, 1234567 → 1.2M. */
@@ -1207,6 +1266,12 @@ export function SuperAgentBoard({
     () => worktreeSessions.filter((s) => isTerminalSuperStatus(s.status)),
     [worktreeSessions],
   );
+  // 残留分支清单：已中断 / 放弃、分支还在但改动未落地的子会话。清单在
+  // 「诊断」视图顶部给出一键「合并 / 丢弃」，让人不必逐行翻找。数据完全从
+  // 现有 superSessions 派生，无需宿主新增推送消息。
+  const residueSessions = useMemo(() => list.filter(isResidualSuperBranch), [list]);
+  const [confirmResidueMerge, setConfirmResidueMerge] = useState<SuperSessionUi | null>(null);
+  const [confirmResidueDiscard, setConfirmResidueDiscard] = useState<SuperSessionUi | null>(null);
   // Live-region text: announce CHANGES, not the whole board. On mount there
   // is nothing to announce (the rows are right there to be read), and a
   // change-only feed keeps the board's own text free of a second copy of
@@ -1577,6 +1642,12 @@ export function SuperAgentBoard({
               )}
               {boardView === "diagnostics" && (
                 <div className="py-1">
+                  <SuperResidueList
+                    sessions={residueSessions}
+                    now={now}
+                    onMerge={setConfirmResidueMerge}
+                    onDiscard={setConfirmResidueDiscard}
+                  />
                   <SuperDiagnosticTimeline
                     entries={diagnosticTimeline}
                     summary={aggregate.diagnostics}
@@ -1777,6 +1848,49 @@ export function SuperAgentBoard({
           onCancel={() => setConfirmCleanupAll(null)}
         />
       )}
+      {/* 残留分支的一键处置：合并 / 丢弃都先二次确认。合并是推进（primary），
+          丢弃是破坏性清理（danger）。二者复用宿主既有的 superAgent 通道。 */}
+      {confirmResidueMerge && (
+        <ConfirmDialog
+          title={t("合并残留分支")}
+          message={t(
+            "让智能体把残留分支 {0} 合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。",
+            confirmResidueMerge.isolation.branch ?? confirmResidueMerge.title,
+          )}
+          actions={[
+            {
+              label: t("让智能体合并分支"),
+              variant: "primary",
+              onClick: () => {
+                beginMerge(confirmResidueMerge.id, confirmResidueMerge.integration?.at);
+                send({ type: "superAgent", action: "merge", sessionId: confirmResidueMerge.id });
+                setConfirmResidueMerge(null);
+              },
+            },
+          ]}
+          onCancel={() => setConfirmResidueMerge(null)}
+        />
+      )}
+      {confirmResidueDiscard && (
+        <ConfirmDialog
+          title={t("丢弃残留分支")}
+          message={t(
+            "丢弃「{0}」的残留分支 {1}？工作目录会被删除；若分支上还有未合并的提交，git 分支会被保留以便事后审查。此操作不可撤销。",
+            confirmResidueDiscard.title,
+            confirmResidueDiscard.isolation.branch ?? "",
+          )}
+          confirmLabel={t("丢弃")}
+          onConfirm={() => {
+            // 单分支丢弃没有独立的「确认令牌」消息：ConfirmDialog 本身就是
+            // 二次确认，回包走既有的 superAgent/cleanup（keepBranch 缺省，
+            // 由宿主按「有未合并提交则保留分支」的规则处理）。
+            send({ type: "superAgent", action: "cleanup", sessionId: confirmResidueDiscard.id });
+            beginCleanup([confirmResidueDiscard.id]);
+            setConfirmResidueDiscard(null);
+          }}
+          onCancel={() => setConfirmResidueDiscard(null)}
+        />
+      )}
     </>
   );
 }
@@ -1800,6 +1914,110 @@ export function shortSuperSessionDescription(session: SuperSessionUi): string {
     .find((line) => line.length > 0 && !/^(#{1,6}\s|【[^】]+】$)/.test(line));
   const text = first || session.title || "";
   return text.length > CARD_DESCRIPTION_MAX ? `${text.slice(0, CARD_DESCRIPTION_MAX - 1)}…` : text;
+}
+
+/**
+ * 折叠行上的「最近活动」小标签。
+ *
+ * 用图标 + 文案双重编码（形状 + 文字），颜色只是冗余；静默超时转警示色。
+ * `now` 从看板每秒节流传入，组件本身不含定时器。
+ */
+function RecentActivity({ session, now }: { session: SuperBoardSession; now: number }) {
+  const { text, elapsed, silent } = recentActivityText(session, now);
+  const title = silent
+    ? t("已静默 {0}，可能卡住，可随时中断", elapsed)
+    : t("距最近一次诊断或进度更新的时间");
+  return (
+    <span
+      className={`flex shrink-0 items-center gap-1 text-ui-micro tabular-nums max-[380px]:hidden ${silent ? "text-warning" : "text-muted-foreground"}`}
+      title={title}
+      data-super-recent-activity={session.id}
+    >
+      <Activity className={ICON_INLINE} aria-hidden="true" />
+      <span>{text}</span>
+    </span>
+  );
+}
+
+/**
+ * 诊断视图顶部的「残留分支」清单。
+ *
+ * 列出已中断 / 放弃、分支还在但改动未落地的子会话，每条给「合并 / 丢弃」
+ * 两个动作。合并走宿主既有的 superAgent/merge（派合并子会话），丢弃走
+ * superAgent/cleanup（删工作目录、保留有未合并提交的分支）——二者都在下面
+ * 经 ConfirmDialog 二次确认后才发送。空列表不渲染，不给看板添噪音。
+ */
+function SuperResidueList({
+  sessions,
+  now,
+  onMerge,
+  onDiscard,
+}: {
+  sessions: readonly SuperBoardSession[];
+  now: number;
+  onMerge: (session: SuperBoardSession) => void;
+  onDiscard: (session: SuperBoardSession) => void;
+}) {
+  if (sessions.length === 0) return null;
+  return (
+    <section className="mb-2 rounded-sm border border-warning/30 bg-warning/5" aria-label={t("残留分支清单")}>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-warning/20 px-2 py-1.5">
+        <GitBranch className={`${ICON_INLINE} text-warning`} aria-hidden="true" />
+        <span className="text-ui-label font-medium text-foreground">
+          {t("残留分支清单")}
+        </span>
+        <Chip tone="warning" title={t("{0} 个待处置分支", sessions.length)}>
+          {t("{0} 个待处置", sessions.length)}
+        </Chip>
+        <span className="text-ui-micro text-muted-foreground">
+          {t("这些分支来自已中断或放弃的超流体，改动尚未并入当前分支")}
+        </span>
+      </div>
+      <ul className="divide-y divide-border/40">
+        {sessions.map((session) => {
+          const activity = recentActivityText(session, now);
+          const issue = collapsedIntegrationIssue(session);
+          return (
+            <li key={session.id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5">
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-ui-label font-medium text-foreground" title={session.title}>
+                  {session.title}
+                </span>
+                <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-ui-micro text-muted-foreground">
+                  {session.isolation.branch && (
+                    <span className="inline-flex items-center gap-1 font-mono" title={session.isolation.branch}>
+                      <GitBranch className={ICON_INLINE} aria-hidden="true" />
+                      {shortBranch(session.isolation.branch)}
+                    </span>
+                  )}
+                  <span data-super-residue-activity={session.id}>{activity.text}</span>
+                  {issue && <span className={issue.tone === "danger" ? "text-destructive" : "text-warning"}>{issue.label}</span>}
+                </span>
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={<GitMerge className={ICON_INLINE} />}
+                aria-label={t("合并残留分支 {0}", session.title)}
+                onClick={() => onMerge(session)}
+              >
+                {t("合并")}
+              </Button>
+              <Button
+                variant="danger-soft"
+                size="sm"
+                icon={<Trash2 className={ICON_INLINE} />}
+                aria-label={t("丢弃残留分支 {0}", session.title)}
+                onClick={() => onDiscard(session)}
+              >
+                {t("丢弃")}
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
 }
 
 /**
@@ -2051,7 +2269,12 @@ function SuperSessionRow({
             </span>
           )}
           <QqTaskTags session={session} />
-          <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground">
+          {/* 最近活动：活跃会话显示距上一次状态推进的相对时间。静默超过
+              阈值转警示色 —— 慢任务卡住时能提前手动中断，不必干等看门狗。 */}
+          {!isTerminalSuperStatus(session.status) && (
+            <RecentActivity session={session} now={now} />
+          )}
+          <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground" title={t("已运行时长")}>
             {elapsedText(session, now)}
           </span>
           <ChevronDown
