@@ -199,6 +199,19 @@ export function superWorktreeRoot(repoRoot: string): string {
 }
 
 /**
+ * 需要扫描的 worktree 根集合：当前根（默认主仓外）+ 历史遗留的主仓内旧根。
+ *
+ * 迁移期主仓内可能还留着旧位置建的 worktree；清扫 / 统计 / 全量清空必须同时
+ * 覆盖两处，否则旧 worktree 变成无人认领的孤儿。回退场景下两者相同，去重后
+ * 只扫描一次。
+ */
+export function superWorktreeRoots(repoRoot: string): string[] {
+  const current = superWorktreeRoot(repoRoot);
+  const legacy = superIsolationDir(repoRoot, "worktrees");
+  return current === legacy ? [current] : [current, legacy];
+}
+
+/**
  * 把隔离子树写进仓库的本地 exclude（`.git/info/exclude`）。
  *
  * 不写 `.gitignore`：那会改动用户受版本控制的文件。exclude 是纯本地元数据，
