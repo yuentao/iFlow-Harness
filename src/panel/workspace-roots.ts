@@ -11,8 +11,10 @@
  * the two sets that MUST agree (the host's fs-callback boundary and the CLI's
  * `--include-directories`) are exactly the ones that would silently drift.
  *
- * Everything here is pure except `defaultRealpath`; tests inject their own
- * `realpath` so no disk is touched.
+ * Everything here is pure except the realpath helpers: `defaultRealpath`
+ * (root collection) and the physical containment check inside
+ * `rewriteRootMentions`. Both accept an injected `realpath`, so tests touch no
+ * disk unless they opt in.
  *
  * Ordering contract (important): the FIRST workspace folder keeps index 0,
  * because the panel derives the CLI process cwd from `roots[0]` and the CLI's
@@ -151,10 +153,51 @@ export function buildAddDirs(
   return normalized.filter((p) => pathKey(p) !== cwdKey);
 }
 
-/** Is `candidate` inside `root` (lexical, after resolve)? */
+/**
+ * SECURITY BOUNDARY (first layer — lexical, no I/O): is `candidate` the same
+ * as `root` or strictly below it?
+ *
+ * The comparison is case-normalised on Windows and `root` is suffixed with a
+ * separator before `startsWith`, so a sibling whose name merely PREFIXES the
+ * root (`D:\work\app2` vs root `D:\work\app`) can never pass. A plain
+ * `startsWith(root)` would let exactly that through.
+ */
 function isWithinRoot(candidate: string, root: string): boolean {
-  const rel = path.relative(root, candidate);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  const c = pathKey(path.resolve(candidate));
+  const r = pathKey(path.resolve(root));
+  if (c === r) return true;
+  return c.startsWith(r.endsWith(path.sep) ? r : r + path.sep);
+}
+
+/** Realpath that THROWS on failure, so the caller can walk up to the deepest
+ * existing ancestor instead of silently accepting an unresolved path. */
+function strictRealpath(p: string): string {
+  return realpathSync(p);
+}
+
+/**
+ * Resolve `target` physically: realpath its deepest EXISTING ancestor and
+ * re-append the missing tail. Files that do not exist yet (the common case for
+ * a mention the agent is about to create) still get their symlinked parents
+ * resolved, so a junction inside the root cannot smuggle the path outside it.
+ * Any error (missing path all the way up, permission, odd drive) falls back to
+ * the lexical path — the caller keeps the lexical layer as the safe minimum.
+ */
+function physicalPath(target: string, realpath: (p: string) => string): string {
+  const resolved = path.resolve(target);
+  const tail: string[] = [];
+  let current = resolved;
+  for (;;) {
+    try {
+      const real = realpath(current);
+      return tail.length === 0 ? real : path.join(real, ...tail.slice().reverse());
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return resolved; // hit the filesystem root
+      tail.push(path.basename(current));
+      current = parent;
+    }
+  }
 }
 
 /**
@@ -167,28 +210,46 @@ function isWithinRoot(candidate: string, root: string): boolean {
  * a sibling root would otherwise be read relative to the cwd and point at
  * nothing.
  *
- * Guards: the alias must be a known root, the relative part must be non-empty,
- * and the joined path must stay INSIDE that root (a `../` escape is left
- * untouched rather than rewritten to a path outside the workspace).
+ * Guards (defence in depth — a rejected mention is left byte-identical, the
+ * historical degradation):
+ *   1. the alias must be a known NON-cwd root and the relative part non-empty;
+ *   2. lexical containment, checked BEFORE any filesystem access: the
+ *      resolved path must sit under `<root><separator>` (case-insensitive on
+ *      Windows). This rejects `..` escapes, absolute/UNC/drive-absolute
+ *      relative parts, and prefix-confusion with a sibling (`app` vs `app2`);
+ *   3. physical containment: the deepest existing ancestor is realpath'd, so
+ *      a symlink/junction inside the root that points outside it is rejected
+ *      too. The panel's downstream `AcpClient.resolveAgentPath` only confines
+ *      paths to the union of ALL workspace roots, so it does NOT catch a
+ *      symlink escaping one root into a sibling root or the wider disk —
+ *      that is why this early check stays even though it is also a boundary.
  */
 export function rewriteRootMentions(
   text: string,
   roots: readonly WorkspaceRootUi[],
   cwd: string | null | undefined,
+  realpath: (p: string) => string = strictRealpath,
 ): string {
   if (text === "" || roots.length <= 1) return text;
   const cwdKey = cwd ? pathKey(path.resolve(cwd)) : null;
-  const byAlias = new Map<string, string>();
+  const byAlias = new Map<string, { rootPath: string; physicalRoot: string }>();
   for (const root of roots) {
     if (cwdKey !== null && pathKey(root.path) === cwdKey) continue;
-    byAlias.set(root.name.toLowerCase(), root.path);
+    byAlias.set(root.name.toLowerCase(), {
+      rootPath: root.path,
+      physicalRoot: physicalPath(root.path, realpath),
+    });
   }
   if (byAlias.size === 0) return text;
   return text.replace(/@([A-Za-z0-9._-]+)\/([^\s]*)/g, (whole, alias: string, rel: string) => {
-    const rootPath = byAlias.get(alias.toLowerCase());
-    if (!rootPath || rel === "") return whole;
-    const abs = path.resolve(rootPath, rel);
-    if (!isWithinRoot(abs, rootPath)) return whole;
+    const root = byAlias.get(alias.toLowerCase());
+    if (!root || rel === "") return whole;
+    const abs = path.resolve(root.rootPath, rel);
+    // Layer 1 (no I/O): lexical containment.
+    if (!isWithinRoot(abs, root.rootPath)) return whole;
+    // Layer 2 (I/O): physical containment, so symlinks/junctions inside the
+    // root cannot reach outside it.
+    if (!isWithinRoot(physicalPath(abs, realpath), root.physicalRoot)) return whole;
     return `@${abs}`;
   });
 }
