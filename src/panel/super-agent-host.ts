@@ -66,11 +66,13 @@ import {
   fromPersistedSuperSession,
   isTerminalSuperStatus,
   MAX_SUPER_ATTACHMENTS,
+  planSuperWaves,
   superArchiveFingerprint,
   superDirectiveDedupeKey,
   SuperDirectiveScanner,
   SuperReportBuffer,
   superReportKey,
+  superTaskKey,
   type SuperAction,
   type SuperActionReceipt,
   type SuperAttachment,
@@ -111,6 +113,16 @@ function normalizePathKey(target: string): string {
 }
 
 type SuperToolCallOutcome = "dispatched" | "actions" | "rejected" | "dropped";
+
+/** 一条待投递给主会话的子会话汇报回合（delivered-unacked 账本与队列共用）。 */
+type PendingSuperReportPrompt = {
+  mainSessionId: string | null;
+  text: string;
+  final?: boolean;
+  fallbackText?: string;
+  suppressQqProgress?: boolean;
+  reportKeys?: string[];
+};
 
 /** Structural mirror of the panel's SuperMergeDispatchResult (no panel import). */
 export type SuperMergeDispatchResult =
@@ -195,14 +207,16 @@ export class SuperAgentHost {
   superActionReceiptLast = "";
   superActionZeroWarned = false;
   readonly pendingSuperReports = new Map<string, SuperReportBuffer>();
-  pendingSuperReportPrompts: Array<{
-    mainSessionId: string | null;
-    text: string;
-    final?: boolean;
-    fallbackText?: string;
-    suppressQqProgress?: boolean;
-    reportKeys?: string[];
-  }> = [];
+  pendingSuperReportPrompts: PendingSuperReportPrompt[] = [];
+  /**
+   * G2 delivered-unacked 账本：`sendPrompt` 起来了、但回合中途 Stop / 失败导致
+   * 主会话没有产出真正汇报的条目。键 = reportKeys.join(",")，值记录重试次数。
+   * 这些报告的缓冲键刻意保持 in-flight（不 confirm），条目重新入投递队列，由
+   * 心跳重投 —— 回合中途失败 / Stop 时汇报不会「投出去即丢」。
+   */
+  readonly reportDeliveryUnacked = new Map<string, { item: PendingSuperReportPrompt; attempts: number; at: number }>();
+  /** 隐藏汇报回合最多重投几次，之后确认出缓冲、靠 QQ 兜底缓存送真实结论。 */
+  maxReportDeliveryAttempts = 3;
   pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }> = [];
   superReportRunning = false;
   static readonly SUPER_AUTO_TURN_PRIORITY = [
@@ -220,6 +234,8 @@ export class SuperAgentHost {
   deferredAutoTurnsToastId: number | null = null;
   superArchiveTimer: NodeJS.Timeout | null = null;
   superArchiveFingerprint = "";
+  /** 运行组 id 序号 —— 一次委派块 = 一个 runId。 */
+  private superRunSeq = 0;
   sweepInFlight = false;
   superSweepDelayMs = 3_000;
   readonly superReportedChildIds = new Set<string>();
@@ -517,7 +533,10 @@ export class SuperAgentHost {
    */
   persistSuperSessions(options: { force?: boolean } = {}): Promise<void> {
     const manager = this.superAgent;
-    if (!manager) return Promise.resolve();
+    // 测试桩 / 只实现部分表面的 manager 可能没有归档接口 —— 安全跳过。
+    if (!manager || typeof manager.archivableMainSessionIds !== "function") {
+      return Promise.resolve();
+    }
     const fingerprint = superArchiveFingerprint(
       manager.archivableMainSessionIds().map((mainSessionId) => ({
         mainSessionId,
@@ -826,7 +845,13 @@ export class SuperAgentHost {
       onDropped(attachments.length - MAX_SUPER_ATTACHMENTS);
       attachments.length = MAX_SUPER_ATTACHMENTS;
     }
-    const next: SuperTaskSpec = { title: spec.title, task: spec.task };
+    const next: SuperTaskSpec = {
+      title: spec.title,
+      task: spec.task,
+      ...(spec.id ? { id: spec.id } : {}),
+      ...(spec.dependsOn && spec.dependsOn.length > 0 ? { dependsOn: [...spec.dependsOn] } : {}),
+      ...(spec.batch !== undefined ? { batch: spec.batch } : {}),
+    };
     if (attachments.length > 0) next.attachments = attachments;
     return next;
   }
@@ -1252,6 +1277,21 @@ export class SuperAgentHost {
     let dispatched = 0;
     let droppedAttachments = 0;
     for (const tasks of blocks) {
+      // 波次计划（任务 A 纯函数）：依赖模式 = 最长依赖路径，批次模式 = batch 排名；
+      // 混合模式 / 成环 / 悬空依赖等块级错误 → 整块拒绝，绝不部分派发。
+      const plan = planSuperWaves(tasks);
+      if (plan.issues.some((issue) => issue.blockLevel)) {
+        const reasons = plan.issues.filter((i) => i.blockLevel).map((i) => i.message);
+        this.log.warn(`super agent: 拒绝含依赖/批次错误的委派块：${reasons.join("; ")}`);
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("委派指令的依赖/批次配置有误，已整块忽略：{0}", reasons[0] ?? ""),
+        );
+        this.queueSuperToolCallCorrection(reasons[0] ?? "");
+        continue;
+      }
+      // 一次委派块 = 一个运行组；runId 让看板按组聚合、pump 按组解析依赖。
+      const runId = `run-${Date.now().toString(36)}-${(this.superRunSeq++).toString(36)}`;
       for (const task of tasks) {
         // 同一份载荷在正文里被重复写出时只派发第一次。
         const dedupeKey = SuperAgentHost.superDirectiveFingerprint(superDirectiveDedupeKey([task]));
@@ -1262,7 +1302,8 @@ export class SuperAgentHost {
         const spec = this.prepareSuperSpec(task, (count) => {
           droppedAttachments += count;
         });
-        const session = manager.spawn(spec);
+        const wave = plan.taskWave[superTaskKey(task)] ?? 0;
+        const session = manager.spawn(spec, { runId, wave });
         // 注入回合（qqInjectedTaskId 非空）里派生的子会话归属该 QQ 主任务：记下
         // 映射，子会话随后 ask_user_question 时才能把提醒转发给同一个 QQ 用户。
         // 本地回合派生（qqInjectedTaskId 为空）不登记，保持本地提问不转发。
@@ -1271,7 +1312,7 @@ export class SuperAgentHost {
         }
         this.rememberDispatchedDirective(dedupeKey);
         dispatched++;
-        this.log.info(`super agent: dispatched ${session.id} 「${spec.title}」`);
+        this.log.info(`super agent: dispatched ${session.id} 「${spec.title}」(runId=${runId} wave=${wave})`);
       }
     }
     if (droppedAttachments > 0) {
@@ -2033,6 +2074,10 @@ export class SuperAgentHost {
       }
       buffer.add([entry]);
     }
+    // 收到汇报 = 关键事件 → 立即落盘。指纹已覆盖终态 / integration / lastError /
+    // statusDetail，但 diagnostics 是刻意不进指纹的高频流；回报正文随下一次写落盘
+    // 前若宿主重启就会丢，因此在汇报到达这一刻显式 force 一次（节流窗口仅 800ms）。
+    this.persistSuperSessions({ force: true });
     this.settleSuperReportsIfReady();
     this.syncSuperWaitingState();
   }
@@ -2347,13 +2392,6 @@ export class SuperAgentHost {
         }
         const pos = this.pendingSuperReportPrompts.indexOf(item);
         if (pos !== -1) this.pendingSuperReportPrompts.splice(pos, 1);
-        // 投递确认点（G2）：sendPrompt 真的在主会话上跑起来了（started=true）
-        // 才把这条汇报从缓冲移除。上面 !started 的 break 保留条目与队列项，
-        // 下一拍心跳重投 —— 汇报不会「取出即丢」。reportKeys 是 sessionId:attempt，
-        // 与 QQ 兜底重投共用去重键，同一个键只确认一次、不会被投第二遍。
-        if (item.reportKeys?.length) {
-          this.pendingSuperReports.get(item.mainSessionId ?? "")?.confirm(item.reportKeys);
-        }
         // 本轮 assistant 正文：只含 agent 的 text 块（thought / tool / diff /
         // 子会话卡都不在其中），与最终结果取文本同口径。
         const reportTurnText = this.captureQqReportTurnText(
@@ -2361,6 +2399,20 @@ export class SuperAgentHost {
           reportTextBefore,
           reportAnchorLen,
         );
+        // G2（回合真正 settle 后 confirm）：await sendPrompt 已等整轮结束，但
+        // `stopReason==="cancelled"`（用户 Stop）也会返回 true —— 那轮主会话并
+        // 没有真正转述子会话结果。只有「没被 Stop 压住 && 没在 error」才算真正
+        // settle，立即 confirm；否则转入 delivered-unacked 账本，心跳复核重投，
+        // 确保回合中途 Stop / 失败时汇报不丢。与 QQ 兜底缓存共用同一真实正文。
+        const genuinelySettled =
+          this.store.getState().status !== "error" && !this.autoTurnsHeld();
+        if (genuinelySettled) {
+          if (item.reportKeys?.length) {
+            this.pendingSuperReports.get(item.mainSessionId ?? "")?.confirm(item.reportKeys);
+          }
+        } else {
+          this.markReportDelivered(item, reportTurnText);
+        }
         // R2：缓存本轮正文供迟到补发复用（只在该会话仍有 awaiter 时才有意义）。
         if (reportTurnText && owner && this.qqFinalRescueOwnerPending(owner)) {
           this.qqFinalRescueText.set(owner, reportTurnText);
@@ -2390,6 +2442,82 @@ export class SuperAgentHost {
       // 汇报已经投出去（或投失败）：重算忙碌标记 —— 还有子会话在跑时面板保持
       // 忙碌态，全部结束且汇报已投出时才回到 idle。
       this.syncSuperWaitingState();
+    }
+  }
+
+  /**
+   * G2 handoff：`sendPrompt` 起来了，但回合**还没确认真正 settle**。把汇报转入
+   * delivered-unacked 账本 —— 缓冲键保持 in-flight（不 confirm），汇报正文与 QQ
+   * 兜底缓存共用一份。回合中途 Stop / 失败时报告不会「投出去即丢」。
+   */
+  markReportDelivered(item: PendingSuperReportPrompt, _reportTurnText: string): void {
+    const keys = item.reportKeys;
+    if (!keys || keys.length === 0) {
+      // 无去重键（测试桩 / 老调用）：没有可追踪的缓冲项，维持旧语义直接了结。
+      return;
+    }
+    const key = keys.join(",");
+    const prev = this.reportDeliveryUnacked.get(key);
+    this.reportDeliveryUnacked.set(key, {
+      item,
+      attempts: (prev?.attempts ?? 0) + 1,
+      at: Date.now(),
+    });
+    // 兜底缓存与 :2317-2340 统一口径：真实汇报正文先落 QQ 缓存，确认 / 重投
+    // 两条路径都不会丢内容。
+    const owner = item.mainSessionId ?? "";
+    const cleanFallback = sanitizeQqReportFallback(item.fallbackText);
+    if (cleanFallback && owner && this.qqHost.qqFinalRescueOwnerPending(owner)) {
+      this.qqHost.qqFinalRescueText.set(owner, cleanFallback);
+      this.qqHost.qqReportFallbackText.set(owner, cleanFallback);
+    }
+  }
+
+  /** delivered-unacked 汇报重投的 staleness 阈值（心跳复核，测试可注入小值）。 */
+  reportRedeliveryMs = 6_000;
+
+  /**
+   * 心跳复核 delivered-unacked：这些汇报的上一轮 sendPrompt 被 Stop / error 打断，
+   * 主会话并没有真正转述。主会话恢复（idle、未 Stop、非 replay、车道空闲）后
+   * 重新入投递队列重投，避免汇报在中途失败时「投出去即丢」。
+   *
+   * - Stop 仍压住 → 留在账本与缓冲，等用户下一次消息解除压制；
+   * - streaming / error → 留在账本，下一拍再看；
+   * - idle 且未到重投阈值 → 释放 in-flight、重新入队重投；
+   * - 达 maxReportDeliveryAttempts → 兜底 confirm（QQ 兜底正文已保留真实结论）。
+   */
+  reconcileReportDelivery(): void {
+    if (this.disposed || this.reportDeliveryUnacked.size === 0) return;
+    // Stop 仍压住：汇报留在账本与缓冲里，等用户下一次消息解除压制 —— 此刻既不
+    // 重投（Stop 期间不该自动开新回合）也不 confirm（没真正送达）。
+    if (this.autoTurnsHeld()) return;
+    const state = this.store.getState();
+    const canRedeliver =
+      state.status === "idle" && !this.historySyncBusy && this.mainLane === null;
+    if (!canRedeliver) return; // 回合还在 streaming / error：等下一拍
+    const now = Date.now();
+    let requeued = false;
+    for (const [key, rec] of [...this.reportDeliveryUnacked]) {
+      const buffer = this.pendingSuperReports.get(rec.item.mainSessionId ?? "");
+      if (now - rec.at < this.reportRedeliveryMs) continue; // 宽限期内先等
+      if (rec.attempts >= this.maxReportDeliveryAttempts) {
+        // 兜底：畸形汇报不能永久卡住缓冲；QQ 兜底正文已保留真实结论。
+        buffer?.confirm(rec.item.reportKeys ?? []);
+        this.reportDeliveryUnacked.delete(key);
+        this.log.warn(
+          `super agent: 汇报重投 ${rec.attempts} 次仍未送达，确认出缓冲（QQ 兜底正文已保留）`,
+        );
+        continue;
+      }
+      // 回合已恢复：释放 in-flight 标记，重新入投递队列重投。
+      buffer?.release(rec.item.reportKeys ?? []);
+      this.reportDeliveryUnacked.delete(key);
+      this.pendingSuperReportPrompts.push(rec.item);
+      requeued = true;
+    }
+    if (requeued) {
+      this.ensureSuperHeartbeat();
+      void this.drainSuperAutoTurns();
     }
   }
 
@@ -2545,6 +2673,9 @@ export class SuperAgentHost {
     // refreshSuperWaitHeartbeat / syncSuperWaitingState 这类同步 UI 刷新。
     try {
       this.deps.refreshSuperWaitHeartbeat();
+      // G2：每拍复核 delivered-unacked —— 回合 settle 才 confirm，中途 Stop /
+      // 失败则重投，避免汇报在「sendPrompt 起来了但回合没跑完」的窗口里丢失。
+      this.reconcileReportDelivery();
       void this.drainSuperAutoTurns();
     } catch (error) {
       this.log.warn(`super agent heartbeat tick failed: ${errorMessage(error)}`);
@@ -2557,6 +2688,8 @@ export class SuperAgentHost {
   hasSuperWork(): boolean {
     if (this.disposed) return false;
     if (this.pendingSuperReportPrompts.length > 0) return true;
+    // delivered-unacked：汇报还在等回合真正 settle / 重投，心跳必须继续。
+    if (this.reportDeliveryUnacked.size > 0) return true;
     // 待投递的动作回执也算「还有活儿」：心跳停了回执就永远投不出去，主会话
     // 于是不知道自己刚发的动作生效没有（→ 重复发同一个动作）。
     if (this.pendingSuperActionReceipts.length > 0) return true;

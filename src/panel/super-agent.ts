@@ -80,18 +80,24 @@ import {
 } from "../../shared/messages.js";
 import {
   applySuperEvent,
+  applySuperDiagnostic,
+  applySuperFailure,
   buildSuperReportPrompt,
   canRetrySuperSession,
   capReportTail,
   clampMaxConcurrentSuperSessions,
   isTerminalSuperStatus,
   normalizeSuperTodos,
+  groupSuperReportsByWave,
   reportForSession,
   retrySuperSession,
+  superTaskKey,
   toPersistedSuperSession,
   toSuperBoardSession,
   withIntegration,
   withUsage,
+  type SuperDiagnosticKind,
+  type SuperFailureKind,
   type PersistedSuperSession,
   type SuperAttachment,
   type SuperEvent,
@@ -182,6 +188,25 @@ export const SUPER_MCP_READY_POLL_MS = 120;
  * 即可确定性验证超时路径，生产路径永不改写。
  */
 export const SUPER_STALL_WATCHDOG_MS = 30 * 60_000;
+
+/**
+ * 失败自动重试的退避窗口（毫秒）：retryable 失败归一后在后台等待这么久再自动
+ * retry（不超过 maxAttempts）。作为实例字段便于单测注入极小值。仅当子会话显式
+ * 声明 `maxAttempts > 1` 时启用，避免改变既有 fixture 的行为。
+ */
+export const SUPER_AUTO_RETRY_BACKOFF_MS = 200;
+
+/**
+ * 依赖跳过（上游失败 → 下游 blocked）时写入 `statusDetail` / `lastError` 的原因
+ * 前缀。看板的失败分类 chip 由 `lastError.kind === "blocked"` 驱动。
+ */
+export const SUPER_DEPENDENCY_BLOCK_REASON = "上游任务失败，已跳过本任务";
+
+/**
+ * 单条诊断文本上限（共享层合并版未导出该常量，这里按同一口径本地定义）。
+ * 防止把整段错误文本 / 任务书塞进诊断把看板与归档撑大。
+ */
+const SUPER_DIAGNOSTIC_TEXT_MAX_CHARS = 500;
 
 /**
  * `.iflow/super/attachments/` 下附件副本的空闲清扫阈值（7 天）。
@@ -738,6 +763,16 @@ export interface SuperAgentDeps {
    */
   maxConcurrentSessions: () => number;
   /**
+   * 失败后最多自动尝试几次（含首次），来自 `iflow.superAgent.maxAttempts`。
+   * 可选：缺省 1 = 不自动重试；spawn 时写入 session.maxAttempts。
+   */
+  maxAttempts?: () => number;
+  /**
+   * 上游失败时对下游任务的处理策略，来自 `iflow.superAgent.dependencyPolicy`。
+   * `block`（默认）= 跳过下游并标记 blocked；`continue` = 照常执行。
+   */
+  dependencyPolicy?: () => "block" | "continue";
+  /**
    * 是否保留正常完成子会话的工作目录（`iflow.superAgent.keepWorktree`，
    * 每次实时读）。
    *
@@ -798,6 +833,10 @@ interface SuperQueueEntry {
   retry?: SuperRetryState;
   /** 审批策略（spawn 时归一化；重试沿用上一轮的那份）。 */
   policy: ResolvedSuperSpawnPolicy;
+  /** 运行组 id（一次委派块 = 一个运行组），用于波次依赖解析。 */
+  runId?: string;
+  /** 所属波次（0 基）。 */
+  wave?: number;
 }
 
 export class SuperAgentManager {
@@ -916,6 +955,19 @@ export class SuperAgentManager {
   private readonly releaseRetryTimers = new Map<string, NodeJS.Timeout>();
   /** 每个子会话已安排过的释放重试次数（用来限制重试轮数）。 */
   private readonly releaseRetryAttempts = new Map<string, number>();
+  /**
+   * 波次依赖索引：`${runId}\u0000${taskKey}` → sessionId。
+   * `dependsOn` 引用的是任务标识（id 或 title），而 session.id 是宿主生成的，
+   * 派发时把两者登记进来，pump 才能把依赖解析成具体的上游会话。
+   */
+  private readonly waveTaskIndex = new Map<string, string>();
+  /**
+   * retryable 失败自动重试的退避定时器（每个子会话最多一个在飞，unref）。
+   * 仅在会话声明 `maxAttempts > 1` 时安排，避免改变无该字段的既有 fixture。
+   */
+  private readonly autoRetryTimers = new Map<string, NodeJS.Timeout>();
+  /** 自动重试退避窗口（实例字段，测试注入极小值）。 */
+  autoRetryBackoffMs = SUPER_AUTO_RETRY_BACKOFF_MS;
   private seq = 0;
   private disposed = false;
 
@@ -1063,12 +1115,19 @@ export class SuperAgentManager {
    */
   spawn(
     spec: SuperTaskSpec,
-    options?: { isolation?: "repo"; policy?: SuperSpawnPolicy | null },
+    options?: {
+      isolation?: "repo";
+      policy?: SuperSpawnPolicy | null;
+      runId?: string;
+      wave?: number;
+    },
   ): SuperSessionUi {
     const now = Date.now();
     const id = `super-${now.toString(36)}-${(this.seq++).toString(36)}`;
     const repoIsolation = options?.isolation === "repo";
     const policy = resolveSpawnPolicy({ policy: options?.policy ?? null });
+    const runId = options?.runId;
+    const wave = options?.wave ?? 0;
     const session: SuperSessionUi = {
       id,
       title: spec.title,
@@ -1084,11 +1143,23 @@ export class SuperAgentManager {
       createdAt: now,
       updatedAt: now,
       reports: [],
+      // 波次依赖调度元数据（缺省 wave 0 / 无依赖 / 无上限 = 既有平铺行为）。
+      ...(runId ? { runId } : {}),
+      wave,
+      ...(spec.dependsOn && spec.dependsOn.length > 0 ? { dependsOn: [...spec.dependsOn] } : {}),
+      ...(spec.batch !== undefined ? { batch: spec.batch } : {}),
+      ...(this.deps.maxAttempts ? { maxAttempts: this.deps.maxAttempts() } : {}),
     };
     this.sessions.set(id, session);
     this.policies.set(id, policy);
     if (session.mainSessionId) this.archiveOwners.add(session.mainSessionId);
-    this.queue.push({ spec, id, policy });
+    // 登记任务标识 → 会话 id：dependsOn 用 id/title 引用上游，pump 据此解析。
+    if (runId) {
+      const key = spec.id?.trim() || spec.title.trim();
+      if (key) this.waveTaskIndex.set(`${runId}\u0000${key}`, id);
+    }
+    this.recordDiagnostic(id, "spawn", "info", `已派发「${spec.title}」（runId=${runId ?? "-"} / wave ${wave}）`, now);
+    this.queue.push({ spec, id, policy, runId, wave });
     this.emit();
     this.pump();
     return session;
@@ -1173,6 +1244,12 @@ export class SuperAgentManager {
     }
     // 还在排队的话先撤掉 —— 否则槽位空出后 pump 会把它启动起来。
     this.dequeue(id);
+    // 用户喊停优先于任何在飞的失败自动重试。
+    const retryTimer = this.autoRetryTimers.get(id);
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      this.autoRetryTimers.delete(id);
+    }
     // 提问定时器随中断一起收口：会话已终态，不该再有到点的定时器去 resolve
     // 一个早被丢弃的提问（更不该误删此处之后新尝试的 resolver）。
     this.discardQuestionResolver(id);
@@ -1306,6 +1383,23 @@ export class SuperAgentManager {
     if (this.disposed) return false;
     const session = this.sessions.get(id);
     if (!session || !canRetrySuperSession(session)) return false;
+    // 尝试上限（含首次）：maxAttempts=2 表示最多两次；当前已是第 N 次且 N>=上限
+    // 就不再重试。maxAttempts 未声明时不限（既有行为）。
+    const maxAttempts = session.maxAttempts ?? this.deps.maxAttempts?.() ?? Infinity;
+    const attempts = session.attempts ?? 1;
+    if (attempts >= maxAttempts) {
+      this.deps.log.info(
+        `[${id}] 已达最大尝试次数（${attempts}/${maxAttempts}），不再重试`,
+      );
+      return false;
+    }
+
+    // 手动 / 自动 retry 都先撤掉在飞的退避定时器，避免一次失败触发两次重试。
+    const timer = this.autoRetryTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      this.autoRetryTimers.delete(id);
+    }
 
     // 上一轮的进程本该在终态时回收；这里再做一次防御性回收（幂等），并把
     // 它从并发槽位摘掉 —— 否则重置后的会话会把自己算成「已占用」而永远
@@ -1322,17 +1416,32 @@ export class SuperAgentManager {
     this.interrupted.delete(id);
 
     const retry: SuperRetryState = {
-      attempt: (session.attempts ?? 1) + 1,
+      attempt: attempts + 1,
       error: session.error,
       summary: session.summary ?? (this.lastText.get(id)?.trim() || undefined),
       reuseIsolation: true,
     };
-    this.sessions.set(id, retrySuperSession(session, Date.now()));
+    const reset = retrySuperSession(session, Date.now());
+    this.sessions.set(id, reset);
+    // retry 诊断：审计里能看到「失败 → 重试 → 完成」的诊断轨迹（与 reports 同构）。
+    this.recordDiagnostic(
+      id,
+      "retry",
+      "info",
+      `自动重试第 ${retry.attempt} 次（上次失败：${session.lastError?.message ?? session.error ?? "未知"}）`,
+    );
     this.lastText.delete(id);
     this.queue.push({
-      spec: { title: session.title, task: session.task },
+      spec: {
+        title: session.title,
+        task: session.task,
+        ...(session.dependsOn ? { dependsOn: [...session.dependsOn] } : {}),
+        ...(session.batch !== undefined ? { batch: session.batch } : {}),
+      },
       id,
       retry,
+      runId: session.runId,
+      wave: session.wave,
       // 重试是同一份派发的延续：策略必须沿用，否则一次重试会把 supervised
       // 静默退回 auto（重新变成无审批执行）。
       policy: this.policies.get(id) ?? resolveSpawnPolicy(null),
@@ -1340,6 +1449,31 @@ export class SuperAgentManager {
     this.emit();
     this.pump();
     return true;
+  }
+
+  /**
+   * retryable 失败的自动重试决策：失败已在 apply() 里归一为 lastError.kind ===
+   * "retryable"，这里用任务 A 的 canRetrySuperSession 决策函数复核终态，再核对
+   * 尝试上限，满足则退避一个窗口后自动 retry。其余分类（terminal / blocked /
+   * interrupted）直接上报、不自动重试。
+   *
+   * 只有会话显式声明 `maxAttempts > 1` 时才启用 —— 不带该字段的既有 fixture /
+   * 用户行为保持逐字不变（绝不在无人要求时把失败子会话自动重跑）。
+   */
+  private maybeAutoRetry(id: string): void {
+    if (this.disposed) return;
+    const session = this.sessions.get(id);
+    if (!session || !canRetrySuperSession(session)) return;
+    if (session.lastError?.kind !== "retryable") return;
+    const maxAttempts = session.maxAttempts ?? this.deps.maxAttempts?.() ?? 1;
+    if (maxAttempts <= 1 || (session.attempts ?? 1) >= maxAttempts) return;
+    if (this.autoRetryTimers.has(id)) return; // 退避已安排，避免重复
+    const timer = setTimeout(() => {
+      this.autoRetryTimers.delete(id);
+      void this.retry(id);
+    }, this.autoRetryBackoffMs);
+    if (typeof timer.unref === "function") timer.unref();
+    this.autoRetryTimers.set(id, timer);
   }
 
   /**
@@ -1907,6 +2041,9 @@ export class SuperAgentManager {
    */
   async dispose(): Promise<{ id: string; path: string; branch?: string }[]> {
     this.disposed = true;
+    // 清掉全部在飞的自动重试退避定时器 —— 宿主已关闭，不能再触发 retry。
+    for (const timer of this.autoRetryTimers.values()) clearTimeout(timer);
+    this.autoRetryTimers.clear();
     const kept: { id: string; path: string; branch?: string }[] = [];
     for (const [id, session] of this.sessions) {
       // 与 cancel 同理：先落「已中断」再杀进程，否则 onExit 会把这次终止记成
@@ -1974,17 +2111,102 @@ export class SuperAgentManager {
 
   // --- 内部 -----------------------------------------------------------------
 
-  /** 队列泵：并发有空位时把排队的派发请求放出去。 */
+  /**
+   * 队列泵：并发有空位时把排队的派发请求放出去。
+   *
+   * 波次依赖门控（单层主→子，不引入新的层级）：每个运行组按 wave 分层，
+   *  - 显式 `dependsOn`（任务标识）指向的上游必须全部终态才放行；
+   *  - 没有显式依赖但 wave > 0 时，同一运行组里所有低波次会话必须终态
+   *    （批次模式的串行语义）；
+   *  - 上游非终态 → 该条目**留在队列**等下一次 pump（由上游收尾的 finally 触发）；
+   *  - 上游失败 / 中断 → 下游标记 failed + `lastError.kind="blocked"` +
+   *    `statusDetail`（除非 dependencyPolicy="continue"），并上报主会话。
+   */
   private pump(): void {
-    // 每次 pump 都重新读配置并归一化：上限是用户可调的，0 / Infinity 之类的
-    // 脏值不能让池子卡死或无限放开。
     const limit = clampMaxConcurrentSuperSessions(this.deps.maxConcurrentSessions());
-    while (this.queue.length > 0 && this.activeCount() < limit) {
-      const next = this.queue.shift();
-      if (!next) return;
+    let i = 0;
+    while (i < this.queue.length && this.activeCount() < limit) {
+      const next = this.queue[i]!;
+      const gate = this.dependencyGate(next);
+      if (gate === "wait") {
+        i++; // 上游还在跑：跳过本条，尝试后面的任务（它们可能无依赖）。
+        continue;
+      }
+      if (gate.blocked) {
+        // 先摘掉队列项再标记终态，避免下一次 pump 重复处理同一条。
+        this.queue.splice(i, 1);
+        this.blockDependent(next.id, gate.reason);
+        continue;
+      }
+      this.queue.splice(i, 1);
       this.started.add(next.id);
       void this.prepare(next.id, next.spec, next.retry, next.policy);
     }
+  }
+
+  /**
+   * 依赖门控判定。返回 "wait"=上游未终态（留队列）；对象 blocked=true=上游失败
+   * 需跳过下游；blocked=false=放行。
+   */
+  private dependencyGate(
+    entry: SuperQueueEntry,
+  ): "wait" | { blocked: false } | { blocked: true; reason: string } {
+    const session = this.sessions.get(entry.id);
+    if (!session) return { blocked: false };
+    const runId = entry.runId ?? session.runId;
+    // 平铺派发（无运行组）：保持既有行为，零依赖零等待。
+    if (!runId) return { blocked: false };
+    const policy = this.deps.dependencyPolicy?.() ?? "block";
+
+    const upstreamCheck = (up: SuperSessionUi | undefined, label: string) => {
+      if (!up) return "ok" as const; // 上游已被清理：shared 校验保证不会悬空，防御性放行
+      if (isTerminalSuperStatus(up.status)) {
+        if (up.status === "failed" || up.status === "cancelled") {
+          return policy === "continue" ? ("ok" as const) : ("failed" as const);
+        }
+        return "ok" as const;
+      }
+      void label;
+      return "wait" as const;
+    };
+
+    // ① 显式依赖：任务标识 → sessionId 索引。
+    for (const dep of session.dependsOn ?? []) {
+      const key = superTaskKey({ title: dep });
+      const upId = this.waveTaskIndex.get(`${runId}\u0000${key}`);
+      const verdict = upstreamCheck(upId ? this.sessions.get(upId) : undefined, dep);
+      if (verdict === "wait") return "wait";
+      if (verdict === "failed") {
+        return { blocked: true, reason: `任务「${dep}」失败 / 中断` };
+      }
+    }
+
+    // ② 批次串行：无显式依赖时，所有低波次会话必须终态。
+    if ((session.dependsOn ?? []).length === 0 && (entry.wave ?? session.wave ?? 0) > 0) {
+      const wave = entry.wave ?? session.wave ?? 0;
+      for (const other of this.sessions.values()) {
+        if (other.id === session.id) continue;
+        if ((other.runId ?? "") !== runId) continue;
+        if ((other.wave ?? 0) >= wave) continue;
+        const verdict = upstreamCheck(other, other.title);
+        if (verdict === "wait") return "wait";
+        if (verdict === "failed") {
+          return { blocked: true, reason: `上游波次 ${other.wave ?? 0}「${other.title}」失败 / 中断` };
+        }
+      }
+    }
+    return { blocked: false };
+  }
+
+  /** 上游失败 → 下游标记 blocked 并上报（ resumed by dependencyPolicy=continue 时不调用）。 */
+  private blockDependent(id: string, reason: string): void {
+    const session = this.sessions.get(id);
+    if (!session || isTerminalSuperStatus(session.status)) return;
+    const detail = `${SUPER_DEPENDENCY_BLOCK_REASON}：${reason}`;
+    // 错误文本含「上游任务失败」→ apply() 的四分类归为 blocked；statusDetail
+    // 显式写入同一句话，供看板与失败分类 chip 读取。
+    this.apply(id, { type: "failed", error: detail, at: Date.now() }, detail);
+    this.notifyReport(id);
   }
 
   /** 把一个会话的排队项移除（取消 / 清理 / 重试重新入队时用）。 */
@@ -2746,11 +2968,15 @@ export class SuperAgentManager {
     // 先占住终态再杀进程：内核退出会被记成 failed，终态粘性让随后的迟到
     // 事件无法改写这条结论（与 cancel 的顺序纪律一致）。
     this.interrupted.set(id, session.attempts ?? 1);
-    this.apply(id, {
-      type: "failed",
-      error: `Host guard blocked a destructive command and stopped the child session: ${reason}`,
-      at: Date.now(),
-    });
+    this.apply(
+      id,
+      {
+        type: "failed",
+        error: `Host guard blocked a destructive command and stopped the child session: ${reason}`,
+        at: Date.now(),
+      },
+      `护栏拦截：${reason}`,
+    );
     const client = this.clients.get(id);
     if (client && session.cliSessionId) {
       try {
@@ -3354,6 +3580,14 @@ export class SuperAgentManager {
       }
     }
     this.emit();
+    // merge 诊断：改动去向（自动合并 / PR / 保留分支）作为生命周期节点入时间线。
+    this.recordDiagnostic(
+      id,
+      "merge",
+      integration.state === "skipped" || integration.state === "conflict" ? "warn" : "info",
+      `集成结果：${integration.state}${integration.detail ? ` — ${integration.detail}` : ""}`,
+      integration.at,
+    );
     this.deps.log.info(
       `super agent: ${id} 集成 ${integration.state}${integration.detail ? ` — ${integration.detail}` : ""}`,
     );
@@ -3744,11 +3978,54 @@ export class SuperAgentManager {
     return updated;
   }
 
-  private apply(id: string, event: SuperEvent): void {
+  /**
+   * 应用一次会话状态迁移，并在同一处留下诊断 / 失败分类 / 状态说明。
+   *
+   * 诊断是追加式的（任务 A 的 applySuperDiagnostic / applySuperFailure 都不改状态
+   * 机），所以放在 applySuperEvent 之后、写回 map 之前完成 —— 一次迁移一份记录，
+   * 看板的「诊断」视图与失败分类 chip 因此有真实数据。`statusDetail` 用错误文本，
+   * 看门狗 / 护栏 / 依赖跳过等失败点还可以传入更具体的一句话说明。
+   */
+  private apply(id: string, event: SuperEvent, statusDetail?: string): void {
     const session = this.sessions.get(id);
     if (!session) return;
-    const next = applySuperEvent(session, event);
+    let next = applySuperEvent(session, event);
     if (next === session) return;
+    const at = event.at;
+    switch (event.type) {
+      case "started":
+        next = applySuperDiagnostic(next, {
+          at,
+          kind: "session",
+          level: "info",
+          message: `内核会话已建立（${event.cliSessionId}）`,
+        });
+        break;
+      case "report":
+        next = applySuperDiagnostic(next, {
+          at,
+          kind: "report",
+          level: "info",
+          message: `汇报：${event.report.state}`,
+          detail: event.report.summary?.slice(0, SUPER_DIAGNOSTIC_TEXT_MAX_CHARS),
+        });
+        break;
+      case "failed": {
+        const kind = classifySuperFailureKind(event.error);
+        next = applySuperFailure(next, { kind, message: event.error, at });
+        const detail = (statusDetail ?? event.error).slice(0, SUPER_DIAGNOSTIC_TEXT_MAX_CHARS);
+        if (detail) next = { ...next, statusDetail: detail, updatedAt: Math.max(next.updatedAt, at) };
+        break;
+      }
+      case "cancelled":
+        next = applySuperDiagnostic(next, {
+          at,
+          kind: "error",
+          level: "info",
+          message: `已被中断（${event.source ?? "system"}）`,
+        });
+        break;
+    }
     this.sessions.set(id, next);
     // 「开始等你回答」只惊动用户一次：prev 没有 pending、next 有 pending 才算
     // 真正进入等待（同一 pending 的重复 apply 不会重复通知）。恢复出来的历史
@@ -3756,6 +4033,31 @@ export class SuperAgentManager {
     if (event.type === "needs_input" && !session.pending && next.pending && !next.restored) {
       this.deps.onNeedInput?.(next);
     }
+    this.emit();
+    // retryable 失败归一后按上限自动重试（见 maybeAutoRetry）。放在 emit 之后，
+    // 让看板先看到 failed 状态再进入退避。
+    if (event.type === "failed") this.maybeAutoRetry(id);
+  }
+
+  /** 追加一条任意诊断（spawn / merge / retry 等生命周期节点）。 */
+  private recordDiagnostic(
+    id: string,
+    kind: SuperDiagnosticKind,
+    level: "info" | "warn" | "error",
+    message: string,
+    at: number = Date.now(),
+  ): void {
+    const session = this.sessions.get(id);
+    if (!session) return;
+    this.sessions.set(
+      id,
+      applySuperDiagnostic(session, {
+        at,
+        kind,
+        level,
+        message: message.slice(0, SUPER_DIAGNOSTIC_TEXT_MAX_CHARS),
+      }),
+    );
     this.emit();
   }
 
@@ -3829,8 +4131,12 @@ export class SuperAgentManager {
       (session) =>
         !isTerminalSuperStatus(session.status) && (session.mainSessionId ?? owner) === owner,
     ).length;
+    // 按 wave 重排汇报（任务 A 的 groupSuperReportsByWave）：同批汇报按波次先后
+    // 聚合，上游先说、下游后说，主会话拿到的是有依赖顺序的结果而非乱序拼盘。
+    // 缺 wave 的旧条目归 0 组，顺序保持原样 —— 平铺派发的提示词逐字不变。
+    const ordered = groupSuperReportsByWave(entries, (entry) => entry.session.wave).flat();
     return {
-      text: buildSuperReportPrompt(entries, {
+      text: buildSuperReportPrompt(ordered, {
         pendingCount,
         finalOverride: options?.finalOverride === true,
       }),
@@ -3986,7 +4292,7 @@ export class SuperAgentManager {
       ? `子会话无响应超时（${Math.round(this.stallTimeoutMs / 1000)} 秒无进展）`
       : "子会话进程已退出但状态未归一（看门狗兜底）";
     this.deps.log.warn(`[${id}] 子会话看门狗触发：${reason}`);
-    this.apply(id, { type: "failed", error: reason, at: Date.now() });
+    this.apply(id, { type: "failed", error: reason, at: Date.now() }, `看门狗：${reason}`);
     this.discardQuestionResolver(id);
     this.finalizeProgress(id);
     this.clearWatchdog(id);
@@ -4116,6 +4422,30 @@ export class SuperAgentManager {
 // ---------------------------------------------------------------------------
 // 辅助
 // ---------------------------------------------------------------------------
+
+/**
+ * 失败四分类归一（把宿主各失败点的错误文本映射到任务 A 的 SuperFailureKind）。
+ *
+ * 这是宿主侧的分类策略（shared 层只提供 applySuperFailure 纯函数与类型），按
+ * 错误语义归到四类：
+ *  - `blocked`：护栏拦截 / 依赖跳过（前提失效，重试没用，但也不是内核故障）；
+ *  - `interrupted`：用户/系统中断（Stop、面板关闭、宿主回收）；
+ *  - `retryable`：内核意外退出 / 无响应超时 / 限流 / 网络瞬断（值得退避重试）；
+ *  - `terminal`：其余确定失败（准备阶段错误、脚本错误等）。
+ */
+export function classifySuperFailureKind(error: string): SuperFailureKind {
+  const text = (error || "").toLowerCase();
+  if (/blocked|destructive|guard|护栏|依赖.*失败|上游/.test(text)) return "blocked";
+  if (/interrupt|cancel|abort|中断|已停止|stopped by|user stop/.test(text)) return "interrupted";
+  if (
+    /退出|exit|crash|崩溃|timeout|超时|无响应|限流|rate.?limit|econn|network|网络瞬断|watchdog|看门狗/.test(
+      text,
+    )
+  ) {
+    return "retryable";
+  }
+  return "terminal";
+}
 
 /**
  * 重试时优先复用上一次的隔离环境。
