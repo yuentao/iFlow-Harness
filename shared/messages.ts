@@ -2271,6 +2271,24 @@ export type WebviewToHost =
       /** cleanup / cleanupBatch: keep the git branch. */
       keepBranch?: boolean;
     }
+  /**
+   * Super Agent — 重试某个运行组里**某一波次**的所有失败 / 阻塞任务。
+   *
+   * `runId` 缺省 = 当前运行组（最近一次委派块）；`wave` 是波次号（0 基，
+   * 由共享层的 `planSuperWaves` 算出）。宿主把该组里落在这一波、且处于失败
+   * 或阻塞状态的任务重置为「准备中」并重新派发 —— 沿用各自的工作目录，
+   * 中断前留下的未提交改动不丢。
+   *
+   * 与 `superRetryFailed` 的区别只是范围：这里按波次圈定，那条按整组。
+   */
+  | { type: "superRetryWave"; runId?: string; wave: number }
+  /**
+   * Super Agent — 重试当前运行组里**所有失败任务**（波次无关）。
+   *
+   * `runId` 缺省 = 当前运行组。宿主只重试处于失败状态的任务，不碰已完成 /
+   * 运行中的。
+   */
+  | { type: "superRetryFailed"; runId?: string }
   | { type: "newSession" }
   | { type: "setModel"; modelId: string }
   | { type: "setThink"; level: ThinkLevel }
