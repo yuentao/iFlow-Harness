@@ -241,7 +241,7 @@ describe("恢复进行中点「新会话」", () => {
     // 新会话照常建立：探针之外只多发了一次 session/new（不双发）。
     expect(client.newSession).toHaveBeenCalledTimes(2);
     expect(p.store.getState().sessionId).toBe("probe-2");
-    expect(recordSession).toHaveBeenCalledWith("probe-2", null);
+    expect(recordSession).toHaveBeenCalledWith("probe-2", null, null);
   });
 
   it("恢复来不及打断时：排队意图被记录，恢复 settle 后自动新建会话", async () => {
@@ -285,7 +285,7 @@ describe("恢复进行中点「新会话」", () => {
     expect(restored).toBe(true);
     expect(replaceTranscript).toHaveBeenCalledTimes(1);
     expect(p.store.getState().sessionId).toBe("restored-session");
-    expect(recordSession).toHaveBeenCalledWith("restored-session", "旧会话的第一句");
+    expect(recordSession).toHaveBeenCalledWith("restored-session", "旧会话的第一句", null);
     expect(restoreSuperSessions).toHaveBeenCalledWith("restored-session");
     expect(infos.some((m) => m.includes("已恢复会话"))).toBe(true);
     expect(p.restoring).toBe(false);

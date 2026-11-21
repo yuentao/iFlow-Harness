@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import path from "node:path";
 import os from "node:os";
-import { realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AcpClient } from "../src/acp/client.js";
 import { buildAcpCommand, MCP_SERVER_ALLOWLIST_FLAG, MCP_SERVER_ALLOWLIST_SENTINEL } from "../src/acp/cli-locator.js";
@@ -311,6 +311,35 @@ describe("AcpClient (integration with mock ACP agent)", () => {
     expect(escapeNote).toBeDefined();
     expect(escapeNote!).toContain("sandbox-blocked");
     expect(escapeNote!).toContain("outside allowed directories");
+  });
+
+  it("transmits settings.add_dirs verbatim on session/new and session/load (multi-repo root subset)", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "iflow-add-dirs-"));
+    const dump = path.join(dir, "sessions.jsonl");
+    try {
+      const client = createClient(undefined, undefined, { ACP_MOCK_SESSION_DUMP: dump });
+      await client.connect();
+      const addDirs = [path.join(dir, "repo-b"), path.join(dir, "repo-c")];
+      await client.newSession({ cwd: here, mcpServers: [], settings: { add_dirs: addDirs } });
+      // 空数组是「只留 cwd」的合法收紧形态（CLI: includeDirectories || argv
+      // 中空数组为真值，会胜出），必须原样透传而不是被当成缺省丢掉。
+      await client.loadSession({
+        cwd: here,
+        mcpServers: [],
+        sessionId: "add-dirs-session",
+        settings: { add_dirs: [] },
+      });
+      const rows = readFileSync(dump, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { method: string; params: Record<string, unknown> });
+      const newRow = rows.find((r) => r.method === "session/new");
+      const loadRow = rows.find((r) => r.method === "session/load");
+      expect((newRow?.params as { settings?: { add_dirs?: string[] } }).settings?.add_dirs).toEqual(addDirs);
+      expect((loadRow?.params as { settings?: { add_dirs?: string[] } }).settings?.add_dirs).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("propagates a JSON-RPC error for unsupported methods", async () => {

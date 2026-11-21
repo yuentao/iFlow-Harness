@@ -19,14 +19,15 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const panelSource = fs.readFileSync(path.join(here, "..", "src", "panel", "panel.ts"), "utf8");
 
-/** 重构前从原 switch 逐字提取的 83 个 case 类型（源码顺序）。 */
+/** 重构前从原 switch 逐字提取的 83 个 case 类型（源码顺序），外加多仓库协作
+ * 新增的 setSessionRoots = 84 个。 */
 const EXPECTED_CASES = [
   "ready", "sendPrompt", "queueAction", "resolveContext", "stopSubagent", "superAgent",
   "superRetryWave", "superRetryFailed", "requestSuperResidueList", "superResidueHandle",
   "cancel", "newSession", "setModel", "setThink", "openLocation", "openExternal",
   "respondApproval", "answerQuestions", "respondProfileSwitch", "respondSuperResidueConfirm",
   "revertTool", "applyHunkSelection", "restoreCheckpoint", "requestTurnChanges",
-  "revertTurnFile", "openDiff", "runInTerminal", "searchFiles", "stageFiles",
+  "revertTurnFile", "openDiff", "runInTerminal", "searchFiles", "setSessionRoots", "stageFiles",
   "pickAttachments", "openImage", "saveAuth", "clearAuth", "activateProfile", "deleteProfile",
   "setOnboardingDismissed", "loadSession", "deleteSession", "setSessionFlags", "renameSession",
   "refreshAuth", "refreshModels", "restartCli", "openSettings", "setHostSettings",
@@ -44,7 +45,7 @@ const EXPECTED_CASES = [
 const DOMAIN_CASES = {
   handleSessionMessage: [
     "ready", "sendPrompt", "queueAction", "resolveContext", "cancel", "newSession", "setModel",
-    "setThink", "openLocation", "openExternal", "runInTerminal", "searchFiles", "stageFiles",
+    "setThink", "openLocation", "openExternal", "runInTerminal", "searchFiles", "setSessionRoots", "stageFiles",
     "pickAttachments", "openImage", "saveAuth", "clearAuth", "activateProfile", "deleteProfile",
     "setOnboardingDismissed", "loadSession", "deleteSession", "setSessionFlags", "renameSession",
     "refreshAuth", "refreshModels", "restartCli", "openSettings", "setHostSettings",
@@ -90,8 +91,8 @@ describe("阶段 7 · Webview 消息路由分域等价性", () => {
   const routerBody = methodBody("private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {");
   const routerCases = caseLabels(routerBody);
 
-  it("薄入口的 case 清单 == 重构前的 83 个（一个不多、一个不少）", () => {
-    expect(routerCases).toHaveLength(83);
+  it("薄入口的 case 清单 == 重构前的 83 个 + 后续新增（多仓库协作 setSessionRoots）", () => {
+    expect(routerCases).toHaveLength(84);
     expect(sorted(routerCases)).toEqual(sorted(EXPECTED_CASES));
   });
 
@@ -111,9 +112,10 @@ describe("阶段 7 · Webview 消息路由分域等价性", () => {
     }
   });
 
-  it("新增 wire 类型数为 0：消息联合类型定义仍由 shared/messages.ts 单独维护", () => {
+  it("case 无重复：薄入口里每个 wire 类型只出现一次", () => {
     // 本轮是纯移动：不新增 case，也不需要改 WebviewToHost。若有人把新消息
     // 直接塞进分域函数却没进薄入口，上面第 2 条会立刻失败。
-    expect(new Set(routerCases).size).toBe(83);
+    // 多仓库协作新增了 setSessionRoots（见 EXPECTED_CASES），计数随之 +1。
+    expect(new Set(routerCases).size).toBe(84);
   });
 });

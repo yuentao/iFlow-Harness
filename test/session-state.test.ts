@@ -2540,6 +2540,17 @@ describe("findCliHistoryCut (locate a turn inside the CLI chatHistory)", () => {
     expect(findCliHistoryCut(history, ["看这个文件"], 0)).toEqual(truncate(0));
   });
 
+  it("多仓库协作：可选重写钩子让 @别名/rel 与 CLI 的绝对路径形态对齐", () => {
+    const cliText = "看 @/repo-b/src/a.ts";
+    const history = [user(cliText), model("回复")];
+    const transcript = ["看 @repo-b/src/a.ts"];
+    // 不重写 → 匹配不上（保守跳过，不截断）
+    expect(findCliHistoryCut(history, transcript, 0)).toEqual({ kind: "skip" });
+    // 用与发送同源的重写 → 命中
+    const rewrite = (text: string) => text.replace(/@repo-b\/([^\s]+)/g, "@/repo-b/$1");
+    expect(findCliHistoryCut(history, transcript, 0, rewrite)).toEqual(truncate(0));
+  });
+
   it("disambiguates identical prompts by occurrence", () => {
     const history = [user("hi"), model("a"), user("hi"), model("b")];
     expect(findCliHistoryCut(history, ["hi", "hi"], 0)).toEqual(truncate(0));

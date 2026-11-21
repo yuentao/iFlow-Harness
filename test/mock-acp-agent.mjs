@@ -19,7 +19,7 @@
  * writes `process.argv.slice(2)` there (same moment) — the same trick for spawn
  * ARGS, used to assert the main-session-only `--allowed-mcp-server-names` scope.
  */
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 
 const envDumpPath = process.env.ACP_MOCK_ENV_DUMP;
 if (envDumpPath) {
@@ -27,6 +27,19 @@ if (envDumpPath) {
     writeFileSync(envDumpPath, JSON.stringify(process.env));
   } catch {
     // Diagnostics convenience; never fail the mock agent over it.
+  }
+}
+
+/** Session request dump (JSONL): lets tests assert exactly what `session/new`
+ * / `session/load` params the client sent (e.g. settings.add_dirs for the
+ * multi-repo root subset). Append-only so a test can observe both calls. */
+const sessionDumpPath = process.env.ACP_MOCK_SESSION_DUMP;
+function dumpSession(method, params) {
+  if (!sessionDumpPath) return;
+  try {
+    appendFileSync(sessionDumpPath, `${JSON.stringify({ method, params })}\n`);
+  } catch {
+    // Same: diagnostics only.
   }
 }
 
@@ -79,6 +92,7 @@ async function handle(msg) {
       break;
 
     case "session/new":
+      dumpSession("session/new", msg.params);
       send({
         jsonrpc: "2.0",
         id: msg.id,
@@ -92,6 +106,15 @@ async function handle(msg) {
             ],
           },
         },
+      });
+      break;
+
+    case "session/load":
+      dumpSession("session/load", msg.params);
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { sessionId: msg.params?.sessionId ?? "mock-session-1" },
       });
       break;
 

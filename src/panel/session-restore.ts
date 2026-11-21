@@ -147,7 +147,11 @@ export interface SessionRestoreDeps {
   queryLiveModels(): Promise<SessionState["models"]>;
   publishSuperSessions(): void;
   resetSuperDirectiveScans(): void;
-  getMainSessionSettings(): SessionSettings;
+  getMainSessionSettings(addDirs?: readonly string[] | null): SessionSettings;
+  /** 多仓库协作：按该会话已存的根集合算出 settings.add_dirs（null = 全量根）。 */
+  sessionAddDirsFor(roots: readonly string[] | null): string[] | null;
+  /** 多仓库协作：恢复后发布根子集投影（applied = 该会话真实根集合）。 */
+  publishWorkspaceRoots(applied?: readonly string[] | null): void;
   loadPersistedTranscript(sessionId: string): Promise<{ blocks: SessionState["blocks"]; firstUserText: string | null }>;
   workspaceModelId(): string | null;
   applyLiveModels(
@@ -164,7 +168,7 @@ export interface SessionRestoreDeps {
   setModel(modelId: string): Promise<void>;
   applyThinkLevel(client: AcpClient, sessionId: string, level: SessionState["thinkLevel"]): Promise<void>;
   cleanupEmptySession(sessionId: string | null): Promise<void>;
-  recordSession(sessionId: string, label: string | null): Promise<void>;
+  recordSession(sessionId: string, label: string | null, roots?: readonly string[] | null): Promise<void>;
   persistActiveTranscript(force?: boolean): void;
   restoreSuperSessions(sessionId: string): Promise<void>;
   postSound(kind: "done" | "error" | "child"): void;
@@ -243,6 +247,10 @@ export class SessionRestoreService {
     // Race the /models HTTP query with the probe + loadSession below (it only
     // reads the endpoint from settings.json — independent of the session).
     const modelsPromise = this.deps.queryLiveModels();
+    // 多仓库协作：这个会话当初的根集合记在会话索引里（恢复不迁移 cwd，也不
+    // 跨根 load）。缺失（旧归档 / 单根）＝全量根，与今天一致。
+    const storedRoots = this.deps.readPersistedSessions().find((s) => s.id === sessionId)?.roots ?? null;
+    const restoreAddDirs = this.deps.sessionAddDirsFor(storedRoots);
     // An abandoned restore never calls applyLiveModels — keep the rejection
     // handled so the query cannot become an unhandled rejection.
     modelsPromise.catch(() => {});
@@ -301,7 +309,7 @@ export class SessionRestoreService {
       const probe = await client.newSession({
         cwd: workspaceRoot,
         mcpServers: [],
-        settings: this.deps.getMainSessionSettings(),
+        settings: this.deps.getMainSessionSettings(restoreAddDirs),
       });
       this.deps.log.info(`restore: probe session/new ok in ${Date.now() - tProbe}ms`);
       // Abort checkpoint 1 — nothing has been written to the store yet.
@@ -312,7 +320,7 @@ export class SessionRestoreService {
         cwd: workspaceRoot,
         mcpServers: [],
         sessionId,
-        settings: this.deps.getMainSessionSettings(),
+        settings: this.deps.getMainSessionSettings(restoreAddDirs),
       });
       this.deps.log.info(`restore: session/load ok in ${Date.now() - tLoad}ms`);
       // Abort checkpoint 2 — still nothing written to the store.
@@ -397,6 +405,9 @@ export class SessionRestoreService {
         skills: meta?.availableSkills ?? [],
         currentModelId,
       });
+      // 多仓库协作：投影这个会话的真实根集合（null → 全量根），让根选择器
+      // 如实显示「当前会话用了哪些根」。
+      this.deps.publishWorkspaceRoots(storedRoots);
       this.deps.applyLiveModels(modelsPromise, client, loadedId, meta?.models?.currentModelId ?? null);
       // Same wire behavior as startNewSession (probed against CLI 0.5.19
       // bundle): session/new reports the CLI's BOOT-time model because
@@ -416,7 +427,7 @@ export class SessionRestoreService {
         `session restored: ${loadedId} (${restored.blocks.length} blocks) in ${Date.now() - tRestore}ms total`,
       );
       await this.deps.cleanupEmptySession(outgoingId);
-      await this.deps.recordSession(loadedId, restored.firstUserText ? clampSessionLabel(restored.firstUserText) : null);
+      await this.deps.recordSession(loadedId, restored.firstUserText ? clampSessionLabel(restored.firstUserText) : null, storedRoots);
       this.deps.persistActiveTranscript(true); // seed the extension-owned copy
       // 该主会话当年派发的子会话（重启后进程已亡，但分支与工作目录还在）：
       // 把它们取回看板，用户才知道有哪些分支等着合并或清理。

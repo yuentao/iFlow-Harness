@@ -74,13 +74,18 @@ export function assembleContextSections(
 export const FOLDER_LISTING_MAX = 200;
 
 /** Normalize a workspace-relative folder path: forward slashes, no leading
- * "./", no trailing slash. Root is "". */
+ * "./", no trailing slash, no empty segments. Root is "".
+ *
+ * 多仓库协作：根别名前缀（`repo-b/src`）只是普通路径段，原样保留 —— 非 cwd
+ * 根的 @ 提及一律带别名前缀，归一化不能把它剥掉（剥掉会让目录列表落到错误
+ * 的根上）。单根工作区没有别名，行为与之前一致。 */
 export function normalizeFolderRel(query: string): string {
   return query
     .trim()
     .replace(/\\/g, "/")
-    .replace(/^\.\//, "")
-    .replace(/\/+$/, "");
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".")
+    .join("/");
 }
 
 /**

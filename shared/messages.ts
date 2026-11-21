@@ -633,6 +633,35 @@ export interface SessionSummaryUi {
   /** M4 P1-8: archived sessions move to a collapsed second section and are
    * kept out of the default (active) results. */
   archived?: boolean;
+  /**
+   * 多仓库协作：这个会话的 CLI 进程实际拿到的目标根集合（绝对路径，cwd 可能
+   * 在列也可能不在）。恢复会话时按它重建 `settings.add_dirs`，绝不迁移 cwd。
+   * 缺失（旧归档 / 单根）＝全量根，即今天的行为。
+   */
+  roots?: string[];
+}
+
+/** 多仓库协作：一个工作区根（展示用）。 */
+export interface WorkspaceRootUi {
+  /** 绝对路径（realpath 归一后的形式）。 */
+  path: string;
+  /** 短别名：`@` 提及里的根前缀（列表内唯一，空格/CJK 归一为 `-`）。 */
+  name: string;
+}
+
+/**
+ * 多仓库协作 —— 会话级根子集投影。
+ *
+ * - `roots`：当前工作区的全部根（cwd 在最前）
+ * - `selected`：用户为**之后的会话**选中的根（宿主持久化）
+ * - `applied`：当前这个会话的 CLI 实际使用的根
+ * - `pendingChange`：两者不一致 —— 改根只对新会话生效，UI 据此给出提示
+ */
+export interface SessionWorkspaceRootsUi {
+  roots: WorkspaceRootUi[];
+  selected: string[];
+  applied: string[];
+  pendingChange: boolean;
 }
 
 /**
@@ -1100,6 +1129,12 @@ export interface SessionState {
    */
   superSessions?: SuperSessionUi[];
   /**
+   * 多仓库协作：本会话的目标根子集投影（面板级、非转录级元数据 —— 切会话/
+   * 恢复都要保留，见 `newSessionState` 的白名单）。`null` = 单根工作区或
+   * 旧宿主，webview 不渲染根选择器。
+   */
+  workspaceRoots?: SessionWorkspaceRootsUi | null;
+  /**
    * 宿主正在等子会话的结果（还有子会话没进终态，或它们的汇报还没投进主会话）。
    *
    * 这是一个**正交**的忙碌标记：它不改 `status`，所以「等待期间用户仍然可以
@@ -1250,6 +1285,7 @@ export function initialSessionState(): SessionState {
     checkpoints: [],
     nextStepSuggestions: [],
     nextStepLoading: false,
+    workspaceRoots: null,
   };
 }
 
@@ -2402,6 +2438,12 @@ export type WebviewToHost =
    * `kind: "folder"` searches directories instead (the popup shows folder
    * paths; selecting one attaches a @folder context card). */
   | { type: "searchFiles"; requestId: number; query: string; kind?: "file" | "folder" }
+  /**
+   * 多仓库协作：根选择器把选中的根（绝对路径）写回宿主。只影响**之后新建**
+   * 的会话（`settings.add_dirs`），当前会话的 CLI 上下文与 cwd 一律不动 ——
+   * 已有会话跨根迁移会破坏 CLI 会话文件定位（见 session-persistence.ts）。
+   */
+  | { type: "setSessionRoots"; roots: string[] }
   /** Right-click "加入 iFlow 上下文": attach the editor selection as a
    * structured code-context card above the composer (styled, removable) —
    * a plain textarea cannot render a fenced block. At most one card; the

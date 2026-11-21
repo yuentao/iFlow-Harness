@@ -53,7 +53,7 @@ import type {
   McpServerStatusView,
   SessionSettings,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
 import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
@@ -67,6 +67,13 @@ import {
 import { checkpointLabelFromText } from "../../shared/checkpoints.js";
 import { ToolDiffService } from "./tool-diff-service.js";
 import { StatusPresenter } from "./status-presenter.js";
+import {
+  buildAddDirs,
+  buildWorkspaceRootsUi,
+  normalizeSelection,
+  rewriteRootMentions,
+  workspaceRootsFrom,
+} from "./workspace-roots.js";
 import { SessionPersistenceService, type PersistedTranscript } from "./session-persistence.js";
 import { CheckpointService } from "./checkpoint-service.js";
 import { SessionRestoreService, type RestoreOutcome } from "./session-restore.js";
@@ -484,12 +491,24 @@ export const MAIN_SESSION_MODE = "smart";
  * (the request's `mcpServers` array is merged ON TOP of the user's configured
  * servers, so an empty array removes nothing). The main session's MCP servers
  * are removed at process level instead — see `buildAcpCommand`'s
- * `disableMcpServers`. */
-export function mainSessionSettings(): SessionSettings {
-  return {
+ * `disableMcpServers`.
+ *
+ * `addDirs`（多仓库协作）: 只有「用户为这个会话选了严格子集」时才传，见
+ * `buildAddDirs`。实证（vendor/iflow-fork/bundle/iflow.js）：
+ *   • `includeDirectories:o?.add_dirs`（ACP adapter 把 settings.add_dirs 直接
+ *     映射成会话 config 的 includeDirectories）；
+ *   • Config 构造 `new Yct(this.targetDir,e.includeDirectories??[])`；
+ *   • 配置工厂 `includeDirectories:A.includeDirectories||r.includeDirectories`
+ *     —— 缺省 add_dirs 时回退到 argv 的 `--include-directories`（全量根，
+ *     即今天的行为）；显式数组（含 `[]`）胜出并收紧该会话的 WorkspaceContext。
+ * 所以 `undefined` 必须保持「完全不写这个键」，否则默认行为会被改变。 */
+export function mainSessionSettings(addDirs?: readonly string[] | null): SessionSettings {
+  const settings: SessionSettings = {
     allowed_tools: [...MAIN_SESSION_ALLOWED_TOOLS],
     disallowed_tools: [...MAIN_SESSION_DISALLOWED_TOOLS],
   };
+  if (addDirs) settings.add_dirs = [...addDirs];
+  return settings;
 }
 /** Next-step prediction: another fire-and-forget internal prompt, but with a
  * much tighter budget. The user turn already settled, so a slow gateway only
@@ -644,6 +663,10 @@ const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
 const WORKSPACE_PROFILE_KEY = "iflow.workspaceActiveProfile";
 /** workspaceState key: the last model selected in this workspace. */
 const WORKSPACE_MODEL_KEY = "iflow.workspaceActiveModel";
+/** workspaceState key (多仓库协作): 用户为**之后新建**的会话选中的目标根集合
+ * （绝对路径数组）。它只是「下一个会话的偏好」——当前会话的 CLI 上下文与 cwd
+ * 一律不动，已有会话的根集合记在会话索引的 `roots` 字段里。 */
+const SESSION_ROOTS_KEY = "iflow.sessionRoots";
 /** workspaceState key: first-run wizard skipped/finished (never auto-open it
  * again in this workspace once true). */
 const ONBOARDING_DISMISSED_KEY = "iflow.onboardingDismissed";
@@ -1653,7 +1676,16 @@ export class ChatPanel implements vscode.Disposable {
       queryLiveModels: () => this.queryLiveModels(),
       publishSuperSessions: () => this.publishSuperSessions(),
       resetSuperDirectiveScans: () => this.resetSuperDirectiveScans(),
-      getMainSessionSettings: () => mainSessionSettings(),
+      getMainSessionSettings: (addDirs) => mainSessionSettings(addDirs),
+      /** 多仓库协作：按某个会话已存的根集合算 add_dirs（恢复用）。 */
+      sessionAddDirsFor: (roots) => {
+        const all = this.workspaceRootInfos();
+        if (all.length <= 1) return null;
+        const cwd = this.services.workspaceRoot ?? all[0]?.path ?? null;
+        return buildAddDirs(roots, all, cwd);
+      },
+      /** 多仓库协作：恢复完成后发布根子集投影。 */
+      publishWorkspaceRoots: (applied) => this.publishWorkspaceRoots(applied),
       loadPersistedTranscript: (id) => this.loadPersistedTranscript(id),
       workspaceModelId: () => this.workspaceModelId(),
       applyLiveModels: (models, client, id, cliModelId) => this.applyLiveModels(models, client, id, cliModelId),
@@ -1661,7 +1693,7 @@ export class ChatPanel implements vscode.Disposable {
       setModel: (id) => this.setModel(id),
       applyThinkLevel: (client, id, level) => this.applyThinkLevel(client, id, level),
       cleanupEmptySession: (id) => this.cleanupEmptySession(id),
-      recordSession: (id, label) => this.recordSession(id, label),
+      recordSession: (id, label, roots) => this.recordSession(id, label, roots),
       persistActiveTranscript: (force) => { void this.persistActiveTranscript(force); },
       restoreSuperSessions: (id) => this.restoreSuperSessions(id),
       postSound: (kind) => this.postSound(kind),
@@ -1702,14 +1734,40 @@ export class ChatPanel implements vscode.Disposable {
       vscode.languages.onDidChangeDiagnostics(() => this.onDiagnosticsChanged()),
     );
     // P6: file-system changes invalidate the @-mention file-list cache.
-    const watchRoot = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.context.extensionUri;
-    const fileWatcher = this.services.watchers?.[0] ?? vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(watchRoot, "**/*"));
+    // 多仓库协作：每个工作区根都要监听 —— 只监听第一个根会让其它根的新建/
+    // 删除文件永远不刷新缓存（搜索结果陈旧）。
+    const watchRoots = this.workspaceRootInfos();
     const invalidateFileCache = () => {
       this.fileSearchCache = null;
     };
-    fileWatcher.onDidCreate(invalidateFileCache);
-    fileWatcher.onDidDelete(invalidateFileCache);
-    this.context.subscriptions.push(fileWatcher);
+    if (this.services.watchers && this.services.watchers.length > 0) {
+      for (const watcher of this.services.watchers) {
+        watcher.onDidCreate(invalidateFileCache);
+        watcher.onDidDelete(invalidateFileCache);
+        this.context.subscriptions.push(watcher);
+      }
+    } else {
+      const uris =
+        watchRoots.length > 0
+          ? watchRoots.map((root) => vscode.Uri.file(root.path))
+          : [this.context.extensionUri];
+      for (const uri of uris) {
+        const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(uri, "**/*"));
+        watcher.onDidCreate(invalidateFileCache);
+        watcher.onDidDelete(invalidateFileCache);
+        this.context.subscriptions.push(watcher);
+      }
+    }
+    // 根集合增减（多根工作区增删文件夹）：缓存作废 + 投影刷新。当前会话的
+    // CLI 上下文不动（它已经建立，改根需要新建会话）。
+    this.context.subscriptions.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        this.fileSearchCache = null;
+        this.publishWorkspaceRoots();
+      }),
+    );
+    // 启动即发布一次投影：多根工作区在首个会话建立前也能看到根选择器。
+    this.publishWorkspaceRoots();
     // QQ 远程任务通道（Wave3-B2b）：设置区的任何改动都可能要求重建服务。
     // 监听整个 `iflow.qq` 段（等价于 `iflow.qq.` 前缀），再按「是否碰到连接类
     // 字段」决定重启 —— 改白名单 / 策略这类热更新字段不应打断在跑的任务。
@@ -2259,6 +2317,7 @@ export class ChatPanel implements vscode.Disposable {
       case "openExternal":
       case "runInTerminal":
       case "searchFiles":
+      case "setSessionRoots":
       case "stageFiles":
       case "pickAttachments":
       case "openImage":
@@ -2451,6 +2510,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "searchFiles":
         void this.searchWorkspaceFiles(msg.requestId, msg.query, msg.kind ?? "file");
+        break;
+      case "setSessionRoots":
+        await this.setSessionRoots(msg.roots);
         break;
       case "stageFiles":
         void this.stageDroppedFiles(msg);
@@ -4972,6 +5034,96 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
+  // --- 多仓库协作：目标根子集 ------------------------------------------------
+
+  /** 当前工作区根的单一来源（realpath + 去重 + 稳定排序，第一根保持 VSCode
+   * 第一个文件夹 —— 进程 cwd 依赖它）。 */
+  private workspaceRootInfos(): WorkspaceRootUi[] {
+    return workspaceRootsFrom(vscode.workspace);
+  }
+
+  /** 用户为「之后的新会话」选中的根（workspaceState 持久化，未知路径被丢弃）。 */
+  private selectedSessionRoots(roots: readonly WorkspaceRootUi[]): string[] {
+    const stored = this.context.workspaceState.get<string[]>(SESSION_ROOTS_KEY, []);
+    return normalizeSelection(stored, roots);
+  }
+
+  /** 当前会话的 CLI 实际使用的根（存于会话索引的 `roots` 字段）。 */
+  private appliedSessionRoots(): string[] | null {
+    const state = this.store.getState();
+    const id = state.activeSessionId ?? state.sessionId;
+    if (!id) return null;
+    const summary = state.sessions.find((s) => s.id === id);
+    return summary?.roots ?? null;
+  }
+
+  /**
+   * 把根子集投影写进状态（只动 UI，不动 CLI、不动 cwd）。
+   *
+   * 三态：`undefined` 沿用当前 applied（用户改选择时用，当前会话的 applied
+   * 不能跟着变，否则「对新会话生效」的提示会自我否认）；`null` 表示全量根；
+   * 数组表示该会话真实的根集合。
+   * 单根工作区不渲染选择器，投影写 null。
+   */
+  private publishWorkspaceRoots(applied?: readonly string[] | null): void {
+    const roots = this.workspaceRootInfos();
+    if (roots.length <= 1) {
+      this.store.setWorkspaceRoots(null);
+      return;
+    }
+    const selected = this.selectedSessionRoots(roots);
+    const appliedRoots =
+      applied === undefined
+        ? this.store.getState().workspaceRoots?.applied ?? this.appliedSessionRoots() ?? null
+        : applied;
+    this.store.setWorkspaceRoots(buildWorkspaceRootsUi(roots, selected, appliedRoots));
+  }
+
+  /**
+   * 为即将新建的会话计算 `settings.add_dirs`（null = 不写该键 = 与今天一致）。
+   * cwd 与 ensureClient 同源（`services.workspaceRoot` 测试钩子优先）。
+   */
+  private sessionAddDirs(): string[] | null {
+    const roots = this.workspaceRootInfos();
+    if (roots.length <= 1) return null;
+    const cwd =
+      this.services.workspaceRoot ??
+      roots[0]?.path ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+      null;
+    return buildAddDirs(this.selectedSessionRoots(roots), roots, cwd);
+  }
+
+  /**
+   * 根选择器写回。只影响**之后新建**的会话：
+   * - 持久化到 workspaceState，下一次 `startNewSession` 用它算 `add_dirs`；
+   * - 刷新投影（`applied` 保持不变 → `pendingChange` 让 UI 提示「对新会话生效」）；
+   * - 当前会话的 CLI 上下文、cwd、会话文件路径一律不动。
+   *
+   * 空选择归一为「全量根」：不提供「一个根都不给」的形态（那等于只剩 cwd，
+   * 语义容易被误读成「工作区丢了」），UI 也会阻止取消最后一个根。
+   */
+  private async setSessionRoots(roots: readonly string[]): Promise<void> {
+    const all = this.workspaceRootInfos();
+    if (all.length <= 1) return;
+    const normalized = normalizeSelection(roots, all);
+    const next = normalized.length > 0 ? normalized : all.map((r) => r.path);
+    await this.context.workspaceState.update(SESSION_ROOTS_KEY, next);
+    this.publishWorkspaceRoots();
+  }
+
+  /**
+   * 为当前会话的重载（keep-session 热重认证、删除消息后截断重载）计算
+   * `add_dirs`：用该会话**已记录**的根集合，而不是根选择器里的下一次偏好 ——
+   * 重载不换会话，根可见范围必须保持不变，否则收紧过的会话会被悄悄放宽。
+   */
+  private currentSessionAddDirs(): string[] | null {
+    const all = this.workspaceRootInfos();
+    if (all.length <= 1) return null;
+    const cwd = this.services.workspaceRoot ?? all[0]?.path ?? null;
+    return buildAddDirs(this.appliedSessionRoots(), all, cwd);
+  }
+
   /**
    * M5: fuzzy workspace file search for the @-mention popup. Plain
    * `findFiles` (glob-excludes) + a simple relevance score is plenty at this
@@ -5032,15 +5184,35 @@ export class ChatPanel implements vscode.Disposable {
    * keystroke pays for one `findFiles` scan; afterwards keystrokes score the
    * cached list in memory. Invalidated by workspace file-system changes
    * (watcher registered in the constructor).
+   *
+   * 多仓库协作：每个根单独扫（旧实现只对第一个根做 path.relative，其它根的
+   * 文件会变成 `../repo/x` 这种无法被模型解析的字符串）。非 cwd 根的条目带
+   * 「别名/」前缀，插入文本即 `@alias/rel`，发送时由 `rewriteRootMentions`
+   * 还原成绝对路径。只扫当前会话 CLI 实际可见的根（投影的 `applied`），
+   * 不给 agent 发它读不到的路径。
    */
   private async loadWorkspaceFileRels(): Promise<string[]> {
     if (this.fileSearchCache) return this.fileSearchCache.rels;
     if (!this.fileSearchInFlight) {
       this.fileSearchInFlight = (async () => {
         const exclude = "{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/coverage/**,**/.iflow/**}";
-        const uris = await vscode.workspace.findFiles("**/*", exclude, 500);
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
-        return uris.map((uri) => path.relative(root, uri.fsPath).replace(/\\/g, "/"));
+        const allRoots = this.workspaceRootInfos();
+        if (allRoots.length === 0) return [];
+        const applied = this.store.getState().workspaceRoots?.applied ?? null;
+        const roots = applied ? allRoots.filter((r) => applied.includes(r.path)) : allRoots;
+        const base = this.sessionCwd ?? this.services.workspaceRoot ?? roots[0]?.path ?? "";
+        const perRoot = await Promise.all(
+          roots.map(async (root) => {
+            const uris = await vscode.workspace.findFiles(
+              new vscode.RelativePattern(vscode.Uri.file(root.path), "**/*"),
+              exclude,
+              500,
+            );
+            const prefix = root.path === base ? "" : `${root.name}/`;
+            return uris.map((uri) => `${prefix}${path.relative(root.path, uri.fsPath).replace(/\\/g, "/")}`);
+          }),
+        );
+        return perRoot.flat();
       })();
       this.fileSearchInFlight.finally(() => {
         this.fileSearchInFlight = null;
@@ -6099,7 +6271,7 @@ export class ChatPanel implements vscode.Disposable {
         cwd,
         mcpServers: [],
         sessionId,
-        settings: mainSessionSettings(),
+        settings: mainSessionSettings(this.currentSessionAddDirs()),
       });
       if (this.disposed || this.client !== client) return false;
     } catch (error) {
@@ -6379,7 +6551,7 @@ export class ChatPanel implements vscode.Disposable {
    * session (restore/switch, label rename) keeps its prior stamp — only
    * touchActiveSession() (a real turn ending) moves it. New entries stamp
    * now (creation time). */
-  private async recordSession(id: string, label: string | null): Promise<void> {
+  private async recordSession(id: string, label: string | null, roots?: readonly string[] | null): Promise<void> {
     if (!id) return;
     const existing = this.readPersistedSessions();
     // clamp: legacy persisted entries may carry uncapped labels.
@@ -6394,6 +6566,13 @@ export class ChatPanel implements vscode.Disposable {
         // M4 P1-8: a pin is deliberate and survives a restore; archived does
         // not — using the session again means it is active again.
         ...(prior?.pinned ? { pinned: true } : {}),
+        // 多仓库协作：该会话 CLI 实际可见的目标根集合。恢复时按它重建
+        // settings.add_dirs（绝不迁移 cwd）。未显式提供时保留旧值。
+        ...(roots && roots.length > 0
+          ? { roots: [...roots] }
+          : prior?.roots
+            ? { roots: prior.roots }
+            : {}),
       },
       ...existing.filter((s) => s.id !== id),
     ];
@@ -7143,8 +7322,13 @@ export class ChatPanel implements vscode.Disposable {
       // process name and were killing active sessions. Concealment is
       // best-effort — any failure returns the original path (see locator).
       const runtime = await concealNodeExecutable(node, this.context.globalStorageUri.fsPath);
+      // 多仓库协作：工作区根的唯一来源（realpath + 去重 + 稳定排序）。
+      // 列表第一项仍是 VSCode 的第一个工作区文件夹 —— 进程 cwd 必须保持它，
+      // 因为 CLI 的会话文件路径依赖这个 cwd（session-persistence.ts）。
+      const roots = this.workspaceRootInfos();
       const workspaceRoot =
         this.services.workspaceRoot ??
+        roots[0]?.path ??
         vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
         this.context.extensionUri.fsPath;
 
@@ -7156,8 +7340,12 @@ export class ChatPanel implements vscode.Disposable {
       // to the CLI as --include-directories: its file tools validate paths
       // against `targetDir + includeDirectories` before delegating to our
       // callbacks, so the two sets must match (probed, CLI 0.5.19 bundle).
-      const allowedRoots = (vscode.workspace.workspaceFolders ?? [])
-        .map((f) => f.uri.fsPath)
+      //
+      // 多仓库协作只收紧、绝不放宽：会话级的 `settings.add_dirs` 覆盖 argv 的
+      // includeDirectories（见 mainSessionSettings），而这里的允许根集合始终
+      // 是全量并集 —— CLI 侧少看几个根，宿主侧仍允许全部工作区根。
+      const allowedRoots = roots
+        .map((root) => root.path)
         .filter((p) => p !== workspaceRoot);
 
       // Main-session MCP scope. This CLI process must not hold ANY MCP server:
@@ -8376,8 +8564,14 @@ export class ChatPanel implements vscode.Disposable {
     // DisposedError; a dispose AFTER it must not write into the destroyed
     // store either.
     if (this.disposed) throw new DisposedError();
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    // 多仓库协作：cwd 仍取工作区第一根（不迁移、不跨根），会话级目标根子集
+    // 只通过 settings.add_dirs 收紧 CLI 侧可见根。
+    const workspaceRoot =
+      this.workspaceRootInfos()[0]?.path ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+      this.context.extensionUri.fsPath;
     this.sessionCwd = workspaceRoot;
+    const addDirs = this.sessionAddDirs();
     // The live /models HTTP query is independent of session/new — race them
     // concurrently (queryLiveModels swallows its own errors into []). A slow
     // endpoint previously serialized behind the CLI's 30-60s boot, adding up
@@ -8388,7 +8582,7 @@ export class ChatPanel implements vscode.Disposable {
     const session = await client.newSession({
       cwd: workspaceRoot,
       mcpServers: [],
-      settings: mainSessionSettings(),
+      settings: mainSessionSettings(addDirs),
     });
     this.log.info(`session/new ok in ${Date.now() - tNewSession}ms`);
     const meta: NewSessionMeta | undefined = session._meta;
@@ -8430,6 +8624,13 @@ export class ChatPanel implements vscode.Disposable {
       currentModelId,
     });
     this.applyLiveModels(modelsPromise, client, session.sessionId, cliModelId);
+    // 多仓库协作：本次会话的 CLI 实际可见根 = 选中的根（add_dirs 为 null 时
+    // 是全量根）。投影给 webview 做「已生效 / 对新会话生效」提示。
+    const sessionRoots = this.workspaceRootInfos();
+    const appliedRoots = addDirs
+      ? sessionRoots.filter((r) => addDirs.includes(r.path) || r.path === workspaceRoot).map((r) => r.path)
+      : sessionRoots.map((r) => r.path);
+    this.publishWorkspaceRoots(appliedRoots);
     // See the wire-behavior note above: the new session inherits the CLI's
     // boot-time model unless we push the panel's selection, so any mismatch
     // (profile switch OR plain dropdown switch) must be re-applied — after
@@ -8444,7 +8645,12 @@ export class ChatPanel implements vscode.Disposable {
     await this.applyMainSessionMode(client, session.sessionId);
     await this.applyThinkLevel(client, session.sessionId, this.store.getState().thinkLevel);
     this.log.info(`session started: ${session.sessionId}`);
-    await this.recordSession(session.sessionId, null);
+    // 单根工作区没有「根子集」概念，索引里不留冗余字段（恢复时 null = 全量根）。
+    await this.recordSession(
+      session.sessionId,
+      null,
+      sessionRoots.length > 1 ? appliedRoots : null,
+    );
     } finally {
       // Close the reset window (see the flag's declaration): from here on the
       // store carries the new sessionId, so the regular cross-session guard
@@ -8700,6 +8906,16 @@ export class ChatPanel implements vscode.Disposable {
         throw error;
       }
       if (expanded) typedText = expanded;
+    }
+    // 多仓库协作：`@<别名>/<rel>` 还原成绝对路径。cwd 内的提及保持原样（今天
+    // 的行为），只有非 cwd 根需要还原 —— 否则模型会按 cwd 解析成不存在的路径。
+    // 别名未知、相对部分为空、或结果逃出该根时一律原样保留。
+    if (!internal) {
+      const mentionRoots = this.workspaceRootInfos();
+      if (mentionRoots.length > 1) {
+        const mentionCwd = this.sessionCwd ?? this.services.workspaceRoot ?? mentionRoots[0]?.path ?? null;
+        typedText = rewriteRootMentions(typedText, mentionRoots, mentionCwd);
+      }
     }
     // The orchestrator's eyes: every main-session turn starts with the live
     // child-session board (host state, NOT user text — it is never written to
@@ -9101,11 +9317,19 @@ export class ChatPanel implements vscode.Disposable {
       const regenSkill = parseSkillInvocation(regenText);
       const regenExpanded = regenSkill ? await this.expandSkillCall(regenSkill) : null;
       const regenDigest = this.superAgentsDigest();
+      let regenAgentText = regenExpanded ?? toAgentPromptText(regenText, this.store.getState().commands);
+      {
+        const mentionRoots = this.workspaceRootInfos();
+        if (mentionRoots.length > 1) {
+          const mentionCwd = this.sessionCwd ?? this.services.workspaceRoot ?? mentionRoots[0]?.path ?? null;
+          regenAgentText = rewriteRootMentions(regenAgentText, mentionRoots, mentionCwd);
+        }
+      }
       const prompt: ContentBlock[] = [
         {
           type: "text",
           text:
-            [regenDigest, regenExpanded ?? toAgentPromptText(regenText, this.store.getState().commands)]
+            [regenDigest, regenAgentText]
               .filter(Boolean)
               .join("\n\n") + regenAttachmentBlock,
         },
@@ -9736,7 +9960,19 @@ export class ChatPanel implements vscode.Disposable {
       try {
         raw = await readFile(file, "utf8");
         const parsed = JSON.parse(raw) as { chatHistory?: unknown };
-        const cut = findCliHistoryCut(parsed.chatHistory, removed.allUserTexts, removed.targetIndex);
+        const cut = findCliHistoryCut(
+          parsed.chatHistory,
+          removed.allUserTexts,
+          removed.targetIndex,
+          // 多仓库协作：发送前把 @别名/rel 还原成绝对路径，转录里保留别名形态，
+          // 定位 CLI 历史时必须过同一个重写（否则跨根提及的轮次匹配不上）。
+          (text) => {
+            const mentionRoots = this.workspaceRootInfos();
+            if (mentionRoots.length <= 1) return text;
+            const mentionCwd = this.sessionCwd ?? this.services.workspaceRoot ?? mentionRoots[0]?.path ?? null;
+            return rewriteRootMentions(text, mentionRoots, mentionCwd);
+          },
+        );
         if (cut.kind === "refuse") throw new Error("CLI history cannot be matched exactly");
         if (cut.kind === "truncate") {
           if (!Array.isArray(parsed.chatHistory)) throw new Error("CLI history is malformed");
@@ -9750,7 +9986,7 @@ export class ChatPanel implements vscode.Disposable {
             cwd,
             mcpServers: [],
             sessionId,
-            settings: mainSessionSettings(),
+            settings: mainSessionSettings(this.currentSessionAddDirs()),
           });
           if (this.disposed || this.client !== client || this.store.getState().sessionId !== sessionId) {
             throw new Error("session changed during history synchronization");
@@ -9768,7 +10004,7 @@ export class ChatPanel implements vscode.Disposable {
                 cwd,
                 mcpServers: [],
                 sessionId,
-                settings: mainSessionSettings(),
+                settings: mainSessionSettings(this.currentSessionAddDirs()),
               });
             }
           } catch (rollbackError) {
