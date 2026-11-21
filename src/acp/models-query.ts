@@ -172,9 +172,13 @@ interface ProfileShape {
   baseUrl?: string;
   apiKey?: string;
   modelName?: string;
+  /** Per-profile context-window limit (Mod-added key, not in the CLI schema). */
+  tokensLimit?: unknown;
 }
 
 export interface CliSettingsShape {
+  /** Top-level context-window limit (Mod-added key, not in the CLI schema). */
+  tokensLimit?: unknown;
   selectedAuthType?: string;
   baseUrl?: string;
   apiKey?: string;

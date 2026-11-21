@@ -25,6 +25,7 @@ import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, en
 import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
 import type { McpBrokerStatus } from "../acp/mcp-broker.js";
 import { deleteKernelApiProfile, migrateKernelApiProfiles, readKernelApiProfiles, setKernelActiveProfile, writeKernelApiProfile } from "../acp/api-profiles.js";
+import { tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
 import {
   getActiveProfileName,
   loadCredentials,
@@ -7123,6 +7124,11 @@ export class ChatPanel implements vscode.Disposable {
       // file only replaces the core template.
       const systemPromptFile = await this.materializeSystemPrompt();
       const spawnEnv: NodeJS.ProcessEnv = { IFLOW_HARNESS: "1", IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile() };
+      // Surface the effective context window to the CLI via env (CLI's
+      // zOt()/CT("tokensLimit") overlay, spread last in its settings merge),
+      // so auto-compression uses the active profile's limit instead of the
+      // 128000 fallback whose 102400 threshold traps super-agent children.
+      Object.assign(spawnEnv, tokensLimitEnvFromSettings());
       if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
       // Vendored CLI 内置 `super-agent` 工具的注册开关（工具实现以
       // `process.env.IFLOW_SUPER_TOOL === "1"` 为门控；当前 bundle 尚未包含
