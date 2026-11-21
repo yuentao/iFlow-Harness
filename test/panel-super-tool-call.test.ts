@@ -174,6 +174,8 @@ describe("Super Agent · 结构化工具调用兜底", () => {
         mainSessionId: string | null;
         text: string;
         images: unknown[];
+        /** 多模态方案 C 起为必填（与 `images` 同下标的逐图说明）。 */
+        imageCaptions: string[];
         files: unknown[];
         droppedByChild: number;
       }>;
@@ -198,6 +200,9 @@ describe("Super Agent · 结构化工具调用兜底", () => {
       mainSessionId: internals.currentMainSessionId(),
       text: "生成中发出的消息",
       images: [],
+      // 多模态C 之后队列项必填 imageCaptions；生产 push 点始终写空数组或
+      // 逐图说明，这里照同一形态构造，才真的走一遍补投链路。
+      imageCaptions: [],
       files: [],
       droppedByChild: 0,
     });
