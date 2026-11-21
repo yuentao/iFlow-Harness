@@ -500,6 +500,25 @@ function normalizeRestoredTodos(todos: SuperTodoUi[] | undefined): SuperTodoUi[]
  */
 export type SuperInterruptSource = "user" | "agent" | "system";
 
+/**
+ * 非终态归档恢复到 `cancelled` 时的**归一原因**。
+ *
+ * 此前恢复逻辑把「准备中 / 运行中 / 等你处理」一律归一成 `cancelled` +
+ * `interruptedBy: "system"`，于是「用户喊停」「宿主重启时还在跑」「宿主主动
+ * 收口」三种情况在看板上长得一模一样 —— 明明是重启打断的，却读成用户停的。
+ * 这个字段把归一的原因如实记下来，与已有的 `interruptedBy`（**谁**中断的）
+ * 正交：`interruptedBy` 答「谁」，本字段答「为什么是 cancelled」。
+ *
+ * - `"recorded"`：归档里已经带着明确的 `interruptedBy`（用户 / 智能体 / 宿主
+ *   主动收口），按原来源标注，绝不二次判定成系统；
+ * - `"restart"`：归档时子会话还在跑、没有中断来源 —— 进程随宿主退出，由重启
+ *   恢复归一为 `cancelled`，`interruptedBy` 定为 `"system"`。
+ *
+ * 只有被归一过的（即从非终态归档恢复出来的 cancelled 会话）才有这个值；
+ * 原生终态（用户主动取消 / 跑完 / 失败）不带，据此可与「用户喊停」区分。
+ */
+export type SuperRestoreReason = "recorded" | "restart";
+
 export interface SuperSessionUi {
   id: string;
   /** 人类可读标题（模型给的或用户给的）。 */
@@ -535,6 +554,14 @@ export interface SuperSessionUi {
   error?: string;
   /** 中断来源（仅 `status === "cancelled"` 有意义）：看板在标题旁据此标注「由谁中断」。 */
   interruptedBy?: SuperInterruptSource;
+  /**
+   * 非终态归档恢复时被归一为 `cancelled` 的**原状态**（如 `running` /
+   * `awaiting_input` / `preparing`）。只有恢复出来的会话可能有；新派发的
+   * 会话不带。看板据此如实说「上次运行到『执行中』时被重启打断」。
+   */
+  restoredFromStatus?: SuperStatus;
+  /** 归一原因（与 `restoredFromStatus` 成对出现，见 {@link SuperRestoreReason}）。 */
+  restoreReason?: SuperRestoreReason;
   /** 正在等待的应答。 */
   pending?: SuperPending;
   /** 子会话的 token 开销（回合结束后结算，见 SuperTokenUsage）。 */
@@ -805,7 +832,43 @@ export type SuperDiagnosticKind =
   | "error"
   | "timeout"
   | "restore"
-  | "blocked";
+  | "blocked"
+  /** 最近一次可见活动（流式进度帧 / 工具结果 / 状态推进的摘要）。 */
+  | "activity"
+  /** 一次工具调用（call / update 的状态迁移）。 */
+  | "tool_call";
+
+/**
+ * `kind === "activity"` 的结构化细节。
+ *
+ * `message` 仍是一句话说明；这里给看板 / 排查工具机器可读的补充。字段刻意
+ * 短小 ——— 它随诊断数组一起进看板快照与归档，不做长文本载体。
+ */
+export interface SuperActivityDetail {
+  /** 活动来源。 */
+  source: "assistant" | "tool_result" | "status";
+  /** 最近活动的短摘要（落盘侧按单条诊断文本上限裁剪）。 */
+  excerpt: string;
+  /** 该活动的原始时刻（epoch ms）；可与事件 `at` 不同。 */
+  at: number;
+}
+
+/**
+ * `kind === "tool_call"` 的结构化细节。
+ *
+ * 一次工具调用在 wire 上会有 call / update 多帧，诊断只记**结论态**一条：
+ * `message` 是人话，`toolCallDetail` 给出工具名 / id / 状态 / 摘要。
+ */
+export interface SuperToolCallDetail {
+  /** 工具名（wire 上的 `name`）。 */
+  name: string;
+  /** 工具调用 id（wire 上的 `toolCallId`；wire 没带时省略）。 */
+  toolCallId?: string;
+  /** 调用状态。 */
+  state: "pending" | "in_progress" | "completed" | "failed";
+  /** 参数 / 结果的短摘要（可选）。 */
+  excerpt?: string;
+}
 
 /** 一条诊断事件。 */
 export interface SuperDiagnosticEvent {
@@ -817,8 +880,12 @@ export interface SuperDiagnosticEvent {
   level: "info" | "warn" | "error";
   /** 一句话（面向人）。 */
   message: string;
-  /** 可选补充。 */
+  /** 可选补充（自由文本；所有 kind 通用）。 */
   detail?: string;
+  /** `kind === "activity"` 时的结构化细节（其它 kind 不应带）。 */
+  activityDetail?: SuperActivityDetail;
+  /** `kind === "tool_call"` 时的结构化细节（其它 kind 不应带）。 */
+  toolCallDetail?: SuperToolCallDetail;
 }
 
 /**
@@ -941,12 +1008,30 @@ export function shouldRetrySuperFailure(
 // ---------------------------------------------------------------------------
 
 /**
+ * 终态进度尾快照的字符上限。
+ *
+ * 实时 `SuperSessionUi.progress` 是高频流式字段，不进归档；只有**终态**才落
+ * 一份轻量尾部，让恢复后的看板能看到「它最后停在 what」。2000 字符足够看清
+ * 最后一段结论，又不会让一条归档膨胀成转录副本。
+ */
+export const SUPER_PROGRESS_TAIL_MAX_CHARS = 2000;
+
+/** 终态落盘的轻量进度尾（最后 N 字符 + 快照时刻）。 */
+export interface SuperProgressTail {
+  /** 进度文本的尾部（最多 {@link SUPER_PROGRESS_TAIL_MAX_CHARS} 字符）。 */
+  text: string;
+  /** 快照时刻（epoch ms，取会话 `updatedAt`）。 */
+  at: number;
+}
+
+/**
  * 落盘的子会话记录（重启后恢复看板用）。
  *
  * 只存「重启后仍然成立」的事实：它属于哪个主会话、做了什么、在哪个分支上、
  * 结束状态与汇报历史。**刻意不存**运行期字段 —— `pending`（宿主要回答的提问
- * 随进程一起没了）、`progress`（实时进度尾）、`cliSessionId`（那个 ACP 会话
- * 已经不存在了）。
+ * 随进程一起没了）、实时的 `progress` 流式尾、`cliSessionId`（那个 ACP 会话
+ * 已经不存在了）。唯一的例外是终态的 `progressTail`：它是定格的一小段文本，
+ * 不是高频流，重启后仍成立。
  */
 export interface PersistedSuperSession {
   id: string;
@@ -966,6 +1051,14 @@ export interface PersistedSuperSession {
   error?: string;
   /** 中断来源（status==="cancelled" 时随归档落盘，重启恢复后仍能在标题旁标注）。 */
   interruptedBy?: SuperInterruptSource;
+  /** 终态进度尾快照（仅终态写入；实时流式 progress 仍不落盘）。 */
+  progressTail?: SuperProgressTail;
+  /**
+   * 归一前的原状态与原因：非终态归档恢复时如实标注，避免把「重启时还在跑」
+   * 误读成「用户喊停」。已归一过的记录再次归档时原样保留（见 SuperRestoreReason）。
+   */
+  restoredFromStatus?: SuperStatus;
+  restoreReason?: SuperRestoreReason;
   tokens?: SuperTokenUsage;
   integration?: SuperIntegration;
   reports: SuperReport[];
@@ -1006,8 +1099,10 @@ export interface PersistedSuperSession {
  * 纳入指纹等于节流失效。
  *
  * **纳入**（变了就必须立刻落盘）：状态、归属、隔离环境、集成结果、尝试次数、
- * 波次 / 批次 / 依赖（调度事实，恢复后要重建「谁挡着谁」）、尝试上限、失败分类、
- * 状态说明。依赖按字典序排序后再拼 —— 依赖是集合语义，顺序不同不算变化。
+ * 波次 / 批次 / 依赖（调度事实，恢复后要重建「谁挡着谁」）、尝试上限、失败分类
+ * （`error` 与 `lastError`）、状态说明。终态错误可能只写人类可读的 `error` 而不写
+ * `lastError`，两者都纳入才能保证「终态错误一落地就立刻落盘」。依赖按字典序排序
+ * 后再拼 —— 依赖是集合语义，顺序不同不算变化。
  *
  * **刻意不纳入** `diagnostics`：它是高频追加的事件流，进指纹会让节流写盘失效
  * （每来一条诊断就整份重写一次归档）。诊断仍会随下一次写落盘，只是不单独触发。
@@ -1036,6 +1131,7 @@ export function superArchiveFingerprint(
           session.batch ?? "",
           [...(session.dependsOn ?? [])].sort().join(","),
           session.maxAttempts ?? "",
+          session.error ?? "",
           session.lastError
             ? `${session.lastError.kind}@${session.lastError.at}:${session.lastError.message}`
             : "",
@@ -1050,6 +1146,13 @@ export function superArchiveFingerprint(
 
 /** 活着的子会话 → 落盘记录（剥掉运行期字段）。 */
 export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuperSession {
+  const tail =
+    isTerminalSuperStatus(session.status) && session.progress
+      ? {
+          text: session.progress.slice(-SUPER_PROGRESS_TAIL_MAX_CHARS),
+          at: session.updatedAt,
+        }
+      : undefined;
   return {
     id: session.id,
     title: session.title,
@@ -1066,6 +1169,9 @@ export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuper
     summary: session.summary,
     error: session.error,
     interruptedBy: session.interruptedBy,
+    progressTail: tail,
+    restoredFromStatus: session.restoredFromStatus,
+    restoreReason: session.restoreReason,
     tokens: session.tokens,
     integration: session.integration,
     reports: session.reports,
@@ -1139,12 +1245,32 @@ export function reconcileRestoredIsolation(
  * 处理）都归一成「已中断」—— 一个永远停在「运行中」的子会话会让主会话的
  * 汇报永远等不到「全部结束」，也会让看板谎报进度。分支与工作目录照旧保留：
  * 它们在磁盘上还在，清理与合并仍然可用。
+ *
+ * **归一要能区分原因**：`interruptedBy` 答「谁中断的」（归档自带则原样沿用，
+ * 缺省才判 `"system"`），新增的 `restoreReason` / `restoredFromStatus` 答
+ * 「为什么变成 cancelled」——
+ *  - 归档已带 interruptedBy → `restoreReason: "recorded"`（用户喊停 / 智能体
+ *    动作 / 宿主主动收口，按归档原样标注）；
+ *  - 归档没带且状态非终态 → `restoreReason: "restart"`（进程随宿主退出，
+ *    重启恢复归一），`restoredFromStatus` 留下归一前的状态。
+ * 终态归档（用户主动取消 / 完成 / 失败）不带这两个字段 —— 据此可与「用户
+ * 喊停」区分。老归档缺新字段时两个值由 `record.status` / `record.interruptedBy`
+ * 推导，行为与旧版一致（仍是 cancelled + interruptedBy=system），只是多出
+ * 可解释的元数据，不改变任何状态语义。
  */
 export function fromPersistedSuperSession(
   record: PersistedSuperSession,
   disk?: RestoredIsolationDiskFacts,
 ): SuperSessionUi {
   const terminal = isTerminalSuperStatus(record.status);
+  // 归档已带新字段时原样沿用（含多次重启的连续归档），否则按归档事实推导。
+  // 非终态 + 无 interruptedBy = 宿主重启导致进程消失，这是最常见的一种归一。
+  const restoredFromStatus = terminal
+    ? record.restoredFromStatus
+    : (record.restoredFromStatus ?? record.status);
+  const restoreReason = terminal
+    ? record.restoreReason
+    : (record.restoreReason ?? (record.interruptedBy ? "recorded" : "restart"));
   return {
     id: record.id,
     title: record.title,
@@ -1162,6 +1288,9 @@ export function fromPersistedSuperSession(
     summary: record.summary,
     error: record.error,
     interruptedBy: record.interruptedBy ?? "system",
+    progress: record.progressTail?.text,
+    ...(restoredFromStatus ? { restoredFromStatus } : {}),
+    ...(restoreReason ? { restoreReason } : {}),
     tokens: record.tokens,
     integration: record.integration,
     reports: record.reports,
