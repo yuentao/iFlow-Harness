@@ -78,6 +78,7 @@ import {
   CountdownBar,
   DisclosureButton,
   HelpTip,
+  Hint,
   ICON_INLINE,
   IconButton,
   ModalShell,
@@ -1682,6 +1683,9 @@ export function SuperAgentBoard({
               )}
               {boardView === "diagnostics" && (
                 <div className="py-1">
+                  <Hint className="px-2 pb-1.5">
+                    {t("诊断事件可能滞后于最后一次归档写入")}
+                  </Hint>
                   <SuperResidueList
                     sessions={residueSessions}
                     now={now}
