@@ -21,6 +21,7 @@ import {
   detectInProgress,
   ensureSuperIsolationIgnored,
   externalSuperWorktreeRoot,
+  homeSuperWorktreeRoot,
   inspectWorktreeState,
   inspectWorkingTree,
   isBranchMerged,
@@ -163,13 +164,15 @@ describe("worktree · 新根位置策略（纯函数）", () => {
     expect(externalSuperWorktreeRoot(repo)).toBe(resolved.root);
   });
 
-  it("祖先链含 .git / AGENTS.md / IFLOW.md 时回退到主仓内", () => {
+  it("祖先链含 .git / AGENTS.md / IFLOW.md 时回退到 CLI 全局目录（避免主仓 AGENTS.md 双份注入）", () => {
     const ancestor = path.dirname(externalSuperWorktreeRoot(repo));
+    const globalDir = path.resolve(tmpdir(), "iflow-fake-global", ".iflow");
     for (const marker of [".git", "AGENTS.md", "IFLOW.md"]) {
       const probe = { exists: (candidate: string) => candidate === path.join(ancestor, marker) };
-      const resolved = resolveSuperWorktreeRoot(repo, probe);
-      expect(resolved.external, marker).toBe(false);
-      expect(resolved.root, marker).toBe(path.join(repo, ".iflow", "super", "worktrees"));
+      const resolved = resolveSuperWorktreeRoot(repo, probe, { globalDir });
+      expect(resolved.external, marker).toBe(true);
+      expect(resolved.root, marker).toBe(homeSuperWorktreeRoot(repo, globalDir));
+      expect(resolved.root.startsWith(repo), marker).toBe(false);
     }
   });
 });

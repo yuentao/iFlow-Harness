@@ -6,9 +6,16 @@
  * 冲突」）。
  *
  * 取自 Orca 的 worktree 模型（https://www.onorca.dev/docs/model/worktrees），
- * 但按本项目的边界做了三处调整：
- *  1. worktree 放在**项目内**的 `.iflow/super/worktrees/` 下 —— 子会话的工作
- *     副本跟着项目走，不写扩展的 globalStorage。这棵子树通过仓库本地
+ * 但按本项目的边界做了四处调整：
+ *  1. worktree **不放在主仓内**：CLI 的层级记忆加载器从子会话 cwd 向上收集
+ *     AGENTS.md / IFLOW.md，worktree 落在主仓内时，主仓根那份会被当成「祖先
+ *     记忆」再注入一次（与 worktree 自己 checkout 出来的那份重复，实测每次
+ *     请求多付 3.6 万 token）。落点按优先级挑：① 主仓外的兄弟目录
+ *     `<repo>-super-worktrees/`；② CLI 全局目录下的 per-repo 子树
+ *     `~/.iflow/super/worktrees/<repoKey>/`（CLI 的记忆遍历在全局目录处停止，
+ *     祖先链上不可能再有记忆文件）；③ 主仓内旧位置（最后兜底，会重复注入，
+ *     生产路径为此记明确 warning）。详见 `resolveSuperWorktreeRoot`。
+ *     主仓内那棵子树（`dirs` / `attachments` / 遗留 worktree）仍通过仓库本地
  *     `.git/info/exclude` 排除（见 `ensureSuperIsolationIgnored`），因此主仓库
  *     的 `git status` 不会被它弄脏，也不会被 `git add -A` 带进提交。
  *  2. 清理时**不静默删分支**：分支上还有未合并的提交时，删除 worktree 但保留
@@ -27,6 +34,8 @@
  */
 
 import path from "node:path";
+import os from "node:os";
+import { createHash } from "node:crypto";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
@@ -123,6 +132,17 @@ export function superIsolationDir(
 // ---------------------------------------------------------------------------
 
 /**
+ * CLI 的全局目录（`os.homedir()/.iflow`）。
+ *
+ * 硬编码 homedir 是**实测**的：CLI 的记忆加载器用 `os.homedir()` 拼全局目录，
+ * **不认 IFLOW_HOME**（认 IFLOW_HOME 的是 `Tn()`，那是 `save_memory` 走的另一条
+ * 路径）。扩展侧必须跟它对齐，否则两边说的不是同一个目录。
+ */
+export function superGlobalDir(): string {
+  return path.join(os.homedir(), ".iflow");
+}
+
+/**
  * 新的 worktree 根（主仓之外的兄弟目录）。
  *
  * 机制（bundle 静态实测 CLI 0.5.19）：子会话 cwd 落在 worktree 里时，CLI 记忆
@@ -136,6 +156,39 @@ export function externalSuperWorktreeRoot(repoRoot: string): string {
   return path.join(path.dirname(repoRoot), `${path.basename(repoRoot)}-super-worktrees`);
 }
 
+/**
+ * per-repo 的键：仓库 basename 的 slug + 绝对路径的短哈希。
+ *
+ * 必须**按仓库再分一层**：全局目录是所有仓库共用的。共用一个根的话，残留清扫
+ * / 残留统计（`superWorktreeRoots` → `listResidueItems`）会把别的仓库的 worktree
+ * 当成自己的残留，甚至允许用户把它当残留丢弃 —— 那是别的仓库未合并的工作。
+ * 哈希让同名仓库（`a/api` 与 `b/api`）也彻底分开。
+ */
+export function superRepoKey(repoRoot: string): string {
+  const resolved = path.resolve(repoRoot);
+  const base = sanitizeWorktreeName(path.basename(resolved));
+  const hash = createHash("sha1").update(resolved).digest("hex").slice(0, 8);
+  return `${base}-${hash}`;
+}
+
+/**
+ * 回退落点：CLI 全局目录下的 per-repo 子树（`~/.iflow/super/worktrees/<repoKey>`）。
+ *
+ * 为什么落在全局目录里（而不是主仓内）：CLI 的层级记忆遍历**在全局目录处停止**
+ * —— bundle 实证 CLI 0.5.19：遍历条件是 `p !== join(homedir, ".iflow")`。于是
+ * 这条链上不可能再命中任何祖先记忆文件，主仓那份 AGENTS.md 也就不会被第二次
+ * 注入（全局那份 `~/.iflow/AGENTS.md` 是被单独读入的，只读一次）。
+ *
+ * 为什么不用系统临时目录：那里会被系统的「临时文件清理」扫掉，子会话未合并的
+ * 工作可能凭空消失。全局目录不会。
+ */
+export function homeSuperWorktreeRoot(
+  repoRoot: string,
+  globalDir: string = superGlobalDir(),
+): string {
+  return path.join(globalDir, "super", "worktrees", superRepoKey(repoRoot));
+}
+
 /** fs 探测注入口（单测注入假实现，生产走 existsSync）。 */
 export interface SuperWorktreeRootProbe {
   exists: (candidate: string) => boolean;
@@ -145,40 +198,116 @@ const DEFAULT_SUPER_WORKTREE_PROBE: SuperWorktreeRootProbe = {
   exists: (candidate) => existsSync(candidate),
 };
 
+/** 安全检查的可调参数。 */
+export interface SuperWorktreeRootSafetyOptions {
+  /**
+   * CLI 的层级记忆遍历在此目录**停止**（该目录本身与它的祖先都不再检查）。
+   *
+   * bundle 实证（CLI 0.5.19）：遍历条件是 `p !== join(homedir, ".iflow")` ——
+   * 全局目录是记忆遍历的终点；里面的 AGENTS.md 作为「全局记忆」被单独读入，
+   * 不会被祖先遍历再读一遍。
+   */
+  memoryStopAt?: string;
+}
+
 /**
  * 纯函数：从新根的父目录一路向上走到盘根，检查每一层是否会让 CLI 记忆加载器
  * 多注入一份祖先记忆 —— AGENTS.md / IFLOW.md 文件，或 .git 目录（会让项目根
  * 判定再扩一层）。任一层命中即判为不安全。
+ *
+ * `memoryStopAt` 到达后**终止记忆文件探测**（bundle 实证 CLI `jva` 的循环条件
+ * `p !== join(homedir, ".iflow")`：到达全局目录就退出循环，不是「跳过这一层、
+ * 继续检查祖先」）。停止点上方的记忆文件不在 CLI 遍历范围内；`.git` 的探测
+ * 则始终走到盘根，因为项目根判定走的是另一条路径，不受记忆遍历停止点约束。
+ */
+export function isSuperWorktreeRootSafeAt(
+  root: string,
+  probe: SuperWorktreeRootProbe,
+  options: SuperWorktreeRootSafetyOptions = {},
+): boolean {
+  let dir = path.dirname(root);
+  const drive = path.parse(dir).root;
+  const stopAt = options.memoryStopAt ? path.resolve(options.memoryStopAt) : null;
+  // 一旦走到停止点，其后所有祖先的记忆文件都不在 CLI 的遍历范围内 —— 必须
+  // 一次性关掉，不能只跳过停止点那一层（否则停止点父层的 AGENTS.md 会被误判
+  // 为不安全，回退主仓内，双份注入的 bug 又回来了）。
+  let memoryCheckActive = true;
+  for (;;) {
+    if (
+      memoryCheckActive &&
+      (probe.exists(path.join(dir, "AGENTS.md")) ||
+        probe.exists(path.join(dir, "IFLOW.md")))
+    ) {
+      return false;
+    }
+    if (probe.exists(path.join(dir, ".git"))) return false;
+    if (dir === drive) return true;
+    const parent = path.dirname(dir);
+    if (parent === dir) return true; // POSIX 根目录兜底
+    dir = parent;
+    if (stopAt !== null && path.resolve(dir) === stopAt) memoryCheckActive = false;
+  }
+}
+
+/**
+ * 纯函数：主仓外兄弟目录的安全检查（祖先链上不能有记忆文件 / `.git` 目录）。
+ *
+ * 保留这个独立入口是为了不改动既有调用契约；真正的判定逻辑在
+ * `isSuperWorktreeRootSafeAt`。
  */
 export function isSuperWorktreeRootSafe(
   repoRoot: string,
   probe: SuperWorktreeRootProbe,
 ): boolean {
-  const external = externalSuperWorktreeRoot(repoRoot);
-  let dir = path.dirname(external);
-  const drive = path.parse(dir).root;
-  for (;;) {
-    if (
-      probe.exists(path.join(dir, "AGENTS.md")) ||
-      probe.exists(path.join(dir, "IFLOW.md")) ||
-      probe.exists(path.join(dir, ".git"))
-    ) {
-      return false;
-    }
-    if (dir === drive) return true;
-    const parent = path.dirname(dir);
-    if (parent === dir) return true; // POSIX 根目录兜底
-    dir = parent;
-  }
+  return isSuperWorktreeRootSafeAt(externalSuperWorktreeRoot(repoRoot), probe);
 }
 
-/** 纯函数：安全检查通过 → 新位置；不通过 → 回退到主仓内的旧位置。 */
+/** 落点解析结果。 */
+export interface SuperWorktreeRootResolution {
+  /** worktree 根目录（子会话 worktree 建在它下面）。 */
+  root: string;
+  /**
+   * 落点是否在**主仓之外**。
+   *
+   * 主仓内 = 祖先链上必然有主仓根那份 AGENTS.md → CLI 会把它连同 worktree 自己
+   * checkout 出来的那份**注入两次**（实测每次请求多付 3.6 万 token）。
+   */
+  external: boolean;
+}
+
+/** 落点解析的可调参数。 */
+export interface SuperWorktreeRootOptions extends SuperWorktreeRootSafetyOptions {
+  /** CLI 全局目录（默认 `os.homedir()/.iflow`）；单测可注入临时目录。 */
+  globalDir?: string;
+}
+
+/**
+ * 纯函数：按优先级挑一个 worktree 根。
+ *
+ * ① 主仓外的兄弟目录（首选）：离主仓近、用户找得到，祖先链干净时最理想。
+ * ② CLI 全局目录下的 per-repo 子树：外部不安全时的回退。CLI 的层级记忆遍历
+ *    在全局目录处停止 → 祖先链上不可能再有记忆文件 → 主仓那份不会被重复注入。
+ * ③ 主仓内的旧位置：①②都不成立时的最后兜底。**会重复注入祖先记忆**，所以
+ *    生产路径必须为此记一条明确 warning（不静默）。
+ */
 export function resolveSuperWorktreeRoot(
   repoRoot: string,
   probe: SuperWorktreeRootProbe = DEFAULT_SUPER_WORKTREE_PROBE,
-): { root: string; external: boolean } {
-  if (isSuperWorktreeRootSafe(repoRoot, probe)) {
-    return { root: externalSuperWorktreeRoot(repoRoot), external: true };
+  options: SuperWorktreeRootOptions = {},
+): SuperWorktreeRootResolution {
+  const globalDir = options.globalDir ?? superGlobalDir();
+  const external = externalSuperWorktreeRoot(repoRoot);
+  if (isSuperWorktreeRootSafeAt(external, probe, options)) {
+    return { root: external, external: true };
+  }
+  const home = homeSuperWorktreeRoot(repoRoot, globalDir);
+  if (
+    isSuperWorktreeRootSafeAt(home, probe, {
+      ...options,
+      memoryStopAt: options.memoryStopAt ?? globalDir,
+    })
+  ) {
+    return { root: home, external: true };
   }
   return { root: superIsolationDir(repoRoot, "worktrees"), external: false };
 }
@@ -192,23 +321,29 @@ export function superWorktreeRoot(repoRoot: string): string {
     warnedSuperWorktreeRoots.add(repoRoot);
     console.warn(
       `super agent: worktree 根回退到主仓内 ${root}（` +
-        `新根祖先链含 AGENTS.md / IFLOW.md 或 .git 目录，会有祖先记忆重复注入风险）`,
+        `主仓外兄弟目录与全局目录都不安全：祖先链含 AGENTS.md / IFLOW.md 或 .git 目录；` +
+        `子会话会重复注入主仓那份 AGENTS.md，每次模型请求多付数万 token）`,
     );
   }
   return root;
 }
 
 /**
- * 需要扫描的 worktree 根集合：当前根（默认主仓外）+ 历史遗留的主仓内旧根。
+ * 需要扫描的 worktree 根集合：当前根 + 其它可能残留 worktree 的落点。
  *
  * 迁移期主仓内可能还留着旧位置建的 worktree；清扫 / 统计 / 全量清空必须同时
- * 覆盖两处，否则旧 worktree 变成无人认领的孤儿。回退场景下两者相同，去重后
- * 只扫描一次。
+ * 覆盖各处，否则旧 worktree 变成无人认领的孤儿。各落点之间按路径去重
+ * （回退场景下两者相同，只扫一次）。
  */
 export function superWorktreeRoots(repoRoot: string): string[] {
   const current = superWorktreeRoot(repoRoot);
-  const legacy = superIsolationDir(repoRoot, "worktrees");
-  return current === legacy ? [current] : [current, legacy];
+  const roots = [
+    current,
+    externalSuperWorktreeRoot(repoRoot),
+    homeSuperWorktreeRoot(repoRoot),
+    superIsolationDir(repoRoot, "worktrees"),
+  ];
+  return [...new Set(roots)];
 }
 
 /**
