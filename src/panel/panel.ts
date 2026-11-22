@@ -3340,13 +3340,36 @@ export class ChatPanel implements vscode.Disposable {
    * 子会话汇报正文（fallback，已清洗）；两者都空时如实说明，绝不伪造结论。
    * QQ 单条消息有字符预算，截断后标注完整结果在面板查看。
    */
-  private forwardTakeoverReport(answer: string, fallbackText: string | undefined): void {
-    if (this.disposed) return;
-    if (!this.qqHost.qqTakeoverActive) return;
+  private forwardTakeoverReport(
+    answer: string,
+    fallbackText: string | undefined,
+    context?: { awaitedHere?: boolean; stopReason?: string },
+  ): void {
+    // 纯可观测：每次进入补投路径都留一条决策快照，事后能一眼判定「正文到底
+    // 有没有交给 QQ 通道、被哪个条件挡住」。appendQqArchiveEvent 内部吞掉归档
+    // 失败且这里 fire-and-forget，绝不影响原有投递 / 静音 / 去重行为。
+    const snapshot: Record<string, unknown> = {
+      source: "takeover-report",
+      awaitedHere: context?.awaitedHere ?? null,
+      stopReason: context?.stopReason ?? null,
+      qqTakeoverActive: this.qqHost.qqTakeoverActive,
+      injectedTaskPresent: this.qqInjectedTaskId !== null,
+      answerChars: answer.length,
+      fallbackChars: fallbackText?.length ?? 0,
+    };
+    const suppressed = (reason: string): void => {
+      void this.appendQqArchiveEvent(
+        "takeover_report_suppressed",
+        this.qqInjectedTaskId ?? undefined,
+        { ...snapshot, reason, notifyBoundUserCalled: false },
+      );
+    };
+    if (this.disposed) { suppressed("disposed"); return; }
+    if (!this.qqHost.qqTakeoverActive) { suppressed("takeover-inactive"); return; }
     // QQ 注入回合自身有专属回执通道；跳过以免同一条结果被发两遍。
-    if (this.qqInjectedTaskId !== null) return;
+    if (this.qqInjectedTaskId !== null) { suppressed("injected-task"); return; }
     const service = this.qqHost.qq?.service;
-    if (!service || typeof service.notifyBoundUser !== "function") return;
+    if (!service || typeof service.notifyBoundUser !== "function") { suppressed("no-service"); return; }
     const status = vscode.l10n.t("主会话已汇报超流体结果");
     const body = answer.trim() || sanitizeQqReportFallback(fallbackText);
     const text = body
@@ -3354,6 +3377,13 @@ export class ChatPanel implements vscode.Disposable {
       : `${status}\n${vscode.l10n.t("超流体任务已完成，但未产生可转发的正文摘要。")}`;
     void service.notifyBoundUser(text).catch((error: unknown) => {
       this.log.warn(`远程接管汇报正文投递失败：${errorMessage(error)}`);
+    });
+    // 记的是「面板把这段正文交给了投递通道」这一事实；通道侧真实投递失败仍由
+    // 服务自己的归档事件记录，两者合起来才是完整链路。
+    void this.appendQqArchiveEvent("takeover_report_delivered", undefined, {
+      ...snapshot,
+      notifyBoundUserCalled: true,
+      chars: text.length,
     });
   }
 
@@ -9144,6 +9174,19 @@ export class ChatPanel implements vscode.Disposable {
         // 有 QQ awaiter 时任务通道会投递真实正文；本地发起的任务没有 QQ 归属，
         // 那条通道找不到任何任务 —— 此时改由接管态的绑定者私聊补投正文。
         const awaitedHere = [...this.qqHost.qqMainFinalAwaiters.values()].includes(promptSessionId);
+        const takeoverActive = this.qqHost.qqTakeoverActive;
+        // 纯可观测：无论是否补投都留一条决策快照，供 QQ 归档事后核对
+        // 「这一轮为什么没投正文 / 投给了谁」。fire-and-forget，不影响回合收尾。
+        void this.appendQqArchiveEvent("takeover_report_decision", undefined, {
+          source: "final-report",
+          sessionId: promptSessionId,
+          awaitedHere,
+          takeoverActive,
+          stopReason: result.stopReason,
+          injectedTaskPresent: this.qqInjectedTaskId !== null,
+          supplemented: !awaitedHere && takeoverActive,
+          answerChars: answer.length,
+        });
         void this.deliverQqMainFinalAnswer(
           promptSessionId,
           answer,
@@ -9151,8 +9194,11 @@ export class ChatPanel implements vscode.Disposable {
           undefined,
           finalFallbackText,
         );
-        if (!awaitedHere && this.qqHost.qqTakeoverActive) {
-          this.forwardTakeoverReport(answer, finalFallbackText);
+        if (!awaitedHere && takeoverActive) {
+          this.forwardTakeoverReport(answer, finalFallbackText, {
+            awaitedHere,
+            stopReason: result.stopReason,
+          });
           takeoverReportSent = true;
         }
       }

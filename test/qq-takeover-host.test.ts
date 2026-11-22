@@ -90,6 +90,18 @@ type Internals = {
   qqInjectedTaskId: string | null;
   /** 完成提示的统一出口（本文件用它验证「接管态改投 QQ」）。 */
   announceCue: (event: string, text: string, kind: "done" | "child") => void;
+  /** QQ 归档事件写入口（本文件用它断言补投是否发生、被哪个条件挡住）。 */
+  appendQqArchiveEvent: (
+    type: string,
+    taskId?: string,
+    detail?: Record<string, unknown>,
+  ) => Promise<void>;
+  /** 接管态正文补投出口（私有方法，测试直接触发各跳过分支）。 */
+  forwardTakeoverReport: (
+    answer: string,
+    fallbackText: string | undefined,
+    context?: { awaitedHere?: boolean; stopReason?: string },
+  ) => void;
   // 完成提示 / QQ 转发两条路径（本文件新增用例要同时接通）。
   superAgent: unknown;
   ensureClient: () => Promise<unknown>;
@@ -464,6 +476,34 @@ describe("ChatPanel 远程接续开关", () => {
     expect(notifyBoundUser).not.toHaveBeenCalled();
   });
 
+  it("接管态 + 注入任务 id 非空：正文补投被抑制并写 takeover_report_suppressed 归档", () => {
+    const notifyBoundUser = vi.fn(async () => true);
+    p.qq = { service: { notifyBoundUser } };
+    const archive = vi.spyOn(p, "appendQqArchiveEvent").mockResolvedValue(undefined);
+    p.qqTakeoverActive = true;
+    p.qqInjectedTaskId = "task-qq";
+
+    p.forwardTakeoverReport("完整汇报正文", undefined, {
+      awaitedHere: false,
+      stopReason: "end_turn",
+    });
+
+    expect(notifyBoundUser).not.toHaveBeenCalled();
+    const suppressed = archive.mock.calls.find((c) => c[0] === "takeover_report_suppressed");
+    expect(suppressed).toBeTruthy();
+    expect(suppressed![1]).toBe("task-qq");
+    const detail = suppressed![2] as Record<string, unknown>;
+    expect(detail["reason"]).toBe("injected-task");
+    expect(detail["source"]).toBe("takeover-report");
+    expect(detail["qqTakeoverActive"]).toBe(true);
+    expect(detail["injectedTaskPresent"]).toBe(true);
+    expect(detail["awaitedHere"]).toBe(false);
+    expect(detail["stopReason"]).toBe("end_turn");
+    expect(detail["notifyBoundUserCalled"]).toBe(false);
+    // 抑制路径绝不能写「已投递」事件。
+    expect(archive.mock.calls.some((c) => c[0] === "takeover_report_delivered")).toBe(false);
+  });
+
   /**
    * 回归（2026-11-20 QQ 用户实测）：「只收到『主会话已汇报超流体结果』的提醒，
    * 完全不知道具体结果」。
@@ -498,6 +538,7 @@ describe("ChatPanel 远程接续开关", () => {
     const notify = vi.spyOn(p, "notifyOsDecision");
     const sound = vi.spyOn(p, "postSound");
 
+    const archive = vi.spyOn(p, "appendQqArchiveEvent").mockResolvedValue(undefined);
     const fallback = "修好登录跳转：改动 src/auth.ts，npx vitest run 全绿";
     const started = p.sendPrompt("【汇报】超流体完成", undefined, undefined, undefined, {
       hidden: true,
@@ -520,6 +561,24 @@ describe("ChatPanel 远程接续开关", () => {
     // 本机仍静音：提示只走 QQ。
     expect(notify).not.toHaveBeenCalled();
     expect(sound).not.toHaveBeenCalled();
+
+    // 可观测：决策点与投递出口各留一条归档，事后能判定正文确实交给了 QQ。
+    const decision = archive.mock.calls.find((c) => c[0] === "takeover_report_decision");
+    expect(decision).toBeTruthy();
+    const decisionDetail = decision![2] as Record<string, unknown>;
+    expect(decisionDetail["awaitedHere"]).toBe(false);
+    expect(decisionDetail["takeoverActive"]).toBe(true);
+    expect(decisionDetail["stopReason"]).toBe("end_turn");
+    expect(decisionDetail["supplemented"]).toBe(true);
+
+    const deliveredEvent = archive.mock.calls.find((c) => c[0] === "takeover_report_delivered");
+    expect(deliveredEvent).toBeTruthy();
+    const deliveredDetail = deliveredEvent![2] as Record<string, unknown>;
+    expect(deliveredDetail["notifyBoundUserCalled"]).toBe(true);
+    expect(deliveredDetail["source"]).toBe("takeover-report");
+    expect(deliveredDetail["awaitedHere"]).toBe(false);
+    expect(deliveredDetail["stopReason"]).toBe("end_turn");
+    expect(deliveredDetail["chars"]).toBe(delivered.length);
   });
 
   it("接管态：最终汇报优先发主会话转述正文，超长截断并保留开头", async () => {
