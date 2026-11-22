@@ -14,7 +14,11 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 本文件的轮询等待有固定截止时间，CI runner 慢时可能顶到默认 5000ms 的
+// testTimeout。按文件放宽超时，不动全局 testTimeout。
+vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 import { SuperAgentManager } from "../src/panel/super-agent.js";
 import { AcpClient, type AcpClientCallbacks } from "../src/acp/client.js";
 import type { ContentBlock } from "../src/acp/protocol.js";
@@ -96,10 +100,23 @@ async function tick(ms = 50): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 轮询直到条件成立或超时（异步收尾链较长，固定 sleep 不可靠）。 */
-async function poll(predicate: () => boolean, timeoutMs = 600, stepMs = 15): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate() && Date.now() < deadline) await tick(stepMs);
+/**
+ * 轮询直到条件成立或超时（异步收尾链较长，固定 sleep 不可靠）。
+ *
+ * 用 vi.waitFor 实现，两个理由：
+ * ① 超时不再**静默放弃** —— 旧实现到期就返回，后面的 expect 会报出
+ *    'expected 1 to be 2' / 'expected preparing to be completed' 这类与
+ *    真因无关的误导性断言错误；现在超时直接抛「轮询条件在超时内未成立」。
+ * ② 默认截止时间从 600ms 放宽到 5000ms —— CI runner 慢时异步收尾链会超过
+ *    600ms，轮询提前放弃就会让本该通过的用例随机失败（时序 flake）。
+ */
+async function poll(predicate: () => boolean, timeoutMs = 5000, stepMs = 15): Promise<void> {
+  await vi.waitFor(
+    () => {
+      expect(predicate(), "轮询条件在超时内未成立").toBe(true);
+    },
+    { timeout: timeoutMs, interval: stepMs },
+  );
 }
 
 describe("波次调度 · spawn 透传 wave/runId/dependsOn/batch", () => {
@@ -163,7 +180,7 @@ describe("波次调度 · pump 分层门控（上游未终态 → 下游留队�
       { title: "下游跳过", task: "不该跑", dependsOn: ["up-fail"] },
       { runId: "run-c", wave: 1 },
     );
-    await poll(() => manager.get(down.id)?.status === "failed", 1500);
+    await poll(() => manager.get(down.id)?.status === "failed", 5000);
     const projected = manager.get(down.id)!;
     expect(projected.status).toBe("failed");
     expect(projected.lastError?.kind).toBe("blocked");

@@ -1,4 +1,8 @@
 import { describe, it, expect, afterAll, vi } from "vitest";
+
+// 本文件跑真实 git（建仓 / worktree / 自动集成），在 CI runner 与全量并发下
+// 单个用例可能跑十几秒。按文件放宽超时，不动全局 testTimeout。
+vi.setConfig({ testTimeout: 60000, hookTimeout: 60000 });
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

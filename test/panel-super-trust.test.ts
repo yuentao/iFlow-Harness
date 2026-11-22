@@ -2,7 +2,11 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
+
+// 本文件会拉起真实 git 进程（建仓 / worktree），在 CI runner 与全量并发下
+// 单个用例可能跑十几秒。按文件放宽超时，不动 vitest.config.ts 的全局值。
+vi.setConfig({ testTimeout: 60000, hookTimeout: 60000 });
 import type { AcpClient, AcpClientCallbacks } from "../src/acp/client.js";
 import { SuperAgentManager, buildTaskPrompt } from "../src/panel/super-agent.js";
 import { superIsolationLabel, type SuperSessionUi } from "../shared/super-agent.js";

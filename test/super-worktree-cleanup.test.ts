@@ -16,6 +16,10 @@
  *  4. 残留清扫的判定条件（并入则删 / 未并入则留 / 脏则留 / 孤儿则留）。
  */
 import { describe, it, expect, afterAll, vi } from "vitest";
+
+// 本文件跑真实 git + junction 清理，重 FS IO；在 CI runner 与全量并发下
+// 单个用例可能跑十几秒。按文件放宽超时，不动全局 testTimeout。
+vi.setConfig({ testTimeout: 60000, hookTimeout: 60000 });
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
