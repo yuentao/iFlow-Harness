@@ -225,11 +225,32 @@ export function resolveActiveProfileName(
 }
 
 /**
+ * Monotonic counter for temp-file names. Two writes inside the same
+ * millisecond must not pick the same temp path, or they would clobber each
+ * other's payload (and one writer would rename the other's content into
+ * place).
+ */
+let settingsTmpSeq = 0;
+
+/**
+ * A temp path that no concurrent writer can collide with: the pid (unique
+ * among live processes) + a millisecond timestamp (unique across restarts) +
+ * an in-process counter (unique within a millisecond). Same shape as the
+ * memory writer's temp name in src/memory/files.ts#writeAtomic.
+ */
+function uniqueTmpPath(file: string): string {
+  settingsTmpSeq += 1;
+  return `${file}.iflow-harness-tmp-${process.pid}-${Date.now()}-${settingsTmpSeq}`;
+}
+
+/**
  * Merge `patch` into settings.json without touching anything else.
- * Read-modify-write through a temp file + rename (atomic on Windows and
- * POSIX), so a concurrent external writer (cloud sync) can at worst lose our
- * patch — never its own content. Returns false (caller logs) when the file is
- * missing/unreadable.
+ * Read-modify-write through a temp file + rename — an ATOMIC REPLACE: the
+ * target is never unlinked first, so readers see either the old or the new
+ * content, never "no file at all" and never a half-written file. A concurrent
+ * external writer (cloud sync, the CLI's own saveSettings) can at worst lose
+ * our patch — never its own content. Returns false (caller logs) when the file
+ * is missing/unreadable.
  *
  * `createIfMissing` is for the project scope, whose `<cwd>/.iflow/settings.json`
  * usually does not exist yet: the file is then created (directory included)
@@ -242,6 +263,7 @@ export function updateCliSettings(
   options?: { createIfMissing?: boolean },
 ): boolean {
   const file = settingsPath ?? settingsFilePath();
+  let tmp: string | null = null;
   try {
     let settings = readCliSettings(file);
     if (!settings) {
@@ -250,17 +272,30 @@ export function updateCliSettings(
       settings = {};
     }
     Object.assign(settings, patch);
-    const tmp = `${file}.iflow-harness-tmp`;
+    tmp = uniqueTmpPath(file);
     writeFileSync(tmp, JSON.stringify(settings, null, 2), "utf8");
-    if (existsSync(file)) unlinkSync(file);
+    // Atomic replace — and NEVER delete the target first:
+    //   * Node's rename replaces an existing file on Windows (libuv uses
+    //     MOVEFILE_REPLACE_EXISTING) and rename(2) always replaces the
+    //     target on POSIX, so the unlink is pure overhead;
+    //   * the old `unlink + rename` sequence opened a window in which the
+    //     settings file did not exist AT ALL. A concurrent reader (the CLI's
+    //     own saveSettings) saw "no file", treated the disk as empty and
+    //     rewrote the whole file without the user's mcpServers / tokensLimit
+    //     / language / approvalMode — the 竞态丢键 bug;
+    //   * it was catastrophic on its own: when the unlink succeeded and the
+    //     rename then failed, the settings file was gone for good.
+    // A failed rename now leaves the previous content intact.
     renameSync(tmp, file);
+    tmp = null; // renamed away — nothing to clean up
     return true;
   } catch {
-    try {
-      const tmp = `${file}.iflow-harness-tmp`;
-      if (existsSync(tmp)) unlinkSync(tmp);
-    } catch {
-      // nothing to clean up
+    if (tmp) {
+      try {
+        if (existsSync(tmp)) unlinkSync(tmp);
+      } catch {
+        // nothing to clean up
+      }
     }
     return false;
   }
@@ -562,10 +597,12 @@ export function applyThinkingRules(incoming: ThinkingRuleEntry[], file = thinkin
   if (existingText !== null && merged.added + merged.changed === 0) {
     return { added: 0, changed: 0, created: false }; // already in sync — no write churn
   }
-  const tmp = `${file}.iflow-harness-tmp`;
+  const tmp = uniqueTmpPath(file);
   try {
     writeFileSync(tmp, JSON.stringify(merged.file, null, 2), "utf8");
-    if (existingText !== null) unlinkSync(file);
+    // Atomic replace, no unlink of the target first — same reasoning as
+    // updateCliSettings(): the file must never be observably missing, and a
+    // failed rename must leave the previous rules intact.
     renameSync(tmp, file);
     return { added: merged.added, changed: merged.changed, created: existingText === null };
   } catch {

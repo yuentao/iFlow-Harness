@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -249,5 +249,68 @@ describe("api-config-isolation-loader", () => {
 
     expect(out).toBeDefined();
     expect(out!.settings.modOwnedKey).toEqual({ enabled: true });
+  });
+
+  it("skips the write when the file exists but holds invalid JSON (torn write)", () => {
+    // The CLI's own saveSettings writes the WHOLE file with a non-atomic
+    // writeFileSync, so a crash mid-write leaves half a JSON document
+    // behind. The old code caught the parse error and continued with an
+    // EMPTY disk view, which stripped every STRIP_KEYS entry — the
+    // whole-file rewrite then deleted the user's mcpServers / tokensLimit /
+    // language / approvalMode for good (竞态丢键).
+    const torn = '{"mcpServers": {"alpha": {"command": "npx"';
+    writeFileSync(settingsPath, torn, "utf-8");
+
+    const out = loader.intercept({
+      path: settingsPath,
+      settings: {
+        language: "en",
+        mcpServers: { alpha: { command: "npx" } },
+        apiProfiles: { A: { baseUrl: "https://a/v1", apiKey: "sk-a" } },
+      },
+    });
+
+    // null = skip the write. The file must be left exactly as it is — NOT
+    // rewritten with the stripped view.
+    expect(out).toBeNull();
+    expect(readFileSync(settingsPath, "utf-8")).toBe(torn);
+  });
+
+  it("skips the write when the file exists but cannot be read", () => {
+    // A directory in the file's place: existsSync() is true, readFileSync()
+    // throws. The disk view is unknown, so nothing may be written.
+    mkdirSync(settingsPath, { recursive: true });
+
+    const out = loader.intercept({
+      path: settingsPath,
+      settings: { language: "en", apiProfiles: { A: { baseUrl: "https://a/v1" } } },
+    });
+
+    expect(out).toBeNull();
+    expect(existsSync(settingsPath)).toBe(true);
+  });
+
+  it("treats a genuinely missing file as an empty disk (first run)", () => {
+    // No file at all -> there is nothing to protect, so the old behaviour
+    // stands: an empty disk view and no panel-owned key written back.
+    expect(existsSync(settingsPath)).toBe(false);
+
+    const out = loader.intercept({
+      path: settingsPath,
+      settings: {
+        language: "en",
+        theme: "dark",
+        apiProfiles: { A: { baseUrl: "https://a/v1", apiKey: "sk-a" } },
+      },
+    });
+
+    expect(out).toBeDefined();
+    // STRIP_KEYS are never written back from the child's memory (the disk
+    // is authoritative and there is no disk value yet) — `language` is one
+    // of them, so it is dropped as well.
+    expect(out!.settings).not.toHaveProperty("apiProfiles");
+    expect(out!.settings).not.toHaveProperty("language");
+    // A key the CLI owns survives.
+    expect(out!.settings.theme).toBe("dark");
   });
 });

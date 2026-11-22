@@ -22,6 +22,17 @@
  * Loader missing / throwing -> the original behaviour is preserved (safe
  * fallback, same discipline as mcp-background-loader).
  *
+ *   2026-11-22 — a THIRD reason to return null was added: the on-disk
+ *   settings.json EXISTS but cannot be read or parsed. The CLI's own
+ *   saveSettings writes the whole file with a non-atomic writeFileSync, so a
+ *   crash mid-write leaves a half file; the old code caught the parse error
+ *   and continued with an EMPTY disk view, which stripped every STRIP_KEYS
+ *   entry and made the whole-file rewrite delete the user's mcpServers /
+ *   tokensLimit / language / approvalMode / compressionTokenThreshold /
+ *   contextWindowLength / apiProfiles for good ("竞态丢键"). A file that is
+ *   genuinely absent still yields an empty view (nothing to protect yet);
+ *   an unreadable / corrupt one now SKIPS the write instead.
+ *
  * Isolation semantics (harness mode only):
  *   The panel-owned fields (selectedAuthType, apiKey, baseUrl, searchApiKey,
  *   modelName, currentApiProfile, apiProfiles) are NEVER written from the
@@ -134,6 +145,55 @@ function isUserSettingsFile(p) {
 }
 
 /**
+ * Read the on-disk settings the isolation rules are computed from.
+ *
+ * The two "no usable disk view" situations MUST NOT be conflated:
+ *
+ *   - the file genuinely does not exist (first run, nothing to protect yet)
+ *     -> an empty view is the correct baseline;
+ *   - the file EXISTS but cannot be read (permissions, transient IO error)
+ *     or does not contain valid JSON (a torn write: the CLI's own
+ *     saveSettings writes the WHOLE file with a NON-atomic writeFileSync,
+ *     so a crash mid-write leaves a half file behind)
+ *     -> the disk view is UNKNOWN, not empty.
+ *
+ * The second case is the dangerous one. Treating it as "the disk is empty"
+ * turns the isolation rules into a data-destruction machine: every
+ * STRIP_KEYS entry (mcpServers, tokensLimit, language, approvalMode,
+ * compressionTokenThreshold, contextWindowLength, apiProfiles ...) would be
+ * stripped from the empty view and the CLI's whole-file rewrite would then
+ * delete those keys from the user's settings.json FOREVER — the very bug
+ * this loader exists to prevent.
+ *
+ * @param {string} file the user settings.json path
+ * @returns {object | null} the parsed disk object ({} when the file is
+ *   genuinely absent) or null when the file exists but cannot be trusted —
+ *   the caller must then SKIP the write instead of pretending it is empty.
+ */
+function readDiskSettings(file) {
+  const fs = require("node:fs");
+  // Genuinely absent (first run): an empty view is the correct baseline.
+  if (!fs.existsSync(file)) return {};
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf-8");
+  } catch (error) {
+    // Vanished between the existence check and the read -> genuinely absent.
+    if (error && error.code === "ENOENT") return {};
+    return null; // unreadable for any other reason (permissions, IO error)
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null; // torn write / invalid JSON
+  }
+  // Valid JSON but not a settings object (`null`, `[]`, `123`, ...).
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return parsed;
+}
+
+/**
  * @param {{path: string, settings: object}} t the saveSettings payload
  * @returns {undefined | {path: string, settings: object} | null}
  *   undefined = untouched, object = write this instead, null = skip write
@@ -145,13 +205,13 @@ function intercept(t) {
   if (!s || typeof s !== "object") return undefined;
   // Preserve the on-disk values of the panel-owned keys (terminal users'
   // creds survive verbatim); drop them from the child's memory view.
-  let disk = {};
-  try {
-    const fs = require("node:fs");
-    if (fs.existsSync(t.path)) disk = JSON.parse(fs.readFileSync(t.path, "utf-8")) || {};
-  } catch {
-    disk = {}; // unreadable/invalid — dropping the keys beats leaking them
-  }
+  const disk = readDiskSettings(t.path);
+  // The file exists but is unreadable or corrupt (torn write). We do NOT
+  // know what is on disk, so we must NOT strip anything: returning null
+  // SKIPS this write (the loader contract) and leaves the file exactly as
+  // it is. A skipped update is a lost update at worst; treating the disk
+  // as empty is permanent data loss.
+  if (disk === null) return null;
   // Nothing to isolate: neither the payload nor the disk carries a
   // panel-owned key. The disk side matters because saveSettings overwrites
   // the whole file — a disk-only apiProfiles (created by the panel after the
