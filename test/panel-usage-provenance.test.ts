@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import { ChatPanel, type PanelServices } from "../src/panel/panel.js";
+import { invalidateKernelTokensLimitsCache } from "../src/acp/cli-tokens-limit.js";
 import type { UsageContext } from "../shared/session-state.js";
 import { refreshSessionUsage } from "../shared/session-state.js";
 import { initialSessionState } from "../shared/messages.js";
@@ -87,10 +88,20 @@ const internals = (panel: ChatPanel): PanelInternals => panel as unknown as Pane
 describe("panel usage provenance wiring · window/cost source → state.usage.sources", () => {
   let panel: ChatPanel;
   let storageDir: string;
+  let homeDir: string;
+  const originalIflowHome = process.env.IFLOW_HOME;
 
   beforeEach(() => {
     setConfigOverrides({ nodePath: process.execPath });
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-usageprov-storage-"));
+    // Hermetic: since 2026-11-22 the occupancy bar resolves its window
+    // through the SAME five-tier chain the CLI uses, which also reads the
+    // kernel settings file (active profile's tokensLimit / top-level
+    // tokensLimit). Point IFLOW_HOME at an empty temp dir so the assertions
+    // never depend on the developer's own ~/.iflow/settings.json.
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-usageprov-home-"));
+    process.env.IFLOW_HOME = homeDir;
+    invalidateKernelTokensLimitsCache();
     panel = new ChatPanel(makeContext(storageDir), {
       entryOverride: mockAgent,
       workspaceRoot: here,
@@ -100,7 +111,11 @@ describe("panel usage provenance wiring · window/cost source → state.usage.so
 
   afterEach(async () => {
     await panel.dispose();
+    invalidateKernelTokensLimitsCache();
+    if (originalIflowHome === undefined) delete process.env.IFLOW_HOME;
+    else process.env.IFLOW_HOME = originalIflowHome;
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    fs.rmSync(homeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   /** Reconfigure overrides + invalidate the panel's parsed cache. */
@@ -151,16 +166,20 @@ describe("panel usage provenance wiring · window/cost source → state.usage.so
     expect(usage.sources?.cost).toBe("builtin-table");
   });
 
-  it("unknown model: window fallback-estimate, cost has no source (never fabricated)", () => {
+  it("unknown model: NO window at all (no guessed denominator), cost has no source (never fabricated)", () => {
     configure({ contextWindowOverrides: [], costTable: [] });
     setModel("totally-unknown-model-x9");
     const ctx = resolve();
-    expect(ctx.windowSource).toBe("fallback-estimate");
-    expect(ctx.estimated).toBe(true);
+    // 2026-11-22：宿主对「没有依据」的模型**不给**窗口（旧实现给 32,768 的
+    // 兜底估算，那个猜测值与 CLI 自己算的窗口不同 —— 正是「一个模型两个窗口」）。
+    // 现在占用条只显示原始 token 数，不显示分母。
+    expect(ctx.contextWindow).toBeNull();
+    expect(ctx.windowSource).toBeNull();
+    expect(ctx.estimated).toBe(false);
     expect(ctx.costPrice).toBeNull();
     expect(ctx.costSource).toBeNull();
     const usage = stamped(ctx);
-    expect(usage.sources?.window).toBe("fallback-estimate");
+    expect(usage.sources?.window).toBeUndefined();
     // No price → sources.cost must stay ABSENT, never fallback-estimate.
     expect(usage.sources?.cost).toBeUndefined();
     expect(usage.estimatedCost).toBeNull();
@@ -215,10 +234,17 @@ describe("panel usage provenance wiring · window/cost source → state.usage.so
 describe("panel usage provenance wiring · T-9 ai-supplement stamp", () => {
   let panel: ChatPanel;
   let storageDir: string;
+  let homeDir: string;
+  const originalIflowHome = process.env.IFLOW_HOME;
 
   beforeEach(() => {
     setConfigOverrides({ nodePath: process.execPath });
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-usageprov-ai-storage-"));
+    // Hermetic for the same reason as the block above: the occupancy bar's
+    // window now comes from the kernel-aware five-tier resolver.
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-usageprov-ai-home-"));
+    process.env.IFLOW_HOME = homeDir;
+    invalidateKernelTokensLimitsCache();
     panel = new ChatPanel(makeContext(storageDir), {
       entryOverride: mockAgent,
       workspaceRoot: here,
@@ -228,7 +254,11 @@ describe("panel usage provenance wiring · T-9 ai-supplement stamp", () => {
 
   afterEach(async () => {
     await panel.dispose();
+    invalidateKernelTokensLimitsCache();
+    if (originalIflowHome === undefined) delete process.env.IFLOW_HOME;
+    else process.env.IFLOW_HOME = originalIflowHome;
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    fs.rmSync(homeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   function configure(values: Record<string, unknown>): void {

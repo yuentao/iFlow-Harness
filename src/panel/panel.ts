@@ -25,7 +25,7 @@ import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, en
 import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
 import type { McpBrokerStatus } from "../acp/mcp-broker.js";
 import { deleteKernelApiProfile, migrateKernelApiProfiles, readKernelApiProfiles, setKernelActiveProfile, writeKernelApiProfile } from "../acp/api-profiles.js";
-import { resolveCliTokensLimit, tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
+import { resolveCliTokensLimit, tokensLimitEnvFromSettings, readKernelTokensLimits } from "../acp/cli-tokens-limit.js";
 import {
   getActiveProfileName,
   loadCredentials,
@@ -130,7 +130,7 @@ import { buildSkillPrompt, parseSkillInvocation, type SkillInvocation } from "..
 import { isWithin, memoryHome } from "../memory/files.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
-import { normalizeModelId, parseContextWindowOverrides, parseCostTable, resolveContextWindowWithSource, resolveCostWithSource } from "../../shared/context-window.js";
+import { normalizeModelId, parseContextWindowOverrides, parseCostTable, resolveContextWindowAuthority, resolveCostWithSource } from "../../shared/context-window.js";
 import {
   postContextWindowOverrides,
   saveContextWindowOverrides,
@@ -601,10 +601,12 @@ const CONTEXT_WARN_RATIO = 0.9;
 const CONTEXT_WARN_EXIT_RATIO = 0.85;
 /** Turn-end auto-compress threshold (see maybeAutoCompressOnIdle). Sits above
  * CONTEXT_WARN_RATIO so the user gets a 90–95% manual window (the warning
- * pill's 立即压缩) before the system compresses on its own. An `estimated`
- * (guessed) window never triggers it — the 2026-10-11 hy3 report proved a
- * missing table row (32K fallback vs a real 256K window) misreports 100% and
- * would otherwise compress a perfectly healthy session every turn.
+ * pill's 立即压缩) before the system compresses on its own. A window the host
+ * has NO authority for never triggers it — the 2026-10-11 hy3 report proved a
+ * guessed denominator (the old 32K fallback vs a real 256K window) misreports
+ * 100% and would otherwise compress a perfectly healthy session every turn;
+ * since 2026-11-22 the bar shows no window at all in that case (the occupancy
+ * bar and the CLI share one five-tier window resolver).
  * DEFAULT only: the live threshold comes from `iflow.autoCompressThresholdPercent`. */
 const CONTEXT_AUTOCOMPRESS_RATIO = 0.95;
 /** Thrown by promptWithRetry when the empty-response retry ladder is
@@ -4420,10 +4422,23 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  /** Resolve the store's usage context: settings overrides → curated tables →
-   * conservative fallback, together with the provenance of each number (T-8)
-   * and the ai-supplement relabel (T-9). Value and label come from the SAME
-   * resolver call so they can never drift. Synchronous and cheap (per push). */
+  /** Resolve the store's usage context: the five-tier authority chain
+   * (user override → active profile → settings top-level → curated table →
+   * no authority), together with the provenance of each number (T-8) and the
+   * ai-supplement relabel (T-9). Value and label come from the SAME resolver
+   * call so they can never drift. Synchronous and cheap (per push).
+   *
+   * 2026-11-22：占用条与 CLI 现在走**同一个** resolver
+   * （`shared/context-window.ts` 的 `resolveContextWindowAuthority`）——
+   * 此前占用条只认「override → 内建表」，推给 CLI 的窗口还多认「profile 档 →
+   * settings 顶层档」两档，于是同一个模型在面板显示的窗口与 CLI 用的窗口会
+   * 分叉（实测：profile tokensLimit=128000 的 auto/deepseek-v4.1-flash，占用条
+   * 显示内建表的 1,000,000）。现在占用条显示的窗口 == 推给 CLI 的
+   * `IFLOW_TOKENS_LIMIT` == `session/set_tokens_limit` 推送的值。
+   *
+   * 无依据（任何一档都没有落地数值）时**不显示分母**：占用条只显示原始 token
+   * 数，不给出一个与 CLI 不同的猜测值（旧的 32,768 兜底估算正是「一个模型
+   * 两个窗口」的残留）。 */
   private resolveUsageContext(): UsageContext {
     const cfg = vscode.workspace.getConfiguration("iflow");
     let cached = this.usageOverridesCache;
@@ -4435,9 +4450,19 @@ export class ChatPanel implements vscode.Disposable {
       this.usageOverridesCache = cached;
     }
     const modelId = this.store.getState().currentModelId;
-    const win = resolveContextWindowWithSource(modelId, cached.overrides);
+    // 内核两档（活动 profile 的 tokensLimit / settings 顶层 tokensLimit）由
+    // 内核 settings.json 提供；读取带 mtime 缓存（占用条每次推送都要用）。
+    const { profileTokensLimit, settingsTokensLimit } = readKernelTokensLimits();
+    const win = resolveContextWindowAuthority({
+      modelId,
+      overrides: cached.overrides,
+      profileTokensLimit,
+      settingsTokensLimit,
+    });
     const cost = resolveCostWithSource(modelId, cached.cost);
-    let windowSource: ModelMetadataSource | null = win.source;
+    // 有窗口才有出处：模型 id 为空时（窗口是端点级别的上限，不是某个模型的
+    // 窗口）不显示窗口，也不标来源。
+    let windowSource: ModelMetadataSource | null = modelId ? (win.source ?? null) : null;
     let costSource: ModelMetadataSource | null = cost.source;
     let capturedAt: number | undefined;
     let sourceUrl: string | undefined;
@@ -4460,14 +4485,18 @@ export class ChatPanel implements vscode.Disposable {
         if (live && live.input === aiStamp.cost.value.input && live.output === aiStamp.cost.value.output) {
           costSource = "ai-supplement";
           if (capturedAt === undefined) capturedAt = aiStamp.cost.capturedAt;
-          if (sourceUrl === undefined && aiStamp.cost.sourceUrl) sourceUrl = aiStamp.cost.sourceUrl;
+          if (sourceUrl === undefined) sourceUrl = aiStamp.cost.sourceUrl;
         }
       }
     }
 
     return {
-      contextWindow: win.window,
-      estimated: win.estimated,
+      // 没有模型 id ⇒ 没有「这个模型的窗口」可言（profile / settings 两档与
+      // 模型无关，但那是端点级别的上限，不能当成某个模型的窗口显示）。
+      contextWindow: modelId ? (win.limit ?? null) : null,
+      // 显示出来的窗口永远是有依据的值（要么来自五档权威链），所以这里不再
+      // 有「估算」形态：宁可没有分母，也不显示一个猜测的分母。
+      estimated: false,
       costPrice: cost.price,
       windowSource,
       costSource,
@@ -4484,10 +4513,13 @@ export class ChatPanel implements vscode.Disposable {
    * existing overflow auto-compress path.
    *
    * Two display-truthfulness rules (2026-10-11):
-   * - An `estimated` context window (fallback guess for an unlisted model)
-   *   never warns: the ratio would present a guessed denominator as fact.
-   *   If a warning is already up and the window becomes estimated (model
-   *   switch), the pill is dismissed instead of left stale.
+   * - A context window the host has NO authority for (no tier of the five-tier
+   *   chain landed a number → `contextWindow` is null) never warns: there is
+   *   no denominator to compare against. (Before 2026-11-22 such a model got
+   *   a conservative 32,768 *estimate*; the bar now shows the raw token count
+   *   without a percentage instead — one model, one window, no guess.)
+   *   If a warning is already up and the window goes away (model switch), the
+   *   pill is dismissed instead of left stale.
    * - The toast text carries NO percentage. The pill is persistent until the
    *   hysteresis exit, so a frozen trigger-time number drifts against the
    *   live usage chip after a compression (99% pill vs 91% chip, reported
@@ -4638,9 +4670,10 @@ export class ChatPanel implements vscode.Disposable {
    * This closes the gap at the idle boundary: after a turn settles, if the
    * occupancy estimate is ≥ CONTEXT_AUTOCOMPRESS_RATIO, drive one `/compress`
    * turn before the next prompt (queued or typed) starts. Guards:
-   * - `estimated` windows never trigger (a guessed denominator must not
-   *   compress a healthy session — the hy3 32K-fallback misreport was the
-   *   exact false-positive this guard prevents);
+   * - a window the host has NO authority for never triggers (no denominator
+   *   ⇒ no ratio; the old 32K *estimated* fallback used to misreport 100%
+   *   and compress a healthy session every turn — the hy3 report — so the
+   *   bar now shows NO window instead of a guessed one);
    * - only a truly idle session (streaming/connecting/init/replay windows
    *   and pending approval/question cards stay untouched);
    * - `autoCompressInFlight` keeps one compress turn at a time; a failed

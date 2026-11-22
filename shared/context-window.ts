@@ -297,6 +297,92 @@ export function resolveContextWindowWithSource(
   return { ...base, source: "fallback-estimate" };
 }
 
+// --- 五档权威链：占用条与 CLI 的唯一窗口口径 --------------------------------
+//
+// 为什么需要这一层（2026-11-22 修复「一个模型两个窗口」）：
+// 此前有**两条并行的解析路径**——
+//   · 推给 CLI：`src/acp/cli-tokens-limit.ts` 的五档链
+//     （user override → active profile → settings 顶层 → 内建表 → 不推）
+//   · webview 占用条：`resolveContextWindowWithSource`
+//     （user override → 内建表 → 兜底估算）
+// 中间那两档（profile / settings 顶层）在占用条这边没有，于是同一个模型在
+// 面板显示的窗口与推给 CLI 的窗口会分叉（实测：profile tokensLimit=128000
+// 的 auto/deepseek-v4.1-flash，占用条显示内建表的 1,000,000）。
+//
+// 现在两条路径都走下面这一个 resolver：同一个模型 → 同一个值。
+
+/** 五档权威链的来源标签（与 `ModelMetadataSource` 的窗口子集对应）。 */
+export type ContextWindowAuthoritySource = "user" | "profile" | "settings" | "builtin-table";
+
+/** 权威链的解析结果：`limit === undefined` 表示「无依据」——调用方不得
+ * 自行补一个猜测值（CLI 侧不推，占用条侧不显示分母）。 */
+export interface ContextWindowAuthority {
+  /** 该模型的有效上下文窗口（token）；无依据时为 undefined。 */
+  limit: number | undefined;
+  /** 数值出自哪一档；无依据时为 undefined。 */
+  source: ContextWindowAuthoritySource | undefined;
+}
+
+/** 只接受正整数：0 / 负数 / 小数 / 非数字 一律视为「没配」。 */
+export function positiveTokenLimit(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+/**
+ * 五档权威链的唯一实现，优先级高 → 低：
+ *
+ *   1. `user`          — `iflow.contextWindowOverrides` 里该模型的显式覆写
+ *                        （手填与「联网补充模型数据」追加的行都算用户意图）。
+ *   2. `profile`       — 活动 API Profile 的 `tokensLimit`（内核 settings.json
+ *                        的 `currentApiProfile` → `apiProfiles[name]`）。
+ *   3. `settings`      — 内核 settings.json 顶层的 `tokensLimit`。
+ *   4. `builtin-table` — 内建对照表命中（最长前缀匹配）。
+ *   5. （无）          — 没有任何依据：`limit`/`source` 都是 undefined。
+ *                        **绝不返回猜测的兜底值**——推给 CLI 的 env 与占用条
+ *                        显示的窗口都必须是「有依据的同一个数」。
+ *
+ * 备注：`profile` / `settings` 两档与模型无关（它们是端点级别的窗口上限，
+ * 与 CLI 自己读 settings.json 的那一档同源），所以即便 `modelId` 为空也会
+ * 命中；`user` / `builtin-table` 两档必须先有模型 id 才能匹配。
+ */
+export function resolveContextWindowAuthority(options: {
+  /** 模型 id（可能带 `provider/` 前缀，匹配前会归一化）。 */
+  modelId?: string | null;
+  /** 已归一化的 `iflow.contextWindowOverrides` 表。 */
+  overrides?: Record<string, number>;
+  /** 活动 Profile 的 `tokensLimit`（内核 settings.json）。 */
+  profileTokensLimit?: unknown;
+  /** 内核 settings.json 顶层的 `tokensLimit`。 */
+  settingsTokensLimit?: unknown;
+}): ContextWindowAuthority {
+  const { modelId, overrides = {} } = options;
+
+  // 1) user override for THIS model.
+  const key = normalizeModelId(modelId);
+  const userLimit = key ? positiveTokenLimit(overrides[key]) : undefined;
+  if (userLimit !== undefined) return { limit: userLimit, source: "user" };
+
+  // 2) active API profile.
+  const profileLimit = positiveTokenLimit(options.profileTokensLimit);
+  if (profileLimit !== undefined) return { limit: profileLimit, source: "profile" };
+
+  // 3) settings.json top-level.
+  const settingsLimit = positiveTokenLimit(options.settingsTokensLimit);
+  if (settingsLimit !== undefined) return { limit: settingsLimit, source: "settings" };
+
+  // 4) curated table — longest-prefix match.
+  const tabled = lookup(CONTEXT_WINDOW_TABLE, modelId);
+  if (tabled !== null) {
+    const builtinLimit = positiveTokenLimit(tabled);
+    if (builtinLimit !== undefined) return { limit: builtinLimit, source: "builtin-table" };
+  }
+
+  // 5) no authority at all → the caller decides what to do with "nothing".
+  return { limit: undefined, source: undefined };
+}
+
 /** Unit price plus the provenance of the number. `source` is null when there
  * is no attributable number (no price, or an unclassifiable branch). */
 export interface CostResolution {

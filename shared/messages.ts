@@ -787,8 +787,23 @@ export type ModelMetadataSource =
   /** Unknown model with no override: `DEFAULT_CONTEXT_WINDOW` conservative
    * fallback (shared/context-window.ts:17, :210), flagged `estimated: true`.
    * Cost has no fallback number — `resolveCost` returns null and the UI shows
-   * 无单价 instead (shared/context-window.ts:236/:239). */
-  | "fallback-estimate";
+   * 无单价 instead (shared/context-window.ts:236/:239).
+   *
+   * DEPRECATED for the occupancy bar (2026-11-22): the bar now uses the
+   * five-tier authority chain (`resolveContextWindowAuthority`), which never
+   * guesses — when no tier has a grounded number the bar shows NO window
+   * instead of a conservative estimate. The member stays in the type because
+   * `resolveContextWindowWithSource` still produces it for the settings-page
+   * prefill path. */
+  | "fallback-estimate"
+  /** The active API Profile's `tokensLimit` (kernel `~/.iflow/settings.json`
+   * → `currentApiProfile` → `apiProfiles[name].tokensLimit`). Fifth-tier
+   * authority chain, tier 2 — the same value the host pushes to the CLI as
+   * `IFLOW_TOKENS_LIMIT` (shared/context-window.ts `resolveContextWindowAuthority`). */
+  | "profile"
+  /** The kernel settings file's top-level `tokensLimit` — authority chain
+   * tier 3, the same value pushed to the CLI as `IFLOW_TOKENS_LIMIT`. */
+  | "settings";
 
 /** Cumulative token usage for the active session. `contextUsed` is the CLI's
  * authoritative occupancy when the acp-usage-report-refactor Mod reported one
@@ -805,10 +820,14 @@ export interface SessionUsageUi {
   cacheWriteTokens: number;
   totalTokens: number;
   /**
-   * P0-6 context-occupancy bar: model context window in tokens (host-resolved
-   * from the built-in table + `iflow.contextWindowOverrides`; null when the
-   * model is unknown and no override matches — the bar then shows the raw
-   * count without a percentage).
+   * P0-6 context-occupancy bar: model context window in tokens. Host-resolved
+   * through the five-tier authority chain (`resolveContextWindowAuthority`:
+   * `iflow.contextWindowOverrides` → active API profile's `tokensLimit` →
+   * kernel settings.json top-level `tokensLimit` → curated table), i.e. the
+   * SAME resolver that produces the window pushed to the CLI as
+   * `IFLOW_TOKENS_LIMIT` — one model, one window. Null when no tier landed a
+   * grounded number (unknown model, nothing configured): the bar then shows
+   * the raw count without a percentage rather than a guess.
    */
   contextWindow?: number | null;
   /** Current context occupancy in tokens (post-compression fold; equals the
@@ -830,8 +849,13 @@ export interface SessionUsageUi {
    */
   prefillTokens?: number;
   /** True when `contextWindow` is a conservative fallback guess rather than a
-   * table/override hit — the UI labels the percentage "估算". Orthogonal to
-   * `usageAuthoritative` (window source vs token source). */
+   * grounded value — the UI labels the percentage "估算". Orthogonal to
+   * `usageAuthoritative` (window source vs token source).
+   *
+   * Since 2026-11-22 the host never produces a guessed window: the bar and
+   * the CLI share one five-tier resolver, and "no authority" means the bar
+   * shows no denominator at all. Kept for compatibility with snapshots
+   * persisted by older hosts. */
   estimated?: boolean;
   /** True when `inputTokens`/`outputTokens`/`contextUsed` come from the CLI's
    * authoritative turn usage (acp-usage-report-refactor Mod reported them at
