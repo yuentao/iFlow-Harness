@@ -20,6 +20,7 @@ import {
   currentBranch,
   detectInProgress,
   ensureSuperIsolationIgnored,
+  externalSuperWorktreeRoot,
   inspectWorktreeState,
   inspectWorkingTree,
   isBranchMerged,
@@ -29,6 +30,7 @@ import {
   probeGitRepo,
   remoteOriginUrl,
   removeWorktree,
+  resolveSuperWorktreeRoot,
   sanitizeWorktreeName,
   superBranchName,
   worktreeHasUncommittedChanges,
@@ -140,11 +142,35 @@ describe("worktree · 命名（纯函数）", () => {
   it("分支名落在专属命名空间下", () => {
     expect(superBranchName("fix-login")).toBe("iflow/super/fix-login");
   });
+});
 
-  it("worktree 路径默认落在主仓外的兄弟目录（避免祖先 AGENTS.md 重复注入）", () => {
-    const repo = path.join("C:", "work", "api");
-    const p = worktreePathFor(repo, "fix-login", "abc");
-    expect(p).toBe(path.join(path.dirname(repo), "api-super-worktrees", "fix-login-abc"));
+describe("worktree · 新根位置策略（纯函数）", () => {
+  /**
+   * 平台无关的绝对仓库路径。旧写法 `path.join("C:", "work", "api")` 在 POSIX
+   * 上会得到相对路径 `C:/work/api`，`path.resolve` 后祖先链一直走到仓库根，
+   * 撞上仓库自己的 AGENTS.md，于是被误判为「不安全 → 回退主仓内」。
+   */
+  const repo = path.resolve(tmpdir(), "work", "api");
+
+  it("祖先链安全时，worktree 根落在主仓外的兄弟目录（避免祖先 AGENTS.md 重复注入）", () => {
+    // 注入「任何位置都不存在」的探针：把「安全检查通过」与真实磁盘隔离，
+    // 断言只针对路径策略本身，不受运行机器的临时目录内容影响。
+    const resolved = resolveSuperWorktreeRoot(repo, { exists: () => false });
+    expect(resolved).toEqual({
+      root: path.join(path.dirname(repo), "api-super-worktrees"),
+      external: true,
+    });
+    expect(externalSuperWorktreeRoot(repo)).toBe(resolved.root);
+  });
+
+  it("祖先链含 .git / AGENTS.md / IFLOW.md 时回退到主仓内", () => {
+    const ancestor = path.dirname(externalSuperWorktreeRoot(repo));
+    for (const marker of [".git", "AGENTS.md", "IFLOW.md"]) {
+      const probe = { exists: (candidate: string) => candidate === path.join(ancestor, marker) };
+      const resolved = resolveSuperWorktreeRoot(repo, probe);
+      expect(resolved.external, marker).toBe(false);
+      expect(resolved.root, marker).toBe(path.join(repo, ".iflow", "super", "worktrees"));
+    }
   });
 });
 
