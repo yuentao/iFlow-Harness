@@ -1835,6 +1835,28 @@ export interface HostSettingsUi {
 }
 
 /**
+ * 上下文窗口覆写的独立通道载荷。
+ *
+ * 为什么不复用 `hostSettings.contextWindowOverrides`：那条通道只镜像面板
+ * 设置项本身，而结构化编辑器还需要「当前会话模型」与「该模型在内建表
+ * （CONTEXT_WINDOW_TABLE）里的窗口」才能给出一键预填的建议值——这两项
+ * 都不是设置项，属于会话态，所以单开一条通道。
+ *
+ * `overrides` 的每一行仍是 `iflow.contextWindowOverrides` 的原始格式
+ * （`模型名=纯token数`），与宿主解析器（shared/context-window.ts 的
+ * `parseContextWindowOverrides`）逐字对齐：模型名经 `normalizeModelId`
+ * 归一化后**精确匹配**，值必须是纯数字。
+ */
+export interface ContextWindowOverridesUi {
+  /** 原始覆写行；顺序即用户在设置页里看到的顺序。 */
+  overrides: string[];
+  /** 当前会话模型 id（面板 store 的权威值）；没有模型时缺省。 */
+  currentModelId?: string;
+  /** 当前模型在内建表里的上下文窗口；表里没有时缺省（UI 不给建议值）。 */
+  builtinWindow?: number;
+}
+
+/**
  * QQ 远程任务设置快照（`iflow.qq.*` 的 9 项 + App Secret「已配置」标志）。
  *
  * **绝不携带明文凭据**：`hasAppSecret` 只是「SecretStorage 里有没有扫码写入的
@@ -2187,6 +2209,9 @@ export type HostToWebview =
    * the background aurora light-spot opacity with it. */
   | { type: "theme"; kind: "dark" | "light"; auroraIntensity?: number }
   | ({ type: "hostSettings" } & HostSettingsUi)
+  /** 上下文窗口覆写的当前值 + 当前模型的内建建议值（设置页结构化编辑器
+   * 的数据源）。宿主在 webview 就绪时推一次、每次写入成功后推一次。 */
+  | ({ type: "contextWindowOverrides" } & ContextWindowOverridesUi)
   /** Turn finished ("done") / failed ("error") / one child session settled
    * ("child") — the webview plays a short synthesized cue. The three are
    * deliberately distinct sounds: a child finishing is NOT the main turn
@@ -2542,6 +2567,10 @@ export type WebviewToHost =
    * .Global — the scope Settings Sync carries), and echoes `hostSettings`
    * with the effective values. Partial: omitted fields stay untouched. */
   | ({ type: "setHostSettings" } & Partial<HostSettingsUi>)
+  /** 覆盖整张上下文窗口覆写表（设置页结构化编辑器一次提交全量行）。
+   * 宿主逐行归一化后写入 `iflow.contextWindowOverrides`，再把生效后的值
+   * 以 `contextWindowOverrides` 推回。 */
+  | { type: "setContextWindowOverrides"; overrides: string[] }
   /** MCP management card opened: read the CURRENT `mcpServers` dicts from BOTH
    * settings files (`~/.iflow/settings.json` and `<cwd>/.iflow/settings.json`)
    * — the CLI / external tools own those files, so the card must show disk

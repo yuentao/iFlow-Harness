@@ -1023,10 +1023,21 @@ const en: Record<string, string> = {
     "The panel runs the search itself (no session involved) and asks the current model for one extraction pass (extra tokens). Existing rows are never overwritten; anything the sources cannot back is dropped.",
   "检索到的资料会交给当前模型提炼一次，额外消耗 token。":
     "The retrieved text goes to the current model for one extraction pass — extra tokens.",
-  "每行写「模型名=上下文长度」，如 glm-4.6=200000；没列出的模型用默认值。":
-    "One「model=context length」per line, e.g. glm-4.6=200000. Models not listed use the default.",
   "每行写「模型名=输入价,输出价」，单位为美元/百万 token，如 deepseek-v3=0.27,1.1。":
     "One「model=input price,output price」per line, in USD per million tokens, e.g. deepseek-v3=0.27,1.1.",
+  // --- 上下文窗口覆写（结构化编辑器） ---
+  "按模型指定上下文长度（token）。没列出的模型用内建表里的值；模型名精确匹配，不支持通配。":
+    "Set the context length (in tokens) per model. Models you don't list use the built-in table; model names match exactly — no wildcards.",
+  "不生效": "Not applied",
+  "删除覆写 {0}": "Delete the override for {0}",
+  "模型名": "Model name",
+  "上下文长度（token）": "Context length (tokens)",
+  "请填写模型名": "Enter a model name",
+  "上下文长度必须是正整数（纯数字，不带 K / M 单位）":
+    "The context length must be a positive whole number (digits only — no K / M suffix)",
+  "当前模型 {0} 的内建上下文窗口是 {1}。":
+    "The built-in context window for the current model ({0}) is {1}.",
+  "填入建议值": "Fill in the suggestion",
   "配置「{0}」和它的密钥会一起删除，无法恢复。":
     "Profile \"{0}\" and its key are deleted together, and this cannot be undone.",
   "连接模型服务": "Connect a model provider",
