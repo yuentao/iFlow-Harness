@@ -86,6 +86,8 @@ import {
   canRetrySuperSession,
   capReportTail,
   clampMaxConcurrentSuperSessions,
+  clampSuperMaxAttempts,
+  DEFAULT_SUPER_MAX_ATTEMPTS,
   isTerminalSuperStatus,
   normalizeSuperTodos,
   groupSuperReportsByWave,
@@ -804,8 +806,16 @@ export interface SuperAgentDeps {
    */
   maxConcurrentSessions: () => number;
   /**
-   * 失败后最多自动尝试几次（含首次），来自 `iflow.superAgent.maxAttempts`。
-   * 可选：缺省 1 = 不自动重试；spawn 时写入 session.maxAttempts。
+   * 子会话的**总尝试次数上限**（含首次执行），来自
+   * `iflow.superAgent.maxAttempts`（缺省 {@link DEFAULT_SUPER_MAX_ATTEMPTS}
+   * = 2，范围 1–5）。
+   *
+   * 可选只是为了让单测与 fixture 不必逐个补齐；**缺省不是「不限」**：所有
+   * 重试 / 重派路径（手动 retry、批量 retryWave / retryFailed、retryable
+   * 失败的自动重试）都读同一个上限，缺省值统一走
+   * {@link DEFAULT_SUPER_MAX_ATTEMPTS}。spawn 时把当时的值写进
+   * `session.maxAttempts`，因此设置改完对**下一个启动**的子会话生效
+   * （与设置项文案一致）。
    */
   maxAttempts?: () => number;
   /**
@@ -1023,9 +1033,19 @@ export class SuperAgentManager {
   private readonly waveTaskIndex = new Map<string, string>();
   /**
    * retryable 失败自动重试的退避定时器（每个子会话最多一个在飞，unref）。
-   * 仅在会话声明 `maxAttempts > 1` 时安排，避免改变无该字段的既有 fixture。
+   * 只在尝试上限 > 1 时安排（上限统一读同一个值，见 {@link maybeAutoRetry}）。
    */
   private readonly autoRetryTimers = new Map<string, NodeJS.Timeout>();
+  /**
+   * **重试重入锁**：正在被重试的子会话 id。
+   *
+   * 所有重试路径（手动 retry、批量 retryWave / retryFailed、retryable 失败
+   * 的自动重试）都汇到 {@link SuperAgentManager.retry} 一个入口，而该方法
+   * 在第一个 await 之前不做任何状态变更 —— 没有这把锁，两条路径撞在一起
+   * 时会各自把同一条 id 塞进队列、把子会话跑两遍（每次重跑都是一整个子会话
+   * 会话的全部 token），而 attempt 计数只 +1（上限形同虚设）。
+   */
+  private readonly retrying = new Set<string>();
   /** 自动重试退避窗口（实例字段，测试注入极小值）。 */
   autoRetryBackoffMs = SUPER_AUTO_RETRY_BACKOFF_MS;
   private seq = 0;
@@ -1208,7 +1228,12 @@ export class SuperAgentManager {
       wave,
       ...(spec.dependsOn && spec.dependsOn.length > 0 ? { dependsOn: [...spec.dependsOn] } : {}),
       ...(spec.batch !== undefined ? { batch: spec.batch } : {}),
-      ...(this.deps.maxAttempts ? { maxAttempts: this.deps.maxAttempts() } : {}),
+      // 尝试上限在**派发时**定格：设置改完对下一个启动的子会话生效（与设置项
+      // 文案一致）。取值走夹取，脏值（NaN / 越界）落到统一的缺省常量，绝不
+      // 出现「声明 2、运行时 0」这种分裂。
+      ...(this.deps.maxAttempts
+        ? { maxAttempts: clampSuperMaxAttempts(this.deps.maxAttempts()) }
+        : {}),
     };
     this.sessions.set(id, session);
     this.policies.set(id, policy);
@@ -1438,14 +1463,32 @@ export class SuperAgentManager {
    * 提示词会告诉新进程「上一轮中断了、先检查现状再继续」，而不是假装从零
    * 开始。目录已被删掉 / 从未建好时退化为新建隔离环境。返回 false 表示该
    * 子会话当前不可重试。
+   *
+   * **唯一入口**：手动重试、批量重试（retryWave / retryFailed）、retryable
+   * 失败的自动重试全部走这里。因此尝试上限与 attempt 计数也只在这里维护
+   * 一次 —— 两条路径各记一份就会把同一个任务跑两遍（每次重跑都是一整个
+   * 子会话会话的全部 token）。
    */
   async retry(id: string): Promise<boolean> {
     if (this.disposed) return false;
+    // **重入锁**：本方法在第一个 await 之前没有任何状态变更，而 await 之后
+    // 才有 —— 不加锁的话，「自动重试的退避定时器到点」与「用户/主 Agent 手动
+    // 重试」撞在一起时，两次调用都会读到 attempts=1、都通过上限检查、都把
+    // 队列塞进同一条 id：子会话被**跑两遍**，而 attempt 只 +1（上限形同虚设）。
+    // 锁覆盖整个方法体：第二次调用直接判定「已在重试中」。
+    if (this.retrying.has(id)) {
+      this.deps.log.info(`[${id}] 已有一次重试在进行，忽略重复的重试请求`);
+      return false;
+    }
     const session = this.sessions.get(id);
     if (!session || !canRetrySuperSession(session)) return false;
     // 尝试上限（含首次）：maxAttempts=2 表示最多两次；当前已是第 N 次且 N>=上限
-    // 就不再重试。maxAttempts 未声明时不限（既有行为）。
-    const maxAttempts = session.maxAttempts ?? this.deps.maxAttempts?.() ?? Infinity;
+    // 就不再重试。**缺省值统一**走 DEFAULT_SUPER_MAX_ATTEMPTS（= 设置项
+    // `iflow.superAgent.maxAttempts` 的声明缺省）—— 各路径各读各的默认值
+    // 会让同一个任务在不同路径上被判定成「已达上限」与「还没到上限」。
+    const maxAttempts = clampSuperMaxAttempts(
+      session.maxAttempts ?? this.deps.maxAttempts?.() ?? DEFAULT_SUPER_MAX_ATTEMPTS,
+    );
     const attempts = session.attempts ?? 1;
     if (attempts >= maxAttempts) {
       this.deps.log.info(
@@ -1461,54 +1504,62 @@ export class SuperAgentManager {
       this.autoRetryTimers.delete(id);
     }
 
-    // 上一轮的进程本该在终态时回收；这里再做一次防御性回收（幂等），并把
-    // 它从并发槽位摘掉 —— 否则重置后的会话会把自己算成「已占用」而永远
-    // 排在自己前面。
-    await this.disposeClient(id);
-    this.started.delete(id);
-    // 上一轮看门狗随旧尝试收口：旧定时器若到点，attempt 守卫本就会放过新尝试，
-    // 这里主动清掉省得它空转到点。
-    this.clearWatchdog(id);
-    // 上一轮若正卡在提问上，它的 resolver/定时器必须随旧尝试一起收口 ——
-    // 否则旧定时器到点会误删新一轮刚挂上的 resolver（跨尝试串包）。
-    this.discardQuestionResolver(id);
-    // 重试是一次**新的尝试**（序号 +1）：上一轮的中断标记不该命中新一轮。
-    this.interrupted.delete(id);
+    this.retrying.add(id);
+    try {
+      // 上一轮的进程本该在终态时回收；这里再做一次防御性回收（幂等），并把
+      // 它从并发槽位摘掉 —— 否则重置后的会话会把自己算成「已占用」而永远
+      // 排在自己前面。
+      await this.disposeClient(id);
+      this.started.delete(id);
+      // 上一轮看门狗随旧尝试收口：旧定时器若到点，attempt 守卫本就会放过新尝试，
+      // 这里主动清掉省得它空转到点。
+      this.clearWatchdog(id);
+      // 上一轮若正卡在提问上，它的 resolver/定时器必须随旧尝试一起收口 ——
+      // 否则旧定时器到点会误删新一轮刚挂上的 resolver（跨尝试串包）。
+      this.discardQuestionResolver(id);
+      // 重试是一次**新的尝试**（序号 +1）：上一轮的中断标记不该命中新一轮。
+      this.interrupted.delete(id);
 
-    const retry: SuperRetryState = {
-      attempt: attempts + 1,
-      error: session.error,
-      summary: session.summary ?? (this.lastText.get(id)?.trim() || undefined),
-      reuseIsolation: true,
-    };
-    const reset = retrySuperSession(session, Date.now());
-    this.sessions.set(id, reset);
-    // retry 诊断：审计里能看到「失败 → 重试 → 完成」的诊断轨迹（与 reports 同构）。
-    this.recordDiagnostic(
-      id,
-      "retry",
-      "info",
-      `自动重试第 ${retry.attempt} 次（上次失败：${session.lastError?.message ?? session.error ?? "未知"}）`,
-    );
-    this.lastText.delete(id);
-    this.queue.push({
-      spec: {
-        title: session.title,
-        task: session.task,
-        ...(session.dependsOn ? { dependsOn: [...session.dependsOn] } : {}),
-        ...(session.batch !== undefined ? { batch: session.batch } : {}),
-      },
-      id,
-      retry,
-      runId: session.runId,
-      wave: session.wave,
-      // 重试是同一份派发的延续：策略必须沿用，否则一次重试会把 supervised
-      // 静默退回 auto（重新变成无审批执行）。
-      policy: this.policies.get(id) ?? resolveSpawnPolicy(null),
-    });
-    this.emit();
-    this.pump();
-    return true;
+      const retry: SuperRetryState = {
+        attempt: attempts + 1,
+        error: session.error,
+        summary: session.summary ?? (this.lastText.get(id)?.trim() || undefined),
+        reuseIsolation: true,
+      };
+      const reset = retrySuperSession(session, Date.now());
+      this.sessions.set(id, reset);
+      // retry 诊断：审计里能看到「失败 → 重试 → 完成」的诊断轨迹（与 reports 同构）。
+      this.recordDiagnostic(
+        id,
+        "retry",
+        "info",
+        `自动重试第 ${retry.attempt} 次（上次失败：${session.lastError?.message ?? session.error ?? "未知"}）`,
+      );
+      this.lastText.delete(id);
+      this.queue.push({
+        spec: {
+          title: session.title,
+          task: session.task,
+          ...(session.dependsOn ? { dependsOn: [...session.dependsOn] } : {}),
+          ...(session.batch !== undefined ? { batch: session.batch } : {}),
+        },
+        id,
+        retry,
+        runId: session.runId,
+        wave: session.wave,
+        // 重试是同一份派发的延续：策略必须沿用，否则一次重试会把 supervised
+        // 静默退回 auto（重新变成无审批执行）。
+        policy: this.policies.get(id) ?? resolveSpawnPolicy(null),
+      });
+      this.emit();
+      this.pump();
+      return true;
+    } finally {
+      // 重入锁只覆盖到「队列已入队 + 状态已重置」为止：此后子会话的状态是
+      // preparing（非终态），canRetrySuperSession 会挡住第二次重试，不需要
+      // 再靠锁兜底。
+      this.retrying.delete(id);
+    }
   }
 
   /**
@@ -1544,7 +1595,9 @@ export class SuperAgentManager {
         shouldRetrySuperFailure(
           "retryable",
           s.attempts ?? 1,
-          s.maxAttempts ?? this.deps.maxAttempts?.() ?? Infinity,
+          clampSuperMaxAttempts(
+            s.maxAttempts ?? this.deps.maxAttempts?.() ?? DEFAULT_SUPER_MAX_ATTEMPTS,
+          ),
         ),
       )
       .map((s) => s.id);
@@ -1568,7 +1621,9 @@ export class SuperAgentManager {
         shouldRetrySuperFailure(
           "retryable",
           s.attempts ?? 1,
-          s.maxAttempts ?? this.deps.maxAttempts?.() ?? Infinity,
+          clampSuperMaxAttempts(
+            s.maxAttempts ?? this.deps.maxAttempts?.() ?? DEFAULT_SUPER_MAX_ATTEMPTS,
+          ),
         ),
       )
       .map((s) => s.id);
@@ -1585,14 +1640,18 @@ export class SuperAgentManager {
    * 尝试上限，满足则退避一个窗口后自动 retry。其余分类（terminal / blocked /
    * interrupted）直接上报、不自动重试。
    *
-   * 只有会话显式声明 `maxAttempts > 1` 时才启用 —— 不带该字段的既有 fixture /
-   * 用户行为保持逐字不变（绝不在无人要求时把失败子会话自动重跑）。
+   * 上限与手动重试**读同一个值**（会话声明的 `maxAttempts` → 设置项 →
+   * {@link DEFAULT_SUPER_MAX_ATTEMPTS} 缺省），不再各用一个「自动=1、手动=无限」
+   * 的分裂缺省：分裂会让同一个任务在自动路径上被判「已达上限」、在手动路径上
+   * 又被判「还能再来一次」，实际就是被多跑几轮。
    */
   private maybeAutoRetry(id: string): void {
     if (this.disposed) return;
     const session = this.sessions.get(id);
     if (!session || !canRetrySuperSession(session)) return;
-    const maxAttempts = session.maxAttempts ?? this.deps.maxAttempts?.() ?? 1;
+    const maxAttempts = clampSuperMaxAttempts(
+      session.maxAttempts ?? this.deps.maxAttempts?.() ?? DEFAULT_SUPER_MAX_ATTEMPTS,
+    );
     // 批次1A 的确切决策签名：只有 retryable 且 attempts < maxAttempts 才自动重试。
     // terminal / blocked / interrupted 或已达上限一律不重试（NaN 等非法上限由纯函数
     // 内部的 `<` 自然退化为「不重试」）。

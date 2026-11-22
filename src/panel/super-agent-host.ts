@@ -64,8 +64,10 @@ import {
   buildSuperMergeRequestPrompt,
   clampMaxConcurrentSuperSessions,
   clampMaxSuperWorktrees,
+  clampSuperMaxAttempts,
   DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   DEFAULT_MAX_SUPER_WORKTREES,
+  DEFAULT_SUPER_MAX_ATTEMPTS,
   extractSuperActions,
   fromPersistedSuperSession,
   isTerminalSuperStatus,
@@ -1276,6 +1278,18 @@ export class SuperAgentHost {
           vscode.workspace
             .getConfiguration("iflow")
             .get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
+        ),
+      // 子会话的总尝试次数上限（含首次）—— `iflow.superAgent.maxAttempts`。
+      //
+      // **接线到运行时是这个设置存在的全部意义**：声明了却从不读 = 空设置
+      // （陷阱 #14），而后果是重试上限在运行时分裂成「手动=无限 / 自动=1」，
+      // 用户把上限调到 1 也照样被多跑几轮（每轮都是一整个子会话的 token）。
+      // 缺省与 package.json 声明的默认值一致（DEFAULT_SUPER_MAX_ATTEMPTS）。
+      maxAttempts: () =>
+        clampSuperMaxAttempts(
+          vscode.workspace
+            .getConfiguration("iflow")
+            .get<number>("superAgent.maxAttempts", DEFAULT_SUPER_MAX_ATTEMPTS),
         ),
       // 默认关闭 = 子会话正常完成后回收工作目录（分支一律保留）。失败/中断
       // 从不回收，重试要复用现场。每次实时读，改完对下一个结束的子会话生效。
@@ -2632,6 +2646,20 @@ export class SuperAgentHost {
         const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
           delegateOnBusy: false,
           hidden: true,
+          // **internal：纯内部回灌，不附加看板摘要。**
+          //
+          // 汇报回合的正文已经自带这一批子会话的终态（[子会话状态上报] + 逐条
+          // 汇报 + 「还有 N 个在跑」），而 sendPrompt 在每个主会话回合开头还会
+          // 再注入一份**完整看板摘要**（id / 状态 / 分支 / 集成结果 / 派发
+          // 提示 / 管理动作说明，约 1,000 tokens）。逐个即时汇报意味着子会话
+          // 结束一个就回灌一次 —— 这份额外开销按回合数线性叠加，而主会话每
+          // 一轮还要重付全部历史，正是 token 过度消耗的主要来源。
+          //
+          // internal 只影响「这一轮要不要额外挂看板摘要」以及会话改名 / 快照
+          // （hidden 已经覆盖后两者），**不影响这一轮是不是真实的主会话回合**
+          // —— 汇报仍然是主会话的一次真实 prompt（模型在自己的上下文里读到
+          // 结果并接着推进）。
+          internal: true,
           // 这一轮是「主会话汇报子会话结果」：收尾时用 superReport 事件 +
           // done 音（与单个子会话收尾的 childDone + child 音区分开）。
           reportTurn: true,
@@ -2739,7 +2767,8 @@ export class SuperAgentHost {
    *
    * - Stop 仍压住 → 留在账本与缓冲，等用户下一次消息解除压制；
    * - streaming / error → 留在账本，下一拍再看；
-   * - idle 且未到重投阈值 → 释放 in-flight、重新入队重投；
+   * - idle 且未到重投阈值 → 保留 in-flight 标记、重新入队重投（同一份汇报
+   *   仍然只会在队列里出现一次）；
    * - 达 maxReportDeliveryAttempts → 兜底 confirm（QQ 兜底正文已保留真实结论）。
    */
   reconcileReportDelivery(): void {
@@ -2765,8 +2794,15 @@ export class SuperAgentHost {
         );
         continue;
       }
-      // 回合已恢复：释放 in-flight 标记，重新入投递队列重投。
-      buffer?.release(rec.item.reportKeys ?? []);
+      // 回合已恢复：**保留 in-flight 标记**，重新入投递队列重投。
+      //
+      // 刻意**不** release：这条汇报此刻仍然「已交给投递队列」（下面就把同一个
+      // item 重新 push 进 pendingSuperReportPrompts）。一旦 release，下一拍心跳
+      // 里的 settleSuperReportsIfReady 会用 drainSettled 把缓冲里**同一条**
+      // 汇报再取一次 → 队列里出现两条同一条汇报的条目 → 同一份汇报被当成两轮
+      // hidden prompt 投进主会话（每轮一次主会话的完整预填充 + 历史）。
+      // in-flight 标记就是这件事的幂等键（键 = 子会话 id : attempt，见
+      // superReportKey）；真正投成功时由 confirm 一次性清掉。
       this.reportDeliveryUnacked.delete(key);
       this.pendingSuperReportPrompts.push(rec.item);
       requeued = true;
