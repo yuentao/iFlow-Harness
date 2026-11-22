@@ -19,7 +19,7 @@
 ## 1. 多 agent 的 token 开销实测数据（Anthropic 官方工程博客）
 
 来源：《How we built our multi-agent research system》，Anthropic Engineering，**2025-06-13**，
-URL：https://www.anthropic.com/research/multi-agent-research-system （本地缓存 `_m_multi_agent.txt`，HTTP 200 全文）。
+URL：https://www.anthropic.com/research/multi-agent-research-system。
 
 要点与逐字引用：
 
@@ -55,7 +55,7 @@ URL：https://www.anthropic.com/research/multi-agent-research-system （本地�
 ## 2. Context engineering：压缩、按需披露、最小高信号 token（Anthropic 官方工程博客）
 
 来源：《Effective context engineering for AI agents》，Anthropic Engineering，**2025-09-29**，
-URL：https://www.anthropic.com/research/effective-context-engineering-for-ai-agents （本地 `_m_context_eng.txt`，HTTP 200 全文）。
+URL：https://www.anthropic.com/research/effective-context-engineering-for-ai-agents。
 
 1. **总原则**：
    > "good context engineering means finding the smallest possible set of high-signal tokens that maximize the likelihood of some desired outcome."
@@ -82,7 +82,7 @@ URL：https://www.anthropic.com/research/effective-context-engineering-for-ai-ag
 
 ### 3.1 Anthropic Prompt Caching
 
-来源：《Prompt caching with Claude》，Anthropic/Claude，**页面日期 2025-08-14**（正文含 GA 更新 2024-12-17），URL：https://claude.com/resources/articles/prompt-caching （本地 `_p_anthropic_caching_blog.txt`，HTTP 200 全文）。
+来源：《Prompt caching with Claude》，Anthropic/Claude，**页面日期 2025-08-14**（正文含 GA 更新 2024-12-17），URL：https://claude.com/resources/articles/prompt-caching。
 
 > "reducing costs by up to 90% and latency by up to 85% for long prompts."
 > "Writing to the cache costs 25% more than our base input token price for any given model, while using cached content is significantly cheaper, costing only 10% of the base input token price."
@@ -94,7 +94,7 @@ URL：https://www.anthropic.com/research/effective-context-engineering-for-ai-ag
 
 ### 3.2 OpenAI Automatic Prompt Caching
 
-来源：《Prompt Caching in the API》，OpenAI，**2024-10-01**，URL：https://openai.com/index/api-prompt-caching/ （本地 `_p_openai_caching.txt`，HTTP 200 全文）。
+来源：《Prompt Caching in the API》，OpenAI，**2024-10-01**，URL：https://openai.com/index/api-prompt-caching/。
 
 > "By reusing recently seen input tokens, developers can get a 50% discount and faster prompt processing times."
 > "automatically applied on prompts longer than 1,024 tokens. The API caches the longest prefix of a prompt that has been previously computed, starting at 1,024 tokens and increasing in 128-token increments."
@@ -106,7 +106,7 @@ URL：https://www.anthropic.com/research/effective-context-engineering-for-ai-ag
 
 ### 3.3 Claude Code 的缓存实践（breakpoint / TTL 的实锤）
 
-来源：《Prompt caching》Claude Code Docs，URL：https://code.claude.com/docs/en/prompt-caching ；《Context window》URL：https://code.claude.com/docs/en/context-window （本地 `_p_cc_caching.txt` 174KB / `_p_cc_context.txt` 142KB，HTTP 200 全文；文档页无单一发布日期，按内容属 2026 现行版）。
+来源：《Prompt caching》Claude Code Docs，URL：https://code.claude.com/docs/en/prompt-caching ；《Context window》URL：https://code.claude.com/docs/en/context-window （文档页无单一发布日期，按内容属 2026 现行版）。
 
 > "The API offers two: a five-minute TTL, and a one-hour TTL that keeps the cache warm through longer breaks but charges a higher rate for cache writes."
 > "Claude Code reports one-hour cache writes under ephemeral_1h_input_tokens and five-minute cache writes under ephemeral_5m_input_tokens."（对应 Anthropic API 的 `cache_creation_input_tokens` / `cache_control: ephemeral` 计费维度；可用 `claude -p "hello" --output-format json` 查看 `usage.cache_creation` 核验）
@@ -120,13 +120,13 @@ URL：https://www.anthropic.com/research/effective-context-engineering-for-ai-ag
 ### 3.4 Gemini Context Caching — 本轮未能一手核实
 
 - 官方 URL（供主会话/browser 侧访问）：https://ai.google.dev/gemini-api/docs/caching
-- 本机抓取状态：`ai.google.dev` 多次 `fetch failed`，`curl.exe` 返回 `HTTP:000 SIZE:0`（网络对该域名不可达）；Bing 搜索页能返回（`cn.bing.com` HTTP 200，本地 `_bing_gemini_cache.html`），但未拿到官方正文，**故本报告不引用其具体 token 阈值/TTL/折扣数字，避免编造**。
+- 本机抓取状态：`ai.google.dev` 多次 `fetch failed`，`curl.exe` 返回 `HTTP:000 SIZE:0`（网络对该域名不可达）；Bing 搜索页能返回（`cn.bing.com` HTTP 200），但未拿到官方正文，**故本报告不引用其具体 token 阈值/TTL/折扣数字，避免编造**。
 
 ---
 
 ## 4. 工具 schema 本身就占大量 token：按需披露工具（Anthropic 官方工程博客）
 
-来源：《Introducing advanced tool use on the Claude Developer Platform》，Anthropic Engineering，**2025-11-24**，URL：https://www.anthropic.com/research/advanced-tool-use （本地 `_m_adv_tool_use.txt`，HTTP 200 全文）。另参 MCP 社区工具搜索讨论（GitHub issues API，本地 `_mcp_toolsearch_issues.txt`）：https://api.github.com/search/issues?q=repo:modelcontextprotocol/modelcontextprotocol+tool+search+in:title,body
+来源：《Introducing advanced tool use on the Claude Developer Platform》，Anthropic Engineering，**2025-11-24**，URL：https://www.anthropic.com/research/advanced-tool-use。另参 MCP 社区工具搜索讨论（GitHub issues API）：https://api.github.com/search/issues?q=repo:modelcontextprotocol/modelcontextprotocol+tool+search+in:title,body
 
 1. **工具定义吃掉的 token 是量级问题**：
    > "tool results and definitions can sometimes consume 50,000+ tokens before an agent reads a request."
@@ -155,7 +155,7 @@ URL：https://www.anthropic.com/research/effective-context-engineering-for-ai-ag
 
 1. **Anthropic multi-agent（已于 §1 引用）**：每个子代理 "operating in parallel with their own context windows... distinct tools, prompts, and exploration trajectories"，本质是「独立上下文 + 只回传压缩结果」。
 
-2. **Claude Code Sub-agents 官方文档**，URL：https://code.claude.com/docs/en/sub-agents （本地 `_p_cc_subagents.txt` 442KB，HTTP 200 全文）：
+2. **Claude Code Sub-agents 官方文档**，URL：https://code.claude.com/docs/en/sub-agents：
    > "Each subagent runs in its own context window with a custom system prompt, specific tool access, and independent permissions."
    > "Each subagent starts with a fresh, isolated context window. It doesn't see your conversation history, the skills you've already invoked, or the files Claude has already read. Claude composes a delegation message that summarizes the task, and the subagent works from there."
    - **规则裁剪的直接证据**：
@@ -166,25 +166,25 @@ URL：https://www.anthropic.com/research/effective-context-engineering-for-ai-ag
    > "Running many subagents that each return detailed results can consume significant context, and each subagent spends tokens of its own while it runs."
    - 迁移性：**逐条高度可迁移**。① "omitClaudeMd" 直接对应本仓「任务书裁剪掉与子任务无关的规则」——应让子会话只加载与其子任务相关的规则切片，而非整份 `AGENTS.md`；② "restate the rule when delegating" 对应「把必要规则显式写进任务书」；③ 工具白名单对应本仓子会话当前全量工具的收敛改造；④ `maxTurns`/`autoCompactWindow` 对应本仓缺失的「子会话级 token/轮次预算」——值得新增。
 
-3. **OpenAI Swarm / Agents SDK**，URL：https://github.com/openai/swarm/blob/main/README.md （本地 `_p_swarm2.txt` 为 GitHub API base64 README）；SDK 文档 https://openai.github.io/openai-agents-python/ （本地 `_p_oai_agents.txt`，HTTP 200）：
+3. **OpenAI Swarm / Agents SDK**，URL：https://github.com/openai/swarm/blob/main/README.md；SDK 文档 https://openai.github.io/openai-agents-python/：
    > README 明确 "Swarm is now replaced by the OpenAI Agents SDK, which is a production-ready evolution of Swarm... Swarm focuses on making agent coordination and execution lightweight, highly controllable, and easily testable."；每个 Agent 仅由 `instructions` + `functions` 定义，上下文通过 handoff / 函数返回值在 agent 间显式传递。
    - 迁移性：印证「最小 agent 定义 + 显式上下文传递」的社区共识；本仓委派指令（代码块/task 工具）已是同类「轻量交接」形态。
 
-4. **Claude Code Agent Teams**，URL：https://code.claude.com/docs/en/agent-teams （本地 `_p_cc_teams.txt` 189KB，HTTP 200）：团队/队友各自独立上下文与消息通道（SendMessage / sibling roster），与本仓看板 + 汇报车道同构，可作为「多 agent 编排的产品化参照」。
+4. **Claude Code Agent Teams**，URL：https://code.claude.com/docs/en/agent-teams：团队/队友各自独立上下文与消息通道（SendMessage / sibling roster），与本仓看板 + 汇报车道同构，可作为「多 agent 编排的产品化参照」。
 
 ---
 
 ## 6. 其它开源实践：压缩、任务分解、token 预算
 
-1. **aider（repo map + 模型分工 + 历史预算）**，官方文档 URL：https://aider.chat/docs/config/options.html （本地 `_p_aider_options2.txt`，HTTP 200）；FAQ https://aider.chat/docs/faq.html ：
+1. **aider（repo map + 模型分工 + 历史预算）**，官方文档 URL：https://aider.chat/docs/config/options.html；FAQ https://aider.chat/docs/faq.html ：
    > `--weak-model WEAK_MODEL`："Specify the model to use for commit messages and chat history summarization (default depends on --model)" —— 用便宜小模型做提交信息与聊天历史摘要；`--editor-model` 用另一模型做编辑；`--max-chat-history-tokens VALUE` 限制聊天历史 token；repo map 用 tree-sitter 生成代码地图（"Add language support via tree-sitter-language-pack"），并指出 "Depending on the LLM you are using, aider may launch with the repo map disabled by default... The repo map is usually disabled for a good reason."（避免模型误把 repo map 当真实代码编辑）
    - 迁移性：**低成本思想可借鉴**：用「小模型/直连轻量调用」做子会话汇报的二次浓缩（本仓已有 `streamChatCompletion` 直连通道与内部 prompt 体系，可复用）；`max-chat-history-tokens` 对应「给子会话设 token 预算上限」。
 
-2. **LangChain / LangGraph middleware**，URL：https://docs.langchain.com/oss/python/langchain/middleware/overview （本地 `_p_langchain_mw.txt` 306KB，HTTP 200）：提供 `SummarizationMiddleware`、`HumanInTheLoopMiddleware`、LLM-based `tool selection` 等中间件，把「摘要压缩 / 审批 / 工具选择」做成可插拔层。
+2. **LangChain / LangGraph middleware**，URL：https://docs.langchain.com/oss/python/langchain/middleware/overview：提供 `SummarizationMiddleware`、`HumanInTheLoopMiddleware`、LLM-based `tool selection` 等中间件，把「摘要压缩 / 审批 / 工具选择」做成可插拔层。
    > 文档原文列出 "HITL interrupt, summarization, PII redaction, retries, and any custom hooks"，以及 `/oss/python/langchain/middleware/built-in#llm-tool-selector` 的工具选择能力。
    - 迁移性：架构思想（把压缩/工具选择做成 middleware 层）与本仓 `src/acp/`、`shared/` 下沉纯逻辑的纪律一致；`SummarizationMiddleware` 对应本仓压缩链路，`LLM tool selector` 对应 §4 按需披露。注：旧 LangGraph `add-summary` how-to 已迁移（本地抓取 404），以新文档为准。
 
-3. **claude-flow 等社区编排项目**：GitHub 仓库搜索（本地 `_p_claudeflow_search.txt`）：https://api.github.com/search/repositories?q=claude-flow —— 属社区实验性编排，权威性与一手数字弱于上述官方文档，本报告不作为关键数字来源，仅作生态参考。
+3. **claude-flow 等社区编排项目**：GitHub 仓库搜索：https://api.github.com/search/repositories?q=claude-flow —— 属社区实验性编排，权威性与一手数字弱于上述官方文档，本报告不作为关键数字来源，仅作生态参考。
 
 ---
 
@@ -212,7 +212,7 @@ URL：https://www.anthropic.com/research/effective-context-engineering-for-ai-ag
 ## 8. 资料可靠性与未能访问项（如实声明）
 
 - HTTP 200 一手全文：Anthropic 三篇博客（multi-agent / context engineering / advanced tool use）、Anthropic prompt caching 文章、OpenAI prompt caching 文章、Claude Code docs（sub-agents / agent-teams / context-window / prompt-caching / costs）、LangChain middleware docs、aider options/FAQ、OpenAI Agents SDK 文档、MCP/claude-flow GitHub API 结果。
-- 区域限制/失败项（不引用其数字）：`claude.com/app-unavailable-in-region`（`_p_anthropic_caching*`、`_p_tool_search*`，但同名主题已由 `claude.com/resources/articles/prompt-caching` 官方文章覆盖）；Gemini 官方文档（`ai.google.dev` 全数失败）；Swarm README 本体走 GitHub API base64 取得（可读）；旧 LangGraph `add-summary` how-to 404（已以新文档替代）。
+- 区域限制/失败项（不引用其数字）：`claude.com/app-unavailable-in-region`（但同名主题已由 `claude.com/resources/articles/prompt-caching` 官方文章覆盖）；Gemini 官方文档（`ai.google.dev` 全数失败）；Swarm README 本体走 GitHub API base64 取得（可读）；旧 LangGraph `add-summary` how-to 404（已以新文档替代）。
 - 「单 agent 15k vs 多 agent 72k」绝对数字未能在一手资料核实，未编造；如主会话需要该数字，请提供出处或允许再次定向检索。
 
 ---
