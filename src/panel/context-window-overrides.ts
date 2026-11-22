@@ -47,6 +47,11 @@ function readContextWindowOverrides(): string[] {
  * 走 `resolveContextWindowWithSource` 的**同一条**解析路径（空覆写表），
  * 不自己抄一份「最长前缀匹配」：运行时用哪条规则，这里就用哪条，两者
  * 不会漂移。
+ *
+ * 注意：这条路径**故意只看内建表**（空覆写表 + 只认 `builtin-table` 来源）。
+ * 它回答的是「内建表里这个模型是多少」，用来给覆写表填建议值；**生效**的
+ * 窗口由五档权威链 `resolveContextWindowAuthority` 决定（占用条与推给 CLI
+ * 的 `IFLOW_TOKENS_LIMIT` 共用那一个），两者不是同一口径，别混用。
  */
 function builtinWindowFor(modelId: string | null | undefined): number | undefined {
   if (!modelId) return undefined;

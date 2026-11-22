@@ -647,6 +647,8 @@ const en: Record<string, string> = {
   "内置表": "Built-in table",
   "AI 补充": "AI supplemented",
   "回退估算": "Fallback estimate",
+  "接口配置档": "API profile",
+  "内核配置": "Kernel settings",
   "无来源链接": "No source link",
   "来源链接：{0}": "Source link: {0}",
   "数据出处：token {0} · 单价 {1} · 采集 {2} · {3}": "Provenance: tokens {0} · price {1} · captured {2} · {3}",

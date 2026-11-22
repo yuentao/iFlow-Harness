@@ -32,14 +32,28 @@
  * all (the very bug this resolver fixes), so there is no fallback number
  * here. Unknown models leave the CLI's own tables alone.
  *
+ * The chain itself lives in `shared/context-window.ts`
+ * (`resolveContextWindowAuthority`) — the webview occupancy bar resolves its
+ * window through the SAME function with the SAME inputs, so the number shown
+ * in the panel and the number pushed to the CLI can never diverge (that was
+ * the "one model, two windows" bug: the bar ignored the profile / settings
+ * tiers). This module is only the host-side adapter: it reads the kernel
+ * settings file and feeds the two kernel-derived tiers into the shared
+ * resolver.
+ *
  * Zero VSCode dependency (pure logic + models-query, which is itself
  * VSCode-free), so it is directly unit-testable.
  */
-import { readCliSettings } from "./models-query.js";
-import { normalizeModelId, resolveContextWindowWithSource } from "../../shared/context-window.js";
+import { statSync } from "node:fs";
+import { readCliSettings, settingsFilePath } from "./models-query.js";
+import {
+  positiveTokenLimit,
+  resolveContextWindowAuthority,
+  type ContextWindowAuthoritySource,
+} from "../../shared/context-window.js";
 
 /** Where the resolved number came from — mirrors the authority chain above. */
-export type CliTokensLimitSource = "user" | "profile" | "settings" | "builtin-table";
+export type CliTokensLimitSource = ContextWindowAuthoritySource;
 
 /** The resolved window plus its provenance. `limit === undefined` means
  * "no authority" — the caller must push nothing. */
@@ -59,15 +73,75 @@ export interface ResolveCliTokensLimitOptions {
   settingsPath?: string;
 }
 
-function positiveInt(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value > 0
-    ? value
-    : undefined;
+/** The two kernel-derived tiers of the authority chain (read from the
+ * kernel's settings.json — the authority for both). */
+export interface KernelTokensLimits {
+  /** Active API profile's `tokensLimit` (tier 2). */
+  profileTokensLimit?: number;
+  /** Settings file's top-level `tokensLimit` (tier 3). */
+  settingsTokensLimit?: number;
 }
 
 /** Spawn-env patch: sets IFLOW_TOKENS_LIMIT only for a positive integer. */
 export function cliTokensLimitEnv(effective: number | undefined): { IFLOW_TOKENS_LIMIT?: string } {
-  return positiveInt(effective) !== undefined ? { IFLOW_TOKENS_LIMIT: String(effective) } : {};
+  return positiveTokenLimit(effective) !== undefined ? { IFLOW_TOKENS_LIMIT: String(effective) } : {};
+}
+
+/**
+ * Read the two kernel tiers from the settings file.
+ *
+ * Cached on the file's (mtime, size): the occupancy bar resolves its window
+ * on EVERY store push (a few times per second while streaming), so parsing
+ * settings.json each time would be wasteful — yet the file is also edited
+ * outside the panel (the CLI writes it, the user hand-edits it). Keying the
+ * cache on the file's stamp keeps both properties: same file ⇒ same numbers,
+ * changed file ⇒ re-read. A missing file is cached too (mtime/size = -1).
+ */
+interface KernelLimitsSnapshot {
+  path: string;
+  mtimeMs: number;
+  size: number;
+  limits: KernelTokensLimits;
+}
+let kernelLimitsSnapshot: KernelLimitsSnapshot | null = null;
+
+/** Drop the cached kernel tiers (call after the panel writes settings.json). */
+export function invalidateKernelTokensLimitsCache(): void {
+  kernelLimitsSnapshot = null;
+}
+
+/** The two kernel-derived tiers, read fresh from the settings file. */
+function readKernelTokensLimitsUncached(file: string): KernelTokensLimits {
+  const settings = readCliSettings(file);
+  const activeName = settings?.currentApiProfile?.trim();
+  const activeProfile = activeName ? settings?.apiProfiles?.[activeName] : undefined;
+  const profileLimit = positiveTokenLimit(activeProfile?.tokensLimit);
+  const settingsLimit = positiveTokenLimit(settings?.tokensLimit);
+  return {
+    ...(profileLimit !== undefined ? { profileTokensLimit: profileLimit } : {}),
+    ...(settingsLimit !== undefined ? { settingsTokensLimit: settingsLimit } : {}),
+  };
+}
+
+/** Cached read of the two kernel tiers (see `KernelLimitsSnapshot`). */
+export function readKernelTokensLimits(settingsPath?: string): KernelTokensLimits {
+  const file = settingsPath ?? settingsFilePath();
+  let mtimeMs = -1;
+  let size = -1;
+  try {
+    const st = statSync(file);
+    mtimeMs = st.mtimeMs;
+    size = st.size;
+  } catch {
+    // Missing file → keep the sentinel (-1/-1) so "still missing" is cached.
+  }
+  const cached = kernelLimitsSnapshot;
+  if (cached && cached.path === file && cached.mtimeMs === mtimeMs && cached.size === size) {
+    return cached.limits;
+  }
+  const limits = readKernelTokensLimitsUncached(file);
+  kernelLimitsSnapshot = { path: file, mtimeMs, size, limits };
+  return limits;
 }
 
 /**
@@ -86,6 +160,12 @@ export function cliTokensLimitEnv(effective: number | undefined): { IFLOW_TOKENS
  *                        `fallback-estimate` branch is deliberately NOT used
  *                        here: an unknown model must not receive a guess.
  *
+ * The chain is implemented ONCE, in `shared/context-window.ts`
+ * (`resolveContextWindowAuthority`); this function only reads the kernel
+ * tiers and forwards them. The webview occupancy bar calls the very same
+ * shared resolver with the very same inputs, so the bar's window and the
+ * window pushed to the CLI are the same number by construction.
+ *
  * Model ids are normalized (`normalizeModelId`: strip the last `/` prefix,
  * lowercase) before matching, so `auto/deepseek-v4.1-flash` and
  * `deepseek-v4.1-flash` hit the very same override entry.
@@ -94,32 +174,8 @@ export function resolveCliTokensLimit(
   options: ResolveCliTokensLimitOptions = {},
 ): CliTokensLimitResolution {
   const { modelId, overrides = {}, settingsPath } = options;
-
-  // 1) user override for THIS model.
-  const key = normalizeModelId(modelId);
-  const userLimit = key ? positiveInt(overrides[key]) : undefined;
-  if (userLimit !== undefined) return { limit: userLimit, source: "user" };
-
-  // 2) active profile / 3) settings top-level — the kernel settings file is
-  // the authority for both (read fresh; it is rewritten by the panel).
-  const settings = readCliSettings(settingsPath);
-  const activeName = settings?.currentApiProfile?.trim();
-  const activeProfile = activeName ? settings?.apiProfiles?.[activeName] : undefined;
-  const profileLimit = positiveInt(activeProfile?.tokensLimit);
-  if (profileLimit !== undefined) return { limit: profileLimit, source: "profile" };
-  const settingsLimit = positiveInt(settings?.tokensLimit);
-  if (settingsLimit !== undefined) return { limit: settingsLimit, source: "settings" };
-
-  // 4) curated table — longest-prefix match. Only the `builtin-table` source
-  // counts; `fallback-estimate` is a guess and must never reach the CLI.
-  const builtin = resolveContextWindowWithSource(modelId, {});
-  if (builtin.source === "builtin-table") {
-    const builtinLimit = positiveInt(builtin.window);
-    if (builtinLimit !== undefined) return { limit: builtinLimit, source: "builtin-table" };
-  }
-
-  // 5) no authority at all → push nothing.
-  return { limit: undefined, source: undefined };
+  const { profileTokensLimit, settingsTokensLimit } = readKernelTokensLimits(settingsPath);
+  return resolveContextWindowAuthority({ modelId, overrides, profileTokensLimit, settingsTokensLimit });
 }
 
 /**

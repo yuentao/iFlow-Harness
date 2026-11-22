@@ -16,6 +16,7 @@
 import { existsSync } from "node:fs";
 import type { ProfileMap } from "./auth.js";
 import { readCliSettings, settingsFilePath, updateCliSettings } from "./models-query.js";
+import { invalidateKernelTokensLimitsCache } from "./cli-tokens-limit.js";
 
 /** Complete profiles from `apiProfiles`; entries missing any of the three
  * credential fields are skipped (never fabricated). */
@@ -63,7 +64,9 @@ export function writeKernelApiProfile(
     apiKey: creds.apiKey,
     modelName: creds.modelName,
   };
-  return updateCliSettings({ apiProfiles: profiles }, file, { createIfMissing: true });
+  const ok = updateCliSettings({ apiProfiles: profiles }, file, { createIfMissing: true });
+  if (ok) invalidateKernelTokensLimitsCache();
+  return ok;
 }
 
 /** Remove one profile. A missing file (nothing to delete) counts as success;
@@ -77,17 +80,21 @@ export function deleteKernelApiProfile(name: string, settingsPath?: string): boo
   const profiles = { ...(settings.apiProfiles ?? {}) };
   if (!Object.hasOwn(profiles, trimmed)) return true;
   delete profiles[trimmed];
-  return updateCliSettings({ apiProfiles: profiles }, file);
+  const ok = updateCliSettings({ apiProfiles: profiles }, file);
+  if (ok) invalidateKernelTokensLimitsCache();
+  return ok;
 }
 
 /** Point the Core's `currentApiProfile` at `name`, or drop the key when null. */
 export function setKernelActiveProfile(name: string | null, settingsPath?: string): boolean {
   const file = settingsPath ?? settingsFilePath();
-  return updateCliSettings(
+  const ok = updateCliSettings(
     { currentApiProfile: name?.trim() || undefined },
     file,
     { createIfMissing: true },
   );
+  if (ok) invalidateKernelTokensLimitsCache();
+  return ok;
 }
 
 /**
@@ -122,5 +129,6 @@ export function migrateKernelApiProfiles(legacy: ProfileMap, settingsPath?: stri
     console.warn(`[iflow-harness] failed to migrate ${migrated.length} API profile(s) into ${file}`);
     return [];
   }
+  invalidateKernelTokensLimitsCache();
   return migrated;
 }

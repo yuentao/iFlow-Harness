@@ -227,6 +227,12 @@ function modelMetadataLabel(src: ModelMetadataSource | null): string {
       return t("内置表");
     case "ai-supplement":
       return t("AI 补充");
+    // 五档权威链的第 2/3 档（占用条与 CLI 共用同一 resolver）：数值来自活动
+    // API 配置档 / 内核 settings.json 顶层，不是猜测出来的估算值。
+    case "profile":
+      return t("接口配置档");
+    case "settings":
+      return t("内核配置");
     case "fallback-estimate":
       return t("回退估算");
     default:
