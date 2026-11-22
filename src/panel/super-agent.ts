@@ -796,6 +796,13 @@ export interface SuperAgentDeps {
   /** 子会话使用的模型；跟随主会话当前模型，null = 用 CLI 的默认值。 */
   currentModel: () => string | null;
   /**
+   * 方案D：子会话 `session/set_model` 成功后，把用户显式覆盖的上下文窗口同步
+   * 进子 CLI 缓存的 tokensLimit（set_model 只改名、不重算）。宿主按 modelId
+   * 解析窗口（只推 source === "user"）并串行 await 推送，保证子会话首轮 prompt
+   * 不会带着旧模型的压缩阈值跑。可选：不关心的 fixture / 单测无需补齐。
+   */
+  setTokensLimit?: (client: AcpClient, sessionId: string, modelId: string) => Promise<void>;
+  /**
    * 当前主会话 id —— 派发出来的子会话归属它。
    *
    * 子会话是主会话的产物：主会话 A 派发的子会话不能在主会话 B 的看板上出现
@@ -2862,8 +2869,14 @@ export class SuperAgentManager {
       if (model) {
         try {
           await client.setModel(sessionId, model);
+          // 方案D：set_model 只改模型名，不重算子 CLI 缓存的 tokensLimit。用户
+          // 显式覆盖的窗口必须串行推送，否则子会话首轮会用旧模型的压缩阈值。
+          // 失败沿用内核默认，绝不阻断子会话。
+          if (this.deps.setTokensLimit) {
+            await this.deps.setTokensLimit(client, sessionId, model);
+          }
         } catch (error) {
-          this.deps.log.warn(`超流体设置模型失败（沿用内核默认）：${errorMessage(error)}`);
+          this.deps.log.warn(`超流体设置模型或上下文长度失败（沿用内核默认）：${errorMessage(error)}`);
         }
         this.patchModel(id, model);
       }

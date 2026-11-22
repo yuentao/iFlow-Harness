@@ -238,6 +238,18 @@ export class AcpClient {
     return await this.peer!.request(AcpMethods.setModel, { sessionId, modelId });
   }
 
+  /**
+   * iFlow extension (方案D, vendored fork): push the effective context window
+   * (tokensLimit) after a hot model switch. `session/set_model` renames the
+   * model but never recomputes the CLI's cached tokensLimit, so without this
+   * the auto-compression threshold keeps using the OLD window until restart.
+   * Answers `{success: boolean}`; throws when the Mod is missing
+   * (methodNotFound) — callers must warn, never silently claim success.
+   */
+  async setTokensLimit(sessionId: string, tokensLimit: number): Promise<unknown> {
+    return await this.peer!.request(AcpMethods.setTokensLimit, { sessionId, tokensLimit });
+  }
+
   /** iFlow extension: toggle thinking mode (verified in bundle, probed on wire). */
   async setThink(sessionId: string, thinkEnabled: boolean, thinkConfig?: "think" | "megathink" | "ultrathink"): Promise<unknown> {
     return await this.peer!.request(AcpMethods.setThink, { sessionId, thinkEnabled, ...(thinkConfig ? { thinkConfig } : {}) });

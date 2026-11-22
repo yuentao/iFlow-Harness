@@ -1267,6 +1267,18 @@ export class SuperAgentHost {
         void this.drainSuperMerges();
       },
       currentModel: () => this.store.getState().currentModelId,
+      // 方案D：子会话 set_model 成功后同步用户显式覆盖的上下文窗口（只推
+      // source === "user"，与 spawnEnv 启动兜底同一口径，绝不覆盖 profile 的
+      // tokensLimit）。宿主解析窗口、管理器只负责串行 await 调用。
+      setTokensLimit: async (client, sessionId, modelId) => {
+        const userWindow = resolveContextWindowWithSource(
+          modelId,
+          parseContextWindowOverrides(vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", [])),
+        );
+        if (userWindow.source === "user" && userWindow.window != null) {
+          await client.setTokensLimit(sessionId, userWindow.window);
+        }
+      },
       // 子会话归属当前主会话：归档按它分文件，恢复历史会话时按它取回。
       currentMainSessionId: () => this.currentMainSessionId(),
       // Child sessions spend the same money as the main session: reuse the

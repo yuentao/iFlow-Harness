@@ -18,6 +18,11 @@ export const AcpMethods = {
   setMode: "session/set_mode",
   setModel: "session/set_model",
   setThink: "session/set_think", // iFlow extension (verify on wire)
+  // iFlow extension (方案D, vendored fork): push the effective context window
+  // (tokensLimit) after a hot model switch. `session/set_model` only renames
+  // the model — it never recomputes the CLI's cached tokensLimit that
+  // getTokensLimit()/JR() use for auto-compression thresholds.
+  setTokensLimit: "session/set_tokens_limit",
   // iFlow extension (agent-cancel-refactor Mod in the vendored fork): stop a
   // single SubAgent by its wire agentId; answers {stopped, reason?}.
   cancelAgent: "_iflow/agent/cancel",
