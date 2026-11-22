@@ -528,3 +528,50 @@ it("keeps a real child failure red even while discovery is still in progress", (
   expect(spans.some((s) => s.className.includes("bg-destructive"))).toBe(true);
   expect(spans.some((s) => (s.getAttribute("title") ?? "").includes("超流体连接失败"))).toBe(true);
 });
+
+it("exposes the full server name via title when the list row truncates it", () => {
+  const name = "an-extremely-long-server-name-that-will-be-truncated-in-a-narrow-panel";
+  reply({ [name]: { command: "node" } });
+  const span = [...container.querySelectorAll("span")].find(
+    (s) => s.textContent === name && s.className.includes("truncate"),
+  );
+  expect(span).toBeTruthy();
+  expect(span!.getAttribute("title")).toBe(name);
+});
+
+it("exposes the full template title and description via title in the catalog", () => {
+  reply({});
+  click("模板目录");
+  const title = "Filesystem";
+  const description = "让智能体在你指定的本机目录里读写、搜索文件";
+  const titleSpan = [...container.querySelectorAll("span")].find(
+    (s) => s.textContent === title && s.className.includes("truncate"),
+  );
+  expect(titleSpan).toBeTruthy();
+  expect(titleSpan!.getAttribute("title")).toBe(title);
+  const descDiv = [...container.querySelectorAll("div")].find(
+    (d) => d.textContent === description && d.className.includes("truncate"),
+  );
+  expect(descDiv).toBeTruthy();
+  expect(descDiv!.getAttribute("title")).toBe(description);
+});
+
+it("exposes the full preserved-extra-keys list via title in the editor", () => {
+  reply({ a: { command: "node", extraOne: 1, extraTwo: 2 } });
+  clickTitle("编辑");
+  const label = "这些字段会原样保留：extraOne, extraTwo";
+  const div = [...container.querySelectorAll("div")].find(
+    (d) => d.textContent === label && d.className.includes("truncate"),
+  );
+  expect(div).toBeTruthy();
+  expect(div!.getAttribute("title")).toBe("extraOne, extraTwo");
+});
+
+it("shows a visible error alert instead of a false empty state when the initial read fails", () => {
+  reply({}, "read failed: EACCES");
+  const alert = container.querySelector('[role="alert"]');
+  expect(alert?.textContent).toContain("read failed: EACCES");
+  // The empty-state copy would claim there are no MCP servers at all — it must
+  // not replace the failure message.
+  expect(container.textContent).not.toContain("尚未配置 MCP 服务器");
+});

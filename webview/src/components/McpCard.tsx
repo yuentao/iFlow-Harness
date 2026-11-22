@@ -623,7 +623,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       return (
                         <div key={template.id} className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card">
                           <div className="flex items-center gap-1.5">
-                            <span className="min-w-0 flex-1 truncate text-ui-body font-semibold text-foreground">
+                            <span className="min-w-0 flex-1 truncate text-ui-body font-semibold text-foreground" title={template.title}>
                               {template.title}
                             </span>
                             {template.recommended && <Chip tone="primary">{t("推荐")}</Chip>}
@@ -639,7 +639,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                             />
                           </div>
                           {template.description && (
-                            <div className="truncate text-ui-label text-muted-foreground">{template.description}</div>
+                            <div className="truncate text-ui-label text-muted-foreground" title={template.description}>{template.description}</div>
                           )}
                           <div className="mt-1 truncate font-mono text-ui-caption text-muted-foreground/80" title={transport}>
                             {transport}
@@ -716,7 +716,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                           title={dotTitle}
                         />
                       )}
-                      <span className="min-w-0 flex-1 truncate text-ui-body font-semibold text-foreground">
+                      <span className="min-w-0 flex-1 truncate text-ui-body font-semibold text-foreground" title={entry.name}>
                         {entry.name}
                       </span>
                       {(() => {
@@ -1235,7 +1235,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                             </>
                           )}
                           {extraKeys.length > 0 && (
-                            <div className="min-w-0 truncate rounded-lg border border-border/70 bg-surface/40 px-2 py-1 text-ui-label leading-relaxed text-muted-foreground/85">
+                            <div className="min-w-0 truncate rounded-lg border border-border/70 bg-surface/40 px-2 py-1 text-ui-label leading-relaxed text-muted-foreground/85" title={extraKeys.join(", ")}>
                               {t("这些字段会原样保留：{0}", extraKeys.join(", "))}
                             </div>
                           )}
