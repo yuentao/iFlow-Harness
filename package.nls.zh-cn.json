@@ -26,6 +26,8 @@
   "iflow.configuration.superAgentDependencyPolicy.description": "上游任务失败时，依赖它的超流体怎么处理：`block`（默认）跳过后续任务并标记为阻塞；`continue` 让它照常执行。",
   "iflow.configuration.superAgentKeepWorktree.description": "超流体正常完成后是否保留它的工作目录。默认关闭：完成后删除工作目录，分支一律保留；开启后工作目录也一并保留，便于你接着手工修改。失败或被中断的超流体始终保留工作目录，重试能直接回到中断前的状态。修改后对下一个结束的超流体生效。",
   "iflow.configuration.superAgentMaxWorktrees.description": "磁盘上最多保留多少个已结束超流体的工作目录。超出时按最后修改时间从旧到新清理，分支一律保留待你审阅；有未提交改动的工作目录不会被清理。默认 10，范围 0–100（0 表示不限制）。",
+  "iflow.configuration.superAgentChildToolAllowlist.description": "按工具名限制超流体（子会话）可用的内置工具，例如 `read_file`、`run_shell_command`。留空（默认）表示不限制，保持全部工具可用；填写后子会话只注册名单内的工具——这是结构性硬门控，请把子会话需要的工具全部列出（含进程内子代理用的 `task`）。修改后对下一个启动的超流体生效。",
+  "iflow.configuration.superAgentChildMcpServerAllowlist.description": "按服务器名限制超流体（子会话）可访问的 MCP 服务器，名称以超流体看板 MCP 状态里显示的为准。留空（默认）保持现状（broker 代理的全部服务器）；填写后只暴露既在名单里、又确实由宿主 broker 提供的服务器，不存在的名字会被忽略。修改后对下一个启动的超流体生效。",
   "iflow.configuration.osNotifications.description": "面板不可见时是否发送系统通知：approvals（默认）仅在审批或提问需要你处理时通知，all 另外在整轮完成时通知，off 关闭。超流体的汇报不会逐条通知，只有超流体向你提问、以及全部超流体结束时才会提醒。",
   "iflow.configuration.contextWindowOverrides.description": "覆写模型的上下文窗口大小，每行一条「模型名=Token 数」，例如 glm-4.6=200000。优先于内置对照表；未列出的模型使用保守的默认值。",
   "iflow.configuration.costTable.description": "会话成本估算所用的单价表，每行一条「模型名=输入价,输出价」，单位为美元/百万 Token，例如 deepseek-v3=0.27,1.1。只影响面板显示的费用估算，不改变实际计费。",
