@@ -67,3 +67,39 @@ export function effectiveMcpServerNames(
   const available = new Set(normalizeAllowlist(brokerNames));
   return allowed.filter((name) => available.has(name));
 }
+
+/**
+ * 完全信任模式下的子会话 settings：不做任何工具收窄。
+ *
+ * `fullTrust=false` 时逐字委托 {@link buildChildSessionSettings}，默认行为与
+ * 接线前完全一致；`fullTrust=true` 时返回 `undefined`，即 `session/new` 不带
+ * settings（与两个白名单都为空时同形），子会话保留全部内置工具。
+ */
+export function buildChildSessionSettingsForTrust(
+  fullTrust: boolean,
+  toolAllowlist: readonly string[] | undefined,
+  mcpAllowlist: readonly string[] | undefined,
+): SessionSettings | undefined {
+  if (fullTrust) return undefined;
+  return buildChildSessionSettings(toolAllowlist, mcpAllowlist);
+}
+
+/**
+ * 完全信任模式下的 MCP 进程作用域：使用 broker 的全量 server，绝不传哨兵。
+ *
+ * `fullTrust=false` 时逐字沿用既有表达式（白名单 ∩ broker，空则回退 broker
+ * 全量），默认零变化；`fullTrust=true` 时忽略用户配置的白名单，broker 有
+ * server 就传全量，broker 为空则传 `undefined` —— `buildAcpCommand` 因此不加
+ * allowlist 参数，不会退化成「无 MCP」的哨兵。
+ */
+export function effectiveMcpServerNamesForTrust(
+  fullTrust: boolean,
+  mcpAllowlist: readonly string[] | undefined,
+  brokerNames: readonly string[] | undefined,
+): string[] | undefined {
+  if (fullTrust) {
+    const names = normalizeAllowlist(brokerNames);
+    return names.length > 0 ? names : undefined;
+  }
+  return effectiveMcpServerNames(mcpAllowlist, brokerNames) ?? normalizeAllowlist(brokerNames);
+}
