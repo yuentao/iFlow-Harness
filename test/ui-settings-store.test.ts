@@ -46,6 +46,7 @@ const baseSettings: HostSettingsUi = {
   superAgentIntegration: "merge",
   superAgentMaxWorktrees: 10,
   superAgentKeepWorktree: false,
+  superAgentFullTrust: false,
 };
 
 beforeEach(() => {
