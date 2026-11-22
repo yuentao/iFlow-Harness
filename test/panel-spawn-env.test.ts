@@ -142,6 +142,93 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     expect(fs.readFileSync(env.IFLOW_SYSTEM_MD!, "utf8")).toBe(loadPrompt("system-prompt"));
   }, 30000);
 
+  /**
+   * 冷启动：spawn env 是在 CLI 的 `session/new` 返回**之前**构造的，所以扩展
+   * 刚激活时 store 的 `currentModelId` 还是 null。此时用户的
+   * `iflow.contextWindowOverrides` 与宿主内建表都必须靠「内核 profile 的
+   * modelName」兜底命中 —— 否则 CLI 会退回自己的 65k deepseek 默认值
+   * （「每轮都触发上下文自动压缩」的根因）。
+   */
+  it("冷启动（currentModelId 尚为 null）时用内核 profile 的 modelName 兜底命中用户覆写", async () => {
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        currentApiProfile: "main",
+        apiProfiles: { main: { modelName: "auto/deepseek-v4.1-flash" } },
+      }),
+      "utf8",
+    );
+    setConfigOverrides({
+      nodePath: process.execPath,
+      contextWindowOverrides: ["deepseek-v4.1-flash=960000"],
+    });
+    const dump = path.join(storageDir, "coldstart-override-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = dump;
+
+    await (panel as unknown as SpawnEnvInternals).ensureClient();
+
+    expect(readDumpedEnv(dump).IFLOW_TOKENS_LIMIT).toBe("960000");
+  }, 30000);
+
+  it("冷启动时内核 profile 的 modelName 命中内建对照表（1M）", async () => {
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        currentApiProfile: "main",
+        apiProfiles: { main: { modelName: "auto/deepseek-v4.1-flash" } },
+      }),
+      "utf8",
+    );
+    setConfigOverrides({ nodePath: process.execPath, contextWindowOverrides: [] });
+    const dump = path.join(storageDir, "coldstart-builtin-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = dump;
+
+    await (panel as unknown as SpawnEnvInternals).ensureClient();
+
+    expect(readDumpedEnv(dump).IFLOW_TOKENS_LIMIT).toBe("1000000");
+  }, 30000);
+
+  it("冷启动且毫无依据时不推 IFLOW_TOKENS_LIMIT（绝不推猜测的默认值）", async () => {
+    // 内核 settings.json 不存在（iflowHome 是空的临时目录）→ 全链路无依据。
+    setConfigOverrides({ nodePath: process.execPath, contextWindowOverrides: [] });
+    const dump = path.join(storageDir, "coldstart-none-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = dump;
+
+    await (panel as unknown as SpawnEnvInternals).ensureClient();
+
+    expect(readDumpedEnv(dump).IFLOW_TOKENS_LIMIT).toBeUndefined();
+  }, 30000);
+
+  it("子会话与主会话共用同一兜底查表（冷启动时子会话也拿到兜底窗口）", async () => {
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        currentApiProfile: "main",
+        apiProfiles: { main: { modelName: "auto/deepseek-v4.1-flash" } },
+      }),
+      "utf8",
+    );
+    setConfigOverrides({
+      nodePath: process.execPath,
+      contextWindowOverrides: ["deepseek-v4.1-flash=960000"],
+    });
+    const dump = path.join(storageDir, "child-coldstart-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = dump;
+
+    const child = await (panel as unknown as SpawnEnvInternals).createSuperClient({
+      cwd: here,
+      allowedRoots: [here],
+      includeDirectories: [],
+      label: "spawn-env-child-coldstart",
+      callbacks: {},
+    });
+    try {
+      expect(readDumpedEnv(dump).IFLOW_TOKENS_LIMIT).toBe("960000");
+    } finally {
+      await child.dispose();
+    }
+  }, 30000);
+
   it("超流体的 spawn env 没有 IFLOW_SUPER_TOOL（即便宿主 process.env 里设了）", async () => {
     // 模拟一个「用户 shell 里已经设了该变量」的环境：子会话必须显式抹掉，
     // 不能靠「父进程没设」这个偶然条件。

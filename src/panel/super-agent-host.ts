@@ -172,6 +172,13 @@ export interface SuperAgentHostCallbacks {
   refreshMcpStatusFromBroker(): void;
   resolveEntry(): string;
   resolveWorkspaceHandshakeCreds(): Promise<OpenAiCompatCredentials | null>;
+  /** The spawn-env patch carrying the effective context window
+   * (`IFLOW_TOKENS_LIMIT`). The panel owns it so the main session and every
+   * child session share ONE resolution — including the cold-start lookup-key
+   * fallbacks. Optional: a host built without the panel (tests) falls back to
+   * the same resolver with fewer key facts (the store's model) — never to
+   * "push nothing". */
+  tokensLimitEnv?: () => { IFLOW_TOKENS_LIMIT?: string };
   chunkText(content: unknown): string;
   sendPrompt(
     text: string,
@@ -1447,12 +1454,24 @@ export class SuperAgentHost {
     // (user override → active profile → settings top-level → curated table →
     // nothing). Without this the child falls back to the CLI's own tiny
     // built-in default and compresses its baseline immediately on start.
-    const childTokensLimitEnv = tokensLimitEnvFromSettings({
-      modelId: this.store.getState().currentModelId,
-      overrides: parseContextWindowOverrides(
-        vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
-      ),
-    });
+    //
+    // The panel computes the patch (ONE site for both spawn paths) so the
+    // cold-start lookup-key fallbacks — store's model → pending switch →
+    // workspace model → kernel profile's modelName — apply here too: the
+    // child's CLI is spawned long before any `currentModelId` exists.
+    //
+    // A host that does not wire the callback (a standalone SuperAgentHost,
+    // e.g. in tests) must not SILENTLY lose the limit — that is exactly the
+    // "window falls back to the CLI's 65k" symptom. The degraded branch uses
+    // the SAME resolver, only with fewer key facts (the store's model).
+    const childTokensLimitEnv =
+      this.deps.tokensLimitEnv?.() ??
+      tokensLimitEnvFromSettings({
+        modelId: this.store.getState().currentModelId,
+        overrides: parseContextWindowOverrides(
+          vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
+        ),
+      });
     const systemPromptFile = await this.materializeSystemPrompt("child");
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
