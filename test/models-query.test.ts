@@ -1,8 +1,11 @@
-import { describe, it, expect, afterAll } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { describe, it, expect, afterAll, vi } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
+  ATOMIC_REPLACE_RETRY_DELAYS_MS,
   applyThinkingRules,
   mcpScopeOf,
   mergeThinkingRulesIntoFile,
@@ -12,6 +15,7 @@ import {
   projectSettingsFilePath,
   readActiveEndpoint,
   readMcpServers,
+  renameWithRetrySync,
   resolveActiveProfileName,
   retireStaleOAuthCreds,
   sanitizeThinkingRules,
@@ -31,6 +35,9 @@ const tempDir = mkdtempSync(path.join(tmpdir(), "iflow-models-"));
 afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
+
+/** How long the cross-process reader polls the settings file (ms). */
+const READER_WINDOW_MS = 1200;
 
 function settingsFile(content: unknown): string {
   const file = path.join(tempDir, `settings-${Math.random().toString(36).slice(2)}.json`);
@@ -128,6 +135,361 @@ describe("updateCliSettings", () => {
 
   it("returns false for a missing/unreadable settings file", () => {
     expect(updateCliSettings({ language: "zh-CN" }, path.join(tempDir, "missing.json"))).toBe(false);
+  });
+
+  it("keeps mcpServers / tokensLimit and every other key when only apiProfiles is patched", () => {
+    // The regression: a write that loses the user's mcpServers / tokensLimit
+    // made the settings page show "尚未配置 MCP 服务器" and the CLI fall back
+    // to its hard-coded context ceiling.
+    const file = settingsFile({
+      mcpServers: {
+        alpha: { command: "npx", args: ["-y", "alpha"] },
+        beta: { command: "npx", args: ["-y", "beta"] },
+      },
+      tokensLimit: 1000000,
+      compressionTokenThreshold: 0.9,
+      contextWindowLength: 1000000,
+      language: "zh-CN",
+      approvalMode: "default",
+      apiProfiles: { existing: { baseUrl: "https://e/v1", apiKey: "sk-e", modelName: "m-e" } },
+    });
+
+    expect(
+      updateCliSettings(
+        { apiProfiles: { work: { baseUrl: "https://w/v1", apiKey: "sk-w", modelName: "m-w" } } },
+        file,
+      ),
+    ).toBe(true);
+
+    const after = JSON.parse(readFileSync(file, "utf8"));
+    expect(Object.keys(after.mcpServers)).toEqual(["alpha", "beta"]);
+    expect(after.mcpServers.alpha.args).toEqual(["-y", "alpha"]);
+    expect(after.tokensLimit).toBe(1000000);
+    expect(after.compressionTokenThreshold).toBe(0.9);
+    expect(after.contextWindowLength).toBe(1000000);
+    expect(after.language).toBe("zh-CN");
+    expect(after.approvalMode).toBe("default");
+    expect(Object.keys(after.apiProfiles)).toEqual(["work"]);
+  });
+
+  it("replaces the file atomically — never unlinks the target, uses a unique temp path", () => {
+    // Source guard: the old implementation did `unlink(file)` before
+    // `rename(tmp, file)`, which opened a window in which settings.json did
+    // not exist at all. A concurrent reader (the CLI's own saveSettings)
+    // saw "no file", treated the disk as empty and rewrote the whole file
+    // without the user's mcpServers / tokensLimit / language / approvalMode.
+    const source = readFileSync(
+      fileURLToPath(new URL("../src/acp/models-query.ts", import.meta.url)),
+      "utf8",
+    );
+    const start = source.indexOf("export function updateCliSettings(");
+    const end = source.indexOf("export function readActiveEndpoint(");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = source.slice(start, end);
+
+    expect(body).not.toContain("unlinkSync(file)");
+    // The replace goes through the retrying helper — on Windows the plain
+    // rename is refused with EPERM while any handle is open on the target.
+    expect(body).toContain("renameWithRetrySync(tmp, file)");
+    // A per-writer unique temp path (pid + timestamp + counter) so two
+    // concurrent writers never share (and clobber) one temp file.
+    expect(body).toContain("uniqueTmpPath(file)");
+    expect(source).toContain("process.pid");
+    // The helper exists and is shared with the other atomic writer.
+    expect(source).toContain("export function renameWithRetrySync(");
+    expect(source).toContain("export async function renameWithRetry(");
+  });
+
+  it("never exposes a missing or half-written settings file to a concurrent reader", async () => {
+    const file = settingsFile({
+      mcpServers: { figma: { command: "npx" } },
+      tokensLimit: 1000000,
+      language: "zh-CN",
+    });
+
+    // A separate process polls the file while we rewrite it over and over.
+    // The reader counts ENOENT (the file vanished) as a failure — that is
+    // exactly the window the old `unlink + rename` sequence opened.
+    // NOTE: the old window is only microseconds wide, so this is an
+    // INVARIANT PROBE, not a deterministic reproduction of the old bug —
+    // the source guard above is the deterministic regression guard.
+    const reader = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const fs=require("fs");const f=process.argv[1];let miss=0,bad=0,ok=0;
+         const end=Date.now()+${READER_WINDOW_MS};
+         while(Date.now()<end){
+           try{const s=fs.readFileSync(f,"utf8");JSON.parse(s);ok++;}
+           catch(e){if(e.code==="ENOENT")miss++;else if(e.code!=="EPERM"&&e.code!=="EBUSY")bad++;}
+           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1);
+         }
+         process.stdout.write(JSON.stringify({miss:miss,bad:bad,ok:ok}));`,
+        file,
+      ],
+      { stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+    );
+    const report = new Promise<string>((resolve, reject) => {
+      let out = "";
+      reader.stdout.on("data", (chunk) => {
+        out += String(chunk);
+      });
+      reader.on("error", reject);
+      reader.on("close", () => resolve(out));
+    });
+
+    let written = 0;
+    for (let i = 0; i < 80; i += 1) {
+      const ok = updateCliSettings(
+        { apiProfiles: { P: { baseUrl: `https://p${i}.example/v1`, apiKey: "sk-p", modelName: "m" } } },
+        file,
+      );
+      if (ok) written += 1;
+      // A concurrent reader holding the file open can make the FIRST rename
+      // attempt fail with a Windows sharing violation (EPERM) — the atomic
+      // replace retries with a short backoff and recovers it. Even if the
+      // hold outlasted the whole retry budget, the PREVIOUS content would
+      // stay intact, which is the guarantee that matters: no key is ever
+      // dropped.
+    }
+    const stats = JSON.parse(await report) as { miss: number; bad: number; ok: number };
+
+    expect(stats.miss).toBe(0); // the file was never observably missing
+    expect(stats.bad).toBe(0); // the reader never saw a half-written file
+    expect(stats.ok).toBeGreaterThan(0); // the reader really did observe the file
+    // Every write went through — the reader's transient EPERM is absorbed by
+    // the retry, so the user's edit is not silently dropped any more.
+    expect(written).toBe(80);
+    // No temp file is left behind (the temp name is unique per write).
+    expect(readdirSync(path.dirname(file)).filter((n) => n.includes("iflow-harness-tmp"))).toEqual([]);
+    // The key promise of the whole fix: no key is lost by the rewrite.
+    const after = JSON.parse(readFileSync(file, "utf8"));
+    expect(after.mcpServers.figma.command).toBe("npx");
+    expect(after.tokensLimit).toBe(1000000);
+    expect(after.language).toBe("zh-CN");
+    expect(after.apiProfiles.P.baseUrl).toMatch(/^https:\/\/p\d+\.example\/v1$/);
+    // Generous timeout: a write whose rename is refused waits out the whole
+    // retry budget (~1.1s) before it can report the failure.
+  }, 60_000);
+});
+
+/**
+ * Windows file-in-use behaviour (probed on win32): replacing an existing
+ * file with `rename` is REFUSED with EPERM while any handle is open on the
+ * target — even a plain read handle (`fs.openSync(file, "r")`), because
+ * replacing a file means deleting the old one and Windows refuses to delete
+ * an open file. The refusal is transient, so the atomic replace retries with
+ * a short backoff instead of losing the write.
+ *
+ * The hold is taken by a CHILD process on purpose: the sync retry parks the
+ * parent's event loop (Atomics.wait), so an in-process timer could not
+ * release the handle while the retry is running.
+ */
+function holdFileOpen(file: string, holdMs: number): {
+  opened: Promise<void>;
+  closed: Promise<void>;
+  release: () => void;
+} {
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      `const fs=require("fs");
+       const fd=fs.openSync(process.argv[1],"r");
+       process.stdout.write("opened\\n");
+       setTimeout(()=>{try{fs.closeSync(fd);}catch{}
+         process.stdout.write("closed\\n");},${holdMs});`,
+      file,
+    ],
+    { stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+  );
+  let openedResolve!: () => void;
+  let closedResolve!: () => void;
+  const opened = new Promise<void>((resolve) => {
+    openedResolve = resolve;
+  });
+  const closed = new Promise<void>((resolve) => {
+    closedResolve = resolve;
+  });
+  let buffer = "";
+  child.stdout!.on("data", (chunk) => {
+    buffer += String(chunk);
+    if (buffer.includes("opened")) openedResolve();
+    if (buffer.includes("closed")) closedResolve();
+  });
+  return {
+    opened,
+    closed,
+    release: () => {
+      try {
+        child.kill();
+      } catch {
+        // already gone
+      }
+    },
+  };
+}
+
+/** A settings file in its own directory (so the temp-file checks are precise). */
+function isolatedSettingsFile(content: unknown): string {
+  const dir = mkdtempSync(path.join(tempDir, "hold-"));
+  const file = path.join(dir, "settings.json");
+  writeFileSync(file, JSON.stringify(content), "utf8");
+  return file;
+}
+
+function tmpLeftovers(dir: string): string[] {
+  return readdirSync(dir).filter((n) => n.includes("iflow-harness-tmp"));
+}
+
+/** Run `fn` and return the thrown error (fails the test when it does not throw). */
+function captureError(fn: () => void): NodeJS.ErrnoException {
+  try {
+    fn();
+  } catch (error) {
+    return error as NodeJS.ErrnoException;
+  }
+  throw new Error("expected the call to throw, but it returned normally");
+}
+
+describe("atomic replace retry (Windows file-in-use)", () => {
+  it("succeeds once the reader releases the file (the first rename was refused)", async () => {
+    const file = isolatedSettingsFile({
+      mcpServers: { figma: { command: "npx" } },
+      language: "zh-CN",
+    });
+    const holder = holdFileOpen(file, 120);
+    try {
+      await holder.opened; // the target is really occupied now
+      const started = Date.now();
+      const ok = updateCliSettings({ language: "en-US" }, file);
+      const elapsed = Date.now() - started;
+      expect(ok).toBe(true);
+      // The first attempt was refused with EPERM — the write only got
+      // through because the retry waited for the holder to let go.
+      expect(elapsed).toBeGreaterThanOrEqual(15);
+      const after = JSON.parse(readFileSync(file, "utf8"));
+      expect(after.language).toBe("en-US");
+      expect(after.mcpServers.figma.command).toBe("npx"); // nothing else lost
+      expect(tmpLeftovers(path.dirname(file))).toEqual([]);
+    } finally {
+      holder.release();
+    }
+  });
+
+  it("fails VISIBLY and keeps the previous content when the hold never ends", async () => {
+    const file = isolatedSettingsFile({
+      mcpServers: { figma: { command: "npx" } },
+      language: "zh-CN",
+    });
+    const holder = holdFileOpen(file, 60_000);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await holder.opened;
+      const ok = updateCliSettings({ language: "en-US" }, file);
+      // Not a silent success: the panel turns `false` into the
+      // "无法写入内核配置 {0}" toast, so the user sees the failed save.
+      expect(ok).toBe(false);
+      const after = JSON.parse(readFileSync(file, "utf8"));
+      expect(after.language).toBe("zh-CN"); // previous content intact
+      expect(after.mcpServers.figma.command).toBe("npx");
+      expect(tmpLeftovers(path.dirname(file))).toEqual([]); // no temp file left behind
+      // The original error is not swallowed either — code + message reach
+      // the host log, so EPERM can be told apart from a permission problem.
+      const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(logged).toContain("EPERM");
+    } finally {
+      warn.mockRestore();
+      holder.release();
+    }
+  });
+
+  it("throws the ORIGINAL error (code + message) when the retry budget runs out", async () => {
+    const file = isolatedSettingsFile({ language: "zh-CN" });
+    const holder = holdFileOpen(file, 60_000);
+    try {
+      await holder.opened;
+      const tmp = path.join(path.dirname(file), "tmp.json");
+      writeFileSync(tmp, "{}", "utf8");
+      const error = captureError(() => renameWithRetrySync(tmp, file));
+      // The very error the OS raised — not a generic "write failed".
+      expect(error.code).toBe("EPERM");
+      expect(error.message).toContain("EPERM");
+      expect(error.message).toContain("settings.json");
+      // The target is untouched: a refused replace never truncates it.
+      expect(JSON.parse(readFileSync(file, "utf8")).language).toBe("zh-CN");
+    } finally {
+      holder.release();
+    }
+  });
+
+  it("rethrows a non-retryable error immediately, without retrying", () => {
+    let attempts = 0;
+    const error = captureError(() =>
+      renameWithRetrySync("tmp", "target", {
+        rename: () => {
+          attempts += 1;
+          const err: NodeJS.ErrnoException = new Error("ENOENT: no such file or directory");
+          err.code = "ENOENT";
+          throw err;
+        },
+      }),
+    );
+    expect(attempts).toBe(1); // exactly one attempt — no backoff was paid
+    expect(error.code).toBe("ENOENT");
+  });
+
+  it("rethrows a real non-retryable error immediately (missing temp file)", () => {
+    const dir = mkdtempSync(path.join(tempDir, "missing-"));
+    const started = Date.now();
+    const error = captureError(() =>
+      renameWithRetrySync(path.join(dir, "nope.tmp"), path.join(dir, "target.json")),
+    );
+    expect(error.code).toBe("ENOENT");
+    // No backoff was paid: the call returns in well under the first delay.
+    expect(Date.now() - started).toBeLessThan(ATOMIC_REPLACE_RETRY_DELAYS_MS[0]!);
+  });
+
+  it("retries a transient failure and then succeeds", () => {
+    let attempts = 0;
+    renameWithRetrySync("tmp", "target", {
+      delaysMs: [1, 2, 3],
+      rename: () => {
+        attempts += 1;
+        if (attempts < 3) {
+          const err: NodeJS.ErrnoException = new Error("EPERM: operation not permitted");
+          err.code = "EPERM";
+          throw err;
+        }
+      },
+    });
+    expect(attempts).toBe(3);
+  });
+
+  it("keeps the sync backoff budget under 1.2s (the host is single-threaded)", () => {
+    const total = ATOMIC_REPLACE_RETRY_DELAYS_MS.reduce((sum, ms) => sum + ms, 0);
+    expect(total).toBeLessThanOrEqual(1200);
+    expect(ATOMIC_REPLACE_RETRY_DELAYS_MS.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("retries the thinking-rules write too (same temp+rename pattern)", async () => {
+    const dir = mkdtempSync(path.join(tempDir, "rules-"));
+    const file = path.join(dir, "thinking-models.json");
+    writeFileSync(file, JSON.stringify({ rules: [] }), "utf8");
+    const holder = holdFileOpen(file, 120);
+    try {
+      await holder.opened;
+      const result = applyThinkingRules(
+        [{ pattern: "gemini-.*", supportsThinking: true }],
+        file,
+      );
+      expect(result.added).toBe(1);
+      expect(result.skippedInvalid).toBeUndefined();
+      expect(tmpLeftovers(dir)).toEqual([]);
+    } finally {
+      holder.release();
+    }
   });
 });
 

@@ -467,6 +467,13 @@ const en: Record<string, string> = {
     "The main session does not load MCP; tools are used by child sessions through the shared proxy",
   "工具 ({0})": "Tools ({0})",
   "提示词 ({0})": "Prompts ({0})",
+  "提示词": "Prompt",
+  // asset detail: structured .toml view vs raw fallback
+  "无法提取结构化字段，显示原始文件内容": "No structured fields to show — displaying the raw file content",
+  "原始 TOML": "Raw TOML",
+  "原始文件内容": "Raw file content",
+  "复制原始 TOML": "Copy the raw TOML",
+  "复制原始文件内容": "Copy the raw file content",
   "参数结构": "Parameter structure",
   "参数结构太大，已省略": "The parameter structure is too large and was omitted",
   // profile-switch choice dialog
@@ -640,6 +647,8 @@ const en: Record<string, string> = {
   "内置表": "Built-in table",
   "AI 补充": "AI supplemented",
   "回退估算": "Fallback estimate",
+  "接口配置档": "API profile",
+  "内核配置": "Kernel settings",
   "无来源链接": "No source link",
   "来源链接：{0}": "Source link: {0}",
   "数据出处：token {0} · 单价 {1} · 采集 {2} · {3}": "Provenance: tokens {0} · price {1} · captured {2} · {3}",
@@ -708,6 +717,13 @@ const en: Record<string, string> = {
   "超流体完成后，是否保留它的工作目录。": "Whether to keep a finished child session's working directory.",
   "默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的超流体从不回收。开启后工作目录会留在磁盘上，可随时手动清理。":
     "Off by default: finished worktrees are reclaimed automatically (branches are always kept); failed or interrupted sessions are never reclaimed. When on, worktrees stay on disk for manual cleanup.",
+  "完全信任模式": "Full trust mode",
+  "子会话直接在主仓工作区运行，不做 worktree 隔离。默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。":
+    "Child sessions run directly in the main repository workspace, with no worktree isolation. Off by default: when on, the tool allowlist and MCP server allowlist are no longer applied to child sessions.",
+  "开启后子会话保留全部内置工具与 broker 代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。":
+    "When on, child sessions keep all built-in tools and every broker-proxied MCP server, may read/write the main repository workspace and run commands, and may push, open pull requests and merge in the main repository. Takes effect on the next dispatched child session.",
+  "开启后子会话无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。":
+    "In full trust mode child sessions can modify main-repository files, run arbitrary commands and push/open PRs without approval — only enable it for tasks you fully trust.",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
   "调整面板整体字号。": "Adjust the panel font size.",
   "审批/提问阻塞时，或整轮完成时发送。":
@@ -1009,10 +1025,21 @@ const en: Record<string, string> = {
     "The panel runs the search itself (no session involved) and asks the current model for one extraction pass (extra tokens). Existing rows are never overwritten; anything the sources cannot back is dropped.",
   "检索到的资料会交给当前模型提炼一次，额外消耗 token。":
     "The retrieved text goes to the current model for one extraction pass — extra tokens.",
-  "每行写「模型名=上下文长度」，如 glm-4.6=200000；没列出的模型用默认值。":
-    "One「model=context length」per line, e.g. glm-4.6=200000. Models not listed use the default.",
   "每行写「模型名=输入价,输出价」，单位为美元/百万 token，如 deepseek-v3=0.27,1.1。":
     "One「model=input price,output price」per line, in USD per million tokens, e.g. deepseek-v3=0.27,1.1.",
+  // --- 上下文窗口覆写（结构化编辑器） ---
+  "按模型指定上下文长度（token）。没列出的模型用内建表里的值；模型名精确匹配，不支持通配。":
+    "Set the context length (in tokens) per model. Models you don't list use the built-in table; model names match exactly — no wildcards.",
+  "不生效": "Not applied",
+  "删除覆写 {0}": "Delete the override for {0}",
+  "模型名": "Model name",
+  "上下文长度（token）": "Context length (tokens)",
+  "请填写模型名": "Enter a model name",
+  "上下文长度必须是正整数（纯数字，不带 K / M 单位）":
+    "The context length must be a positive whole number (digits only — no K / M suffix)",
+  "当前模型 {0} 的内建上下文窗口是 {1}。":
+    "The built-in context window for the current model ({0}) is {1}.",
+  "填入建议值": "Fill in the suggestion",
   "配置「{0}」和它的密钥会一起删除，无法恢复。":
     "Profile \"{0}\" and its key are deleted together, and this cannot be undone.",
   "连接模型服务": "Connect a model provider",

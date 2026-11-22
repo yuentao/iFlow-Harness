@@ -787,8 +787,23 @@ export type ModelMetadataSource =
   /** Unknown model with no override: `DEFAULT_CONTEXT_WINDOW` conservative
    * fallback (shared/context-window.ts:17, :210), flagged `estimated: true`.
    * Cost has no fallback number — `resolveCost` returns null and the UI shows
-   * 无单价 instead (shared/context-window.ts:236/:239). */
-  | "fallback-estimate";
+   * 无单价 instead (shared/context-window.ts:236/:239).
+   *
+   * DEPRECATED for the occupancy bar (2026-11-22): the bar now uses the
+   * five-tier authority chain (`resolveContextWindowAuthority`), which never
+   * guesses — when no tier has a grounded number the bar shows NO window
+   * instead of a conservative estimate. The member stays in the type because
+   * `resolveContextWindowWithSource` still produces it for the settings-page
+   * prefill path. */
+  | "fallback-estimate"
+  /** The active API Profile's `tokensLimit` (kernel `~/.iflow/settings.json`
+   * → `currentApiProfile` → `apiProfiles[name].tokensLimit`). Fifth-tier
+   * authority chain, tier 2 — the same value the host pushes to the CLI as
+   * `IFLOW_TOKENS_LIMIT` (shared/context-window.ts `resolveContextWindowAuthority`). */
+  | "profile"
+  /** The kernel settings file's top-level `tokensLimit` — authority chain
+   * tier 3, the same value pushed to the CLI as `IFLOW_TOKENS_LIMIT`. */
+  | "settings";
 
 /** Cumulative token usage for the active session. `contextUsed` is the CLI's
  * authoritative occupancy when the acp-usage-report-refactor Mod reported one
@@ -805,10 +820,14 @@ export interface SessionUsageUi {
   cacheWriteTokens: number;
   totalTokens: number;
   /**
-   * P0-6 context-occupancy bar: model context window in tokens (host-resolved
-   * from the built-in table + `iflow.contextWindowOverrides`; null when the
-   * model is unknown and no override matches — the bar then shows the raw
-   * count without a percentage).
+   * P0-6 context-occupancy bar: model context window in tokens. Host-resolved
+   * through the five-tier authority chain (`resolveContextWindowAuthority`:
+   * `iflow.contextWindowOverrides` → active API profile's `tokensLimit` →
+   * kernel settings.json top-level `tokensLimit` → curated table), i.e. the
+   * SAME resolver that produces the window pushed to the CLI as
+   * `IFLOW_TOKENS_LIMIT` — one model, one window. Null when no tier landed a
+   * grounded number (unknown model, nothing configured): the bar then shows
+   * the raw count without a percentage rather than a guess.
    */
   contextWindow?: number | null;
   /** Current context occupancy in tokens (post-compression fold; equals the
@@ -830,8 +849,13 @@ export interface SessionUsageUi {
    */
   prefillTokens?: number;
   /** True when `contextWindow` is a conservative fallback guess rather than a
-   * table/override hit — the UI labels the percentage "估算". Orthogonal to
-   * `usageAuthoritative` (window source vs token source). */
+   * grounded value — the UI labels the percentage "估算". Orthogonal to
+   * `usageAuthoritative` (window source vs token source).
+   *
+   * Since 2026-11-22 the host never produces a guessed window: the bar and
+   * the CLI share one five-tier resolver, and "no authority" means the bar
+   * shows no denominator at all. Kept for compatibility with snapshots
+   * persisted by older hosts. */
   estimated?: boolean;
   /** True when `inputTokens`/`outputTokens`/`contextUsed` come from the CLI's
    * authoritative turn usage (acp-usage-report-refactor Mod reported them at
@@ -1686,6 +1710,17 @@ export interface MemoryStateUi {
 export type AssetKind = "command" | "agent" | "skill";
 export type AssetScope = "global" | "project";
 
+/**
+ * Structured fields parsed from an asset's raw body (currently command .toml
+ * only). `null` member = the key was absent or unparseable. `assetContent.fields`
+ * being absent entirely means this asset type has no structured view (.md,
+ * agents, skills) and the webview should show the raw body.
+ */
+export interface AssetContentFields {
+  description: string | null;
+  prompt: string | null;
+}
+
 export interface AssetUi {
   kind: AssetKind;
   scope: AssetScope;
@@ -1818,6 +1853,31 @@ export interface HostSettingsUi {
   /** Keep the worktree directory after a child session finishes
    * (`iflow.superAgent.keepWorktree`); default false = clean up. */
   superAgentKeepWorktree: boolean;
+  /** Run child sessions in the main repository workspace with no isolation
+   * (`iflow.superAgent.fullTrust`); default false. */
+  superAgentFullTrust: boolean;
+}
+
+/**
+ * 上下文窗口覆写的独立通道载荷。
+ *
+ * 为什么不复用 `hostSettings.contextWindowOverrides`：那条通道只镜像面板
+ * 设置项本身，而结构化编辑器还需要「当前会话模型」与「该模型在内建表
+ * （CONTEXT_WINDOW_TABLE）里的窗口」才能给出一键预填的建议值——这两项
+ * 都不是设置项，属于会话态，所以单开一条通道。
+ *
+ * `overrides` 的每一行仍是 `iflow.contextWindowOverrides` 的原始格式
+ * （`模型名=纯token数`），与宿主解析器（shared/context-window.ts 的
+ * `parseContextWindowOverrides`）逐字对齐：模型名经 `normalizeModelId`
+ * 归一化后**精确匹配**，值必须是纯数字。
+ */
+export interface ContextWindowOverridesUi {
+  /** 原始覆写行；顺序即用户在设置页里看到的顺序。 */
+  overrides: string[];
+  /** 当前会话模型 id（面板 store 的权威值）；没有模型时缺省。 */
+  currentModelId?: string;
+  /** 当前模型在内建表里的上下文窗口；表里没有时缺省（UI 不给建议值）。 */
+  builtinWindow?: number;
 }
 
 /**
@@ -2121,8 +2181,11 @@ export type HostToWebview =
       requestId?: number;
       state: AssetsStateUi;
     }
-  /** Reply to `readAsset`: full body + hash for the inline editor. */
-  | { type: "assetContent"; path: string; content: string; hash: string | null; error?: string; requestId?: number }
+  /** Reply to `readAsset`: full body + hash for the inline editor. `fields`
+   * carries the parsed .toml description/prompt for a structured detail view;
+   * absent for raw-only assets (.md / agents / skills). The raw `content` is
+   * always present — editing must round-trip the exact file bytes. */
+  | { type: "assetContent"; path: string; content: string; hash: string | null; fields?: AssetContentFields; error?: string; requestId?: number }
   /** Reply to `saveAsset` / `createAsset`: `conflict` means the file changed
    * on disk since the card read it (or, for create, already exists) — the
    * write did NOT happen and the caller must reload. `requestId` echoes the
@@ -2170,6 +2233,9 @@ export type HostToWebview =
    * the background aurora light-spot opacity with it. */
   | { type: "theme"; kind: "dark" | "light"; auroraIntensity?: number }
   | ({ type: "hostSettings" } & HostSettingsUi)
+  /** 上下文窗口覆写的当前值 + 当前模型的内建建议值（设置页结构化编辑器
+   * 的数据源）。宿主在 webview 就绪时推一次、每次写入成功后推一次。 */
+  | ({ type: "contextWindowOverrides" } & ContextWindowOverridesUi)
   /** Turn finished ("done") / failed ("error") / one child session settled
    * ("child") — the webview plays a short synthesized cue. The three are
    * deliberately distinct sounds: a child finishing is NOT the main turn
@@ -2525,6 +2591,10 @@ export type WebviewToHost =
    * .Global — the scope Settings Sync carries), and echoes `hostSettings`
    * with the effective values. Partial: omitted fields stay untouched. */
   | ({ type: "setHostSettings" } & Partial<HostSettingsUi>)
+  /** 覆盖整张上下文窗口覆写表（设置页结构化编辑器一次提交全量行）。
+   * 宿主逐行归一化后写入 `iflow.contextWindowOverrides`，再把生效后的值
+   * 以 `contextWindowOverrides` 推回。 */
+  | { type: "setContextWindowOverrides"; overrides: string[] }
   /** MCP management card opened: read the CURRENT `mcpServers` dicts from BOTH
    * settings files (`~/.iflow/settings.json` and `<cwd>/.iflow/settings.json`)
    * — the CLI / external tools own those files, so the card must show disk

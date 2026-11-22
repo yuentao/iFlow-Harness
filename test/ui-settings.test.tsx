@@ -43,6 +43,7 @@ const hostSettings = vi.hoisted(() => ({
   superAgentIntegration: "merge",
   superAgentMaxWorktrees: 10,
   superAgentKeepWorktree: false,
+  superAgentFullTrust: false,
 } as HostSettingsUi));
 const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,
@@ -70,6 +71,10 @@ const modelMetadata = vi.hoisted(() => ({
   added: undefined as { windows: number; costs: number; rules: number } | undefined,
   error: undefined as string | undefined,
 }));
+/** 宿主的「上下文窗口覆写」通道载荷（行 + 当前模型 + 内建窗口）。 */
+const contextWindow = vi.hoisted(() => ({
+  view: null as { overrides: string[]; currentModelId?: string; builtinWindow?: number } | null,
+}));
 
 vi.mock("../webview/src/store", () => ({
   useChat: Object.assign(
@@ -78,11 +83,29 @@ vi.mock("../webview/src/store", () => ({
       updateHostSetting: typeof updateHostSetting;
       hostSettings: typeof hostSettings;
       modelMetadata: typeof modelMetadata;
+      contextWindowOverridesView: typeof contextWindow.view;
       pending: typeof chat.pending;
       state: typeof chat.state;
     }) => unknown) =>
-      selector({ send, updateHostSetting, hostSettings, modelMetadata, ...chat }),
-    { getState: () => ({ beginPending, send, ...chat, hostSettings, modelMetadata, updateHostSetting }) },
+      selector({
+        send,
+        updateHostSetting,
+        hostSettings,
+        modelMetadata,
+        contextWindowOverridesView: contextWindow.view,
+        ...chat,
+      }),
+    {
+      getState: () => ({
+        beginPending,
+        send,
+        ...chat,
+        hostSettings,
+        modelMetadata,
+        updateHostSetting,
+        contextWindowOverridesView: contextWindow.view,
+      }),
+    },
   ),
 }));
 vi.mock("../webview/src/i18n", () => ({
@@ -107,6 +130,7 @@ beforeEach(() => {
   beginPending.mockReset();
   chat.pending = null;
   chat.state = null;
+  contextWindow.view = null;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.append(container);
@@ -299,6 +323,43 @@ it("toggles auto-title in the Conversation tab", () => {
   expect(updateHostSetting).toHaveBeenCalledWith({ autoTitle: false });
 });
 
+/**
+ * 「完全信任模式」开关（iflow.superAgent.fullTrust，默认关闭）。
+ *
+ * 三件事钉死：①默认关闭；②打开时把取值写回宿主设置（宿主据此喂给
+ * `shared/super-tool-policy.ts` 的策略层）；③宿主已下发开启时读回宿主值，
+ * 不回落成默认值。可见文案必须写清「默认关闭」与它解除的是哪一层限制
+ * （工具白名单 / MCP 服务器白名单），否则用户按不住这个开关。
+ */
+it("keeps the full-trust switch off by default and says so on screen", () => {
+  hostSettings.superAgentFullTrust = false;
+  renderTab("chat", BASIC_AUTH);
+  const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
+  expect(toggle).toBeTruthy();
+  expect(toggle!.getAttribute("aria-checked")).toBe("false");
+  expect(container.textContent).toContain("默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。");
+});
+
+it("writes the full-trust switch value back to host settings", () => {
+  hostSettings.superAgentFullTrust = false;
+  renderTab("chat", BASIC_AUTH);
+  const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]')!;
+  act(() => toggle.click());
+  expect(updateHostSetting).toHaveBeenCalledWith({ superAgentFullTrust: true });
+});
+
+it("reads the full-trust value back from the host settings", () => {
+  hostSettings.superAgentFullTrust = true;
+  try {
+    renderTab("chat", BASIC_AUTH);
+    const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
+    expect(toggle).toBeTruthy();
+    expect(toggle!.getAttribute("aria-checked")).toBe("true");
+  } finally {
+    hostSettings.superAgentFullTrust = false;
+  }
+});
+
 it("renders runtime groups and commits the Node path on blur", () => {
   renderTab("runtime", BASIC_AUTH);
   expect(container.textContent).toContain("检查点");
@@ -408,6 +469,101 @@ it("keeps the metadata status line out of the disclosure's divided children", ()
   expect(divider?.firstElementChild).toBe(block);
 });
 
+/* --- 上下文窗口覆写（结构化编辑器） --------------------------------------- */
+
+/** 打开设置页的「账户与模型」页并展开「模型元数据」分组。 */
+function renderContextWindowOverrides() {
+  renderApiTab();
+  click("模型元数据");
+}
+
+function overrideInput(label: string): HTMLInputElement {
+  const input = container.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement | null;
+  expect(input).toBeTruthy();
+  return input!;
+}
+
+/** React 受控输入：走原生 setter + input 事件（与项目其它 UI 用例同法）。 */
+function typeInto(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  act(() => {
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+it("rejects an empty model name with an inline error", () => {
+  contextWindow.view = { overrides: [] };
+  renderContextWindowOverrides();
+  typeInto(overrideInput("上下文长度（token）"), "960000");
+  click("添加");
+  expect(container.textContent).toContain("请填写模型名");
+  expect(send).not.toHaveBeenCalledWith(
+    expect.objectContaining({ type: "setContextWindowOverrides" }),
+  );
+});
+
+it("rejects a window value the runtime would silently drop", () => {
+  // "960K" 在运行时被 parseContextWindowOverrides 静默丢弃 —— 设置页必须
+  // 在写盘前就拦住，否则用户以为配好了、实际没生效。
+  contextWindow.view = { overrides: [] };
+  renderContextWindowOverrides();
+  typeInto(overrideInput("模型名"), "deepseek-v4.1-flash");
+  typeInto(overrideInput("上下文长度（token）"), "960K");
+  click("添加");
+  expect(container.textContent).toContain("上下文长度必须是正整数（纯数字，不带 K / M 单位）");
+  expect(send).not.toHaveBeenCalledWith(
+    expect.objectContaining({ type: "setContextWindowOverrides" }),
+  );
+});
+
+it("submits a new override row under its normalized model name", () => {
+  contextWindow.view = { overrides: [] };
+  renderContextWindowOverrides();
+  typeInto(overrideInput("模型名"), "auto/deepseek-v4.1-flash");
+  typeInto(overrideInput("上下文长度（token）"), "960000");
+  click("添加");
+  expect(send).toHaveBeenCalledWith({
+    type: "setContextWindowOverrides",
+    overrides: ["deepseek-v4.1-flash=960000"],
+  });
+});
+
+it("lists override rows under their normalized model name", () => {
+  contextWindow.view = { overrides: ["auto/deepseek-v4.1-flash=960000"] };
+  renderContextWindowOverrides();
+  expect(container.textContent).toContain("deepseek-v4.1-flash");
+  expect(container.textContent).not.toContain("auto/deepseek-v4.1-flash");
+  expect(container.textContent).toContain("960000");
+});
+
+it("marks an unparsable row as not applied instead of hiding it", () => {
+  contextWindow.view = { overrides: ["deepseek=960K"] };
+  renderContextWindowOverrides();
+  expect(container.textContent).toContain("不生效");
+  expect(container.textContent).toContain("deepseek=960K");
+});
+
+it("removes an override row", () => {
+  contextWindow.view = { overrides: ["deepseek-v4.1-flash=960000", "glm-4.6=200000"] };
+  renderContextWindowOverrides();
+  const remove = container.querySelector('button[aria-label="删除覆写 glm-4.6"]') as HTMLButtonElement | null;
+  expect(remove).toBeTruthy();
+  act(() => remove!.click());
+  expect(send).toHaveBeenCalledWith({
+    type: "setContextWindowOverrides",
+    overrides: ["deepseek-v4.1-flash=960000"],
+  });
+});
+
+it("fills the current model's built-in window into the draft", () => {
+  contextWindow.view = { overrides: [], currentModelId: "gemini-2.5-pro", builtinWindow: 1048576 };
+  renderContextWindowOverrides();
+  click("填入建议值");
+  expect(overrideInput("模型名").value).toBe("gemini-2.5-pro");
+  expect(overrideInput("上下文长度（token）").value).toBe("1048576");
+});
+
 it("shows a waiting label until the profile-switch choice is answered", () => {
   chat.pending = { kind: "profile", target: "B" };
   chat.state = { pendingProfileSwitch: { id: "pswitch-1", profileName: "B" } };
@@ -454,6 +610,34 @@ it("starts a new profile from a provider preset", () => {
   expect(fields[1]?.value).toBe("https://api.deepseek.com");
   expect(fields[3]?.value).toBe("deepseek-chat");
   expect(container.textContent).toContain("获取 API Key");
+});
+
+/**
+ * API Key 字段：提示语不能塞进 placeholder。placeholder 既不换行也不省略，
+ * 窄面板下整句被裁掉（「已保存（…fH04），留空则不改」），而且输入框宽度塌缩、
+ * 眼睛按钮悬在框外。已保存提示改为字段下方的次级说明行。
+ */
+it("keeps the saved-key notice out of the API Key placeholder", () => {
+  renderAuthTabWith({
+    authenticated: true,
+    needsSetup: false,
+    saved: { baseUrl: "https://api.deepseek.com", modelName: "deepseek-chat", keyTail: "…fH04" },
+    profiles: [],
+    onboardingDismissed: false,
+  });
+  click("DeepSeek");
+  const keyInput = inputs()[2]!;
+  expect(keyInput.placeholder).toBe("sk-…");
+  expect(keyInput.placeholder).not.toContain("已保存");
+  expect(container.textContent).toContain("已保存（…fH04），留空则不改");
+});
+
+it("omits the saved-key notice when no key is stored", () => {
+  renderAuthTabWith(EMPTY_AUTH);
+  click("DeepSeek");
+  const keyInput = inputs()[2]!;
+  expect(keyInput.placeholder).toBe("sk-…");
+  expect(container.textContent).not.toContain("已保存");
 });
 
 it("opens the provider key page from the preset guidance", () => {

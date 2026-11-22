@@ -118,6 +118,16 @@ async function handle(msg) {
       });
       break;
 
+    case "session/set_tokens_limit": {
+      // 方案D: echo the pushed window so the wire round-trip is assertable.
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { success: true, tokensLimit: msg.params?.tokensLimit },
+      });
+      break;
+    }
+
     case "session/set_think": {
       const enabled = Boolean(msg.params?.thinkEnabled);
       const config = msg.params?.thinkConfig ?? "think";

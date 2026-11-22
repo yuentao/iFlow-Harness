@@ -4,6 +4,7 @@ import {
   EVICT_KEEP_BLOCKS,
   evictBlockPayloads,
   type Block,
+  type ContextWindowOverridesUi,
   type HostSettingsUi,
   type HostToWebview,
   type KnowledgeDocUi,
@@ -109,6 +110,7 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   superAgentIntegration: "merge",
   superAgentMaxWorktrees: 10,
   superAgentKeepWorktree: false,
+  superAgentFullTrust: false,
 };
 
 // --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------
@@ -228,6 +230,13 @@ function createMockHost(): HostApi {
   };
   /** Mirrors the real host's mirrored extension settings (default on). */
   const mockHostSettings: HostSettingsUi = { ...DEFAULT_HOST_SETTINGS };
+  /** Mock of the host's context-window-override channel (rows + the current
+   * model's built-in window, so the browser preview can try the suggestion). */
+  let mockContextWindowOverrides: ContextWindowOverridesUi = {
+    overrides: [],
+    currentModelId: "gemini-2.5-pro",
+    builtinWindow: 1_048_576,
+  };
   /** 「联网补充模型数据」 mock: one in-flight timer (cancel clears it). */
   let mockMetadataTimer: number | null = null;
   /**
@@ -1346,6 +1355,7 @@ function createMockHost(): HostApi {
       if (m.type === "ready") {
         broadcast({ type: "theme", kind: mockTheme });
         broadcast({ type: "hostSettings", ...mockHostSettings });
+        broadcast({ type: "contextWindowOverrides", ...mockContextWindowOverrides });
         // QQ channels are independent of the transcript snapshot (the real
         // host pushes them separately), so the mock must seed them too —
         // otherwise the settings hub's QQ tab renders empty tables.
@@ -1425,6 +1435,12 @@ function createMockHost(): HostApi {
         }
         applyUiScale(mockHostSettings.uiFontSize, mockHostSettings.uiDensity);
         broadcast({ type: "hostSettings", ...mockHostSettings });
+        return;
+      }
+      if (m.type === "setContextWindowOverrides") {
+        mockContextWindowOverrides = { ...mockContextWindowOverrides, overrides: [...m.overrides] };
+        mockHostSettings.contextWindowOverrides = [...m.overrides];
+        broadcast({ type: "contextWindowOverrides", ...mockContextWindowOverrides });
         return;
       }
       if (m.type === "saveAuth") {
@@ -2849,6 +2865,14 @@ interface ChatStore {
    */
   hostSettings: HostSettingsUi;
   updateHostSetting: (patch: Partial<HostSettingsUi>) => void;
+  /**
+   * 上下文窗口覆写的当前视图（设置页结构化编辑器的数据源）：原始覆写行 +
+   * 当前会话模型 + 该模型在内建表里的窗口（给「一键预填」用）。
+   *
+   * 宿主在 webview 就绪时推一次、每次写入成功后推一次；null = 还没收到
+   * （设置页此时显示空列表，等首次推送即可）。
+   */
+  contextWindowOverridesView: ContextWindowOverridesUi | null;
   /** Lifecycle of the settings-panel 「联网补充模型数据」 web-search fetch
    * (see `modelMetadataState`). WebView-local mirror of the host lane: the
    * button shows the spinner while `searching` and the inline error on
@@ -2923,6 +2947,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   superResidueLoading: false,
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
+  contextWindowOverridesView: null,
   modelMetadata: { state: "idle" },
   pending: null,
   promptSeq: 0,
@@ -3094,6 +3119,19 @@ export const useChat = create<ChatStore>((set, get) => ({
       } catch {
         // localStorage can be unavailable in hardened webviews.
       }
+      return;
+    }
+    if (msg.type === "contextWindowOverrides") {
+      // The structured 「上下文窗口覆写」 editor's data source: the current
+      // rows plus the current model's built-in window (for its one-click
+      // suggestion). Full replacement — the host always sends the whole table.
+      set({
+        contextWindowOverridesView: {
+          overrides: [...msg.overrides],
+          ...(msg.currentModelId ? { currentModelId: msg.currentModelId } : {}),
+          ...(msg.builtinWindow !== undefined ? { builtinWindow: msg.builtinWindow } : {}),
+        },
+      });
       return;
     }
     if (msg.type === "modelMetadataState") {

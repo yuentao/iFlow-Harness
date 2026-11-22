@@ -180,6 +180,48 @@ describe("核心接线 · retry 上限与自动重试", () => {
     expect(manager.get(child.id)!.status).toBe("completed");
     await manager.dispose();
   });
+
+  it("缺省 maxAttempts 统一到 DEFAULT(2)：连续 retryable 失败只重试一次就停（不是 Infinity 无限重跑）", async () => {
+    // 不注入 maxAttempts —— 缺省走 DEFAULT_SUPER_MAX_ATTEMPTS=2。连续三次都
+    // retryable 失败，上限只许「首次 + 一次重试」= 2 次，第二次失败后 attempts
+    // 已达上限，不再自动重试。旧实现自动路径 `?? Infinity` / `?? 1` 会分裂。
+    const { manager } = makeFailureManager({
+      plans: ["exit", "exit", "exit"],
+      autoRetryBackoffMs: 30,
+    });
+    const child = manager.spawn({ title: "缺省上限", task: "连续失败" });
+    await pollUntil(() => manager.get(child.id)?.attempts === 2 && manager.get(child.id)?.status === "failed", 2000);
+    expect(manager.get(child.id)!.attempts).toBe(2);
+    // 再多等几个退避窗口，确认没有第三次尝试（上限确确实实卡在 2）。
+    await settle(250);
+    expect(manager.get(child.id)!.attempts).toBe(2);
+    await manager.dispose();
+  });
+
+  it("两条重试路径并发撞车时重入锁让 attempt 只 +1、只入队一次（不重复执行）", async () => {
+    // 退避窗口开到极大，彻底关掉自动重试这条路径；只留两次「手动」retry 并发。
+    // 旧实现无重入锁：两次 retry 在 await disposeClient 前都读到 attempts=1、
+    // 都通过上限、都 reset + 入队 → 同一子会话跑两遍。
+    const { manager } = makeFailureManager({
+      plans: ["exit", "complete", "complete"],
+      maxAttempts: () => 5,
+      autoRetryBackoffMs: 100000,
+    });
+    const child = manager.spawn({ title: "并发重试", task: "失败一次后并发重试两次" });
+    await pollUntil(() => manager.get(child.id)?.lastError?.kind === "retryable", 1500);
+    expect(manager.get(child.id)!.attempts).toBe(1);
+
+    const [first, second] = await Promise.all([
+      manager.retry(child.id),
+      manager.retry(child.id),
+    ]);
+    // 恰好一条路径拿到重试资格，另一条被重入锁挡下。
+    expect([first, second].filter(Boolean)).toHaveLength(1);
+    // attempt 只 +1（2），不是 +2（3）；第二次尝试最终完成。
+    await pollUntil(() => manager.get(child.id)?.status === "completed", 1500);
+    expect(manager.get(child.id)!.attempts).toBe(2);
+    await manager.dispose();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -288,6 +330,30 @@ describe("核心接线 · 汇报投递 G2 delivered-unacked", () => {
     expect(host.reportDeliveryUnacked.size).toBe(0); // 出账本
     expect(host.pendingSuperReportPrompts.length).toBe(1); // 重新入队重投
     expect(buffer.size).toBe(1); // 缓冲仍在（未 confirm，可重取）
+  });
+
+  it("重投保留 in-flight：同一份终态汇报第二次 drainSettled 拿不到（不重复投递）", () => {
+    // 修 2 的核心回归：中途 Stop / error 的汇报转入 delivered-unacked 账本，
+    // reconcile 重新入队时**必须保留 in-flight 标记**。旧实现 reconcile 先
+    // buffer.release(keys) 清标，下一拍 settleSuperReportsIfReady 的 drainSettled
+    // 会把同一条再取一次 → 队列里两条同一汇报 → 同一份汇报被当成两轮 hidden
+    // prompt 投进主会话（每轮一次主会话完整预填充 + 全部历史）。
+    const { host, buffer, storeState } = makeHostHarness();
+    const session = SETTLED_SESSION();
+    buffer.add([{ session, report: { state: "ready", summary: "做完了", at: 2 } }]);
+    expect(buffer.drainSettled([session])).toHaveLength(1); // 第一次取到，标记 in-flight
+    expect(buffer.drainSettled([session])).toBeNull(); // in-flight 保护，第二次拿不到
+    host.reportRedeliveryMs = 0;
+    host.markReportDelivered(
+      { mainSessionId: "main-1", text: "汇报", reportKeys: ["child-x:1"], final: true },
+      "正文",
+    );
+    storeState.status = "idle";
+    host.reconcileReportDelivery(); // 重投：保留 in-flight，重新入队
+    expect(host.reportDeliveryUnacked.size).toBe(0);
+    expect(host.pendingSuperReportPrompts.length).toBe(1);
+    // 关键：重投后 in-flight 仍在，同一条 drain 不出来 —— 队列里不会出现第二条。
+    expect(buffer.drainSettled([session])).toBeNull();
   });
 
   it("回合中途 streaming：未确认汇报留在账本等待，不 confirm 也不丢", () => {
@@ -559,5 +625,89 @@ describe("批次2A · 残留二次确认令牌与 urgent 写", () => {
       ]),
     ).toBe(true);
     expect(host.noteSuperCriticalChange([{ ...base, status: "failed" }])).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 接线 · 子会话工具白名单进入 session/new settings
+// ---------------------------------------------------------------------------
+
+type SeenNewSession = {
+  cwd: string;
+  mcpServers: readonly unknown[];
+  settings?: Record<string, unknown>;
+};
+
+class SettingsProbeClient {
+  disposed = false;
+  constructor(
+    readonly callbacks: AcpClientCallbacks,
+    private readonly seen: SeenNewSession[],
+  ) {}
+  async newSession(req: SeenNewSession): Promise<{ sessionId: string }> {
+    this.seen.push(req);
+    return { sessionId: "sub-settings-probe" };
+  }
+  async setMode(): Promise<unknown> { return {}; }
+  async setModel(): Promise<unknown> { return {}; }
+  async mcpStatus(): Promise<unknown> { return { available: false, servers: {} }; }
+  async prompt(): Promise<{ stopReason: string }> { return { stopReason: "end_turn" }; }
+  isAlive(): boolean { return true; }
+  cancel(): void {}
+  async dispose(): Promise<void> { this.disposed = true; }
+}
+
+function makeSettingsProbeManager(childSettings?: {
+  allowed_tools?: string[];
+  disallowed_tools?: string[];
+}) {
+  const repoRoot = makeRepo();
+  const seen: SeenNewSession[] = [];
+  const manager = new SuperAgentManager({
+    repoRoot,
+    createClient: async (params) =>
+      new SettingsProbeClient(params.callbacks, seen) as unknown as AcpClient,
+    // 宿主在缺省配置下给的就是 undefined（buildChildSessionSettings([], [])）。
+    childSessionSettings: childSettings ? () => ({ ...childSettings }) : undefined,
+    onSessionsChanged: () => {},
+    onReport: () => {},
+    currentModel: () => null,
+    currentMainSessionId: () => "main-1",
+    integrationMode: () => "manual",
+    maxConcurrentSessions: () => 5,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+  return { manager, seen };
+}
+
+describe("接线 · 子会话工具白名单进入 session/new settings", () => {
+  it("两个白名单皆空（buildChildSessionSettings 返回 undefined）：不传 settings / 无 allowed_tools", async () => {
+    const { manager, seen } = makeSettingsProbeManager(undefined);
+    manager.spawn({ title: "缺省", task: "缺省配置" });
+    await pollUntil(() => seen.length > 0);
+    expect(seen[0]!.settings).toBeUndefined();
+    expect(seen[0]!.settings?.allowed_tools).toBeUndefined();
+  });
+
+  it("工具白名单非空：session/new settings 带 allowed_tools", async () => {
+    const { manager, seen } = makeSettingsProbeManager({
+      allowed_tools: ["read_file", "glob"],
+    });
+    manager.spawn({ title: "白名单", task: "限制工具" });
+    await pollUntil(() => seen.length > 0);
+    expect(seen[0]!.settings?.allowed_tools).toEqual(["read_file", "glob"]);
+  });
+
+  it("与既有 disallowedTools 合并：两种策略同时存在互不覆盖", async () => {
+    const { manager, seen } = makeSettingsProbeManager({
+      allowed_tools: ["read_file"],
+    });
+    manager.spawn(
+      { title: "合并", task: "两种策略" },
+      { policy: { approval: "auto", disallowedTools: ["run_shell_command"] } },
+    );
+    await pollUntil(() => seen.length > 0);
+    expect(seen[0]!.settings?.allowed_tools).toEqual(["read_file"]);
+    expect(seen[0]!.settings?.disallowed_tools).toEqual(["run_shell_command"]);
   });
 });

@@ -12,7 +12,9 @@ import {
   canRetrySuperSession,
   capReportTail,
   clampMaxConcurrentSuperSessions,
+  clampSuperMaxAttempts,
   DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+  DEFAULT_SUPER_MAX_ATTEMPTS,
   describeSuperSessionLine,
   extractSuperActions,
   extractSuperDirectives,
@@ -1021,6 +1023,11 @@ describe("super agent · 汇报", () => {
     expect(text).toContain("改完了");
     // 状态标签是英文（提示词正文面向模型）。
     expect(text).toContain("completed");
+    // 汇报回合走 internal 通道、不带 [子会话看板] 摘要（省 ~1,000 tokens/回合），
+    // 所以提示词必须自带主会话角色锚点 —— 否则主 Agent 会因输入里没有看板标记
+    // 而把自己误判成子会话（system prompt 的角色判定规则），放弃派发后续任务。
+    expect(text).not.toContain("[子会话看板]");
+    expect(text).toContain("You are the MAIN session");
   });
 
   it("空汇报不产出提示词", () => {
@@ -1803,6 +1810,22 @@ describe("超流体并发上限", () => {
     // 2026-11-15 实测：maxConcurrent=10 却只派 4 个，根因是 system prompt
     // 里写死 "At most 4"，不是 clamp。锁住 clamp 对 10 的返回值。
     expect(clampMaxConcurrentSuperSessions(10)).toBe(10);
+  });
+});
+
+describe("子会话尝试上限（统一缺省）", () => {
+  it("缺省 = 2，与 package.json 声明一致（含首次执行）", () => {
+    expect(DEFAULT_SUPER_MAX_ATTEMPTS).toBe(2);
+  });
+
+  it("脏值夹到 1..5，非有限值回落到缺省 2", () => {
+    expect(clampSuperMaxAttempts(0)).toBe(1);
+    expect(clampSuperMaxAttempts(-3)).toBe(1);
+    expect(clampSuperMaxAttempts(1000)).toBe(5);
+    expect(clampSuperMaxAttempts(3)).toBe(3);
+    expect(clampSuperMaxAttempts(Number.NaN)).toBe(2);
+    expect(clampSuperMaxAttempts(Number.POSITIVE_INFINITY)).toBe(2);
+    expect(clampSuperMaxAttempts("8" as unknown as number)).toBe(2);
   });
 });
 

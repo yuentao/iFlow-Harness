@@ -2166,17 +2166,25 @@ export function completePrompt(
  * pure and merely stamps the numbers onto the estimate.
  */
 export interface UsageContext {
-  /** Resolved model context window (null = unknown model, no override). */
+  /** Resolved model context window (null = the host has no authority for this
+   * model — no tier of the five-tier chain landed a number). The value comes
+   * from the SAME resolver that produces the window pushed to the CLI
+   * (`resolveContextWindowAuthority`), so the bar and the CLI can never
+   * disagree about a model's window. */
   contextWindow: number | null;
-  /** True when the window is the conservative fallback (UI labels 估算). */
+  /** True when the window is the conservative fallback (UI labels 估算).
+   * Since 2026-11-22 the host never produces a guessed window (the bar and
+   * the CLI share one resolver that returns "no authority" instead), so this
+   * stays false; the field is kept so older hosts' snapshots stay valid. */
   estimated: boolean;
   /** Unit price per million tokens (null = no price known → no cost shown). */
   costPrice: { input: number; output: number } | null;
-  /** U1 provenance — source of `contextWindow` (user / builtin-table /
-   * fallback-estimate / ai-supplement). Null/omitted means no attributable
-   * number (null model id); the reducer must not stamp a source in that case.
-   * The panel computes this in the same place as `contextWindow` (its resolver
-   * calls resolveContextWindowWithSource) so value and label never drift. */
+  /** U1 provenance — source of `contextWindow` (user / profile / settings /
+   * builtin-table / ai-supplement). Null/omitted means no attributable number
+   * (null model id, or no tier landed a value); the reducer must not stamp a
+   * source in that case. The panel computes this in the same place as
+   * `contextWindow` (its resolver calls resolveContextWindowAuthority) so
+   * value and label never drift. */
   windowSource?: ModelMetadataSource | null;
   /** U1 provenance — source of the unit price behind `estimatedCost`.
    * Null/omitted when resolveCost found no price (cost has no fallback), so

@@ -112,11 +112,21 @@ jobs:
               ;;
             *)
               # No release yet - create a published one directly with notes + asset.
+              #
+              # --target is REQUIRED: without it `gh release create` creates the
+              # tag at the repository's DEFAULT BRANCH head, not at the commit
+              # whose .vsix was just built. Empirically every historical tag was
+              # wrong: v3.11.0 points at 2cc69acc (package.json version 3.2.7)
+              # while the published artifact came from release HEAD 83194b8
+              # (3.11.0). GITHUB_SHA is the commit that triggered this run and
+              # the one actions/checkout checked out, so it is the commit the
+              # artifact was built from.
               echo "Creating new published release for $TAG"
               printf '%s' "$RELEASE_NOTES" > /tmp/release_notes.md
               gh release create "$TAG" \
                 --title "v${{ steps.changelog.outputs.version }}" \
                 --notes-file /tmp/release_notes.md \
+                --target "$GITHUB_SHA" \
                 "$ASSET"
               rm -f /tmp/release_notes.md
               ;;

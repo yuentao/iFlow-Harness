@@ -245,22 +245,31 @@ describe("QQ 出站 — 系统通知近似转述短窗去重", () => {
     expect(f.delivered.length).toBe(2);
   });
 
-  it("最终答复与近期中间正文高度相似时只落盘收尾、不重复投递", async () => {
+  it("最终答复的完整汇报仍被投递（与近期中间正文措辞相近也不吞掉终局正文）", async () => {
     const f = makeServiceFixture();
     const taskId = await injectedMainTask(f);
     f.delivered.length = 0;
 
+    // 中间进度正文：措辞简短，只说取消与另派。
     await f.service.deliverMainTurnText(taskId, "打包任务已经取消，已经另外派了一个新的打包任务去做");
     expect(f.delivered.length).toBe(1);
+
+    // 汇总轮交回的完整汇报：前缀与进度措辞高度相似（足以命中短窗相似去重），
+    // 但带有进度里没有的终局信息（构建完成 / 镜像推送 / 版本号）。
+    // 回归 84e0501 曾据此走 suppressDelivery 把完整汇报吞掉 —— 必须不再发生。
+    const finalReport =
+      "打包任务已经取消，已经另外派了一个新的打包任务去做；新任务已构建完成并推送镜像，版本 v2.3.1，全部测试通过";
     await f.service.completeMainFinalAnswer({
       taskId,
-      text: "打包任务已取消，已另外派了新的打包任务去做",
+      text: finalReport,
       stopReason: "end_turn",
     });
-    // 相似：不再投第二条；任务仍照常收尾为终态。
-    expect(f.delivered.length).toBe(1);
+
+    // 终局完整汇报必须真正投递到 QQ，不能被当成「重复转述」吞掉。
+    expect(f.delivered.some((item) => item.text.includes("新任务已构建完成并推送镜像"))).toBe(true);
     expect(f.service.getTask(taskId)?.status).toBe("succeeded");
-    expect(f.store.events.some((e) => e.type === "task_answer_deduped")).toBe(true);
+    // 完整汇报不是「相似去重丢弃」，不应留下 deduped 事件。
+    expect(f.store.events.some((e) => e.type === "task_answer_deduped")).toBe(false);
   });
 
   it("真实用户消息触发的独立答复仍正常投递（未被去重误杀）", async () => {

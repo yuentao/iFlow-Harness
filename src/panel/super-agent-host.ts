@@ -38,8 +38,12 @@ import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, locateNodeExecutable } from "../acp/cli-locator.js";
 import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
 import { loadCredentials } from "../acp/auth.js";
-import { tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
-import { parseCostTable, resolveCost } from "../../shared/context-window.js";
+import { resolveCliTokensLimit, tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
+import {
+  buildChildSessionSettingsForTrust,
+  effectiveMcpServerNamesForTrust,
+} from "../../shared/super-tool-policy.js";
+import { parseContextWindowOverrides, parseCostTable, resolveCost } from "../../shared/context-window.js";
 import {
   type Block,
   type ContextRefUi,
@@ -64,8 +68,10 @@ import {
   buildSuperMergeRequestPrompt,
   clampMaxConcurrentSuperSessions,
   clampMaxSuperWorktrees,
+  clampSuperMaxAttempts,
   DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   DEFAULT_MAX_SUPER_WORKTREES,
+  DEFAULT_SUPER_MAX_ATTEMPTS,
   extractSuperActions,
   fromPersistedSuperSession,
   isTerminalSuperStatus,
@@ -155,7 +161,8 @@ export interface SuperAgentHostCallbacks {
   deliverQqMainIntermediateText(...args: Parameters<QqHost["deliverQqMainIntermediateText"]>): ReturnType<QqHost["deliverQqMainIntermediateText"]>;
   forwardQqMainTaskChildQuestion(...args: Parameters<QqHost["forwardQqMainTaskChildQuestion"]>): ReturnType<QqHost["forwardQqMainTaskChildQuestion"]>;
   forwardQqTaskQuestion(...args: Parameters<QqHost["forwardQqTaskQuestion"]>): ReturnType<QqHost["forwardQqTaskQuestion"]>;
-  materializeSystemPrompt(): Promise<string | null>;
+  /** Materialise the system-prompt file for the CLI; child sessions pass "child". */
+  materializeSystemPrompt(variant?: "main" | "child"): Promise<string | null>;
   mcpProjectCwd(): string | null;
   notifyOs(event: OsNotifyEvent, text: string): boolean;
   postToWebview(message: unknown): void;
@@ -165,6 +172,13 @@ export interface SuperAgentHostCallbacks {
   refreshMcpStatusFromBroker(): void;
   resolveEntry(): string;
   resolveWorkspaceHandshakeCreds(): Promise<OpenAiCompatCredentials | null>;
+  /** The spawn-env patch carrying the effective context window
+   * (`IFLOW_TOKENS_LIMIT`). The panel owns it so the main session and every
+   * child session share ONE resolution — including the cold-start lookup-key
+   * fallbacks. Optional: a host built without the panel (tests) falls back to
+   * the same resolver with fewer key facts (the store's model) — never to
+   * "push nothing". */
+  tokensLimitEnv?: () => { IFLOW_TOKENS_LIMIT?: string };
   chunkText(content: unknown): string;
   sendPrompt(
     text: string,
@@ -300,7 +314,7 @@ export class SuperAgentHost {
   private deliverQqMainIntermediateText(...args: Parameters<SuperAgentHostCallbacks["deliverQqMainIntermediateText"]>) { return this.deps.deliverQqMainIntermediateText(...args); }
   private forwardQqMainTaskChildQuestion(...args: Parameters<SuperAgentHostCallbacks["forwardQqMainTaskChildQuestion"]>) { return this.deps.forwardQqMainTaskChildQuestion(...args); }
   private forwardQqTaskQuestion(...args: Parameters<SuperAgentHostCallbacks["forwardQqTaskQuestion"]>) { return this.deps.forwardQqTaskQuestion(...args); }
-  private materializeSystemPrompt() { return this.deps.materializeSystemPrompt(); }
+  private materializeSystemPrompt(variant: "main" | "child" = "main") { return this.deps.materializeSystemPrompt(variant); }
   private mcpProjectCwd() { return this.deps.mcpProjectCwd(); }
   private notifyOs(...args: Parameters<SuperAgentHostCallbacks["notifyOs"]>) { return this.deps.notifyOs(...args); }
   private postToWebview(message: unknown): void { this.deps.postToWebview(message); }
@@ -1181,6 +1195,20 @@ export class SuperAgentHost {
       // manager asks for entries the broker (when any server is configured) is
       // already listening. Read lazily: a child spawned later still sees it.
       childMcpServers: () => this.mcpBroker?.sessionServers() ?? [],
+      // 完全信任模式：实时读，开启后子会话直接跑在主仓工作区、不收窄工具/MCP、
+      // 任务书允许 push/PR/合并。缺省 false 保持既有行为逐字节不变。
+      fullTrust: () =>
+        vscode.workspace.getConfiguration("iflow").get<boolean>("superAgent.fullTrust", false),
+      // 子会话工具白名单：实时读配置，缺省两个数组都是 [] → 纯函数返回
+      // undefined → newSession 不带 settings（既有行为逐字节不变）。MCP
+      // 白名单也传进去（它的收窄在 spawn 层完成，settings 里不会多出键）。
+      // 完全信任时纯函数直接返回 undefined，忽略用户配置的白名单。
+      childSessionSettings: () =>
+        buildChildSessionSettingsForTrust(
+          vscode.workspace.getConfiguration("iflow").get<boolean>("superAgent.fullTrust", false),
+          vscode.workspace.getConfiguration("iflow").get<string[]>("superAgent.childToolAllowlist", []),
+          vscode.workspace.getConfiguration("iflow").get<string[]>("superAgent.childMcpServerAllowlist", []),
+        ),
       onSessionsChanged: (sessions) => {
         this.store.setSuperSessions(sessions);
         // 批次2A 项6：终态转换 / 失败分类（lastError）/ 改动去向（integration）
@@ -1255,6 +1283,21 @@ export class SuperAgentHost {
         void this.drainSuperMerges();
       },
       currentModel: () => this.store.getState().currentModelId,
+      // 方案D：子会话 set_model 成功后同步该模型的有效上下文窗口。与主会话
+      // 同一 resolver、同一口径（user override → active profile → settings
+      // 顶层 → 内建表 → 无依据不推），绝不推兜底估算。宿主解析窗口、管理器
+      // 只负责串行 await 调用。
+      setTokensLimit: async (client, sessionId, modelId) => {
+        const resolved = resolveCliTokensLimit({
+          modelId,
+          overrides: parseContextWindowOverrides(
+            vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
+          ),
+        });
+        if (resolved.limit !== undefined) {
+          await client.setTokensLimit(sessionId, resolved.limit);
+        }
+      },
       // 子会话归属当前主会话：归档按它分文件，恢复历史会话时按它取回。
       currentMainSessionId: () => this.currentMainSessionId(),
       // Child sessions spend the same money as the main session: reuse the
@@ -1276,6 +1319,18 @@ export class SuperAgentHost {
           vscode.workspace
             .getConfiguration("iflow")
             .get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
+        ),
+      // 子会话的总尝试次数上限（含首次）—— `iflow.superAgent.maxAttempts`。
+      //
+      // **接线到运行时是这个设置存在的全部意义**：声明了却从不读 = 空设置
+      // （陷阱 #14），而后果是重试上限在运行时分裂成「手动=无限 / 自动=1」，
+      // 用户把上限调到 1 也照样被多跑几轮（每轮都是一整个子会话的 token）。
+      // 缺省与 package.json 声明的默认值一致（DEFAULT_SUPER_MAX_ATTEMPTS）。
+      maxAttempts: () =>
+        clampSuperMaxAttempts(
+          vscode.workspace
+            .getConfiguration("iflow")
+            .get<number>("superAgent.maxAttempts", DEFAULT_SUPER_MAX_ATTEMPTS),
         ),
       // 默认关闭 = 子会话正常完成后回收工作目录（分支一律保留）。失败/中断
       // 从不回收，重试要复用现场。每次实时读，改完对下一个结束的子会话生效。
@@ -1381,10 +1436,43 @@ export class SuperAgentHost {
     // broker 为空（没有配置 / 启动失败）时传空数组 → 哨兵 → 子会话无 MCP，
     // 与启动失败时的 toast 一起如实暴露，绝不伪造共享。
     const broker = await this.ensureMcpBroker();
+    const brokerNames = broker?.names() ?? [];
+    const fullTrust = vscode.workspace
+      .getConfiguration("iflow")
+      .get<boolean>("superAgent.fullTrust", false);
+    const mcpAllowlist = vscode.workspace
+      .getConfiguration("iflow")
+      .get<string[]>("superAgent.childMcpServerAllowlist", []);
     const { args } = buildAcpCommand(entry, includeDirectories, {
-      mcpServerNames: broker?.names() ?? [],
+      // 完全信任：忽略白名单，用 broker 全量 server；broker 为空时不传该参数
+      // （绝不退化成「无 MCP」哨兵）。非完全信任时逐字沿用既有表达式，默认
+      // 行为不变。
+      mcpServerNames: effectiveMcpServerNamesForTrust(fullTrust, mcpAllowlist, brokerNames),
     });
-    const systemPromptFile = await this.materializeSystemPrompt();
+    // Same effective context window as the main session (see panel.ts
+    // spawnEnv), resolved through the very same five-tier authority chain
+    // (user override → active profile → settings top-level → curated table →
+    // nothing). Without this the child falls back to the CLI's own tiny
+    // built-in default and compresses its baseline immediately on start.
+    //
+    // The panel computes the patch (ONE site for both spawn paths) so the
+    // cold-start lookup-key fallbacks — store's model → pending switch →
+    // workspace model → kernel profile's modelName — apply here too: the
+    // child's CLI is spawned long before any `currentModelId` exists.
+    //
+    // A host that does not wire the callback (a standalone SuperAgentHost,
+    // e.g. in tests) must not SILENTLY lose the limit — that is exactly the
+    // "window falls back to the CLI's 65k" symptom. The degraded branch uses
+    // the SAME resolver, only with fewer key facts (the store's model).
+    const childTokensLimitEnv =
+      this.deps.tokensLimitEnv?.() ??
+      tokensLimitEnvFromSettings({
+        modelId: this.store.getState().currentModelId,
+        overrides: parseContextWindowOverrides(
+          vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
+        ),
+      });
+    const systemPromptFile = await this.materializeSystemPrompt("child");
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
       IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile(),
@@ -1394,9 +1482,9 @@ export class SuperAgentHost {
       // 会跳过值为 undefined 的环境变量），即便用户 shell 里设了也不继承。
       IFLOW_SUPER_TOOL: undefined,
       // Same effective context window as the main session: without this the
-      // child falls back to 128000 (threshold 102400) and compresses its
-      // ~103000-token baseline immediately on start.
-      ...tokensLimitEnvFromSettings(),
+      // child falls back to the CLI's own 128000/65000 default and compresses
+      // its baseline immediately on start.
+      ...childTokensLimitEnv,
     };
     if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
     const client = new AcpClient(
@@ -2632,6 +2720,20 @@ export class SuperAgentHost {
         const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
           delegateOnBusy: false,
           hidden: true,
+          // **internal：纯内部回灌，不附加看板摘要。**
+          //
+          // 汇报回合的正文已经自带这一批子会话的终态（[子会话状态上报] + 逐条
+          // 汇报 + 「还有 N 个在跑」），而 sendPrompt 在每个主会话回合开头还会
+          // 再注入一份**完整看板摘要**（id / 状态 / 分支 / 集成结果 / 派发
+          // 提示 / 管理动作说明，约 1,000 tokens）。逐个即时汇报意味着子会话
+          // 结束一个就回灌一次 —— 这份额外开销按回合数线性叠加，而主会话每
+          // 一轮还要重付全部历史，正是 token 过度消耗的主要来源。
+          //
+          // internal 只影响「这一轮要不要额外挂看板摘要」以及会话改名 / 快照
+          // （hidden 已经覆盖后两者），**不影响这一轮是不是真实的主会话回合**
+          // —— 汇报仍然是主会话的一次真实 prompt（模型在自己的上下文里读到
+          // 结果并接着推进）。
+          internal: true,
           // 这一轮是「主会话汇报子会话结果」：收尾时用 superReport 事件 +
           // done 音（与单个子会话收尾的 childDone + child 音区分开）。
           reportTurn: true,
@@ -2739,7 +2841,8 @@ export class SuperAgentHost {
    *
    * - Stop 仍压住 → 留在账本与缓冲，等用户下一次消息解除压制；
    * - streaming / error → 留在账本，下一拍再看；
-   * - idle 且未到重投阈值 → 释放 in-flight、重新入队重投；
+   * - idle 且未到重投阈值 → 保留 in-flight 标记、重新入队重投（同一份汇报
+   *   仍然只会在队列里出现一次）；
    * - 达 maxReportDeliveryAttempts → 兜底 confirm（QQ 兜底正文已保留真实结论）。
    */
   reconcileReportDelivery(): void {
@@ -2765,8 +2868,15 @@ export class SuperAgentHost {
         );
         continue;
       }
-      // 回合已恢复：释放 in-flight 标记，重新入投递队列重投。
-      buffer?.release(rec.item.reportKeys ?? []);
+      // 回合已恢复：**保留 in-flight 标记**，重新入投递队列重投。
+      //
+      // 刻意**不** release：这条汇报此刻仍然「已交给投递队列」（下面就把同一个
+      // item 重新 push 进 pendingSuperReportPrompts）。一旦 release，下一拍心跳
+      // 里的 settleSuperReportsIfReady 会用 drainSettled 把缓冲里**同一条**
+      // 汇报再取一次 → 队列里出现两条同一条汇报的条目 → 同一份汇报被当成两轮
+      // hidden prompt 投进主会话（每轮一次主会话的完整预填充 + 历史）。
+      // in-flight 标记就是这件事的幂等键（键 = 子会话 id : attempt，见
+      // superReportKey）；真正投成功时由 confirm 一次性清掉。
       this.reportDeliveryUnacked.delete(key);
       this.pendingSuperReportPrompts.push(rec.item);
       requeued = true;

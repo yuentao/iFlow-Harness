@@ -15,9 +15,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
+import * as vscode from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import { MCP_SERVER_ALLOWLIST_FLAG, MCP_SERVER_ALLOWLIST_SENTINEL } from "../src/acp/cli-locator.js";
+import { loadPrompt } from "../prompts/index.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -94,6 +96,14 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     iflowHome = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-spawnenv-home-"));
     process.env.IFLOW_HOME = iflowHome;
     delete process.env.IFLOW_SUPER_TOOL;
+    // 宿主 shell 可能带着真实的 IFLOW_SYSTEM_MD；不清掉会掩盖宿主自己设的值。
+    delete process.env.IFLOW_SYSTEM_MD;
+    // stub 默认没有 workspace.fs，materializeSystemPrompt 会写入失败而返回 null；
+    // 这里只补最小读写，其它 fs 调用仍保持原来的报错行为。
+    (vscode.workspace as unknown as { fs: unknown }).fs = {
+      readFile: (uri: { fsPath: string }) => fs.promises.readFile(uri.fsPath),
+      writeFile: (uri: { fsPath: string }, data: Uint8Array) => fs.promises.writeFile(uri.fsPath, data),
+    };
     panel = new ChatPanel(makeContext(storageDir), {
       entryOverride: mockAgent,
       workspaceRoot: here,
@@ -106,7 +116,9 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     delete process.env.ACP_MOCK_ENV_DUMP;
     delete process.env.ACP_MOCK_ARGV_DUMP;
     delete process.env.IFLOW_SUPER_TOOL;
+    delete process.env.IFLOW_SYSTEM_MD;
     delete process.env.IFLOW_HOME;
+    delete (vscode.workspace as unknown as { fs?: unknown }).fs;
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     fs.rmSync(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
@@ -125,6 +137,96 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     expect(env.IFLOW_SUPER_TOOL).toBe("1");
     // 既有契约没被破坏：harness 标记仍在。
     expect(env.IFLOW_HARNESS).toBe("1");
+    // 主会话仍指向原 system-prompt.md，内容逐字节等于主模板（child 变体不得串味）。
+    expect(path.resolve(env.IFLOW_SYSTEM_MD!)).toBe(path.resolve(storageDir, "system-prompt.md"));
+    expect(fs.readFileSync(env.IFLOW_SYSTEM_MD!, "utf8")).toBe(loadPrompt("system-prompt"));
+  }, 30000);
+
+  /**
+   * 冷启动：spawn env 是在 CLI 的 `session/new` 返回**之前**构造的，所以扩展
+   * 刚激活时 store 的 `currentModelId` 还是 null。此时用户的
+   * `iflow.contextWindowOverrides` 与宿主内建表都必须靠「内核 profile 的
+   * modelName」兜底命中 —— 否则 CLI 会退回自己的 65k deepseek 默认值
+   * （「每轮都触发上下文自动压缩」的根因）。
+   */
+  it("冷启动（currentModelId 尚为 null）时用内核 profile 的 modelName 兜底命中用户覆写", async () => {
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        currentApiProfile: "main",
+        apiProfiles: { main: { modelName: "auto/deepseek-v4.1-flash" } },
+      }),
+      "utf8",
+    );
+    setConfigOverrides({
+      nodePath: process.execPath,
+      contextWindowOverrides: ["deepseek-v4.1-flash=960000"],
+    });
+    const dump = path.join(storageDir, "coldstart-override-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = dump;
+
+    await (panel as unknown as SpawnEnvInternals).ensureClient();
+
+    expect(readDumpedEnv(dump).IFLOW_TOKENS_LIMIT).toBe("960000");
+  }, 30000);
+
+  it("冷启动时内核 profile 的 modelName 命中内建对照表（1M）", async () => {
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        currentApiProfile: "main",
+        apiProfiles: { main: { modelName: "auto/deepseek-v4.1-flash" } },
+      }),
+      "utf8",
+    );
+    setConfigOverrides({ nodePath: process.execPath, contextWindowOverrides: [] });
+    const dump = path.join(storageDir, "coldstart-builtin-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = dump;
+
+    await (panel as unknown as SpawnEnvInternals).ensureClient();
+
+    expect(readDumpedEnv(dump).IFLOW_TOKENS_LIMIT).toBe("1000000");
+  }, 30000);
+
+  it("冷启动且毫无依据时不推 IFLOW_TOKENS_LIMIT（绝不推猜测的默认值）", async () => {
+    // 内核 settings.json 不存在（iflowHome 是空的临时目录）→ 全链路无依据。
+    setConfigOverrides({ nodePath: process.execPath, contextWindowOverrides: [] });
+    const dump = path.join(storageDir, "coldstart-none-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = dump;
+
+    await (panel as unknown as SpawnEnvInternals).ensureClient();
+
+    expect(readDumpedEnv(dump).IFLOW_TOKENS_LIMIT).toBeUndefined();
+  }, 30000);
+
+  it("子会话与主会话共用同一兜底查表（冷启动时子会话也拿到兜底窗口）", async () => {
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        currentApiProfile: "main",
+        apiProfiles: { main: { modelName: "auto/deepseek-v4.1-flash" } },
+      }),
+      "utf8",
+    );
+    setConfigOverrides({
+      nodePath: process.execPath,
+      contextWindowOverrides: ["deepseek-v4.1-flash=960000"],
+    });
+    const dump = path.join(storageDir, "child-coldstart-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = dump;
+
+    const child = await (panel as unknown as SpawnEnvInternals).createSuperClient({
+      cwd: here,
+      allowedRoots: [here],
+      includeDirectories: [],
+      label: "spawn-env-child-coldstart",
+      callbacks: {},
+    });
+    try {
+      expect(readDumpedEnv(dump).IFLOW_TOKENS_LIMIT).toBe("960000");
+    } finally {
+      await child.dispose();
+    }
   }, 30000);
 
   it("超流体的 spawn env 没有 IFLOW_SUPER_TOOL（即便宿主 process.env 里设了）", async () => {
@@ -146,6 +248,9 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
       expect(env.IFLOW_SUPER_TOOL).toBeUndefined();
       // 子会话仍是 harness 子进程，只是没有派发工具。
       expect(env.IFLOW_HARNESS).toBe("1");
+      // 子会话必须拿裁剪版系统提示（去掉主会话编排段）。
+      expect(path.resolve(env.IFLOW_SYSTEM_MD!)).toBe(path.resolve(storageDir, "system-prompt-child.md"));
+      expect(fs.readFileSync(env.IFLOW_SYSTEM_MD!, "utf8")).toBe(loadPrompt("system-prompt-child"));
     } finally {
       await child.dispose();
     }
@@ -286,4 +391,72 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
       await child.dispose();
     }
   }, 30000);
+
+  it("子会话 MCP 白名单：缺省为 broker 全量，非空取交集且过滤未知名字", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-spawnenv-allowlist-"));
+    const spawnLog = path.join(dir, "spawns.log");
+    fs.writeFileSync(spawnLog, "");
+    try {
+      fs.writeFileSync(
+        path.join(iflowHome, "settings.json"),
+        JSON.stringify({
+          mcpServers: {
+            alpha: {
+              command: process.execPath,
+              args: [fakeMcpServer, "--name", "alpha"],
+              env: { FAKE_MCP_SPAWN_LOG: spawnLog },
+            },
+            beta: {
+              command: process.execPath,
+              args: [fakeMcpServer, "--name", "beta"],
+              env: { FAKE_MCP_SPAWN_LOG: spawnLog },
+            },
+          },
+        }),
+        "utf8",
+      );
+      const spawnChild = async (label: string, dumpFile: string): Promise<SpawnClient> => {
+        process.env.ACP_MOCK_ARGV_DUMP = path.join(storageDir, dumpFile);
+        return (panel as unknown as SpawnEnvInternals).createSuperClient({
+          cwd: here,
+          allowedRoots: [here],
+          includeDirectories: [],
+          label,
+          callbacks: {},
+        });
+      };
+
+      // 缺省（空 allowlist）：必须等于接线前的原表达式 —— broker 全量 server 名。
+      setConfigOverrides({
+        nodePath: process.execPath,
+        "superAgent.childMcpServerAllowlist": [],
+      });
+      const all = await spawnChild("spawn-argv-child-all", "child-allowlist-all-argv.json");
+      try {
+        const argv = readDumpedArgv(path.join(storageDir, "child-allowlist-all-argv.json"));
+        expect([...allowedMcpNames(argv)].sort()).toEqual(["alpha", "beta"]);
+        expect(argv).not.toContain(MCP_SERVER_ALLOWLIST_SENTINEL);
+      } finally {
+        await all.dispose();
+      }
+
+      // 非空 allowlist：只保留 broker 里真实存在的名字，未知名字被过滤。
+      setConfigOverrides({
+        nodePath: process.execPath,
+        "superAgent.childMcpServerAllowlist": ["beta", "does-not-exist"],
+      });
+      const picked = await spawnChild("spawn-argv-child-picked", "child-allowlist-picked-argv.json");
+      try {
+        const argv = readDumpedArgv(path.join(storageDir, "child-allowlist-picked-argv.json"));
+        expect(allowedMcpNames(argv)).toEqual(["beta"]);
+        expect(allowedMcpNames(argv)).not.toContain("does-not-exist");
+        expect(argv).not.toContain(MCP_SERVER_ALLOWLIST_SENTINEL);
+      } finally {
+        await picked.dispose();
+      }
+    } finally {
+      setConfigOverrides({ nodePath: process.execPath });
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  }, 60000);
 });

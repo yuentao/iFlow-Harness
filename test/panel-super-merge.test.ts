@@ -10,6 +10,10 @@
  *  3. 排队的是「待派发的合并子会话」，不是一条待发送的提示词。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// 本文件跑真实 git（建仓 / worktree / merge --no-ff），在 CI runner 与全量
+// 并发下单个用例可能跑十几秒。按文件放宽超时，不动全局 testTimeout。
+vi.setConfig({ testTimeout: 60000, hookTimeout: 60000 });
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -433,7 +437,7 @@ describe("S1 · 自动合并的两条让路分支（真实 git，工作区不变
     git(repo, "commit", "-qm", "base");
     baseRef = git(repo, "rev-parse", "HEAD");
     mgr = makeMergeManager(repo);
-  });
+  }, 60000);
 
   afterEach(async () => {
     await mgr.dispose();
@@ -441,7 +445,7 @@ describe("S1 · 自动合并的两条让路分支（真实 git，工作区不变
       fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
     fs.rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-  });
+  }, 60000);
 
   it("已跟踪文件与合并改动路径重叠：跳过、保留分支，主仓文件与 HEAD 不变", async () => {
     addChildWithCommit("s-overlap", "iflow/super/overlap", "shared.txt", "child\n");
@@ -460,7 +464,7 @@ describe("S1 · 自动合并的两条让路分支（真实 git，工作区不变
     expect(git(repo, "rev-parse", "HEAD")).toBe(beforeHead);
     expect(git(repo, "branch", "--list", "iflow/super/overlap")).toContain("iflow/super/overlap");
     expect(fs.existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(false);
-  });
+  }, 60000);
 
   it("同名未跟踪文件挡住合并：拒绝且工作区原样，绝不替用户 add/commit/stash", async () => {
     addChildWithCommit("s-untracked", "iflow/super/untracked", "new.txt", "child\n");
@@ -482,7 +486,7 @@ describe("S1 · 自动合并的两条让路分支（真实 git，工作区不变
       "iflow/super/untracked",
     );
     expect(fs.existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(false);
-  });
+  }, 60000);
 
   it("多子会话同时完成：集成走串行链，逐个判定，不会并发叠加出坏合并", async () => {
     addChildWithCommit("s-a", "iflow/super/a-task", "from-a.txt", "a\n");
@@ -496,5 +500,5 @@ describe("S1 · 自动合并的两条让路分支（真实 git，工作区不变
     expect(mgr.get("s-b")?.integration?.state).toBe("merged");
     expect(Number(git(repo, "rev-list", "--count", "--merges", `${baseRef}..HEAD`))).toBe(2);
     expect(fs.existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(false);
-  }, 15000);
-});
+  }, 60000);
+}, 60000);

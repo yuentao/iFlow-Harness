@@ -3,10 +3,10 @@ import path from "node:path";
 import os from "node:os";
 import {
   externalSuperWorktreeRoot,
+  homeSuperWorktreeRoot,
   isSuperWorktreeRootSafe,
   resolveSuperWorktreeRoot,
   sanitizeWorktreeName,
-  superIsolationDir,
   type SuperWorktreeRootProbe,
 } from "../src/panel/worktree.js";
 
@@ -52,17 +52,23 @@ describe("super worktree root · 移出主仓目录树", () => {
     expect(sanitizeWorktreeName("")).toBe("task");
   });
 
-  it("④ 安全检查通过选新位置，不通过回退到主仓内旧位置", () => {
+  it("④ 安全检查通过选新位置，不通过回退到 CLI 全局目录（不再回退主仓内）", () => {
     const repoRoot = path.join(os.tmpdir(), "iflow-resolve", "repo");
     const parent = path.dirname(repoRoot);
+    const globalDir = path.join(os.tmpdir(), "iflow-resolve", "global-iflow");
 
-    const safe = resolveSuperWorktreeRoot(repoRoot, probeWith([]));
+    const safe = resolveSuperWorktreeRoot(repoRoot, probeWith([]), { globalDir });
     expect(safe.external).toBe(true);
     expect(safe.root).toBe(externalSuperWorktreeRoot(repoRoot));
 
-    const unsafe = resolveSuperWorktreeRoot(repoRoot, probeWith([path.join(parent, "AGENTS.md")]));
-    expect(unsafe.external).toBe(false);
-    expect(unsafe.root).toBe(superIsolationDir(repoRoot, "worktrees"));
-    expect(unsafe.root.startsWith(repoRoot)).toBe(true);
+    const unsafe = resolveSuperWorktreeRoot(
+      repoRoot,
+      probeWith([path.join(parent, "AGENTS.md")]),
+      { globalDir },
+    );
+    expect(unsafe.external).toBe(true);
+    expect(unsafe.root).toBe(homeSuperWorktreeRoot(repoRoot, globalDir));
+    // 主仓内旧落点不再作为回退：祖先链仍会命中主仓 AGENTS.md，双份注入。
+    expect(unsafe.root.startsWith(repoRoot)).toBe(false);
   });
 });

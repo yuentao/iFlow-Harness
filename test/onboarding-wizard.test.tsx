@@ -162,6 +162,30 @@ it("prefills a preset and saves the credentials", () => {
   expect(container.textContent).toContain("第 2 / 3 步");
 });
 
+/**
+ * API Key 字段：placeholder 保持短文案，「已保存（…）」改为字段下方的次级说明行
+ * ——placeholder 既不换行也不省略，窄面板下整句会被裁掉。
+ */
+it("keeps the saved-key notice out of the API Key placeholder", () => {
+  renderWizard({
+    authenticated: true,
+    needsSetup: false,
+    saved: { baseUrl: "https://api.deepseek.com", modelName: "deepseek-chat", keyTail: "…fH04" },
+    profiles: [],
+    onboardingDismissed: false,
+  });
+  const keyInput = inputAt(1);
+  expect(keyInput.placeholder).toBe("sk-…");
+  expect(keyInput.placeholder).not.toContain("已保存");
+  expect(container.textContent).toContain("已保存（…fH04），留空则不改");
+});
+
+it("omits the saved-key notice when no key is stored", () => {
+  renderWizard();
+  expect(inputAt(1).placeholder).toBe("sk-…");
+  expect(container.textContent).not.toContain("已保存");
+});
+
 it("validates the API form before saving", () => {
   renderWizard();
   click("DeepSeek");

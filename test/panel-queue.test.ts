@@ -387,7 +387,12 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     expect(reportPrompt).toHaveBeenCalledTimes(1);
     const text = calls[1]!.prompt.map((b) => b.text ?? "").join("\n");
     expect(text).toContain("[子会话状态上报]");
-    expect(text).toContain("[子会话看板]"); // still a main-session turn
+    // 汇报回合走 internal 通道：**不再附加看板摘要**。汇报正文已经自带这一批
+    // 子会话的终态，而看板摘要每回合约 1,000 tokens，逐个即时汇报会按回合数
+    // 线性叠加（用户回合仍然带看板摘要，见下面的用例）。
+    expect(text).not.toContain("[子会话看板]");
+    // 仍是主会话的一次真实回合：角色由汇报协议标记承担（见 shared 的
+    // buildSuperReportPrompt 头部角色锚点）。
     // Hidden instruction: the assistant answers in the transcript, but no
     // user bubble is fabricated for a host-driven turn.
     expect(p.store.getState().blocks.filter((b) => b.kind === "user")).toHaveLength(1);

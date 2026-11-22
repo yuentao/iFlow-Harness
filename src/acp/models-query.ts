@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, mkdirSync, realpathSync } from "node:fs";
+import { rename as renameAsync } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { get as httpGet } from "node:http";
@@ -225,11 +226,146 @@ export function resolveActiveProfileName(
 }
 
 /**
+ * Monotonic counter for temp-file names. Two writes inside the same
+ * millisecond must not pick the same temp path, or they would clobber each
+ * other's payload (and one writer would rename the other's content into
+ * place).
+ */
+let settingsTmpSeq = 0;
+
+/**
+ * A temp path that no concurrent writer can collide with: the pid (unique
+ * among live processes) + a millisecond timestamp (unique across restarts) +
+ * an in-process counter (unique within a millisecond). Same shape as the
+ * memory writer's temp name in src/memory/files.ts#writeAtomic.
+ */
+function uniqueTmpPath(file: string): string {
+  settingsTmpSeq += 1;
+  return `${file}.iflow-harness-tmp-${process.pid}-${Date.now()}-${settingsTmpSeq}`;
+}
+
+/**
+ * Backoff schedule for the atomic replace: five retries, 20ms → 600ms,
+ * 1130ms in total.
+ *
+ * The budget is deliberately small. The sync flavour of the retry (below)
+ * blocks the extension host's event loop, and the host is single-threaded —
+ * every millisecond spent here is a millisecond the webview does not get
+ * painted. ~1.1s is long enough to outlast a transient handle (a reader, an
+ * editor, a virus scanner) and short enough that a stuck write never feels
+ * like a hang.
+ */
+export const ATOMIC_REPLACE_RETRY_DELAYS_MS: readonly number[] = [20, 60, 150, 300, 600];
+
+/**
+ * Error codes that mean "the target is transiently busy".
+ *
+ * Probed on win32 (Node 22, this machine): `renameSync(tmp, file)` over an
+ * EXISTING target fails with **EPERM** while ANY handle is open on that
+ * target — even a plain read handle (`fs.openSync(file, "r")`). Replacing a
+ * file means deleting the old one, and Windows refuses to delete a file that
+ * is open. The refusal is transient (the holder closes within milliseconds),
+ * which is why we retry instead of failing the write.
+ *
+ * ENOENT / EXDEV / EISDIR are NOT retried: the temp file is missing, the
+ * paths live on different volumes, the target is a directory — retrying
+ * cannot help and would only delay the visible failure.
+ */
+const RETRYABLE_REPLACE_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/** True when `error` is a transient "file is busy" failure worth retrying. */
+export function isRetryableReplaceError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
+  return typeof code === "string" && RETRYABLE_REPLACE_CODES.has(code);
+}
+
+/**
+ * Block the current thread for `ms` without burning CPU.
+ *
+ * `Atomics.wait` parks the thread on a shared buffer (the same trick the
+ * repo's cross-process reader probe uses). It DOES block the extension
+ * host's event loop — timers included — which is the price of keeping the
+ * settings write path synchronous: `updateCliSettings` has six call sites
+ * and turning it async would ripple through api-profiles.ts and panel.ts.
+ * The total is capped by {@link ATOMIC_REPLACE_RETRY_DELAYS_MS} (~1.1s).
+ */
+const SLEEP_PARK = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSync(ms: number): void {
+  Atomics.wait(SLEEP_PARK, 0, 0, ms);
+}
+
+/**
+ * Rename `tmp` over `file`, retrying the transient "target is busy" failure.
+ *
+ * Sync flavour (used by the settings writer). Throws the LAST error — the
+ * original Error object, so `code`, `message` and `stack` all survive — when
+ * the retry budget is exhausted; a non-retryable error (ENOENT, EXDEV, …)
+ * is rethrown immediately, without paying any backoff.
+ *
+ * `options.rename` / `options.delaysMs` exist for the tests (a fake rename
+ * that fails N times, a shortened schedule); production callers use the
+ * defaults.
+ */
+export function renameWithRetrySync(
+  tmp: string,
+  file: string,
+  options?: { delaysMs?: readonly number[]; rename?: (from: string, to: string) => void },
+): void {
+  const delays = options?.delaysMs ?? ATOMIC_REPLACE_RETRY_DELAYS_MS;
+  const rename = options?.rename ?? renameSync;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      rename(tmp, file);
+      return;
+    } catch (error) {
+      if (!isRetryableReplaceError(error)) throw error; // ENOENT & friends: retrying is pointless
+      const delay = delays[attempt];
+      if (delay === undefined) throw error; // budget exhausted — rethrow the ORIGINAL error
+      sleepSync(delay);
+    }
+  }
+}
+
+/**
+ * Async flavour of {@link renameWithRetrySync}: same classification, same
+ * schedule, same "throw the last original error" contract — but the backoff
+ * sleeps on the event loop, so nothing else in the host is blocked.
+ *
+ * Used by the memory writer (`src/memory/files.ts#writeAtomic`), whose
+ * callers are already async.
+ */
+export async function renameWithRetry(
+  tmp: string,
+  file: string,
+  options?: {
+    delaysMs?: readonly number[];
+    rename?: (from: string, to: string) => Promise<void>;
+  },
+): Promise<void> {
+  const delays = options?.delaysMs ?? ATOMIC_REPLACE_RETRY_DELAYS_MS;
+  const rename = options?.rename ?? renameAsync;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(tmp, file);
+      return;
+    } catch (error) {
+      if (!isRetryableReplaceError(error)) throw error;
+      const delay = delays[attempt];
+      if (delay === undefined) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+/**
  * Merge `patch` into settings.json without touching anything else.
- * Read-modify-write through a temp file + rename (atomic on Windows and
- * POSIX), so a concurrent external writer (cloud sync) can at worst lose our
- * patch — never its own content. Returns false (caller logs) when the file is
- * missing/unreadable.
+ * Read-modify-write through a temp file + rename — an ATOMIC REPLACE: the
+ * target is never unlinked first, so readers see either the old or the new
+ * content, never "no file at all" and never a half-written file. A concurrent
+ * external writer (cloud sync, the CLI's own saveSettings) can at worst lose
+ * our patch — never its own content. Returns false (caller logs) when the file
+ * is missing/unreadable.
  *
  * `createIfMissing` is for the project scope, whose `<cwd>/.iflow/settings.json`
  * usually does not exist yet: the file is then created (directory included)
@@ -242,6 +378,7 @@ export function updateCliSettings(
   options?: { createIfMissing?: boolean },
 ): boolean {
   const file = settingsPath ?? settingsFilePath();
+  let tmp: string | null = null;
   try {
     let settings = readCliSettings(file);
     if (!settings) {
@@ -250,18 +387,45 @@ export function updateCliSettings(
       settings = {};
     }
     Object.assign(settings, patch);
-    const tmp = `${file}.iflow-harness-tmp`;
+    tmp = uniqueTmpPath(file);
     writeFileSync(tmp, JSON.stringify(settings, null, 2), "utf8");
-    if (existsSync(file)) unlinkSync(file);
-    renameSync(tmp, file);
+    // Atomic replace — and NEVER delete the target first:
+    //   * Node's rename replaces an existing file on Windows (libuv uses
+    //     MOVEFILE_REPLACE_EXISTING) and rename(2) always replaces the
+    //     target on POSIX, so the unlink is pure overhead;
+    //   * the old `unlink + rename` sequence opened a window in which the
+    //     settings file did not exist AT ALL. A concurrent reader (the CLI's
+    //     own saveSettings) saw "no file", treated the disk as empty and
+    //     rewrote the whole file without the user's mcpServers / tokensLimit
+    //     / language / approvalMode — the 竞态丢键 bug;
+    //   * it was catastrophic on its own: when the unlink succeeded and the
+    //     rename then failed, the settings file was gone for good.
+    // A failed rename now leaves the previous content intact.
+    //
+    // Why the retry: on Windows the replace itself can be REFUSED with
+    // EPERM while any handle is open on the target (probed: even a plain
+    // read handle blocks it — replacing a file means deleting the old one,
+    // and Windows will not delete an open file). That refusal is transient
+    // (a reader / editor / scanner closes within milliseconds), so we retry
+    // with a short backoff instead of losing the user's edit. The failure
+    // stays VISIBLE: when the budget is exhausted the error is logged with
+    // its original code + message and `false` is returned, which the panel
+    // surfaces as the "无法写入内核配置 {0}" toast.
+    renameWithRetrySync(tmp, file);
+    tmp = null; // renamed away — nothing to clean up
     return true;
-  } catch {
-    try {
-      const tmp = `${file}.iflow-harness-tmp`;
-      if (existsSync(tmp)) unlinkSync(tmp);
-    } catch {
-      // nothing to clean up
+  } catch (error) {
+    if (tmp) {
+      try {
+        if (existsSync(tmp)) unlinkSync(tmp);
+      } catch {
+        // nothing to clean up
+      }
     }
+    // Never swallow the reason: the caller only sees `false`, so the
+    // original error (code + message) is kept in the host log — otherwise a
+    // transient EPERM and a permanent permission problem look identical.
+    console.warn(`[iflow-harness] failed to write ${file}: ${errorMessage(error)}`);
     return false;
   }
 }
@@ -562,18 +726,23 @@ export function applyThinkingRules(incoming: ThinkingRuleEntry[], file = thinkin
   if (existingText !== null && merged.added + merged.changed === 0) {
     return { added: 0, changed: 0, created: false }; // already in sync — no write churn
   }
-  const tmp = `${file}.iflow-harness-tmp`;
+  const tmp = uniqueTmpPath(file);
   try {
     writeFileSync(tmp, JSON.stringify(merged.file, null, 2), "utf8");
-    if (existingText !== null) unlinkSync(file);
-    renameSync(tmp, file);
+    // Atomic replace, no unlink of the target first — same reasoning as
+    // updateCliSettings(): the file must never be observably missing, and a
+    // failed rename must leave the previous rules intact.
+    // Same Windows transient-EPERM retry as updateCliSettings(): a reader
+    // holding the rules file open blocks the replace for a few ms.
+    renameWithRetrySync(tmp, file);
     return { added: merged.added, changed: merged.changed, created: existingText === null };
-  } catch {
+  } catch (error) {
     try {
       if (existsSync(tmp)) unlinkSync(tmp);
     } catch {
       // nothing to clean up
     }
+    console.warn(`[iflow-harness] failed to write thinking rules ${file}: ${errorMessage(error)}`);
     return { added: 0, changed: 0, created: false, skippedInvalid: true };
   }
 }

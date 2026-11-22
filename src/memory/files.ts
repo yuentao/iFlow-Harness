@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { renameWithRetry } from "../acp/models-query.js";
 
 /**
  * CLI-side memory contract (probed with test/fixtures/probe-memory.mjs, CLI
@@ -138,20 +139,49 @@ export async function statIfExists(file: string): Promise<{ bytes: number; mtime
 }
 
 /**
+ * Monotonic counter for temp-file names. Two writes inside the same
+ * millisecond must not pick the same temp path, or they would clobber each
+ * other's payload (and one writer would rename the other's content into
+ * place).
+ *
+ * Same shape as `settingsTmpSeq` in src/acp/models-query.ts — the two
+ * writers (the settings writer and this memory writer) target DIFFERENT
+ * files, but they share the process, so each needs its own counter.
+ */
+let memoryTmpSeq = 0;
+
+/**
+ * A temp path that no concurrent writer can collide with: the pid (unique
+ * among live processes) + a millisecond timestamp (unique across restarts) +
+ * an in-process counter (unique within a millisecond).
+ */
+function uniqueTmpPath(file: string): string {
+  memoryTmpSeq += 1;
+  return `${file}.iflow-harness-tmp-${process.pid}-${Date.now()}-${memoryTmpSeq}`;
+}
+
+/**
  * Atomic write: temp file in the same directory, then rename. Every writer
  * (the panel and the CLI's save_memory tool) works on the same file, so a
  * concurrent external edit is caught by the caller's expectedHash check; the
  * temp+rename only guarantees readers never see a half-written file.
+ *
+ * The rename is retried on the transient Windows "target is busy" failure —
+ * see `renameWithRetry` in src/acp/models-query.ts for the probed details
+ * (replacing a file means deleting the old one, and Windows refuses to
+ * delete an open file → EPERM while any reader/editor holds a handle). The
+ * async flavour is used here on purpose: the backoff sleeps on the event
+ * loop, so a stuck handle never blocks the extension host.
  */
 export async function writeAtomic(file: string, content: string): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.iflow-harness-tmp-${process.pid}-${Date.now()}`;
+  const tmp = uniqueTmpPath(file);
   try {
     await writeFile(tmp, content, "utf8");
     // Node's rename replaces an existing file on Windows (libuv uses
     // MOVEFILE_REPLACE_EXISTING). Never delete the target first: a failed
     // replace must leave the previous content intact.
-    await rename(tmp, file);
+    await renameWithRetry(tmp, file);
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => {});
     throw error;

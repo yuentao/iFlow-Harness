@@ -25,7 +25,7 @@ import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, en
 import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
 import type { McpBrokerStatus } from "../acp/mcp-broker.js";
 import { deleteKernelApiProfile, migrateKernelApiProfiles, readKernelApiProfiles, setKernelActiveProfile, writeKernelApiProfile } from "../acp/api-profiles.js";
-import { tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
+import { resolveCliTokensLimit, tokensLimitEnvFromSettings, readKernelTokensLimits } from "../acp/cli-tokens-limit.js";
 import {
   getActiveProfileName,
   loadCredentials,
@@ -130,7 +130,12 @@ import { buildSkillPrompt, parseSkillInvocation, type SkillInvocation } from "..
 import { isWithin, memoryHome } from "../memory/files.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
-import { normalizeModelId, parseContextWindowOverrides, parseCostTable, resolveContextWindowWithSource, resolveCostWithSource } from "../../shared/context-window.js";
+import { normalizeModelId, parseContextWindowOverrides, parseCostTable, resolveContextWindowAuthority, resolveCostWithSource } from "../../shared/context-window.js";
+import {
+  postContextWindowOverrides,
+  saveContextWindowOverrides,
+  type ContextWindowOverridesHost,
+} from "./context-window-overrides.js";
 import {
   gateOsNotification,
   initOsNotifyGate,
@@ -596,10 +601,12 @@ const CONTEXT_WARN_RATIO = 0.9;
 const CONTEXT_WARN_EXIT_RATIO = 0.85;
 /** Turn-end auto-compress threshold (see maybeAutoCompressOnIdle). Sits above
  * CONTEXT_WARN_RATIO so the user gets a 90–95% manual window (the warning
- * pill's 立即压缩) before the system compresses on its own. An `estimated`
- * (guessed) window never triggers it — the 2026-10-11 hy3 report proved a
- * missing table row (32K fallback vs a real 256K window) misreports 100% and
- * would otherwise compress a perfectly healthy session every turn.
+ * pill's 立即压缩) before the system compresses on its own. A window the host
+ * has NO authority for never triggers it — the 2026-10-11 hy3 report proved a
+ * guessed denominator (the old 32K fallback vs a real 256K window) misreports
+ * 100% and would otherwise compress a perfectly healthy session every turn;
+ * since 2026-11-22 the bar shows no window at all in that case (the occupancy
+ * bar and the CLI share one five-tier window resolver).
  * DEFAULT only: the live threshold comes from `iflow.autoCompressThresholdPercent`. */
 const CONTEXT_AUTOCOMPRESS_RATIO = 0.95;
 /** Thrown by promptWithRetry when the empty-response retry ladder is
@@ -923,7 +930,7 @@ export class ChatPanel implements vscode.Disposable {
       deliverQqMainIntermediateText: (...args) => this.deliverQqMainIntermediateText(...args),
       forwardQqMainTaskChildQuestion: (...args) => this.forwardQqMainTaskChildQuestion(...args),
       forwardQqTaskQuestion: (...args) => this.forwardQqTaskQuestion(...args),
-      materializeSystemPrompt: () => this.materializeSystemPrompt(),
+      materializeSystemPrompt: (variant) => this.materializeSystemPrompt(variant),
       mcpProjectCwd: () => this.mcpProjectCwd(),
       notifyOs: (event, text) => this.notifyOs(event, text),
       postToWebview: (m) => this.postToWebview(m),
@@ -933,6 +940,9 @@ export class ChatPanel implements vscode.Disposable {
       refreshMcpStatusFromBroker: () => this.refreshMcpStatusFromBroker(),
       resolveEntry: () => this.resolveEntry(),
       resolveWorkspaceHandshakeCreds: () => this.resolveWorkspaceHandshakeCreds(),
+      // Same effective context window as the main session — ONE computation
+      // site (the panel owns the cold-start lookup-key fallbacks).
+      tokensLimitEnv: () => this.tokensLimitEnv(),
       chunkText: (content) => ChatPanel.chunkText(content),
       sendPrompt: (text, images, files, contexts, options) => this.sendPrompt(text, images, files, contexts, options),
     });
@@ -2376,6 +2386,7 @@ export class ChatPanel implements vscode.Disposable {
       case "restartCli":
       case "openSettings":
       case "setHostSettings":
+      case "setContextWindowOverrides":
       case "listMcpServers":
       case "saveMcpServers":
       case "mcpStatus":
@@ -2482,6 +2493,10 @@ export class ChatPanel implements vscode.Disposable {
         // `ready` proves the listener is live.
         this.postTheme();
         this.postHostSettings();
+        // The structured 「上下文窗口覆写」 editor needs the current rows plus
+        // the current model's built-in window (for its one-click suggestion) —
+        // a webview that booted before the first push would show an empty list.
+        postContextWindowOverrides(this.contextWindowOverridesHost());
         this.pushQqState();
         break;
       case "sendPrompt":
@@ -2730,6 +2745,9 @@ export class ChatPanel implements vscode.Disposable {
         if (typeof msg.superAgentKeepWorktree === "boolean") {
           writes.push(["superAgent.keepWorktree", msg.superAgentKeepWorktree]);
         }
+        if (typeof msg.superAgentFullTrust === "boolean") {
+          writes.push(["superAgent.fullTrust", msg.superAgentFullTrust]);
+        }
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
         // 调高上限后排队的子会话立刻有机会起跑；调低不影响已在运行的会话，
         // 但 pump 本身是幂等且只按新上限放行，所以两种情况都能直接调。
@@ -2740,6 +2758,13 @@ export class ChatPanel implements vscode.Disposable {
         // instead of waiting for the configuration listener round trip.
         if (msg.auroraIntensity !== undefined) this.postTheme();
         this.postHostSettings();
+        break;
+      }
+      case "setContextWindowOverrides": {
+        // 上下文窗口覆写的结构化编辑器一次提交整张表；宿主归一化后写进
+        // VSCode 用户设置（Global 作用域），写成功再把生效后的值推回去。
+        if (!Array.isArray(msg.overrides)) break;
+        await saveContextWindowOverrides(this.contextWindowOverridesHost(), msg.overrides);
         break;
       }
       case "listMcpServers":
@@ -3053,18 +3078,36 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /** Write one panel-owned setting to USER settings (the scope VSCode
-   * Settings Sync carries). Validation happens at the call site. */
-  private async writeUserSetting(key: string, value: unknown): Promise<void> {
+   * Settings Sync carries). Validation happens at the call site.
+   *
+   * Returns whether the write landed. `label` is an optional human-readable
+   * name for the setting, shown in the failure toast instead of the raw key
+   * (a caller that has to react to a failed write uses the return value —
+   * the toast is emitted here, so nobody double-toasts). */
+  private async writeUserSetting(key: string, value: unknown, label?: string): Promise<boolean> {
     try {
       await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
+      return true;
     } catch (error) {
       const detail = errorMessage(error);
       this.log.warn(`failed to update ${key}: ${detail}`);
       // A silent failure made the control look like it "snapped back" on its
       // own — say which setting could not be written (the value the user sees
       // is the one VSCode still has on disk).
-      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}", key));
+      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}", label ?? key));
+      return false;
     }
+  }
+
+  /** The capabilities the context-window-override module needs from the
+   * panel: the shared settings-write channel, the webview channel, and the
+   * authoritative current model id (the store's, not the CLI's report). */
+  private contextWindowOverridesHost(): ContextWindowOverridesHost {
+    return {
+      writeUserSetting: (key, value, label) => this.writeUserSetting(key, value, label),
+      postToWebview: (message) => this.postToWebview(message),
+      currentModelId: () => this.store.getState().currentModelId ?? null,
+    };
   }
 
   // --- configurable ceilings (iflow.* settings) ------------------------------
@@ -3166,6 +3209,7 @@ export class ChatPanel implements vscode.Disposable {
         config.get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
       ),
       superAgentKeepWorktree: config.get<boolean>("superAgent.keepWorktree", false),
+      superAgentFullTrust: config.get<boolean>("superAgent.fullTrust", false),
     });
   }
 
@@ -3340,13 +3384,36 @@ export class ChatPanel implements vscode.Disposable {
    * 子会话汇报正文（fallback，已清洗）；两者都空时如实说明，绝不伪造结论。
    * QQ 单条消息有字符预算，截断后标注完整结果在面板查看。
    */
-  private forwardTakeoverReport(answer: string, fallbackText: string | undefined): void {
-    if (this.disposed) return;
-    if (!this.qqHost.qqTakeoverActive) return;
+  private forwardTakeoverReport(
+    answer: string,
+    fallbackText: string | undefined,
+    context?: { awaitedHere?: boolean; stopReason?: string },
+  ): void {
+    // 纯可观测：每次进入补投路径都留一条决策快照，事后能一眼判定「正文到底
+    // 有没有交给 QQ 通道、被哪个条件挡住」。appendQqArchiveEvent 内部吞掉归档
+    // 失败且这里 fire-and-forget，绝不影响原有投递 / 静音 / 去重行为。
+    const snapshot: Record<string, unknown> = {
+      source: "takeover-report",
+      awaitedHere: context?.awaitedHere ?? null,
+      stopReason: context?.stopReason ?? null,
+      qqTakeoverActive: this.qqHost.qqTakeoverActive,
+      injectedTaskPresent: this.qqInjectedTaskId !== null,
+      answerChars: answer.length,
+      fallbackChars: fallbackText?.length ?? 0,
+    };
+    const suppressed = (reason: string): void => {
+      void this.appendQqArchiveEvent(
+        "takeover_report_suppressed",
+        this.qqInjectedTaskId ?? undefined,
+        { ...snapshot, reason, notifyBoundUserCalled: false },
+      );
+    };
+    if (this.disposed) { suppressed("disposed"); return; }
+    if (!this.qqHost.qqTakeoverActive) { suppressed("takeover-inactive"); return; }
     // QQ 注入回合自身有专属回执通道；跳过以免同一条结果被发两遍。
-    if (this.qqInjectedTaskId !== null) return;
+    if (this.qqInjectedTaskId !== null) { suppressed("injected-task"); return; }
     const service = this.qqHost.qq?.service;
-    if (!service || typeof service.notifyBoundUser !== "function") return;
+    if (!service || typeof service.notifyBoundUser !== "function") { suppressed("no-service"); return; }
     const status = vscode.l10n.t("主会话已汇报超流体结果");
     const body = answer.trim() || sanitizeQqReportFallback(fallbackText);
     const text = body
@@ -3354,6 +3421,13 @@ export class ChatPanel implements vscode.Disposable {
       : `${status}\n${vscode.l10n.t("超流体任务已完成，但未产生可转发的正文摘要。")}`;
     void service.notifyBoundUser(text).catch((error: unknown) => {
       this.log.warn(`远程接管汇报正文投递失败：${errorMessage(error)}`);
+    });
+    // 记的是「面板把这段正文交给了投递通道」这一事实；通道侧真实投递失败仍由
+    // 服务自己的归档事件记录，两者合起来才是完整链路。
+    void this.appendQqArchiveEvent("takeover_report_delivered", undefined, {
+      ...snapshot,
+      notifyBoundUserCalled: true,
+      chars: text.length,
     });
   }
 
@@ -4351,10 +4425,23 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  /** Resolve the store's usage context: settings overrides → curated tables →
-   * conservative fallback, together with the provenance of each number (T-8)
-   * and the ai-supplement relabel (T-9). Value and label come from the SAME
-   * resolver call so they can never drift. Synchronous and cheap (per push). */
+  /** Resolve the store's usage context: the five-tier authority chain
+   * (user override → active profile → settings top-level → curated table →
+   * no authority), together with the provenance of each number (T-8) and the
+   * ai-supplement relabel (T-9). Value and label come from the SAME resolver
+   * call so they can never drift. Synchronous and cheap (per push).
+   *
+   * 2026-11-22：占用条与 CLI 现在走**同一个** resolver
+   * （`shared/context-window.ts` 的 `resolveContextWindowAuthority`）——
+   * 此前占用条只认「override → 内建表」，推给 CLI 的窗口还多认「profile 档 →
+   * settings 顶层档」两档，于是同一个模型在面板显示的窗口与 CLI 用的窗口会
+   * 分叉（实测：profile tokensLimit=128000 的 auto/deepseek-v4.1-flash，占用条
+   * 显示内建表的 1,000,000）。现在占用条显示的窗口 == 推给 CLI 的
+   * `IFLOW_TOKENS_LIMIT` == `session/set_tokens_limit` 推送的值。
+   *
+   * 无依据（任何一档都没有落地数值）时**不显示分母**：占用条只显示原始 token
+   * 数，不给出一个与 CLI 不同的猜测值（旧的 32,768 兜底估算正是「一个模型
+   * 两个窗口」的残留）。 */
   private resolveUsageContext(): UsageContext {
     const cfg = vscode.workspace.getConfiguration("iflow");
     let cached = this.usageOverridesCache;
@@ -4366,9 +4453,19 @@ export class ChatPanel implements vscode.Disposable {
       this.usageOverridesCache = cached;
     }
     const modelId = this.store.getState().currentModelId;
-    const win = resolveContextWindowWithSource(modelId, cached.overrides);
+    // 内核两档（活动 profile 的 tokensLimit / settings 顶层 tokensLimit）由
+    // 内核 settings.json 提供；读取带 mtime 缓存（占用条每次推送都要用）。
+    const { profileTokensLimit, settingsTokensLimit } = readKernelTokensLimits();
+    const win = resolveContextWindowAuthority({
+      modelId,
+      overrides: cached.overrides,
+      profileTokensLimit,
+      settingsTokensLimit,
+    });
     const cost = resolveCostWithSource(modelId, cached.cost);
-    let windowSource: ModelMetadataSource | null = win.source;
+    // 有窗口才有出处：模型 id 为空时（窗口是端点级别的上限，不是某个模型的
+    // 窗口）不显示窗口，也不标来源。
+    let windowSource: ModelMetadataSource | null = modelId ? (win.source ?? null) : null;
     let costSource: ModelMetadataSource | null = cost.source;
     let capturedAt: number | undefined;
     let sourceUrl: string | undefined;
@@ -4391,14 +4488,18 @@ export class ChatPanel implements vscode.Disposable {
         if (live && live.input === aiStamp.cost.value.input && live.output === aiStamp.cost.value.output) {
           costSource = "ai-supplement";
           if (capturedAt === undefined) capturedAt = aiStamp.cost.capturedAt;
-          if (sourceUrl === undefined && aiStamp.cost.sourceUrl) sourceUrl = aiStamp.cost.sourceUrl;
+          if (sourceUrl === undefined) sourceUrl = aiStamp.cost.sourceUrl;
         }
       }
     }
 
     return {
-      contextWindow: win.window,
-      estimated: win.estimated,
+      // 没有模型 id ⇒ 没有「这个模型的窗口」可言（profile / settings 两档与
+      // 模型无关，但那是端点级别的上限，不能当成某个模型的窗口显示）。
+      contextWindow: modelId ? (win.limit ?? null) : null,
+      // 显示出来的窗口永远是有依据的值（要么来自五档权威链），所以这里不再
+      // 有「估算」形态：宁可没有分母，也不显示一个猜测的分母。
+      estimated: false,
       costPrice: cost.price,
       windowSource,
       costSource,
@@ -4415,10 +4516,13 @@ export class ChatPanel implements vscode.Disposable {
    * existing overflow auto-compress path.
    *
    * Two display-truthfulness rules (2026-10-11):
-   * - An `estimated` context window (fallback guess for an unlisted model)
-   *   never warns: the ratio would present a guessed denominator as fact.
-   *   If a warning is already up and the window becomes estimated (model
-   *   switch), the pill is dismissed instead of left stale.
+   * - A context window the host has NO authority for (no tier of the five-tier
+   *   chain landed a number → `contextWindow` is null) never warns: there is
+   *   no denominator to compare against. (Before 2026-11-22 such a model got
+   *   a conservative 32,768 *estimate*; the bar now shows the raw token count
+   *   without a percentage instead — one model, one window, no guess.)
+   *   If a warning is already up and the window goes away (model switch), the
+   *   pill is dismissed instead of left stale.
    * - The toast text carries NO percentage. The pill is persistent until the
    *   hysteresis exit, so a frozen trigger-time number drifts against the
    *   live usage chip after a compression (99% pill vs 91% chip, reported
@@ -4569,9 +4673,10 @@ export class ChatPanel implements vscode.Disposable {
    * This closes the gap at the idle boundary: after a turn settles, if the
    * occupancy estimate is ≥ CONTEXT_AUTOCOMPRESS_RATIO, drive one `/compress`
    * turn before the next prompt (queued or typed) starts. Guards:
-   * - `estimated` windows never trigger (a guessed denominator must not
-   *   compress a healthy session — the hy3 32K-fallback misreport was the
-   *   exact false-positive this guard prevents);
+   * - a window the host has NO authority for never triggers (no denominator
+   *   ⇒ no ratio; the old 32K *estimated* fallback used to misreport 100%
+   *   and compress a healthy session every turn — the hy3 report — so the
+   *   bar now shows NO window instead of a guessed one);
    * - only a truly idle session (streaming/connecting/init/replay windows
    *   and pending approval/question cards stay untouched);
    * - `autoCompressInFlight` keeps one compress turn at a time; a failed
@@ -7313,6 +7418,35 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- Agent lifecycle ----------------------------------------------------------
 
+  /**
+   * The effective context window for every CLI subprocess this panel spawns.
+   *
+   * ONE computation site: the main session spawn AND every child session
+   * spawn go through it, so the two paths can never drift apart (the child
+   * spawn used to recompute the patch inline).
+   *
+   * The lookup key carries the cold-start fallbacks (store's model →
+   * pending switch → workspace model → kernel profile's `modelName`): the
+   * spawn env is built BEFORE the CLI's `session/new` returns, so
+   * `currentModelId` is still null on the very first spawn of a fresh
+   * window. Without the fallbacks the user's `iflow.contextWindowOverrides`
+   * and the curated table both MISS, and the CLI falls back to its own 65k
+   * `deepseek` default — the "every turn auto-compresses" symptom.
+   *
+   * The key is used for TABLE LOOKUPS ONLY; it never changes the model id
+   * the host pushes to the CLI (`session/set_model` stays verbatim).
+   */
+  private tokensLimitEnv(): { IFLOW_TOKENS_LIMIT?: string } {
+    return tokensLimitEnvFromSettings({
+      modelId: this.store.getState().currentModelId,
+      pendingSwitchModel: this.pendingSwitchModel,
+      workspaceModelId: this.workspaceModelId(),
+      overrides: parseContextWindowOverrides(
+        vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
+      ),
+    });
+  }
+
   private async ensureClient(): Promise<AcpClient> {
     // A3: never spawn a new client after the panel is gone — the handshake's
     // post-connect steps would run against a destroyed store.
@@ -7438,9 +7572,22 @@ export class ChatPanel implements vscode.Disposable {
       const spawnEnv: NodeJS.ProcessEnv = { IFLOW_HARNESS: "1", IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile() };
       // Surface the effective context window to the CLI via env (CLI's
       // zOt()/CT("tokensLimit") overlay, spread last in its settings merge),
-      // so auto-compression uses the active profile's limit instead of the
-      // 128000 fallback whose 102400 threshold traps super-agent children.
-      Object.assign(spawnEnv, tokensLimitEnvFromSettings());
+      // so the CLI's auto-compression threshold is computed from the SAME
+      // window the panel's occupancy bar shows — one model, one window.
+      //
+      // `resolveCliTokensLimit` is the single authority chain:
+      //   user override → active profile → settings top-level → curated table
+      // and pushes NOTHING when no tier has a grounded number (never a guess).
+      // The curated table IS included on purpose: the CLI's own tables miss
+      // modern ids (its `deepseek` pattern row defaults to 65k), which is
+      // exactly what made every turn trip the 0.8 auto-compression ratio.
+      //
+      // tokensLimitEnv() is the ONE computation site for that patch (the main
+      // session and every child session go through it), and it carries the
+      // cold-start lookup-key fallbacks — the spawn env is built BEFORE
+      // `session/new` returns, so `currentModelId` is still null on the very
+      // first spawn and the user's override would otherwise MISS.
+      Object.assign(spawnEnv, this.tokensLimitEnv());
       if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
       // Vendored CLI 内置 `super-agent` 工具的注册开关（工具实现以
       // `process.env.IFLOW_SUPER_TOOL === "1"` 为门控；当前 bundle 尚未包含
@@ -7845,6 +7992,30 @@ export class ChatPanel implements vscode.Disposable {
         | undefined;
       if (resp?.success && resp.currentModelId) {
         this.store.sessionMeta({ currentModelId: resp.currentModelId });
+        // 方案D：`session/set_model` 只改模型名，不重算 CLI 缓存的 tokensLimit
+        // （getTokensLimit()/JR() 用它算自动压缩阈值）。切换后必须把新模型的
+        // 有效窗口同步推给 CLI，否则热切换后压缩阈值仍停在旧模型的窗口。
+        // 走同一个 resolver（与 spawnEnv 同一口径）：user override → active
+        // profile → settings 顶层 → 内建表；**无依据时不推**（绝不推兜底估算）。
+        // 串行 await：set_model 成功 → set_tokens_limit 成功之间不允许发 prompt，
+        // 所以模型切换「完成」必须等到这次推送 settle（webview 的 beginPending
+        // 门控在 sessionMeta 刷新快照后即释放，真正的护栏是这里的串行等待）。
+        const switchedWindow = resolveCliTokensLimit({
+          modelId: resp.currentModelId,
+          overrides: parseContextWindowOverrides(
+            vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
+          ),
+        });
+        if (switchedWindow.limit !== undefined) {
+          try {
+            await this.client?.setTokensLimit(sessionId, switchedWindow.limit);
+          } catch (error) {
+            vscode.window.showWarningMessage(
+              vscode.l10n.t("切换模型后同步上下文长度失败：{0}", errorMessage(error)),
+            );
+            this.store.pushSnapshot();
+          }
+        }
         await this.rememberWorkspaceModel(resp.currentModelId);
         return;
       }
@@ -7978,10 +8149,17 @@ export class ChatPanel implements vscode.Disposable {
    * lives. Skips the write when the file already holds the current template.
    * Returns null on failure so the spawn omits the override instead of pointing
    * the CLI at a path that does not exist (it throws on a missing file).
+   *
+   * `variant` selects which template lands on disk: "main" (the default) keeps
+   * the original `system-prompt.md` byte-for-byte; "child" writes the trimmed
+   * Super-Agent-child template so child sessions don't carry the main session's
+   * orchestration section (~5K tokens/request saved per child).
    */
-  private async materializeSystemPrompt(): Promise<string | null> {
-    const fileUri = vscode.Uri.joinPath(this.context.storageUri ?? this.context.globalStorageUri, "system-prompt.md");
-    const text = loadPrompt("system-prompt");
+  private async materializeSystemPrompt(variant: "main" | "child" = "main"): Promise<string | null> {
+    const fileName = variant === "child" ? "system-prompt-child.md" : "system-prompt.md";
+    const promptName = variant === "child" ? "system-prompt-child" : "system-prompt";
+    const fileUri = vscode.Uri.joinPath(this.context.storageUri ?? this.context.globalStorageUri, fileName);
+    const text = loadPrompt(promptName);
     try {
       let existing: Uint8Array | null;
       try {
@@ -9144,6 +9322,19 @@ export class ChatPanel implements vscode.Disposable {
         // 有 QQ awaiter 时任务通道会投递真实正文；本地发起的任务没有 QQ 归属，
         // 那条通道找不到任何任务 —— 此时改由接管态的绑定者私聊补投正文。
         const awaitedHere = [...this.qqHost.qqMainFinalAwaiters.values()].includes(promptSessionId);
+        const takeoverActive = this.qqHost.qqTakeoverActive;
+        // 纯可观测：无论是否补投都留一条决策快照，供 QQ 归档事后核对
+        // 「这一轮为什么没投正文 / 投给了谁」。fire-and-forget，不影响回合收尾。
+        void this.appendQqArchiveEvent("takeover_report_decision", undefined, {
+          source: "final-report",
+          sessionId: promptSessionId,
+          awaitedHere,
+          takeoverActive,
+          stopReason: result.stopReason,
+          injectedTaskPresent: this.qqInjectedTaskId !== null,
+          supplemented: !awaitedHere && takeoverActive,
+          answerChars: answer.length,
+        });
         void this.deliverQqMainFinalAnswer(
           promptSessionId,
           answer,
@@ -9151,9 +9342,32 @@ export class ChatPanel implements vscode.Disposable {
           undefined,
           finalFallbackText,
         );
-        if (!awaitedHere && this.qqHost.qqTakeoverActive) {
-          this.forwardTakeoverReport(answer, finalFallbackText);
+        // 本地发起的任务（qqInjectedTaskId === null）即使残留 awaiter，正文也只到
+        // completeMainFinalAnswer 任务通道、私聊看不到，必须补投。QQ 注入回合由
+        // forwardTakeoverReport 内部 `qqInjectedTaskId !== null` 守卫(3347)跳过，不会重复。
+        if (
+          (!awaitedHere || this.qqInjectedTaskId === null) &&
+          takeoverActive
+        ) {
+          this.forwardTakeoverReport(answer, finalFallbackText, {
+            awaitedHere,
+            stopReason: result.stopReason,
+          });
           takeoverReportSent = true;
+        }
+        if (!takeoverReportSent && this.qqHost.qqTakeoverActive) {
+          void this.appendQqArchiveEvent("takeover_report_forward_skipped", undefined, {
+            awaitedHere,
+            takeoverActive: this.qqHost.qqTakeoverActive,
+            injectedTaskId: this.qqInjectedTaskId,
+            promptSessionId,
+            answerChars: answer.trim().length,
+            fallbackChars: sanitizeQqReportFallback(finalFallbackText).length,
+            awaitingTaskIds: [...this.qqHost.qqMainFinalAwaiters.entries()]
+              .filter(([, owner]) => owner === promptSessionId)
+              .map(([taskId]) => taskId),
+            stopReason: result.stopReason,
+          });
         }
       }
       // 回合收尾：复核动作围栏 —— 回合都结束了还停在未闭合围栏上，说明这个

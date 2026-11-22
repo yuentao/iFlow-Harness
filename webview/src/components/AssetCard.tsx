@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { ChevronRight, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
+import { Check, ChevronRight, Copy, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import type {
+  AssetContentFields,
   AssetKind,
   AssetScope,
   AssetUi,
@@ -8,7 +9,8 @@ import type {
 } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { ActionRow, Button, Chip, ConfirmDialog, Field, Hint, IconButton, ICON_INLINE, Segmented, TextArea, TextInput, ToolbarRow } from "./ui";
+import { copyText } from "./Markdown";
+import { ActionRow, Button, Chip, ConfirmDialog, DisclosureButton, Field, FieldLabel, Hint, IconButton, ICON_INLINE, Segmented, TextArea, TextInput, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -61,6 +63,101 @@ function templateBody(kind: AssetKind, name: string): string {
 }
 
 /**
+ * 复制原文（.toml 命令的原始 TOML / 其它资产的原始文件内容）。
+ *
+ * 成功翻成对勾，2 秒后复原；剪贴板被 webview 权限拒绝时抛一条「复制失败」
+ * 提示 —— 拒绝和成功长得不一样，绝不谎报已复制（与转录的复制反馈同一语言）。
+ */
+function CopySourceButton({ text, label }: { text: string; label: string }) {
+  const notify = useChat((s) => s.notify);
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  return (
+    <IconButton
+      size="sm"
+      label={copied ? t("已复制") : label}
+      icon={
+        copied ? (
+          <Check className={ICON_INLINE} aria-hidden="true" />
+        ) : (
+          <Copy className={ICON_INLINE} aria-hidden="true" />
+        )
+      }
+      onClick={() => {
+        Promise.resolve()
+          .then(() => copyText(text))
+          .then(
+            () => {
+              if (timer.current) clearTimeout(timer.current);
+              setCopied(true);
+              timer.current = setTimeout(() => {
+                timer.current = null;
+                setCopied(false);
+              }, 2000);
+            },
+            () => notify(t("复制失败"), "error"),
+          );
+      }}
+    />
+  );
+}
+
+/**
+ * 原始正文面板：.toml 命令 = 原始 TOML 源文本，其它资产 = 原始文件内容。
+ *
+ * 结构化视图只显示 description / prompt 两个字段，而注释、未知键、CLI 的
+ * zod 校验依据都只在原文里 —— 原文必须有一个入口，否则用户永远拿不到
+ * 自己那份文件。折叠走 kit 的 DisclosureButton（aria-expanded + 焦点环，
+ * 不自绘按钮），复制走 kit 的 IconButton（aria-label 与 tooltip 同文），
+ * 正文是 <pre> + overflow-auto + max-h，长文件在面板内滚动，不撑破布局。
+ */
+function RawSourcePanel({
+  content,
+  label,
+  copyLabel,
+  defaultOpen = false,
+}: {
+  content: string;
+  label: string;
+  copyLabel: string;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-1.5">
+        <DisclosureButton
+          expanded={open}
+          aria-label={label}
+          title={label}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <ChevronRight
+            className={`size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ${open ? "rotate-90" : ""}`}
+          />
+          <span className="text-ui-label font-medium text-foreground">{label}</span>
+        </DisclosureButton>
+        <CopySourceButton text={content} label={copyLabel} />
+      </div>
+      {open && (
+        <pre
+          className="max-h-72 overflow-auto rounded-md bg-muted/8 px-2 py-1.5 font-mono text-ui-caption leading-snug whitespace-pre-wrap break-all"
+          title={label}
+        >
+          {content}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/**
  * F4 asset manager (settings tab): lists the CLI's user-level assets —
  * custom slash commands, subagent definitions, skills — as they stand on
  * disk (the CLI and the agent's own tools write the same files behind our
@@ -84,6 +181,9 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
   // detail/edit subviews (one at a time); editLoading = read in flight.
   const [detail, setDetail] = useState<{ path: string; hash: string | null } | null>(null);
   const [detailContent, setDetailContent] = useState<string | null>(null);
+  /** Structured description/prompt from the host (.toml only). null = no
+   * structured view → fall back to the raw body. */
+  const [detailFields, setDetailFields] = useState<AssetContentFields | null>(null);
   const [editing, setEditing] = useState<{ path: string; content: string; hash: string | null } | null>(null);
   const [editLoading, setEditLoading] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
@@ -128,6 +228,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
         path?: string;
         content?: string;
         hash?: string | null;
+        fields?: AssetContentFields;
         ok?: boolean;
         conflict?: boolean;
         error?: string;
@@ -156,6 +257,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
         if (mode === "detail") {
           setDetail({ path: targetPath, hash: msg.hash ?? null });
           setDetailContent(msg.content ?? "");
+          setDetailFields(msg.fields ?? null);
           return;
         }
         setEditing((current) =>
@@ -251,6 +353,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               back: () => {
                 setDetail(null);
                 setDetailContent(null);
+                setDetailFields(null);
               },
               title: t("资产详情"),
             }
@@ -465,6 +568,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                           onClick={() => {
                             setDetail({ path: item.path, hash: item.hash });
                             setDetailContent(null);
+                            setDetailFields(null);
                             setEditError(null);
                             requestOpen(item.path, "detail");
                           }}
@@ -524,13 +628,45 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
           </div>
           {detailContent === null ? (
             <div className="py-3 text-center text-ui-label text-muted-foreground">{t("读取中…")}</div>
+          ) : detailFields && (detailFields.description !== null || detailFields.prompt !== null) ? (
+            <div className="space-y-2">
+              {detailFields.description !== null && (
+                <div className="flex flex-col gap-1">
+                  <FieldLabel>{t("描述")}</FieldLabel>
+                  <p className="text-ui-body leading-relaxed text-foreground">{detailFields.description}</p>
+                </div>
+              )}
+              {detailFields.prompt !== null && (
+                <div className="flex flex-col gap-1">
+                  <FieldLabel>{t("提示词")}</FieldLabel>
+                  <pre
+                    className="max-h-48 overflow-y-auto rounded-md bg-muted/8 px-1.5 py-1 font-mono text-ui-caption leading-snug whitespace-pre-wrap break-all"
+                    title={t("提示词")}
+                  >
+                    {detailFields.prompt}
+                  </pre>
+                </div>
+              )}
+              {/* 原始 TOML：结构化视图之外仍要能拿到原文 —— 注释、未知键、CLI 的
+                  zod 校验依据都只在原文里。默认折叠，不抢结构化视图的位置。 */}
+              <RawSourcePanel
+                key={detail.path}
+                content={detailContent}
+                label={t("原始 TOML")}
+                copyLabel={t("复制原始 TOML")}
+              />
+            </div>
           ) : (
-            <pre
-              className="max-h-48 overflow-y-auto rounded-md bg-muted/8 px-2 py-1.5 font-mono text-ui-label leading-snug whitespace-pre-wrap break-all"
-              title={t("文件内容")}
-            >
-              {detailContent}
-            </pre>
+            <>
+              <Hint>{t("无法提取结构化字段，显示原始文件内容")}</Hint>
+              <RawSourcePanel
+                key={detail.path}
+                content={detailContent}
+                label={detail.path.toLowerCase().endsWith(".toml") ? t("原始 TOML") : t("原始文件内容")}
+                copyLabel={detail.path.toLowerCase().endsWith(".toml") ? t("复制原始 TOML") : t("复制原始文件内容")}
+                defaultOpen
+              />
+            </>
           )}
           {detailContent !== null && (
             <ActionRow>
@@ -540,6 +676,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                   setEditing({ path: detail.path, content: detailContent, hash: detail.hash });
                   setDetail(null);
                   setDetailContent(null);
+                  setDetailFields(null);
                   setEditError(null);
                 }}
               >

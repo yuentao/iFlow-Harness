@@ -45,7 +45,7 @@ import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
-import type { McpServer } from "../acp/protocol.js";
+import type { McpServer, SessionSettings } from "../acp/protocol.js";
 import type {
   ContentBlock,
   ExitPlanModeRequest,
@@ -86,6 +86,8 @@ import {
   canRetrySuperSession,
   capReportTail,
   clampMaxConcurrentSuperSessions,
+  clampSuperMaxAttempts,
+  DEFAULT_SUPER_MAX_ATTEMPTS,
   isTerminalSuperStatus,
   normalizeSuperTodos,
   groupSuperReportsByWave,
@@ -727,6 +729,13 @@ export interface SuperAgentDeps {
    * absent dependency means "no MCP in child sessions" (the previous default).
    */
   childMcpServers?: () => McpServer[];
+  /**
+   * 子会话 `session/new` 的附加 settings（工具白名单，由宿主读配置后经
+   * `buildChildSessionSettings` 算出）。管理器把它与审批策略的
+   * `disallowed_tools` 合并；返回 `undefined` 或未产生任何键时不带 settings，
+   * 缺省请求形状与接线前逐字节一致。可选是为了让既有 fixture 不必补齐。
+   */
+  childSessionSettings?: () => SessionSettings | undefined;
   /** 子会话列表变化（宿主写进 store.superSessions）。 */
   onSessionsChanged: (sessions: SuperSessionUi[]) => void;
   /**
@@ -787,6 +796,13 @@ export interface SuperAgentDeps {
   /** 子会话使用的模型；跟随主会话当前模型，null = 用 CLI 的默认值。 */
   currentModel: () => string | null;
   /**
+   * 方案D：子会话 `session/set_model` 成功后，把用户显式覆盖的上下文窗口同步
+   * 进子 CLI 缓存的 tokensLimit（set_model 只改名、不重算）。宿主按 modelId
+   * 解析窗口（只推 source === "user"）并串行 await 推送，保证子会话首轮 prompt
+   * 不会带着旧模型的压缩阈值跑。可选：不关心的 fixture / 单测无需补齐。
+   */
+  setTokensLimit?: (client: AcpClient, sessionId: string, modelId: string) => Promise<void>;
+  /**
    * 当前主会话 id —— 派发出来的子会话归属它。
    *
    * 子会话是主会话的产物：主会话 A 派发的子会话不能在主会话 B 的看板上出现
@@ -804,8 +820,16 @@ export interface SuperAgentDeps {
    */
   maxConcurrentSessions: () => number;
   /**
-   * 失败后最多自动尝试几次（含首次），来自 `iflow.superAgent.maxAttempts`。
-   * 可选：缺省 1 = 不自动重试；spawn 时写入 session.maxAttempts。
+   * 子会话的**总尝试次数上限**（含首次执行），来自
+   * `iflow.superAgent.maxAttempts`（缺省 {@link DEFAULT_SUPER_MAX_ATTEMPTS}
+   * = 2，范围 1–5）。
+   *
+   * 可选只是为了让单测与 fixture 不必逐个补齐；**缺省不是「不限」**：所有
+   * 重试 / 重派路径（手动 retry、批量 retryWave / retryFailed、retryable
+   * 失败的自动重试）都读同一个上限，缺省值统一走
+   * {@link DEFAULT_SUPER_MAX_ATTEMPTS}。spawn 时把当时的值写进
+   * `session.maxAttempts`，因此设置改完对**下一个启动**的子会话生效
+   * （与设置项文案一致）。
    */
   maxAttempts?: () => number;
   /**
@@ -813,6 +837,12 @@ export interface SuperAgentDeps {
    * `block`（默认）= 跳过下游并标记 blocked；`continue` = 照常执行。
    */
   dependencyPolicy?: () => "block" | "continue";
+  /**
+   * 完全信任模式（`iflow.superAgent.fullTrust`，每次实时读）。开启后子会话
+   * 直接在主仓工作区运行（不建 worktree）、不收窄工具与 MCP，且任务书允许
+   * push / 开 PR / 合并。缺省 undefined 即 false —— 既有行为逐字节不变。
+   */
+  fullTrust?: () => boolean;
   /**
    * 是否保留正常完成子会话的工作目录（`iflow.superAgent.keepWorktree`，
    * 每次实时读）。
@@ -1023,9 +1053,19 @@ export class SuperAgentManager {
   private readonly waveTaskIndex = new Map<string, string>();
   /**
    * retryable 失败自动重试的退避定时器（每个子会话最多一个在飞，unref）。
-   * 仅在会话声明 `maxAttempts > 1` 时安排，避免改变无该字段的既有 fixture。
+   * 只在尝试上限 > 1 时安排（上限统一读同一个值，见 {@link maybeAutoRetry}）。
    */
   private readonly autoRetryTimers = new Map<string, NodeJS.Timeout>();
+  /**
+   * **重试重入锁**：正在被重试的子会话 id。
+   *
+   * 所有重试路径（手动 retry、批量 retryWave / retryFailed、retryable 失败
+   * 的自动重试）都汇到 {@link SuperAgentManager.retry} 一个入口，而该方法
+   * 在第一个 await 之前不做任何状态变更 —— 没有这把锁，两条路径撞在一起
+   * 时会各自把同一条 id 塞进队列、把子会话跑两遍（每次重跑都是一整个子会话
+   * 会话的全部 token），而 attempt 计数只 +1（上限形同虚设）。
+   */
+  private readonly retrying = new Set<string>();
   /** 自动重试退避窗口（实例字段，测试注入极小值）。 */
   autoRetryBackoffMs = SUPER_AUTO_RETRY_BACKOFF_MS;
   private seq = 0;
@@ -1185,6 +1225,7 @@ export class SuperAgentManager {
     const now = Date.now();
     const id = `super-${now.toString(36)}-${(this.seq++).toString(36)}`;
     const repoIsolation = options?.isolation === "repo";
+    const fullTrust = !repoIsolation && (this.deps.fullTrust?.() ?? false);
     const policy = resolveSpawnPolicy({ policy: options?.policy ?? null });
     const runId = options?.runId;
     const wave = options?.wave ?? 0;
@@ -1195,9 +1236,16 @@ export class SuperAgentManager {
       status: "preparing",
       queued: true,
       attempts: 1,
-      isolation: repoIsolation
-        ? { kind: "repo", path: this.deps.repoRoot }
-        : { kind: "directory", path: "", note: "正在准备隔离环境" },
+      // 完全信任：直接落在主仓工作区档（与合并子会话同档，但带 fullTrust
+      // 标记走另一套任务书契约），看板从派发那一刻就显示「完全信任」。
+      isolation:
+        repoIsolation || fullTrust
+          ? {
+              kind: "repo",
+              path: this.deps.repoRoot,
+              ...(fullTrust ? { fullTrust: true, note: "完全信任（主仓工作区）" } : {}),
+            }
+          : { kind: "directory", path: "", note: "正在准备隔离环境" },
       // 归属主会话：归档按它分文件，恢复历史会话时按它取回。
       mainSessionId: this.deps.currentMainSessionId() ?? undefined,
       createdAt: now,
@@ -1208,7 +1256,12 @@ export class SuperAgentManager {
       wave,
       ...(spec.dependsOn && spec.dependsOn.length > 0 ? { dependsOn: [...spec.dependsOn] } : {}),
       ...(spec.batch !== undefined ? { batch: spec.batch } : {}),
-      ...(this.deps.maxAttempts ? { maxAttempts: this.deps.maxAttempts() } : {}),
+      // 尝试上限在**派发时**定格：设置改完对下一个启动的子会话生效（与设置项
+      // 文案一致）。取值走夹取，脏值（NaN / 越界）落到统一的缺省常量，绝不
+      // 出现「声明 2、运行时 0」这种分裂。
+      ...(this.deps.maxAttempts
+        ? { maxAttempts: clampSuperMaxAttempts(this.deps.maxAttempts()) }
+        : {}),
     };
     this.sessions.set(id, session);
     this.policies.set(id, policy);
@@ -1438,14 +1491,32 @@ export class SuperAgentManager {
    * 提示词会告诉新进程「上一轮中断了、先检查现状再继续」，而不是假装从零
    * 开始。目录已被删掉 / 从未建好时退化为新建隔离环境。返回 false 表示该
    * 子会话当前不可重试。
+   *
+   * **唯一入口**：手动重试、批量重试（retryWave / retryFailed）、retryable
+   * 失败的自动重试全部走这里。因此尝试上限与 attempt 计数也只在这里维护
+   * 一次 —— 两条路径各记一份就会把同一个任务跑两遍（每次重跑都是一整个
+   * 子会话会话的全部 token）。
    */
   async retry(id: string): Promise<boolean> {
     if (this.disposed) return false;
+    // **重入锁**：本方法在第一个 await 之前没有任何状态变更，而 await 之后
+    // 才有 —— 不加锁的话，「自动重试的退避定时器到点」与「用户/主 Agent 手动
+    // 重试」撞在一起时，两次调用都会读到 attempts=1、都通过上限检查、都把
+    // 队列塞进同一条 id：子会话被**跑两遍**，而 attempt 只 +1（上限形同虚设）。
+    // 锁覆盖整个方法体：第二次调用直接判定「已在重试中」。
+    if (this.retrying.has(id)) {
+      this.deps.log.info(`[${id}] 已有一次重试在进行，忽略重复的重试请求`);
+      return false;
+    }
     const session = this.sessions.get(id);
     if (!session || !canRetrySuperSession(session)) return false;
     // 尝试上限（含首次）：maxAttempts=2 表示最多两次；当前已是第 N 次且 N>=上限
-    // 就不再重试。maxAttempts 未声明时不限（既有行为）。
-    const maxAttempts = session.maxAttempts ?? this.deps.maxAttempts?.() ?? Infinity;
+    // 就不再重试。**缺省值统一**走 DEFAULT_SUPER_MAX_ATTEMPTS（= 设置项
+    // `iflow.superAgent.maxAttempts` 的声明缺省）—— 各路径各读各的默认值
+    // 会让同一个任务在不同路径上被判定成「已达上限」与「还没到上限」。
+    const maxAttempts = clampSuperMaxAttempts(
+      session.maxAttempts ?? this.deps.maxAttempts?.() ?? DEFAULT_SUPER_MAX_ATTEMPTS,
+    );
     const attempts = session.attempts ?? 1;
     if (attempts >= maxAttempts) {
       this.deps.log.info(
@@ -1461,54 +1532,62 @@ export class SuperAgentManager {
       this.autoRetryTimers.delete(id);
     }
 
-    // 上一轮的进程本该在终态时回收；这里再做一次防御性回收（幂等），并把
-    // 它从并发槽位摘掉 —— 否则重置后的会话会把自己算成「已占用」而永远
-    // 排在自己前面。
-    await this.disposeClient(id);
-    this.started.delete(id);
-    // 上一轮看门狗随旧尝试收口：旧定时器若到点，attempt 守卫本就会放过新尝试，
-    // 这里主动清掉省得它空转到点。
-    this.clearWatchdog(id);
-    // 上一轮若正卡在提问上，它的 resolver/定时器必须随旧尝试一起收口 ——
-    // 否则旧定时器到点会误删新一轮刚挂上的 resolver（跨尝试串包）。
-    this.discardQuestionResolver(id);
-    // 重试是一次**新的尝试**（序号 +1）：上一轮的中断标记不该命中新一轮。
-    this.interrupted.delete(id);
+    this.retrying.add(id);
+    try {
+      // 上一轮的进程本该在终态时回收；这里再做一次防御性回收（幂等），并把
+      // 它从并发槽位摘掉 —— 否则重置后的会话会把自己算成「已占用」而永远
+      // 排在自己前面。
+      await this.disposeClient(id);
+      this.started.delete(id);
+      // 上一轮看门狗随旧尝试收口：旧定时器若到点，attempt 守卫本就会放过新尝试，
+      // 这里主动清掉省得它空转到点。
+      this.clearWatchdog(id);
+      // 上一轮若正卡在提问上，它的 resolver/定时器必须随旧尝试一起收口 ——
+      // 否则旧定时器到点会误删新一轮刚挂上的 resolver（跨尝试串包）。
+      this.discardQuestionResolver(id);
+      // 重试是一次**新的尝试**（序号 +1）：上一轮的中断标记不该命中新一轮。
+      this.interrupted.delete(id);
 
-    const retry: SuperRetryState = {
-      attempt: attempts + 1,
-      error: session.error,
-      summary: session.summary ?? (this.lastText.get(id)?.trim() || undefined),
-      reuseIsolation: true,
-    };
-    const reset = retrySuperSession(session, Date.now());
-    this.sessions.set(id, reset);
-    // retry 诊断：审计里能看到「失败 → 重试 → 完成」的诊断轨迹（与 reports 同构）。
-    this.recordDiagnostic(
-      id,
-      "retry",
-      "info",
-      `自动重试第 ${retry.attempt} 次（上次失败：${session.lastError?.message ?? session.error ?? "未知"}）`,
-    );
-    this.lastText.delete(id);
-    this.queue.push({
-      spec: {
-        title: session.title,
-        task: session.task,
-        ...(session.dependsOn ? { dependsOn: [...session.dependsOn] } : {}),
-        ...(session.batch !== undefined ? { batch: session.batch } : {}),
-      },
-      id,
-      retry,
-      runId: session.runId,
-      wave: session.wave,
-      // 重试是同一份派发的延续：策略必须沿用，否则一次重试会把 supervised
-      // 静默退回 auto（重新变成无审批执行）。
-      policy: this.policies.get(id) ?? resolveSpawnPolicy(null),
-    });
-    this.emit();
-    this.pump();
-    return true;
+      const retry: SuperRetryState = {
+        attempt: attempts + 1,
+        error: session.error,
+        summary: session.summary ?? (this.lastText.get(id)?.trim() || undefined),
+        reuseIsolation: true,
+      };
+      const reset = retrySuperSession(session, Date.now());
+      this.sessions.set(id, reset);
+      // retry 诊断：审计里能看到「失败 → 重试 → 完成」的诊断轨迹（与 reports 同构）。
+      this.recordDiagnostic(
+        id,
+        "retry",
+        "info",
+        `自动重试第 ${retry.attempt} 次（上次失败：${session.lastError?.message ?? session.error ?? "未知"}）`,
+      );
+      this.lastText.delete(id);
+      this.queue.push({
+        spec: {
+          title: session.title,
+          task: session.task,
+          ...(session.dependsOn ? { dependsOn: [...session.dependsOn] } : {}),
+          ...(session.batch !== undefined ? { batch: session.batch } : {}),
+        },
+        id,
+        retry,
+        runId: session.runId,
+        wave: session.wave,
+        // 重试是同一份派发的延续：策略必须沿用，否则一次重试会把 supervised
+        // 静默退回 auto（重新变成无审批执行）。
+        policy: this.policies.get(id) ?? resolveSpawnPolicy(null),
+      });
+      this.emit();
+      this.pump();
+      return true;
+    } finally {
+      // 重入锁只覆盖到「队列已入队 + 状态已重置」为止：此后子会话的状态是
+      // preparing（非终态），canRetrySuperSession 会挡住第二次重试，不需要
+      // 再靠锁兜底。
+      this.retrying.delete(id);
+    }
   }
 
   /**
@@ -1544,7 +1623,9 @@ export class SuperAgentManager {
         shouldRetrySuperFailure(
           "retryable",
           s.attempts ?? 1,
-          s.maxAttempts ?? this.deps.maxAttempts?.() ?? Infinity,
+          clampSuperMaxAttempts(
+            s.maxAttempts ?? this.deps.maxAttempts?.() ?? DEFAULT_SUPER_MAX_ATTEMPTS,
+          ),
         ),
       )
       .map((s) => s.id);
@@ -1568,7 +1649,9 @@ export class SuperAgentManager {
         shouldRetrySuperFailure(
           "retryable",
           s.attempts ?? 1,
-          s.maxAttempts ?? this.deps.maxAttempts?.() ?? Infinity,
+          clampSuperMaxAttempts(
+            s.maxAttempts ?? this.deps.maxAttempts?.() ?? DEFAULT_SUPER_MAX_ATTEMPTS,
+          ),
         ),
       )
       .map((s) => s.id);
@@ -1585,14 +1668,18 @@ export class SuperAgentManager {
    * 尝试上限，满足则退避一个窗口后自动 retry。其余分类（terminal / blocked /
    * interrupted）直接上报、不自动重试。
    *
-   * 只有会话显式声明 `maxAttempts > 1` 时才启用 —— 不带该字段的既有 fixture /
-   * 用户行为保持逐字不变（绝不在无人要求时把失败子会话自动重跑）。
+   * 上限与手动重试**读同一个值**（会话声明的 `maxAttempts` → 设置项 →
+   * {@link DEFAULT_SUPER_MAX_ATTEMPTS} 缺省），不再各用一个「自动=1、手动=无限」
+   * 的分裂缺省：分裂会让同一个任务在自动路径上被判「已达上限」、在手动路径上
+   * 又被判「还能再来一次」，实际就是被多跑几轮。
    */
   private maybeAutoRetry(id: string): void {
     if (this.disposed) return;
     const session = this.sessions.get(id);
     if (!session || !canRetrySuperSession(session)) return;
-    const maxAttempts = session.maxAttempts ?? this.deps.maxAttempts?.() ?? 1;
+    const maxAttempts = clampSuperMaxAttempts(
+      session.maxAttempts ?? this.deps.maxAttempts?.() ?? DEFAULT_SUPER_MAX_ATTEMPTS,
+    );
     // 批次1A 的确切决策签名：只有 retryable 且 attempts < maxAttempts 才自动重试。
     // terminal / blocked / interrupted 或已达上限一律不重试（NaN 等非法上限由纯函数
     // 内部的 `<` 自然退化为「不重试」）。
@@ -2593,8 +2680,15 @@ export class SuperAgentManager {
       this.deps.log.info(`super agent: ${id} 重试复用工作目录 ${reused.path}`);
     } else if (session.isolation.kind === "repo") {
       // 主仓工作区档：不建 worktree、不建分支 —— 子会话直接在主仓根目录里
-      // 干活。合并只能在目标分支所在的工作区发生，这一档就是为此存在的。
-      isolation = { kind: "repo", path: this.deps.repoRoot };
+      // 干活。合并子会话与完全信任子会话共用这一档；fullTrust 标记与看板
+      // note 必须带过去，否则任务书会退回「不许 push」的合并契约。
+      isolation = {
+        kind: "repo",
+        path: this.deps.repoRoot,
+        ...(session.isolation.fullTrust
+          ? { fullTrust: true, note: "完全信任（主仓工作区）" }
+          : {}),
+      };
     } else {
       const slug = sanitizeWorktreeName(spec.title);
       const unique = `${Date.now().toString(36)}-${(this.seq++).toString(36)}`;
@@ -2743,15 +2837,20 @@ export class SuperAgentManager {
       this.deps.log.info(
         `[${id}] 子会话 MCP 服务器：${childMcpServers.length} 个（${childMcpServers.map((s) => s.name).join(", ") || "无"}]`,
       );
+      // 工具白名单来自宿主配置（buildChildSessionSettings），与审批策略的
+      // 黑名单合并成一份 settings。两者都为空时不带 settings —— 缺省
+      // `session/new` 的请求形状必须与既有行为逐字节一致（既有测试断言
+      // 子会话不传 settings）。
+      const settings: SessionSettings = {
+        ...(this.deps.childSessionSettings?.() ?? {}),
+        ...(policy.disallowedTools.length > 0
+          ? { disallowed_tools: [...policy.disallowedTools] }
+          : {}),
+      };
       const { sessionId } = await client.newSession({
         cwd: isolation.path,
         mcpServers: childMcpServers,
-        // 工具黑名单与主会话的 `settings.disallowed_tools` 同一机制；**为空时
-        // 不带 settings** —— 缺省策略下 `session/new` 的请求形状必须与既有
-        // 行为逐字节一致（既有测试断言子会话不传 settings）。
-        ...(policy.disallowedTools.length > 0
-          ? { settings: { disallowed_tools: [...policy.disallowedTools] } }
-          : {}),
+        ...(Object.keys(settings).length > 0 ? { settings } : {}),
       });
       this.apply(id, { type: "started", cliSessionId: sessionId, at: Date.now() });
 
@@ -2791,8 +2890,14 @@ export class SuperAgentManager {
       if (model) {
         try {
           await client.setModel(sessionId, model);
+          // 方案D：set_model 只改模型名，不重算子 CLI 缓存的 tokensLimit。用户
+          // 显式覆盖的窗口必须串行推送，否则子会话首轮会用旧模型的压缩阈值。
+          // 失败沿用内核默认，绝不阻断子会话。
+          if (this.deps.setTokensLimit) {
+            await this.deps.setTokensLimit(client, sessionId, model);
+          }
         } catch (error) {
-          this.deps.log.warn(`超流体设置模型失败（沿用内核默认）：${errorMessage(error)}`);
+          this.deps.log.warn(`超流体设置模型或上下文长度失败（沿用内核默认）：${errorMessage(error)}`);
         }
         this.patchModel(id, model);
       }
@@ -5110,7 +5215,14 @@ function describeAttachmentFailures(attachments?: StagedSuperAttachments): strin
 /** 工作目录段落：worktree、目录隔离与主仓工作区三档的边界说明。 */
 function describeIsolation(isolation: SuperSessionUi["isolation"]): string {
   const lines = [`Working directory: ${isolation.path}`];
-  if (isolation.kind === "repo") {
+  if (isolation.fullTrust) {
+    // 完全信任档：跑在主仓工作区里，拥有本机用户的几乎全部权限。边界只留
+    // 「只提交本任务文件 + 禁 force push / --no-verify + 不丢用户未提交改动」。
+    lines.push(
+      "This is the MAIN repository workspace in FULL TRUST mode: no worktree isolation and no branch of your own. You have the full privileges of the local user — you may read and write repository files, run arbitrary commands, push, open pull requests and merge here.",
+      "Hard boundaries: commit only files that belong to this task; never force push (`--force` / `--force-with-lease`) and never use `--no-verify` to bypass hooks; never discard the user's other uncommitted changes.",
+    );
+  } else if (isolation.kind === "repo") {
     // 主仓工作区档：这是唯一一档允许在主仓里动 git 的隔离方式，边界必须
     // 写死 —— 尤其是「不许 git add -A / commit -a / stash」：那会把用户
     // 尚未提交的其它改动卷进合并提交。
@@ -5146,8 +5258,20 @@ function describeRetry(retry: SuperRetryContext): string {
 }
 
 /** 提交契约段落：worktree 内要求自己提交；目录隔离明确不要碰 git；
- * 主仓工作区档则明确「合并提交就是交付物，不许自己提交」。 */
+ * 主仓工作区档则明确「合并提交就是交付物，不许自己提交」；完全信任档
+ * 放开 push / PR / 合并，但仍只提交本任务文件并禁 force push / --no-verify。 */
 function describeSubmission(isolation: SuperSessionUi["isolation"]): string {
+  if (isolation.fullTrust) {
+    return (
+      "\n" +
+      [
+        "Submitting your work:",
+        "- Commit before finishing: stage and commit ONLY the files that belong to this task (use explicit `git add <file>` paths — never `git add -A` / `git add .`, which would sweep the user's uncommitted changes into your commit).",
+        "- Full trust mode: you may push, open pull requests, merge, and switch/create/delete branches in the main repository as needed to deliver the task.",
+        "- Hard boundaries: never force push (`git push --force` / `--force-with-lease`) and never use `--no-verify`; never modify files unrelated to this task or discard the user's uncommitted work.",
+      ].join("\n")
+    );
+  }
   if (isolation.kind === "repo") {
     return (
       "\n" +

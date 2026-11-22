@@ -296,6 +296,22 @@ describe("ui kit guard", () => {
     expect(hits).toEqual([]);
   });
 
+  it("keeps the revealable credential field full width", () => {
+    // Regression guard for the collapsed API Key field: the reveal toggle is
+    // absolutely positioned inside a wrapper div, so the input stops being a
+    // flex item of the surrounding Field and falls back to the browser's
+    // intrinsic `size=20` width (≈190px). Wrapper and input must both claim
+    // the full width, otherwise the placeholder is clipped and the eye button
+    // hangs outside the field.
+    const kit = codeOnly(files.find((f) => f.rel === CONTROL_HOME)!.content);
+    const start = kit.indexOf("export function TextInput(");
+    expect(start).toBeGreaterThan(-1);
+    const body = kit.slice(start, kit.indexOf("export function CommitTextInput(", start));
+    const branch = body.slice(body.indexOf("if (!revealable) return field;"));
+    expect(branch).toContain("relative w-full");
+    expect(body).toMatch(/revealable \? "[^"]*w-full[^"]*"/);
+  });
+
   it("keeps the settings nav rail scrollable", () => {
     // The settings nav rail (4 groups / 8 tabs) used to be `shrink-0` +
     // `overflow-visible`: on a short or narrow screen it was clipped by the
@@ -605,9 +621,18 @@ describe("field chrome", () => {
 
     const input = container.querySelector<HTMLInputElement>("input")!;
     expect(input.type).toBe("password");
+    // The revealable branch wraps the input in a div, so the input is no
+    // longer a flex item of the surrounding Field and would collapse to the
+    // browser's intrinsic width — the placeholder gets clipped and the
+    // absolute eye toggle detaches from the field.
+    expect(input.className).toContain("w-full");
     const toggle = container.querySelector<HTMLButtonElement>("button[aria-label='显示密码']");
     expect(toggle).toBeTruthy();
     expect(toggle!.getAttribute("title")).toBe("显示密码");
+    // The toggle must live in the input's own wrapper, not float away.
+    expect(toggle!.parentElement).toBe(input.parentElement);
+    expect(input.parentElement!.className).toContain("relative");
+    expect(input.parentElement!.className).toContain("w-full");
 
     act(() => toggle!.click());
     expect(input.type).toBe("text");

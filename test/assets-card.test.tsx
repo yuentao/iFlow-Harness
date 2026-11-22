@@ -5,8 +5,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AssetSection } from "../webview/src/components/AssetCard";
 
 const send = vi.hoisted(() => vi.fn());
+const notify = vi.hoisted(() => vi.fn());
 vi.mock("../webview/src/store", () => ({
-  useChat: (selector: (s: { send: typeof send }) => unknown) => selector({ send }),
+  useChat: (selector: (s: { send: typeof send; notify: typeof notify }) => unknown) =>
+    selector({ send, notify }),
 }));
 vi.mock("../webview/src/i18n", () => ({
   t: (s: string, ...args: string[]) => s.replace(/\{(\d+)\}/g, (_, i) => args[Number(i)] ?? ""),
@@ -100,6 +102,30 @@ const SKILL = {
   editable: true,
 };
 
+const RAW_TOML = [
+  "# Command: api-docs",
+  "# Description: 在apipost创建api文档",
+  'description = "在apipost创建api文档"',
+  'prompt = """',
+  "在 apipost 创建 API 文档。",
+  'description = "假描述，不应出现在详情里"',
+  "1. 打开 apipost",
+  '"""',
+  "",
+].join("\n");
+const TOML_FIELDS = {
+  description: "在apipost创建api文档",
+  prompt: "在 apipost 创建 API 文档。\ndescription = \"假描述，不应出现在详情里\"\n1. 打开 apipost",
+};
+const TOML_CMD = {
+  ...CMD,
+  name: "api-docs",
+  path: "C:\\home\\.iflow\\commands\\api-docs.toml",
+  displayPath: "~/.iflow/commands/api-docs.toml",
+  description: "在apipost创建api文档",
+  hash: "hash-toml",
+};
+
 function stateReply(commands: unknown[], agents: unknown[], skills: unknown[]) {
   act(
     () =>
@@ -123,11 +149,24 @@ function stateReply(commands: unknown[], agents: unknown[], skills: unknown[]) {
       ),
   );
 }
-function contentReply(path: string, content: string, hash: string | null) {
+function contentReply(
+  path: string,
+  content: string,
+  hash: string | null,
+  fields?: { description: string | null; prompt: string | null } | null,
+) {
   act(
     () =>
       window.dispatchEvent(
-        new MessageEvent("message", { data: { type: "assetContent", path, content, hash } }),
+        new MessageEvent("message", {
+          data: {
+            type: "assetContent",
+            path,
+            content,
+            hash,
+            ...(fields !== undefined ? { fields } : {}),
+          },
+        }),
       ),
   );
 }
@@ -150,6 +189,7 @@ function deletedReply(requestId: number) {
 
 beforeEach(() => {
   send.mockReset();
+  notify.mockReset();
   header.mockReset();
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
@@ -160,6 +200,8 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  // The copy case stubs navigator.clipboard; jsdom has none by default.
+  Reflect.deleteProperty(navigator, "clipboard");
 });
 
 it("lists assets through a segmented kind control with scope chips and metadata", () => {
@@ -201,6 +243,126 @@ it("edits an asset file through the read → textarea → hash-guarded save loop
   expect(container.textContent).toContain("保存中…");
   savedReply(1);
   expect(container.textContent).toContain("已保存");
+});
+
+it("renders a .toml detail as structured 描述/提示词 fields, keeping the raw TOML behind a collapsed disclosure", () => {
+  stateReply([TOML_CMD], [], []);
+  clickTitle("详情");
+  expect(container.textContent).toContain("读取中…");
+  contentReply(TOML_CMD.path, RAW_TOML, "hash-toml", TOML_FIELDS);
+
+  // Semantic field labels (FieldLabel) with their values.
+  const labels = [...container.querySelectorAll("span")].map((s) => s.textContent);
+  expect(labels).toContain("描述");
+  expect(labels).toContain("提示词");
+  expect([...container.querySelectorAll("p")].some((p) => p.textContent === TOML_FIELDS.description)).toBe(true);
+  const promptPre = [...container.querySelectorAll("pre")].find((p) => p.getAttribute("title") === "提示词");
+  expect(promptPre).toBeTruthy();
+  expect(promptPre!.textContent).toBe(TOML_FIELDS.prompt);
+
+  // The locating info (path + 详情 chip) stays. The raw TOML is reachable, but
+  // not dumped into the structured view — it waits behind its own disclosure.
+  expect(container.textContent).toContain("详情");
+  expect(container.textContent).toContain("api-docs.toml");
+  expect(container.textContent).toContain("原始 TOML");
+  expect(container.textContent).not.toContain("# Command:");
+  expect(container.textContent).not.toContain("# Description:");
+  expect(container.textContent).not.toContain('description = "在apipost创建api文档"');
+  expect(container.textContent).not.toContain('prompt = """');
+});
+
+it("reveals the raw TOML behind the disclosure, with a labelled copy button", async () => {
+  stateReply([TOML_CMD], [], []);
+  clickTitle("详情");
+  contentReply(TOML_CMD.path, RAW_TOML, "hash-toml", TOML_FIELDS);
+
+  // The disclosure trigger is a real button carrying aria-expanded.
+  const trigger = [...container.querySelectorAll("button")].find(
+    (b) => b.getAttribute("title") === "原始 TOML",
+  );
+  expect(trigger).toBeTruthy();
+  expect(trigger!.getAttribute("aria-expanded")).toBe("false");
+
+  // The copy affordance is an icon button → it needs an accessible name
+  // (aria-label === tooltip wording).
+  const copy = container.querySelector("button[aria-label='复制原始 TOML']");
+  expect(copy).toBeTruthy();
+  expect(copy!.getAttribute("title")).toBe("复制原始 TOML");
+
+  // Expanding shows the original file — comments and unknown keys included.
+  await act(async () => {
+    trigger!.click();
+  });
+  expect(trigger!.getAttribute("aria-expanded")).toBe("true");
+  const rawPre = [...container.querySelectorAll("pre")].find((p) => p.getAttribute("title") === "原始 TOML");
+  expect(rawPre).toBeTruthy();
+  expect(rawPre!.textContent).toContain("# Command: api-docs");
+  expect(rawPre!.textContent).toContain("# Description: 在apipost创建api文档");
+  expect(rawPre!.textContent).toContain('description = "在apipost创建api文档"');
+  expect(rawPre!.textContent).toContain('prompt = """');
+  // A long file scrolls inside the panel instead of blowing the layout up.
+  expect(rawPre!.className).toContain("overflow-auto");
+  expect(rawPre!.className).toContain("max-h-");
+});
+
+it("copies the raw TOML and reports a refused clipboard honestly", async () => {
+  stateReply([TOML_CMD], [], []);
+  clickTitle("详情");
+  contentReply(TOML_CMD.path, RAW_TOML, "hash-toml", TOML_FIELDS);
+
+  const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText },
+    configurable: true,
+  });
+
+  const copy = container.querySelector("button[aria-label='复制原始 TOML']")!;
+  await act(async () => {
+    copy.click();
+  });
+  // A denied clipboard must not look like a success: the label stays and one
+  // error toast is raised.
+  expect(container.querySelector("button[aria-label='复制原始 TOML']")).toBeTruthy();
+  expect(notify).toHaveBeenCalledWith("复制失败", "error");
+
+  // A granted clipboard flips the icon to a check mark.
+  writeText.mockResolvedValue(undefined);
+  await act(async () => {
+    copy.click();
+  });
+  expect(container.querySelector("button[aria-label='已复制']")).toBeTruthy();
+  expect(writeText).toHaveBeenCalledWith(RAW_TOML);
+});
+
+it("keeps the full raw TOML in edit mode after a structured detail (edit round trip)", () => {
+  stateReply([TOML_CMD], [], []);
+  clickTitle("详情");
+  contentReply(TOML_CMD.path, RAW_TOML, "hash-toml", TOML_FIELDS);
+  click("编辑");
+  const textarea = container.querySelector("textarea")!;
+  // Editing still targets the raw file — the CLI's zod check on `prompt`
+  // would break if the structurer dropped any field.
+  expect(textarea.value).toBe(RAW_TOML);
+  input(textarea, RAW_TOML + "# touched\n");
+  click("保存");
+  const call = send.mock.calls.at(-1)![0];
+  expect(call.type).toBe("saveAsset");
+  expect(call.content).toContain('prompt = """');
+  expect(call.content).toContain("# touched");
+  savedReply(1, {}, TOML_CMD.path);
+  expect(container.textContent).toContain("已保存");
+});
+
+it("falls back to the raw body with a Hint when the host sends no fields", () => {
+  stateReply([TOML_CMD], [], []);
+  clickTitle("详情");
+  contentReply(TOML_CMD.path, RAW_TOML, "hash-toml");
+  expect(container.textContent).toContain("无法提取结构化字段，显示原始文件内容");
+  expect(container.textContent).toContain("# Command: api-docs");
+  expect(container.textContent).toContain('prompt = """');
+  expect(
+    [...container.querySelectorAll("pre")].some((p) => p.textContent?.includes("# Command:")),
+  ).toBe(true);
 });
 
 it("refuses a save whose expected hash drifted on disk (conflict, nothing written)", () => {
