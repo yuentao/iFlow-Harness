@@ -120,6 +120,11 @@ type Internals = {
     stopReason: string,
     onlyTaskIds?: ReadonlySet<string>,
   ) => Promise<void>;
+  appendQqArchiveEvent: (
+    type: string,
+    taskId?: string,
+    detail?: Record<string, unknown>,
+  ) => Promise<void>;
   qqMainFinalAwaiters: Map<string, string>;
   qq?: {
     service?: {
@@ -570,5 +575,69 @@ describe("ChatPanel 远程接续开关", () => {
     expect(delivered).not.toContain(fallback); // 转述优先于兜底
     expect(delivered).not.toContain("尾部标记"); // 超长已截断
     expect(delivered).toContain("完整结果请在面板查看");
+  });
+
+  /**
+   * 可观测性回归（2026-11-22）：中间人开启接续后的补投决策必须落归档事件，
+   * 下次复现「QQ 只收到短提醒」时能一眼区分是补投被跳过还是根本没走到收尾块。
+   * QQ 注入回合自带回执通道，正文补投被内部 guard 跳过，属于「合法跳过」，
+   * 此时应记录 takeover_report_forward_skipped 及其判定上下文。
+   */
+  it("接管态 + QQ 注入回合：跳过正文补投时记录 takeover_report_forward_skipped 归档事件", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      autoMemoryCapture: false,
+      nextStepSuggestions: false,
+    });
+    p.qq = { service: { notifyBoundUser: vi.fn(async () => true) } };
+    await p.handleWebviewMessage({ type: "qqTakeover", action: "start" });
+    // QQ 注入回合 + 该 session 已登记 awaiter → 补投条件不成立、takeoverReportSent=false。
+    p.qqInjectedTaskId = "task-qq";
+    p.qqMainFinalAwaiters.set("task-qq", "s1");
+    p.superAgent = { list: () => [] };
+    p.ensureClient = async () => ({});
+    const pending: Array<(v: { stopReason: string }) => void> = [];
+    p.promptWithRetry = vi.fn(
+      (_c: unknown, _s: string, _prompt: unknown) =>
+        new Promise<{ stopReason: string }>((resolve) => pending.push(resolve)),
+    ) as unknown as Internals["promptWithRetry"];
+    p.persistActiveTranscript = async () => {};
+    p.touchActiveSession = async () => {};
+    p.store.sessionStarted({ sessionId: "s1" });
+    p.store.replaceState({ ...p.store.getState(), status: "idle", blocks: [] });
+
+    const archive = vi.spyOn(p, "appendQqArchiveEvent").mockResolvedValue(undefined);
+
+    const fallback = "子会话汇报正文：修好登录跳转";
+    const started = p.sendPrompt("【汇报】超流体完成", undefined, undefined, undefined, {
+      hidden: true,
+      reportTurn: true,
+      finalReport: true,
+      finalFallbackText: fallback,
+    });
+    for (let i = 0; i < 100 && pending.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    pending[0]?.({ stopReason: "end_turn" });
+    await started;
+
+    expect(archive).toHaveBeenCalledTimes(1);
+    expect(archive).toHaveBeenCalledWith(
+      "takeover_report_forward_skipped",
+      undefined,
+      expect.objectContaining({
+        awaitedHere: true,
+        takeoverActive: true,
+        injectedTaskId: "task-qq",
+        promptSessionId: "s1",
+        answerChars: expect.any(Number),
+        fallbackChars: expect.any(Number),
+        // deliverQqMainFinalAnswer 投递时已消费 awaiter（qq-host.ts delete），
+        // 归档时列表为空；awaitedHere=true 是投递前采样，才是诊断根因的关键。
+        awaitingTaskIds: [],
+        stopReason: "end_turn",
+      }),
+    );
   });
 });
