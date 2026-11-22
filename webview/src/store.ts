@@ -109,6 +109,7 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   superAgentIntegration: "merge",
   superAgentMaxWorktrees: 10,
   superAgentKeepWorktree: false,
+  superAgentFullTrust: false,
 };
 
 // --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------

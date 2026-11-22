@@ -82,6 +82,7 @@ const hostSettings = vi.hoisted(() =>
     superAgentIntegration: "merge",
     superAgentMaxWorktrees: 10,
     superAgentKeepWorktree: false,
+    superAgentFullTrust: false,
     // 宿主尚未把这两个字段接进 HostSettingsUi（host 侧子会话负责），这里
     // 用可选字段模拟「已接线」与「未接线」两种状态。
     superAgentMaxAttempts: undefined as number | undefined,
@@ -152,6 +153,7 @@ beforeEach(() => {
   updateHostSetting.mockReset();
   hostSettings.superAgentMaxAttempts = undefined;
   hostSettings.superAgentDependencyPolicy = undefined;
+  hostSettings.superAgentFullTrust = false;
   setLocale("zh-cn");
   container = document.createElement("div");
   document.body.append(container);
@@ -189,6 +191,7 @@ describe("本地化占位", () => {
     for (const key of [
       "iflow.configuration.superAgentMaxAttempts.description",
       "iflow.configuration.superAgentDependencyPolicy.description",
+      "iflow.configuration.superAgentFullTrust.description",
     ]) {
       expect(nlsEn[key], `package.nls.json 缺 ${key}`).toBeTruthy();
       expect(nlsZh[key], `package.nls.zh-cn.json 缺 ${key}`).toBeTruthy();
@@ -255,11 +258,38 @@ describe("设置页 UI", () => {
     expect(radio("继续").getAttribute("aria-checked")).toBe("true");
   });
 
+  it("「超流体」分组渲染出完全信任模式开关，默认关闭", () => {
+    expect(container.textContent).toContain("完全信任模式");
+    const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
+    expect(toggle).toBeTruthy();
+    expect(toggle!.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("风险提示始终可见", () => {
+    expect(container.textContent).toContain(
+      "开启后子会话可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。",
+    );
+  });
+
+  it("打开完全信任模式把取值写回宿主设置", () => {
+    const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]')!;
+    act(() => toggle.click());
+    expect(updateHostSetting).toHaveBeenCalledWith({ superAgentFullTrust: true });
+  });
+
+  it("宿主已下发开启时，设置页显示为已开启", () => {
+    hostSettings.superAgentFullTrust = true;
+    renderChatTab();
+    const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]')!;
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
+
   it("英文词典里有对应的英文文案", () => {
     setLocale("en-US");
     expect(t("最大尝试次数")).toBe("Max attempts");
     expect(t("依赖策略")).toBe("Dependency policy");
     expect(t("阻塞")).toBe("Block");
     expect(t("继续")).toBe("Continue");
+    expect(t("完全信任模式")).toBe("Full trust mode");
   });
 });

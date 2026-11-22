@@ -43,6 +43,7 @@ const hostSettings = vi.hoisted(() => ({
   superAgentIntegration: "merge",
   superAgentMaxWorktrees: 10,
   superAgentKeepWorktree: false,
+  superAgentFullTrust: false,
 } as HostSettingsUi));
 const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,

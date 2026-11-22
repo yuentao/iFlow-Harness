@@ -1829,6 +1829,9 @@ export interface HostSettingsUi {
   /** Keep the worktree directory after a child session finishes
    * (`iflow.superAgent.keepWorktree`); default false = clean up. */
   superAgentKeepWorktree: boolean;
+  /** Run child sessions in the main repository workspace with no isolation
+   * (`iflow.superAgent.fullTrust`); default false. */
+  superAgentFullTrust: boolean;
 }
 
 /**
