@@ -269,13 +269,25 @@ export class AcpClient {
   async dispose(): Promise<void> {
     this.stopped = true;
     const child = this.child;
-    if (!child || child.exitCode !== null) return;
+    // A child killed by a signal reports `exitCode === null` with `signalCode`
+    // set (POSIX `child.kill()` → SIGTERM). Checking only `exitCode` made a
+    // second dispose() wait for an `exit` event that already fired, hanging
+    // forever (Linux CI: the two "connect failure disposes the child" tests).
+    const settled = () => child !== null && (child.exitCode !== null || child.signalCode !== null);
+    if (!child || settled()) return;
     this.failAllPending("Client disposed");
-    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    const exited = new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+      // A failed spawn emits `error` + `close`, never `exit`; without this the
+      // teardown would await an event that can never arrive.
+      child.once("close", () => resolve());
+    });
     await killTree(child);
     const graceful = await Promise.race([exited.then(() => true), new Promise<false>((resolve) => setTimeout(() => resolve(false), 3000))]);
-    if (!graceful && child.exitCode === null) child.kill("SIGKILL");
-    await exited;
+    if (!graceful && !settled()) child.kill("SIGKILL");
+    // Bounded safety net: teardown must never wedge the extension host, even if
+    // the OS refuses to reap the process.
+    await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 5000))]);
   }
 
   /**

@@ -398,6 +398,22 @@ describe("AcpClient (integration with mock ACP agent)", () => {
     await vi.waitFor(() => expect(exits).toBe(1), { timeout: 15000 });
   }, 20000);
 
+  it("dispose returns immediately for a signal-terminated child (exitCode null, signalCode set)", async () => {
+    // POSIX `child.kill()` reports exitCode === null and signalCode === "SIGTERM".
+    // A second dispose() must not await an `exit` event that already fired — that
+    // used to hang forever on Linux, timing out both dispose regression tests.
+    const client = new AcpClient({ command: process.execPath, args: [mockAgent], cwd: here });
+    const fakeChild = {
+      exitCode: null,
+      signalCode: "SIGTERM",
+      pid: 999_999,
+      once: () => fakeChild,
+      kill: () => true,
+    };
+    (client as unknown as { child: unknown }).child = fakeChild;
+    await expect(client.dispose()).resolves.toBeUndefined();
+  });
+
   it("does not dispose a client whose initialize succeeded", async () => {
     const client = createClient();
     const disposeSpy = vi.spyOn(client, "dispose");
