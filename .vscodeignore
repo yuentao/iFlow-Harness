@@ -47,4 +47,30 @@ iflow.js.original
 session-*.md
 # Local UI-verification screenshots (verify-*.png) are debug artifacts, not assets.
 verify-*.png
+# Internal agent/contributor notes: implementation details, local fork paths and
+# credential-handling notes. Never ship it to the public Marketplace package.
 AGENTS.md
+# --- Internal planning docs, research notes & throwaway debug scripts --------
+# Workspace-only artifacts. The five product/market planning reports are listed
+# by exact name on purpose: a blanket *.md would also drop README.md /
+# CHANGELOG.md / LICENSE, which the Marketplace page and the extension need.
+#
+# NOTE: vsce matches .vscodeignore with minimatch, NOT gitignore semantics —
+# a leading "/" is a literal separator there, not a root anchor, so "/foo.md"
+# never matches the relative path "foo.md". Patterns containing a "/" are
+# anchored at the extension root; patterns without one match the file name.
+本地产品与代码库分析报告.md
+产品升级路线规划报告.md
+市场现状与趋势提炼报告.md
+未来市场预测报告.md
+用户需求与技术趋势分析报告.md
+research/**
+# Throwaway root-level probe/verify scripts. They import dist/src/** (excluded
+# above), so they can never run from a packaged install anyway.
+.tmp-dump.mjs
+.tmp-locate.mjs
+.tmp-probe-window.mjs
+.tmp-verify-window.mjs
+verify-mcp.mjs
+# Local tool ignore file — same category as .gitignore above.
+.iflowignore
