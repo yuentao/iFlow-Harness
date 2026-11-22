@@ -7470,7 +7470,18 @@ export class ChatPanel implements vscode.Disposable {
       // zOt()/CT("tokensLimit") overlay, spread last in its settings merge),
       // so auto-compression uses the active profile's limit instead of the
       // 128000 fallback whose 102400 threshold traps super-agent children.
-      Object.assign(spawnEnv, tokensLimitEnvFromSettings());
+      // Bridge `iflow.contextWindowOverrides` into the same channel: only a
+      // real USER override (source === "user") is forwarded. Builtin-table /
+      // fallback numbers are UI estimates, not CLI authority — forwarding
+      // them would override an explicit active-profile tokensLimit and drift
+      // behaviour. An invalid/absent override falls back to settings inside
+      // tokensLimitEnvFromSettings, so this is additive.
+      const userWindow = resolveContextWindowWithSource(
+        this.store.getState().currentModelId,
+        parseContextWindowOverrides(vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", [])),
+      );
+      const overrideWindow = userWindow.source === "user" ? (userWindow.window ?? undefined) : undefined;
+      Object.assign(spawnEnv, tokensLimitEnvFromSettings(undefined, overrideWindow));
       if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
       // Vendored CLI 内置 `super-agent` 工具的注册开关（工具实现以
       // `process.env.IFLOW_SUPER_TOOL === "1"` 为门控；当前 bundle 尚未包含

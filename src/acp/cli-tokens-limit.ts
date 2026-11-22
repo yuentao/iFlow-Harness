@@ -11,7 +11,8 @@
  * and the Mod's `readTokensLimit()` without ever touching settings.json.
  *
  * Precedence for the effective value (positive integers only):
- *   active profile's `tokensLimit`  >  settings top-level `tokensLimit`  >  undefined.
+ *   `overrideWindow` (panel `iflow.contextWindowOverrides`)  >  active
+ *   profile's `tokensLimit`  >  settings top-level `tokensLimit`  >  undefined.
  * Invalid/missing values are treated as absent. We deliberately do NOT invent a
  * default: when nothing valid is found we omit the env var and let the CLI use
  * its own tables — a bogus large number would be worse than no override.
@@ -49,8 +50,19 @@ export function cliTokensLimitEnv(effective: number | undefined): { IFLOW_TOKENS
  * CLI subprocess. The active profile is the kernel `currentApiProfile` pointer;
  * its per-profile `tokensLimit` is the Mod-added key the CLI's whole-file
  * `saveSettings` never preserves, which is exactly why we surface it via env.
+ *
+ * `overrideWindow` (the panel's resolved `iflow.contextWindowOverrides` for the
+ * current model) wins when it is a positive integer, so the UI occupancy bar
+ * and the CLI's auto-compression threshold read the SAME number. An absent or
+ * invalid override falls back to the settings-derived value — omitting the
+ * argument is byte-for-byte the original behaviour.
  */
-export function tokensLimitEnvFromSettings(settingsPath?: string): { IFLOW_TOKENS_LIMIT?: string } {
+export function tokensLimitEnvFromSettings(
+  settingsPath?: string,
+  overrideWindow?: number,
+): { IFLOW_TOKENS_LIMIT?: string } {
+  const override = positiveInt(overrideWindow);
+  if (override !== undefined) return cliTokensLimitEnv(override);
   const settings = readCliSettings(settingsPath);
   if (!settings) return {};
   const activeName = settings.currentApiProfile?.trim();
