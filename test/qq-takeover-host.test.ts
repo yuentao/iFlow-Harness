@@ -681,10 +681,14 @@ describe("ChatPanel 远程接续开关", () => {
     pending[0]?.({ stopReason: "end_turn" });
     await started;
 
-    expect(archive).toHaveBeenCalledTimes(1);
-    expect(archive).toHaveBeenCalledWith(
-      "takeover_report_forward_skipped",
-      undefined,
+    // finalReport 收尾还会无条件写一条 takeover_report_decision 决策快照，
+    // 这里只关心 forward_skipped 这一条：按事件名过滤后断言恰好一条并校验上下文。
+    const skipped = archive.mock.calls.filter(
+      (c) => c[0] === "takeover_report_forward_skipped",
+    );
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]![1]).toBeUndefined();
+    expect(skipped[0]![2]).toEqual(
       expect.objectContaining({
         awaitedHere: true,
         takeoverActive: true,

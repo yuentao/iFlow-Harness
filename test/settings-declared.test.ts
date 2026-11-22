@@ -55,6 +55,8 @@ const ALL_KEYS: string[] = [
   "iflow.superAgent.dependencyPolicy",
   "iflow.superAgent.keepWorktree",
   "iflow.superAgent.maxWorktrees",
+  "iflow.superAgent.childToolAllowlist",
+  "iflow.superAgent.childMcpServerAllowlist",
   "iflow.qq.enabled",
   "iflow.qq.allowedUsers",
   "iflow.qq.allowedGroups",
