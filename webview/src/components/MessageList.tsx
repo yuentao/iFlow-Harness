@@ -312,6 +312,7 @@ function OutputDetails({
   blockId,
   live = false,
   chrome = "card",
+  evicted = false,
 }: {
   output: string;
   truncatedChars?: number;
@@ -323,6 +324,10 @@ function OutputDetails({
    * live pane) drops the framed code box and the transcript-only copy/export
    * actions — the row keeps its status line and the output text only. */
   chrome?: BlockChrome;
+  /** The webview released this block's heavy payload (long-session memory
+   * trim, pitfall #27). The HOST keeps the full record, so the output is
+   * still recoverable through the export affordance. */
+  evicted?: boolean;
 }) {
   const flat = chrome === "flat";
   const send = useChat((s) => s.send);
@@ -351,7 +356,23 @@ function OutputDetails({
     const el = bodyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [live, open, output]);
-  if (!output) return null;
+  if (!output) {
+    // The payload was released on the webview side (long-session memory trim)
+    // — the HOST still holds the full output, so the recovery exit is the
+    // host-side export. Without it the card would only say 「内容已释放」 and
+    // the output would be unreachable from the UI.
+    if (!evicted || flat || !blockId) return null;
+    return (
+      <div className="flex items-center gap-3 px-3 pb-1.5 text-ui-caption">
+        <button
+          className="text-muted-foreground hover:text-foreground"
+          onClick={() => send({ type: "exportToolOutput", blockId })}
+        >
+          {t("查看完整输出")}
+        </button>
+      </div>
+    );
+  }
   // 3.5 ②: the store keeps up to 512K chars; render at most the display cap
   // so one monster output cannot balloon the DOM (pitfall #27). Everything
   // stored — including what this pane cuts — stays recoverable via the
@@ -670,6 +691,7 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
         blockId={block.id}
         live={block.status === "in_progress"}
         chrome={chrome}
+        evicted={block.evicted === true}
       />
     </div>
   );
@@ -891,7 +913,37 @@ const SubAgentCard = memo(function SubAgentCard({ block, chrome = "card" }: { bl
 
 function ReadOnlySubAgentEntry({ block, chrome = "card" }: { block: Block; chrome?: BlockChrome }) {
   if (block.kind === "subagent") return null; // Rendered once in the tree above.
-  if (block.kind === "tool") return <div><div>{localizeStepTitle(block.title || block.toolName)} · <StatusChip status={block.status} flat={chrome === "flat"} /></div>{block.input && <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all opacity-80">{block.input}</pre>}<pre className="max-h-64 overflow-auto whitespace-pre-wrap">{block.output}</pre></div>;
+  if (block.kind === "tool") {
+    return (
+      <div>
+        <div>
+          {localizeStepTitle(block.title || block.toolName)} ·{" "}
+          <StatusChip status={block.status} flat={chrome === "flat"} />
+        </div>
+        {block.input && (
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all opacity-80">{block.input}</pre>
+        )}
+        {/* The output rides the SAME OutputDetails as the main transcript's
+            tool card: a bare <pre> had no truncation notice and no way to get
+            the text back once the host capped it. The recover row (「已截断 N
+            字符」+「复制全部」) is the recovery exit.
+            NOTE: no `blockId` here — nested subagent entries live inside
+            `subagent.entries`, NOT in the host's top-level block list, so the
+            host's exportToolOutput lookup could not resolve them (a dead
+            「查看完整输出」button is worse than none). The host needs a deep
+            lookup before that affordance can be offered here. */}
+        <OutputDetails
+          output={block.output}
+          truncatedChars={block.truncatedChars}
+          chrome={chrome}
+          evicted={block.evicted === true}
+        />
+        {block.evicted && (
+          <div className="text-ui-caption opacity-60">{t("内容已释放")}</div>
+        )}
+      </div>
+    );
+  }
   if (block.kind === "thought") return <div><Brain className="mr-1 inline size-3" />{block.evicted ? <span className="opacity-60">{t("内容已释放")}</span> : block.text}</div>;
   if (block.kind === "text" || block.kind === "user") return <Markdown text={block.text} />;
   if (block.kind === "plan") return <TaskList block={block} chrome={chrome} />;

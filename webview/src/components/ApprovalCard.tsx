@@ -199,7 +199,12 @@ export function ApprovalCard({
           <span className="block text-ui-micro text-muted-foreground/85 tracking-wide">
             {t("iFlow 想执行一项操作")}
           </span>
-          <span id={titleId} className="block truncate text-ui-label font-semibold leading-tight">
+          <span
+            id={titleId}
+            className="block truncate text-ui-label font-semibold leading-tight"
+            /* truncate 必配 title：文件路径被省略号吃掉的部分只有 hover 拿得到 */
+            title={actionTarget || undefined}
+          >
             {t(actionVerb)}
             {!!actionTarget && (
               <code className="approval-target ml-1">{actionTarget}</code>
