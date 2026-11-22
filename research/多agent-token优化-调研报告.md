@@ -1,6 +1,6 @@
 # 多 Agent / 多子代理系统 Token 开销优化 — 联网调研报告
 
-调研日期：2026-11-22。方法：本机 `curl.exe` / Node `fetch` 直抓一手页面（官方工程博客、官方文档、GitHub API），原文按主题缓存于 `research/_m_*.txt`（Anthropic 博客）与 `research/_p_*.txt`（产品文档 / 开源项目）等文件，每份首行 `/* STATUS: <HTTP码> <最终URL> */` 记录抓取结果。本报告每条要点附可访问 URL（标题 + 大致日期）与「对 iflow-harness Super Agent 的可迁移性」判断。
+调研日期：2026-11-22。方法：本机 `curl.exe` / Node `fetch` 直抓一手页面（官方工程博客、官方文档、GitHub API），抓取的一手资料已逐条核实，调研完成后抓取缓存已清理。本报告每条要点附可访问 URL（标题 + 大致日期）与「对 iflow-harness Super Agent 的可迁移性」判断。
 
 > 关于用户提到的「单 agent 15k tokens vs 交给 agent 72k tokens」绝对数字：**在本次抓到的一手资料中未能定位到这组绝对值**。Anthropic 原文给的是相对倍数（agent 用 4×、multi-agent 用 15× chat 的 token）与百分比（90.2% 提升、80% 方差解释）；`~72K tokens` 出现在 advanced tool use 文中，指的是「50+ MCP 工具定义的 token 开销」，与「多 agent 总开销」不是同一口径。为避免误引，下文只引用一手原文确有的数字，并单独标注这一缺口。
 
