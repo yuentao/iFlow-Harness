@@ -220,4 +220,76 @@ describe("AssetsService", () => {
     const outside = lastMessage(messages, "assetContent");
     expect(outside.error).toContain("这个位置的文件不能在这里编辑");
   });
+
+  it("readFile returns structured .toml description/prompt without leaking raw TOML into the fields", async () => {
+    const home = tempDir("iflow-assets-home-");
+    const cwd = tempDir("iflow-assets-ws-");
+    mk(path.join(home, "commands"));
+    const target = path.join(home, "commands", "api-docs.toml");
+    const raw = [
+      "# Command: api-docs",
+      "# Description: 在apipost创建api文档",
+      'description = "在apipost创建api文档"',
+      'prompt = """',
+      "在 apipost 创建 API 文档。",
+      'description = "这是提示词正文里的假描述，不能被当成 description"',
+      "步骤：",
+      "1. 打开 apipost",
+      '2. 填写 "接口" 信息',
+      '"""',
+      "",
+    ].join("\n");
+    writeFileSync(target, raw, "utf8");
+
+    const { service, messages } = makeService(home, cwd);
+    await service.readFile(target, 11);
+    const read = lastMessage(messages, "assetContent");
+
+    // The raw body is still present verbatim — editing must round-trip it so
+    // the CLI's zod validation on `prompt` is never broken.
+    expect(read.content).toBe(raw);
+    expect(read.fields).toBeDefined();
+    expect(read.fields!.description).toBe("在apipost创建api文档");
+    expect(read.fields!.prompt).toBe(
+      [
+        "在 apipost 创建 API 文档。",
+        'description = "这是提示词正文里的假描述，不能被当成 description"',
+        "步骤：",
+        "1. 打开 apipost",
+        '2. 填写 "接口" 信息',
+      ].join("\n"),
+    );
+    // No delimiters, no leading/trailing whitespace in the prompt field.
+    expect(read.fields!.prompt).not.toContain('"""');
+    expect(read.fields!.prompt!.trim()).toBe(read.fields!.prompt);
+  });
+
+  it("readFile degrades gracefully on an unparseable .toml (null fields, no throw)", async () => {
+    const home = tempDir("iflow-assets-home-");
+    const cwd = tempDir("iflow-assets-ws-");
+    mk(path.join(home, "commands"));
+    const target = path.join(home, "commands", "broken.toml");
+    const raw = "this is not a command toml\n# description = \"only in a comment\"\nprompt = 42\n";
+    writeFileSync(target, raw, "utf8");
+
+    const { service, messages } = makeService(home, cwd);
+    await expect(service.readFile(target, 12)).resolves.toBeUndefined();
+    const read = lastMessage(messages, "assetContent");
+    expect(read.error).toBeUndefined();
+    expect(read.content).toBe(raw);
+    expect(read.fields).toEqual({ description: null, prompt: null });
+  });
+
+  it("readFile leaves raw-only assets (.md) without a fields key", async () => {
+    const home = tempDir("iflow-assets-home-");
+    const cwd = tempDir("iflow-assets-ws-");
+    mk(path.join(home, "commands"));
+    const target = path.join(home, "commands", "plain.md");
+    writeFileSync(target, "---\ndescription: plain\n---\n\nbody\n", "utf8");
+
+    const { service, messages } = makeService(home, cwd);
+    await service.readFile(target, 13);
+    const read = lastMessage(messages, "assetContent");
+    expect(read.fields).toBeUndefined();
+  });
 });

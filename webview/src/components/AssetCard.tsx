@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { ChevronRight, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import type {
+  AssetContentFields,
   AssetKind,
   AssetScope,
   AssetUi,
@@ -8,7 +9,7 @@ import type {
 } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { ActionRow, Button, Chip, ConfirmDialog, Field, Hint, IconButton, ICON_INLINE, Segmented, TextArea, TextInput, ToolbarRow } from "./ui";
+import { ActionRow, Button, Chip, ConfirmDialog, Field, FieldLabel, Hint, IconButton, ICON_INLINE, Segmented, TextArea, TextInput, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -84,6 +85,9 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
   // detail/edit subviews (one at a time); editLoading = read in flight.
   const [detail, setDetail] = useState<{ path: string; hash: string | null } | null>(null);
   const [detailContent, setDetailContent] = useState<string | null>(null);
+  /** Structured description/prompt from the host (.toml only). null = no
+   * structured view → fall back to the raw body. */
+  const [detailFields, setDetailFields] = useState<AssetContentFields | null>(null);
   const [editing, setEditing] = useState<{ path: string; content: string; hash: string | null } | null>(null);
   const [editLoading, setEditLoading] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
@@ -128,6 +132,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
         path?: string;
         content?: string;
         hash?: string | null;
+        fields?: AssetContentFields;
         ok?: boolean;
         conflict?: boolean;
         error?: string;
@@ -156,6 +161,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
         if (mode === "detail") {
           setDetail({ path: targetPath, hash: msg.hash ?? null });
           setDetailContent(msg.content ?? "");
+          setDetailFields(msg.fields ?? null);
           return;
         }
         setEditing((current) =>
@@ -251,6 +257,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               back: () => {
                 setDetail(null);
                 setDetailContent(null);
+                setDetailFields(null);
               },
               title: t("资产详情"),
             }
@@ -465,6 +472,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                           onClick={() => {
                             setDetail({ path: item.path, hash: item.hash });
                             setDetailContent(null);
+                            setDetailFields(null);
                             setEditError(null);
                             requestOpen(item.path, "detail");
                           }}
@@ -524,13 +532,36 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
           </div>
           {detailContent === null ? (
             <div className="py-3 text-center text-ui-label text-muted-foreground">{t("读取中…")}</div>
+          ) : detailFields && (detailFields.description !== null || detailFields.prompt !== null) ? (
+            <div className="space-y-2">
+              {detailFields.description !== null && (
+                <div className="flex flex-col gap-1">
+                  <FieldLabel>{t("描述")}</FieldLabel>
+                  <p className="text-ui-body leading-relaxed text-foreground">{detailFields.description}</p>
+                </div>
+              )}
+              {detailFields.prompt !== null && (
+                <div className="flex flex-col gap-1">
+                  <FieldLabel>{t("提示词")}</FieldLabel>
+                  <pre
+                    className="max-h-48 overflow-y-auto rounded-md bg-muted/8 px-1.5 py-1 font-mono text-ui-caption leading-snug whitespace-pre-wrap break-all"
+                    title={t("提示词")}
+                  >
+                    {detailFields.prompt}
+                  </pre>
+                </div>
+              )}
+            </div>
           ) : (
-            <pre
-              className="max-h-48 overflow-y-auto rounded-md bg-muted/8 px-2 py-1.5 font-mono text-ui-label leading-snug whitespace-pre-wrap break-all"
-              title={t("文件内容")}
-            >
-              {detailContent}
-            </pre>
+            <>
+              <Hint>{t("无法提取结构化字段，显示原始文件内容")}</Hint>
+              <pre
+                className="max-h-48 overflow-y-auto rounded-md bg-muted/8 px-2 py-1.5 font-mono text-ui-label leading-snug whitespace-pre-wrap break-all"
+                title={t("文件内容")}
+              >
+                {detailContent}
+              </pre>
+            </>
           )}
           {detailContent !== null && (
             <ActionRow>
@@ -540,6 +571,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                   setEditing({ path: detail.path, content: detailContent, hash: detail.hash });
                   setDetail(null);
                   setDetailContent(null);
+                  setDetailFields(null);
                   setEditError(null);
                 }}
               >
