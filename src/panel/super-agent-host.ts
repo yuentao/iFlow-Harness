@@ -39,6 +39,7 @@ import { buildAcpCommand, concealNodeExecutable, locateNodeExecutable } from "..
 import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
 import { loadCredentials } from "../acp/auth.js";
 import { tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
+import { buildChildSessionSettings, effectiveMcpServerNames } from "../../shared/super-tool-policy.js";
 import { parseCostTable, resolveCost } from "../../shared/context-window.js";
 import {
   type Block,
@@ -1184,6 +1185,14 @@ export class SuperAgentHost {
       // manager asks for entries the broker (when any server is configured) is
       // already listening. Read lazily: a child spawned later still sees it.
       childMcpServers: () => this.mcpBroker?.sessionServers() ?? [],
+      // 子会话工具白名单：实时读配置，缺省两个数组都是 [] → 纯函数返回
+      // undefined → newSession 不带 settings（既有行为逐字节不变）。MCP
+      // 白名单也传进去（它的收窄在 spawn 层完成，settings 里不会多出键）。
+      childSessionSettings: () =>
+        buildChildSessionSettings(
+          vscode.workspace.getConfiguration("iflow").get<string[]>("superAgent.childToolAllowlist", []),
+          vscode.workspace.getConfiguration("iflow").get<string[]>("superAgent.childMcpServerAllowlist", []),
+        ),
       onSessionsChanged: (sessions) => {
         this.store.setSuperSessions(sessions);
         // 批次2A 项6：终态转换 / 失败分类（lastError）/ 改动去向（integration）
@@ -1396,8 +1405,15 @@ export class SuperAgentHost {
     // broker 为空（没有配置 / 启动失败）时传空数组 → 哨兵 → 子会话无 MCP，
     // 与启动失败时的 toast 一起如实暴露，绝不伪造共享。
     const broker = await this.ensureMcpBroker();
+    const brokerNames = broker?.names() ?? [];
+    const mcpAllowlist = vscode.workspace
+      .getConfiguration("iflow")
+      .get<string[]>("superAgent.childMcpServerAllowlist", []);
     const { args } = buildAcpCommand(entry, includeDirectories, {
-      mcpServerNames: broker?.names() ?? [],
+      // 空白名单 → effectiveMcpServerNames 返回 undefined → 回退 broker 全量
+      // （接线前的原表达式）；非空则与 broker 实际 server 名取交集，用户写错
+      // 的名字在进程层就被过滤掉。
+      mcpServerNames: effectiveMcpServerNames(mcpAllowlist, brokerNames) ?? brokerNames,
     });
     const systemPromptFile = await this.materializeSystemPrompt("child");
     const spawnEnv: NodeJS.ProcessEnv = {

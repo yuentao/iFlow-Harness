@@ -627,3 +627,87 @@ describe("批次2A · 残留二次确认令牌与 urgent 写", () => {
     expect(host.noteSuperCriticalChange([{ ...base, status: "failed" }])).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 接线 · 子会话工具白名单进入 session/new settings
+// ---------------------------------------------------------------------------
+
+type SeenNewSession = {
+  cwd: string;
+  mcpServers: readonly unknown[];
+  settings?: Record<string, unknown>;
+};
+
+class SettingsProbeClient {
+  disposed = false;
+  constructor(
+    readonly callbacks: AcpClientCallbacks,
+    private readonly seen: SeenNewSession[],
+  ) {}
+  async newSession(req: SeenNewSession): Promise<{ sessionId: string }> {
+    this.seen.push(req);
+    return { sessionId: "sub-settings-probe" };
+  }
+  async setMode(): Promise<unknown> { return {}; }
+  async setModel(): Promise<unknown> { return {}; }
+  async mcpStatus(): Promise<unknown> { return { available: false, servers: {} }; }
+  async prompt(): Promise<{ stopReason: string }> { return { stopReason: "end_turn" }; }
+  isAlive(): boolean { return true; }
+  cancel(): void {}
+  async dispose(): Promise<void> { this.disposed = true; }
+}
+
+function makeSettingsProbeManager(childSettings?: {
+  allowed_tools?: string[];
+  disallowed_tools?: string[];
+}) {
+  const repoRoot = makeRepo();
+  const seen: SeenNewSession[] = [];
+  const manager = new SuperAgentManager({
+    repoRoot,
+    createClient: async (params) =>
+      new SettingsProbeClient(params.callbacks, seen) as unknown as AcpClient,
+    // 宿主在缺省配置下给的就是 undefined（buildChildSessionSettings([], [])）。
+    childSessionSettings: childSettings ? () => ({ ...childSettings }) : undefined,
+    onSessionsChanged: () => {},
+    onReport: () => {},
+    currentModel: () => null,
+    currentMainSessionId: () => "main-1",
+    integrationMode: () => "manual",
+    maxConcurrentSessions: () => 5,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+  return { manager, seen };
+}
+
+describe("接线 · 子会话工具白名单进入 session/new settings", () => {
+  it("两个白名单皆空（buildChildSessionSettings 返回 undefined）：不传 settings / 无 allowed_tools", async () => {
+    const { manager, seen } = makeSettingsProbeManager(undefined);
+    manager.spawn({ title: "缺省", task: "缺省配置" });
+    await pollUntil(() => seen.length > 0);
+    expect(seen[0]!.settings).toBeUndefined();
+    expect(seen[0]!.settings?.allowed_tools).toBeUndefined();
+  });
+
+  it("工具白名单非空：session/new settings 带 allowed_tools", async () => {
+    const { manager, seen } = makeSettingsProbeManager({
+      allowed_tools: ["read_file", "glob"],
+    });
+    manager.spawn({ title: "白名单", task: "限制工具" });
+    await pollUntil(() => seen.length > 0);
+    expect(seen[0]!.settings?.allowed_tools).toEqual(["read_file", "glob"]);
+  });
+
+  it("与既有 disallowedTools 合并：两种策略同时存在互不覆盖", async () => {
+    const { manager, seen } = makeSettingsProbeManager({
+      allowed_tools: ["read_file"],
+    });
+    manager.spawn(
+      { title: "合并", task: "两种策略" },
+      { policy: { approval: "auto", disallowedTools: ["run_shell_command"] } },
+    );
+    await pollUntil(() => seen.length > 0);
+    expect(seen[0]!.settings?.allowed_tools).toEqual(["read_file"]);
+    expect(seen[0]!.settings?.disallowed_tools).toEqual(["run_shell_command"]);
+  });
+});
