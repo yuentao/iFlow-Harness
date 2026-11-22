@@ -234,6 +234,9 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - `vendor/iflow-fork` 下的改动（如 super-agent loader 校验）在下次 `vendor:cli` 从外部 fork 重新生成快照时会被覆盖，必须同步回 iFlowMods 源仓库（如 `super-agent-tool-refactor`），否则闭环能力丢失。
 - 同屏值选择优先使用 ui.tsx 的 ChoiceRow（内部 Segmented），不要用 Select；控件应收敛到 ui.tsx，避免同类功能出现不同控件形态。
 - CI 中 knip/lint:deps 告警要按用户要求通过真正删除死代码修复，不接受新增豁免；修到零告警是发布前质量门的一部分。
+- 当前 iFlowMods 同步决策：不做远程同步/PR，只保留本地改动（vendor/iflow-fork 产物快照）。
+- 用户决定 iFlowMods 相关改动只保留在本地，不做 GitHub 远程同步/PR；项目里说的“外部 fork”指本地定制 fork checkout，不是 GitHub 上的 iFlowMods 仓库。
+- vendor/iflow-fork 是本地外部 fork 的产物快照；改 vendor 快照后要同步本地 fork 源仓库，否则下次 npm run vendor:cli --from-dir 重生成会覆盖。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 
