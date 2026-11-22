@@ -9158,9 +9158,29 @@ export class ChatPanel implements vscode.Disposable {
           undefined,
           finalFallbackText,
         );
-        if (!awaitedHere && this.qqHost.qqTakeoverActive) {
+        // 本地发起的任务（qqInjectedTaskId === null）即使残留 awaiter，正文也只到
+        // completeMainFinalAnswer 任务通道、私聊看不到，必须补投。QQ 注入回合由
+        // forwardTakeoverReport 内部 `qqInjectedTaskId !== null` 守卫(3347)跳过，不会重复。
+        if (
+          (!awaitedHere || this.qqInjectedTaskId === null) &&
+          this.qqHost.qqTakeoverActive
+        ) {
           this.forwardTakeoverReport(answer, finalFallbackText);
           takeoverReportSent = true;
+        }
+        if (!takeoverReportSent && this.qqHost.qqTakeoverActive) {
+          void this.appendQqArchiveEvent("takeover_report_forward_skipped", undefined, {
+            awaitedHere,
+            takeoverActive: this.qqHost.qqTakeoverActive,
+            injectedTaskId: this.qqInjectedTaskId,
+            promptSessionId,
+            answerChars: answer.trim().length,
+            fallbackChars: sanitizeQqReportFallback(finalFallbackText).length,
+            awaitingTaskIds: [...this.qqHost.qqMainFinalAwaiters.entries()]
+              .filter(([, owner]) => owner === promptSessionId)
+              .map(([taskId]) => taskId),
+            stopReason: result.stopReason,
+          });
         }
       }
       // 回合收尾：复核动作围栏 —— 回合都结束了还停在未闭合围栏上，说明这个
