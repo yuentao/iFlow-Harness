@@ -470,6 +470,10 @@ const en: Record<string, string> = {
   "提示词": "Prompt",
   // asset detail: structured .toml view vs raw fallback
   "无法提取结构化字段，显示原始文件内容": "No structured fields to show — displaying the raw file content",
+  "原始 TOML": "Raw TOML",
+  "原始文件内容": "Raw file content",
+  "复制原始 TOML": "Copy the raw TOML",
+  "复制原始文件内容": "Copy the raw file content",
   "参数结构": "Parameter structure",
   "参数结构太大，已省略": "The parameter structure is too large and was omitted",
   // profile-switch choice dialog
