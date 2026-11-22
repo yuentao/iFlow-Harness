@@ -923,7 +923,7 @@ export class ChatPanel implements vscode.Disposable {
       deliverQqMainIntermediateText: (...args) => this.deliverQqMainIntermediateText(...args),
       forwardQqMainTaskChildQuestion: (...args) => this.forwardQqMainTaskChildQuestion(...args),
       forwardQqTaskQuestion: (...args) => this.forwardQqTaskQuestion(...args),
-      materializeSystemPrompt: () => this.materializeSystemPrompt(),
+      materializeSystemPrompt: (variant) => this.materializeSystemPrompt(variant),
       mcpProjectCwd: () => this.mcpProjectCwd(),
       notifyOs: (event, text) => this.notifyOs(event, text),
       postToWebview: (m) => this.postToWebview(m),
@@ -7978,10 +7978,17 @@ export class ChatPanel implements vscode.Disposable {
    * lives. Skips the write when the file already holds the current template.
    * Returns null on failure so the spawn omits the override instead of pointing
    * the CLI at a path that does not exist (it throws on a missing file).
+   *
+   * `variant` selects which template lands on disk: "main" (the default) keeps
+   * the original `system-prompt.md` byte-for-byte; "child" writes the trimmed
+   * Super-Agent-child template so child sessions don't carry the main session's
+   * orchestration section (~5K tokens/request saved per child).
    */
-  private async materializeSystemPrompt(): Promise<string | null> {
-    const fileUri = vscode.Uri.joinPath(this.context.storageUri ?? this.context.globalStorageUri, "system-prompt.md");
-    const text = loadPrompt("system-prompt");
+  private async materializeSystemPrompt(variant: "main" | "child" = "main"): Promise<string | null> {
+    const fileName = variant === "child" ? "system-prompt-child.md" : "system-prompt.md";
+    const promptName = variant === "child" ? "system-prompt-child" : "system-prompt";
+    const fileUri = vscode.Uri.joinPath(this.context.storageUri ?? this.context.globalStorageUri, fileName);
+    const text = loadPrompt(promptName);
     try {
       let existing: Uint8Array | null;
       try {

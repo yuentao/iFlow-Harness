@@ -14,9 +14,11 @@
  * ambient `*.md` declaration in `md.d.ts`; vitest mirrors the same contract with
  * a text loader plugin in `vitest.config.ts`.
  *
- * The one template that must exist on disk is `system-prompt`: the CLI reads
- * `IFLOW_SYSTEM_MD` as a file path, so `ChatPanel` materialises this text into
- * its own storage dir before spawning the CLI.
+ * The two templates that must exist on disk are the system-prompt variants:
+ * `system-prompt` (main session) and `system-prompt-child` (Super Agent child
+ * sessions, trimmed of the main-session orchestration section). The CLI reads
+ * `IFLOW_SYSTEM_MD` as a file path, so `ChatPanel` materialises the right
+ * variant into its own storage dir before spawning each CLI process.
  *
  * A missing template or placeholder throws rather than degrading: sending the
  * model an instruction-less (or half-filled) prompt would silently produce junk.
@@ -37,6 +39,7 @@ import knowledgeIncremental from "./knowledge-incremental.md";
 import modelMetadata from "./model-metadata.md";
 import superAgentTask from "./super-agent-task.md";
 import systemPrompt from "./system-prompt.md";
+import systemPromptChild from "./system-prompt-child.md";
 
 /** CRLF normalised to LF, trailing blank lines dropped. */
 function normalize(text: string): string {
@@ -59,6 +62,7 @@ const templates: Record<string, string> = {
   "model-metadata": normalize(modelMetadata),
   "super-agent-task": normalize(superAgentTask),
   "system-prompt": normalize(systemPrompt),
+  "system-prompt-child": normalize(systemPromptChild),
 };
 
 /** Raw template text; throws when the name is not one of the registered templates. */
