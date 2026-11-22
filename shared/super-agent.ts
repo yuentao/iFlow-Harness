@@ -40,6 +40,41 @@ export function clampMaxConcurrentSuperSessions(value: number): number {
   );
 }
 
+/**
+ * 子会话的**总尝试次数上限**（含首次执行），对应设置项
+ * `iflow.superAgent.maxAttempts`。
+ *
+ * **缺省值必须与 `package.json` 声明的默认值一致（2）**：声明与运行时一旦
+ * 漂移，设置就成了「空设置」（声明了却不生效，见陷阱 #14），而每一次多跑
+ * 的一轮都是一整个子会话会话的全部 token。
+ *
+ * 语义：`1` = 不再重试（失败即终局）；`2` = 首次 + 最多一次重试；`N` = 总共
+ * 最多 N 次。所有重试 / 重派路径（手动 retry、批量 retryWave / retryFailed、
+ * retryable 失败的自动重试）都必须读这同一个上限 —— 路径之间各读各的默认值，
+ * 就会出现「自动重试认为已到上限、手动重试认为还没到」的分裂，同一个任务被
+ * 重复执行。
+ */
+export const DEFAULT_SUPER_MAX_ATTEMPTS = 2;
+/** 下限：至少允许首次执行一次（0 会让子会话连跑都跑不了）。 */
+export const MIN_SUPER_MAX_ATTEMPTS = 1;
+/** 上限：再多就是放任同一个任务无限重跑，token 无底洞。 */
+export const MAX_SUPER_MAX_ATTEMPTS = 5;
+
+/**
+ * 把任意来源的尝试上限收敛成合法值。
+ *
+ * 与并发上限同一纪律：非有限数（NaN / Infinity / 运行时脏值）回落到缺省 2，
+ * 其余截断取整后夹到 1..5。`0` / 负数会被夹到 1 —— 即「不重试」，绝不会
+ * 因为脏值把上限算成 0 而让子会话第一次执行就被判「已达上限」。
+ */
+export function clampSuperMaxAttempts(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_SUPER_MAX_ATTEMPTS;
+  return Math.min(
+    MAX_SUPER_MAX_ATTEMPTS,
+    Math.max(MIN_SUPER_MAX_ATTEMPTS, Math.trunc(value)),
+  );
+}
+
 /** 磁盘上最多保留多少个已结束子会话的工作目录（设置项 `iflow.superAgent.maxWorktrees`）。 */
 export const DEFAULT_MAX_SUPER_WORKTREES = 10;
 /** 可调范围上限：再多就是放任磁盘堆目录了。 */
@@ -4672,6 +4707,12 @@ export function buildSuperReportPrompt(
   });
   const head = [
     "[子会话状态上报]",
+    // 角色锚点：系统提示用「输入里有没有 [子会话看板]」区分主会话与子会话，而
+    // 汇报回合**不再附加看板摘要**（那份额外开销约 1,000 tokens/回合，逐个
+    // 即时汇报会按回合数线性叠加）。这里如实声明这是主会话才有的通道，避免
+    // 主 Agent 因为看不到看板标记而把自己误判成子会话（那会让它放弃派发
+    // 后续任务 —— 正是汇报回合要它做的事）。
+    "You are the MAIN session — the one that dispatches child sessions. This report channel is delivered only to the main session; the child-session board snapshot is not repeated here because the reports below already carry that state.",
     "Below is the final state of the child sessions as observed by the host — this is not a user message, and not something you said earlier.",
     `These are the final states of the ${entries.length} child session(s) that just finished in this batch.`,
     summaryLine,
