@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 本文件做大量原子写盘（tmp + rename + 索引重建），全量并发时单个用例可能
+// 超过默认 5000ms。按文件放宽超时，不动全局 testTimeout。
+vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 import { DEFAULT_TERMINAL_STATUSES, QqTaskStore } from "../src/qq/store.js";
 import { TERMINAL_STATUSES } from "../shared/qq-task.js";
 

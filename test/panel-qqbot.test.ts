@@ -105,8 +105,6 @@ type PanelInternals = {
   [k: string]: unknown;
 };
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 30));
-
 describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
   let storageDir: string;
   let panel: ChatPanel;
@@ -152,6 +150,45 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     p = panel as unknown as PanelInternals;
   }
 
+  /**
+   * 等面板构造期那次 startQqIfEnabled（fire-and-forget）落定。
+   *
+   * 以内部 qqStarting promise 归零为完成信号 —— 固定 sleep 在慢速 CI
+   * runner 上不够（它会与用例里的扫码链路交错）。
+   */
+  async function waitPanelStartSettled(): Promise<void> {
+    const internals = p as unknown as { qqStarting?: Promise<void> | null };
+    await vi.waitFor(
+      () => {
+        expect(internals.qqStarting).toBeNull();
+      },
+      { timeout: 5000, interval: 5 },
+    );
+  }
+
+  /**
+   * 等扫码绑定链（`onQqBotBound` 是 fire-and-forget）真正收尾。
+   *
+   * 完成信号取 `qqManagedStatus` 的 `logged_in` 帧 —— 它是绑定链的倒数
+   * 第二步（在凭据写入、白名单合并、通道启动、「首次绑定自动开启」落盘
+   * **之后**），等它出现即等价于「整条链已落定」。固定 sleep 在慢速 CI
+   * runner 上不够：曾导致 writes 仍为空
+   * （`expected [] to deep equally contain { enabled: true }`）。
+   *
+   * @param after 已有的 logged_in 帧数（第二次扫码时传上一轮的值）。
+   */
+  async function waitBindSettled(after = 0): Promise<void> {
+    await vi.waitFor(
+      () => {
+        const loggedIn = posted.filter(
+          (m) => m.type === "qqManagedStatus" && m.phase === "logged_in",
+        ).length;
+        expect(loggedIn, "绑定链已走到 logged_in").toBeGreaterThan(after);
+      },
+      { timeout: 5000, interval: 10 },
+    );
+  }
+
   beforeEach(async () => {
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qqbot-"));
     setConfigOverrides({
@@ -161,7 +198,8 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     ioHarness = makeIo();
     posted = [];
     createPanel();
-    await tick(); // 构造函数的 startQqIfEnabled 落定（无凭据 → 提示绑定）
+    // 构造函数的 startQqIfEnabled 落定（无凭据 → 提示绑定）。
+    await waitPanelStartSettled();
     vi.spyOn(p, "postToWebview").mockImplementation((m) => {
       posted.push(m);
     });
@@ -195,7 +233,11 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
 
     const creds: QqBotCredentials = { appId: "app-1", appSecret: "sec-1" };
     protocolCbs!.onSuccess(creds);
-    await tick();
+    // 绑定链是 fire-and-forget（`void this.onQqBotBound(...)`）：固定 30ms
+    // tick 在慢速 CI runner 上不够 —— 断言时 writes 仍是空的
+    // （`expected [] to deep equally contain { enabled: true }`）。轮询等
+    // 链的最后一步落盘。
+    await waitBindSettled();
 
     expect(ioHarness.secrets.get(QQBOT_APP_ID_SECRET_KEY)).toBe("app-1");
     expect(ioHarness.secrets.get(QQ_SECRET_KEYS.appSecret)).toBe("sec-1");
@@ -230,7 +272,8 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
   it("扫码成功：扫码者 openid 去重写入白名单，重复扫码不重复占位", async () => {
     await p.handleQqManagedSetup("start");
     protocolCbs!.onSuccess({ appId: "app-2", appSecret: "sec-2", userOpenid: "open-self" });
-    await tick();
+    // 绑定链是 fire-and-forget：等它落定（logged_in 帧）再断言。
+    await waitBindSettled();
 
     expect(ioHarness.writes).toContainEqual({ allowedUsers: ["10001", "open-self"] });
     expect(
@@ -241,7 +284,9 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     // 再扫一次（同一 openid）不应重复占位。
     await p.handleQqManagedSetup("start");
     protocolCbs!.onSuccess({ appId: "app-2", appSecret: "sec-2", userOpenid: "open-self" });
-    await tick();
+    // 第二轮绑定同样是 fire-and-forget：等它的 logged_in 帧（此时开关已开，
+    // 不会再写 `{ enabled: true }`，只能按帧数判代）。
+    await waitBindSettled(1);
     expect(ioHarness.settings.allowedUsers).toEqual(["10001", "open-self"]);
   });
 
@@ -253,7 +298,8 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     ioHarness.settings.allowedUsers = [{ openid: "user-a", note: "同事" }];
 
     protocolCbs!.onSuccess({ appId: "app-3", appSecret: "sec-3", userOpenid: "mem-b" });
-    await tick();
+    // 绑定链是 fire-and-forget：等它落定再断言白名单合并结果。
+    await waitBindSettled();
 
     expect(ioHarness.settings.allowedUsers).toEqual([
       { openid: "user-a", note: "同事" },
@@ -283,7 +329,16 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
   it("扫码失败：推脱敏 error，不留扫码会话", async () => {
     await p.handleQqManagedSetup("start");
     protocolCbs!.onFailure("app_secret=LEAK 失败");
-    await tick();
+    // 失败回执由回调同步推帧；轮询等它出现，不用固定 sleep。
+    await vi.waitFor(
+      () => {
+        expect(
+          posted.some((m) => m.type === "qqManagedStatus" && m.phase === "error"),
+          "失败回执已推送",
+        ).toBe(true);
+      },
+      { timeout: 5000, interval: 10 },
+    );
     const errors = posted.filter(
       (m) => (m as { type?: string; phase?: string }).type === "qqManagedStatus" &&
         (m as { phase?: string }).phase === "error",
@@ -296,7 +351,9 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
   it("stopQq：关闭 adapter 并清空绑定会话，幂等", async () => {
     await p.handleQqManagedSetup("start");
     protocolCbs!.onSuccess({ appId: "app", appSecret: "sec" });
-    await tick();
+    // 绑定链是 fire-and-forget：等它落定（adapter 建出来了）再 stopQq，
+    // 否则 close 次数与 p.qq 的断言会随 runner 负载漂移。
+    await waitBindSettled();
     await p.stopQq();
     expect(adapter.close).toHaveBeenCalled();
     expect(p.qq).toBeUndefined();
@@ -365,7 +422,9 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
 
     expect(p.qq).toBeTruthy();
     releaseConnect();
-    await tick();
+    // connect 放行后绑定链还要走完（服务启动 → 落盘 → logged_in）：轮询等
+    // 它真正收尾，不用固定 sleep。
+    await waitBindSettled();
     expect(p.qq).toBeTruthy();
     expect(adapter.connect).toHaveBeenCalledTimes(1);
   });

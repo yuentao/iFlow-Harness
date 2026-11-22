@@ -10,7 +10,11 @@
  * 可观测）、满队丢弃不再静默（`record()` 回传 dropped / reason / 累计计数）、
  * 清退后新用户能重新进队。
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 本文件做大量原子写盘（tmp + rename + 索引重建），全量并发时单个用例可能
+// 超过默认 5000ms。按文件放宽超时，不动全局 testTimeout。
+vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

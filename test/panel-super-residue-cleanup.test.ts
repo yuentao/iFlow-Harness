@@ -8,6 +8,10 @@
  *  5. 全量清空真的删掉未合并 worktree 目录与分支。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// 本文件跑真实 git + junction/realpath 混合路径清扫，重 FS IO；在 CI runner
+// 与全量并发下单个用例可能跑十几秒。按文件放宽超时，不动全局 testTimeout。
+vi.setConfig({ testTimeout: 60000, hookTimeout: 60000 });
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

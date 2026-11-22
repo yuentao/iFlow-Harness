@@ -99,8 +99,6 @@ type PanelInternals = {
   [k: string]: unknown;
 };
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
-
 describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => {
   let storageDir: string;
   let panel: ChatPanel;
@@ -144,13 +142,47 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
     p = panel as unknown as PanelInternals;
   }
 
+  /**
+   * 等面板构造期那次 startQqIfEnabled（fire-and-forget）落定。
+   *
+   * 以内部 qqStarting promise 归零为完成信号 —— 固定 sleep 在慢速 CI
+   * runner 上不够（它会与用例里的扫码链路交错）。
+   */
+  async function waitPanelStartSettled(): Promise<void> {
+    const internals = p as unknown as { qqStarting?: Promise<void> | null };
+    await vi.waitFor(
+      () => {
+        expect(internals.qqStarting).toBeNull();
+      },
+      { timeout: 5000, interval: 5 },
+    );
+  }
+
+  /**
+   * 等扫码绑定链（`onQqBotBound` 是 fire-and-forget）真正收尾。
+   *
+   * 链的**最后一步**是「首次绑定自动开启远程任务」的 `{ enabled: true }`
+   * 落盘 —— 它发生在凭据写入、白名单合并、通道启动**之后**，等它出现即
+   * 等价于「整条链已落定」（通道启动闸门 qqChannelStarting 也已释放）。
+   * 固定 sleep 在慢速 CI runner 上不够：曾导致 writes 仍为空，以及失活
+   * 恢复被 `recoverQqChannel` 的「正在启动就别抢」分支直接跳过。
+   */
+  async function waitBindSettled(): Promise<void> {
+    await vi.waitFor(
+      () => {
+        expect(ioHarness.writes).toContainEqual({ enabled: true });
+      },
+      { timeout: 5000, interval: 10 },
+    );
+  }
+
   beforeEach(async () => {
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-managed-"));
     setConfigOverrides({ enabled: true, allowedUsers: ["10001"] });
     ioHarness = makeIo();
     posted = [];
     createPanel();
-    await tick();
+    await waitPanelStartSettled();
     vi.spyOn(p, "postToWebview").mockImplementation((m) => {
       posted.push(m);
     });
@@ -179,10 +211,13 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
     // `{ enabled: true }` 的落盘在整条链（含 QqService.start() 的真实磁盘 IO）
     // 末尾才发生。固定 25ms tick 在慢速 CI runner 上不够，assert 时 writes 还
     // 是空的 —— 用 waitFor 等实际副作用到位，消除时序 flake。
-    await vi.waitFor(() => {
-      expect(ioHarness.writes).toContainEqual({ enabled: true });
-      expect(p.qq?.qqbot?.adapter).toBeTruthy();
-    });
+    await vi.waitFor(
+      () => {
+        expect(ioHarness.writes).toContainEqual({ enabled: true });
+        expect(p.qq?.qqbot?.adapter).toBeTruthy();
+      },
+      { timeout: 5000, interval: 10 },
+    );
     expect(ioHarness.secrets.get(QQBOT_APP_ID_SECRET_KEY)).toBe("app-1");
     expect(ioHarness.secrets.get(QQ_SECRET_KEYS.appSecret)).toBe("sec-1");
     // 首次绑定（原本未启用）必须自动开启远程任务。
@@ -211,7 +246,9 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
   it("stopQq：关 adapter 并清空绑定会话，幂等", async () => {
     await p.handleQqManagedSetup("start");
     protocolCbs!.onSuccess({ appId: "app", appSecret: "sec" });
-    await tick();
+    // 绑定链是 fire-and-forget：不等它落定就 stopQq，adapter 还没建出来，
+    // close 次数与 p.qq 的断言都会随 runner 负载漂移。
+    await waitBindSettled();
     await p.stopQq();
     expect(adapter.close).toHaveBeenCalled();
     expect(p.qq).toBeUndefined();
@@ -238,7 +275,11 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
   it("op=9 失活：测试连接不再显示正常，并自动重启一次", async () => {
     await p.handleQqManagedSetup("start");
     protocolCbs!.onSuccess({ appId: "app", appSecret: "sec" });
-    await tick();
+    // 绑定链是 fire-and-forget（`void this.onQqBotBound(...)`）：固定 25ms
+    // tick 在慢速 CI runner 上不够 —— 通道启动闸门（qqChannelStarting）还
+    // 占着时，失活恢复会被 recoverQqChannel 的「正在启动就别抢」分支直接
+    // 跳过，connect 停在 1 次（曾稳定复现）。轮询等整条绑定链落定。
+    await waitBindSettled();
     expect(p.qq).toBeTruthy();
     expect(adapter.connect).toHaveBeenCalledTimes(1);
 
@@ -252,7 +293,16 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
 
     const statuses = messages("qqStatus");
     expect(statuses.some((m) => (m as { connected?: boolean }).connected === false)).toBe(true);
-    // 自动重启一次：stop 旧 owner 后重新 connect。
+    // 自动重启一次：stop 旧 owner 后重新 connect。恢复链含真实磁盘 IO +
+    // 通道重建，轮询等它真正落地 —— 轮询只是同步手段，断言强度不变：
+    // 下面仍然精确断言 connect 恰好 2 次（首绑 1 次 + 重启 1 次）。
+    await vi.waitFor(
+      () => {
+        expect(adapter.connect.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(toast).toHaveBeenCalledWith("info", expect.stringContaining("已自动重启一次"));
+      },
+      { timeout: 5000, interval: 10 },
+    );
     expect(adapter.connect).toHaveBeenCalledTimes(2);
     expect(toast).toHaveBeenCalledWith("info", expect.stringContaining("已自动重启一次"));
     expect(p.qq).toBeTruthy();
@@ -262,7 +312,8 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
   it("连续失活最多自动重启一次：第二次只提示重新扫码", async () => {
     await p.handleQqManagedSetup("start");
     protocolCbs!.onSuccess({ appId: "app", appSecret: "sec" });
-    await tick();
+    // 同上：等整条绑定链落定，避免失活恢复被「正在启动就别抢」跳过。
+    await waitBindSettled();
     expect(adapter.connect).toHaveBeenCalledTimes(1);
 
     const toast = vi.spyOn(p.store, "sendToast").mockImplementation(() => 0);
@@ -272,6 +323,13 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
     });
 
     await p.handleQqConfigAction("testConnection");
+    // 恢复链含真实磁盘 IO + 通道重建：轮询等第一次重启真正落地。
+    await vi.waitFor(
+      () => {
+        expect(adapter.connect.mock.calls.length).toBeGreaterThanOrEqual(2);
+      },
+      { timeout: 5000, interval: 10 },
+    );
     expect(adapter.connect).toHaveBeenCalledTimes(2);
 
     // 第二次仍然失活：预算已用尽，绝不再重启，只能让用户重扫。
