@@ -2093,15 +2093,14 @@ export class QqService {
     // deliverResultLocked 的空摘要分支不会重复追加通知（无双重发送）。
     const summary = trimmed || QQ_MAIN_FINAL_EMPTY_NOTICE;
     const stopReason = (input.stopReason ?? "").trim() || "end_turn";
-    // 短窗相似去重（最终答复侧）：汇报汇总轮的二次转述若与近期出站正文高度
-    // 相似（系统通知回合的近似重复），只落盘收尾、不投递第二条。
-    const deduped = this.isSimilarRecentOutbound(input.taskId, summary);
+    // 终局完整汇报一律投递：不要在最终答复侧按内容相似度去重。
+    // 短窗相似去重只保留在 deliverMainTurnText（中间进度正文）侧抑制刷屏 ——
+    // 终局正文即使与进度措辞相近，也携带用户要的完成结论，必须走 deliverResult。
+    // 真正的重复投递由 resultDeliveredAt 幂等锚点挡住，不靠内容相似度猜测。
     await this.finalizeMainTask(current, summary, stopReason, {
       channel: "main",
       plan: "active-first",
-      ...(deduped ? { suppressDelivery: true } : {}),
     });
-    if (!deduped) this.recordOutboundText(input.taskId, summary);
   }
 
   /**
