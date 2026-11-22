@@ -10,6 +10,10 @@ import type {
 } from "../../../shared/messages";
 import { validateAuthForm } from "../../../shared/messages";
 import { matchProviderPreset, PROVIDER_PRESETS, type ProviderPreset } from "../../../shared/provider-presets";
+import {
+  parseContextWindowRow,
+  validateContextWindowDraft,
+} from "../../../shared/context-window-overrides";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import {
@@ -24,6 +28,7 @@ import {
   HelpTip,
   Hint,
   ICON_INLINE,
+  IconButton,
   LinesCommitTextArea,
   ModalShell,
   Segmented,
@@ -465,6 +470,138 @@ function LinesRow({
         value={value}
         onCommit={onCommit}
       />
+    </div>
+  );
+}
+
+/**
+ * 上下文窗口覆写：结构化编辑器（模型名 + 窗口长度），取代原先「每行写
+ * `模型名=数值`」的多行文本框。
+ *
+ * 为什么必须结构化：覆写行的值只能是**纯数字**——`960K` 在运行时会被
+ * `parseContextWindowOverrides` 静默丢弃（shared/context-window.ts），文本框
+ * 里写错一个单位，用户会以为配好了、实际根本没生效。这里把两个输入框拆开
+ * 并做行内校验，让错误在写盘之前就可见。
+ *
+ * 展示与写盘都走运行时同一套规则（`shared/context-window-overrides.ts`）：
+ * 展示时归一化 `auto/x` → `x`；**不能解析的旧行照样列出来并标明「不生效」**，
+ * 用户能看见、能删，但不会被一次保存静默吞掉。
+ */
+function ContextWindowOverridesGroup({
+  overrides,
+  currentModelId,
+  builtinWindow,
+  onChange,
+}: {
+  overrides: string[];
+  currentModelId?: string;
+  builtinWindow?: number;
+  onChange: (next: string[]) => void;
+}) {
+  const [modelDraft, setModelDraft] = useState("");
+  const [windowDraft, setWindowDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const rows = overrides.map((raw) => ({ raw, parsed: parseContextWindowRow(raw) }));
+
+  function add() {
+    const check = validateContextWindowDraft(modelDraft, windowDraft);
+    if (!check.ok) {
+      setError(
+        check.reason === "model"
+          ? t("请填写模型名")
+          : t("上下文长度必须是正整数（纯数字，不带 K / M 单位）"),
+      );
+      return;
+    }
+    setError(null);
+    onChange([...overrides, check.row]);
+    setModelDraft("");
+    setWindowDraft("");
+  }
+
+  function remove(index: number) {
+    onChange(overrides.filter((_, i) => i !== index));
+  }
+
+  const canSuggest = Boolean(currentModelId) && typeof builtinWindow === "number";
+
+  return (
+    <div className="px-4 py-4">
+      <div className="text-ui-body font-medium leading-snug text-foreground">{t("上下文窗口覆写")}</div>
+      <Hint className="mt-1">
+        {t("按模型指定上下文长度（token）。没列出的模型用内建表里的值；模型名精确匹配，不支持通配。")}
+      </Hint>
+      {rows.length > 0 && (
+        <ul className="mt-2 flex flex-col gap-0.5">
+          {rows.map((row, index) => (
+            <li
+              key={`${row.raw}-${index}`}
+              className="flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 hover:bg-accent/40"
+            >
+              <span className="min-w-0 flex-1 truncate font-mono text-ui-label text-foreground">
+                {row.parsed ? row.parsed.model : row.raw}
+              </span>
+              {row.parsed ? (
+                <span className="shrink-0 font-mono text-ui-caption text-muted-foreground">{row.parsed.window}</span>
+              ) : (
+                <Chip tone="warning">{t("不生效")}</Chip>
+              )}
+              <IconButton
+                icon={<Trash2 className={ICON_INLINE} />}
+                tone="danger"
+                size="sm"
+                label={t("删除覆写 {0}", row.parsed ? row.parsed.model : row.raw)}
+                onClick={() => remove(index)}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <TextInput
+          aria-label={t("模型名")}
+          value={modelDraft}
+          onChange={(event) => {
+            setModelDraft(event.target.value);
+            setError(null);
+          }}
+          placeholder="deepseek-v4.1-flash"
+          className="min-w-0 flex-1"
+        />
+        <TextInput
+          aria-label={t("上下文长度（token）")}
+          value={windowDraft}
+          onChange={(event) => {
+            setWindowDraft(event.target.value);
+            setError(null);
+          }}
+          placeholder="960000"
+          className="w-32"
+        />
+        <Button icon={<Plus className={ICON_INLINE} />} onClick={add}>
+          {t("添加")}
+        </Button>
+      </div>
+      {error && <div className="mt-1 text-ui-caption text-destructive">{error}</div>}
+      {canSuggest && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="min-w-0 flex-1 text-ui-caption text-muted-foreground">
+            {t("当前模型 {0} 的内建上下文窗口是 {1}。", currentModelId ?? "", builtinWindow ?? 0)}
+          </span>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              setModelDraft(currentModelId ?? "");
+              setWindowDraft(String(builtinWindow ?? ""));
+              setError(null);
+            }}
+          >
+            {t("填入建议值")}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1043,6 +1180,10 @@ function ApiConfigSection({
   const settings = useChat((s) => s.hostSettings);
   const updateHostSetting = useChat((s) => s.updateHostSetting);
   const metadata = useChat((s) => s.modelMetadata);
+  // The dedicated override channel carries the rows plus the current model's
+  // built-in window (for the one-click suggestion). `hostSettings` is the
+  // fallback until that channel's first push arrives.
+  const contextWindowView = useChat((s) => s.contextWindowOverridesView);
   const switching = useChat((s) => s.pending?.kind === "profile");
   const awaitingChoice = useChat((s) => s.state?.pendingProfileSwitch != null);
   // null = list view; { name } = editing an existing profile; { name: null } = new.
@@ -1534,12 +1675,11 @@ function ApiConfigSection({
             )}
           </div>
         </div>
-        <LinesRow
-          label={t("上下文窗口覆写")}
-          description={t("每行写「模型名=上下文长度」，如 glm-4.6=200000；没列出的模型用默认值。")}
-          value={settings.contextWindowOverrides}
-          placeholder="glm-4.6=200000"
-          onCommit={(contextWindowOverrides) => updateHostSetting({ contextWindowOverrides })}
+        <ContextWindowOverridesGroup
+          overrides={contextWindowView?.overrides ?? settings.contextWindowOverrides}
+          currentModelId={contextWindowView?.currentModelId}
+          builtinWindow={contextWindowView?.builtinWindow}
+          onChange={(overrides) => send({ type: "setContextWindowOverrides", overrides })}
         />
         <LinesRow
           label={t("成本单价")}

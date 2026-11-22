@@ -132,6 +132,11 @@ import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 import { normalizeModelId, parseContextWindowOverrides, parseCostTable, resolveContextWindowWithSource, resolveCostWithSource } from "../../shared/context-window.js";
 import {
+  postContextWindowOverrides,
+  saveContextWindowOverrides,
+  type ContextWindowOverridesHost,
+} from "./context-window-overrides.js";
+import {
   gateOsNotification,
   initOsNotifyGate,
   isDuplicateNotificationBlock,
@@ -2376,6 +2381,7 @@ export class ChatPanel implements vscode.Disposable {
       case "restartCli":
       case "openSettings":
       case "setHostSettings":
+      case "setContextWindowOverrides":
       case "listMcpServers":
       case "saveMcpServers":
       case "mcpStatus":
@@ -2482,6 +2488,10 @@ export class ChatPanel implements vscode.Disposable {
         // `ready` proves the listener is live.
         this.postTheme();
         this.postHostSettings();
+        // The structured 「上下文窗口覆写」 editor needs the current rows plus
+        // the current model's built-in window (for its one-click suggestion) —
+        // a webview that booted before the first push would show an empty list.
+        postContextWindowOverrides(this.contextWindowOverridesHost());
         this.pushQqState();
         break;
       case "sendPrompt":
@@ -2743,6 +2753,13 @@ export class ChatPanel implements vscode.Disposable {
         // instead of waiting for the configuration listener round trip.
         if (msg.auroraIntensity !== undefined) this.postTheme();
         this.postHostSettings();
+        break;
+      }
+      case "setContextWindowOverrides": {
+        // 上下文窗口覆写的结构化编辑器一次提交整张表；宿主归一化后写进
+        // VSCode 用户设置（Global 作用域），写成功再把生效后的值推回去。
+        if (!Array.isArray(msg.overrides)) break;
+        await saveContextWindowOverrides(this.contextWindowOverridesHost(), msg.overrides);
         break;
       }
       case "listMcpServers":
@@ -3056,18 +3073,36 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /** Write one panel-owned setting to USER settings (the scope VSCode
-   * Settings Sync carries). Validation happens at the call site. */
-  private async writeUserSetting(key: string, value: unknown): Promise<void> {
+   * Settings Sync carries). Validation happens at the call site.
+   *
+   * Returns whether the write landed. `label` is an optional human-readable
+   * name for the setting, shown in the failure toast instead of the raw key
+   * (a caller that has to react to a failed write uses the return value —
+   * the toast is emitted here, so nobody double-toasts). */
+  private async writeUserSetting(key: string, value: unknown, label?: string): Promise<boolean> {
     try {
       await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
+      return true;
     } catch (error) {
       const detail = errorMessage(error);
       this.log.warn(`failed to update ${key}: ${detail}`);
       // A silent failure made the control look like it "snapped back" on its
       // own — say which setting could not be written (the value the user sees
       // is the one VSCode still has on disk).
-      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}", key));
+      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}", label ?? key));
+      return false;
     }
+  }
+
+  /** The capabilities the context-window-override module needs from the
+   * panel: the shared settings-write channel, the webview channel, and the
+   * authoritative current model id (the store's, not the CLI's report). */
+  private contextWindowOverridesHost(): ContextWindowOverridesHost {
+    return {
+      writeUserSetting: (key, value, label) => this.writeUserSetting(key, value, label),
+      postToWebview: (message) => this.postToWebview(message),
+      currentModelId: () => this.store.getState().currentModelId ?? null,
+    };
   }
 
   // --- configurable ceilings (iflow.* settings) ------------------------------
