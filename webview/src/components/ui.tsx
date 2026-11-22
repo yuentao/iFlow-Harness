@@ -1752,14 +1752,20 @@ export function TextInput({
       aria-invalid={invalid || undefined}
       {...rest}
       type={revealable && shown ? "text" : (rest.type ?? "text")}
+      // `w-full` only in the revealable branch: there the input is wrapped in
+      // a plain div, so it is no longer a flex item of the surrounding Field
+      // and would collapse to the browser's intrinsic `size=20` width
+      // (≈190px) — clipping long placeholders and detaching the absolute
+      // eye toggle. Non-revealable inputs stay flex items and keep their
+      // call-site width semantics (`min-w-0 flex-1`, `w-full`, …).
       className={`${dense ? BTN_INPUT_SM : BTN_INPUT}${mono ? " font-mono" : ""}${
         invalid ? " border-destructive/60" : ""
-      }${revealable ? " pr-8" : ""}${className ? ` ${className}` : ""}`}
+      }${revealable ? " w-full pr-8" : ""}${className ? ` ${className}` : ""}`}
     />
   );
   if (!revealable) return field;
   return (
-    <div className="relative">
+    <div className="relative w-full">
       {field}
       <IconButton
         icon={shown ? <EyeOff className={ICON_INLINE} /> : <Eye className={ICON_INLINE} />}

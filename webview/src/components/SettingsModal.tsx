@@ -1121,10 +1121,11 @@ function ApiConfigSection({
   // saveable while a turn or a child session is in flight.
   const editingActiveProfile = editing?.name != null && editingProfile?.active === true;
   const saveBlocked = busy && (editing?.name == null || editingActiveProfile);
-  const keyPlaceholder = (() => {
-    const tail = editingProfile?.keyTail ?? auth.saved?.keyTail;
-    return tail ? t("已保存（{0}），留空则不改", tail) : "sk-…";
-  })();
+  // The stored-key notice is rendered as a secondary line under the field,
+  // never as the placeholder: a placeholder never wraps nor ellipsizes, so in
+  // a narrow panel the sentence was clipped mid-way and the reveal toggle
+  // floated away from the collapsed input.
+  const savedKeyTail = editingProfile?.keyTail ?? auth.saved?.keyTail;
 
   const back = useCallback(() => {
     pendingSaveRef.current = null;
@@ -1265,10 +1266,11 @@ function ApiConfigSection({
             revealable
             mono
             value={form.apiKey}
-            placeholder={keyPlaceholder}
+            placeholder="sk-…"
             onChange={(e) => setForm((f) => ({ ...f, apiKey: e.target.value }))}
           />
         </Field>
+        {savedKeyTail && <Hint>{t("已保存（{0}），留空则不改", savedKeyTail)}</Hint>}
         <Field label={t("模型名称")}>
           <TextInput
             mono
