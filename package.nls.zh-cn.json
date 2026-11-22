@@ -30,7 +30,7 @@
   "iflow.configuration.superAgentChildToolAllowlist.description": "按工具名限制超流体（子会话）可用的内置工具，例如 `read_file`、`run_shell_command`。留空（默认）表示不限制，保持全部工具可用；填写后子会话只注册名单内的工具——这是结构性硬门控，请把子会话需要的工具全部列出（含进程内子代理用的 `task`）。修改后对下一个启动的超流体生效。",
   "iflow.configuration.superAgentChildMcpServerAllowlist.description": "按服务器名限制超流体（子会话）可访问的 MCP 服务器，名称以超流体看板 MCP 状态里显示的为准。留空（默认）保持现状（broker 代理的全部服务器）；填写后只暴露既在名单里、又确实由宿主 broker 提供的服务器，不存在的名字会被忽略。修改后对下一个启动的超流体生效。",
   "iflow.configuration.osNotifications.description": "面板不可见时是否发送系统通知：approvals（默认）仅在审批或提问需要你处理时通知，all 另外在整轮完成时通知，off 关闭。超流体的汇报不会逐条通知，只有超流体向你提问、以及全部超流体结束时才会提醒。",
-  "iflow.configuration.contextWindowOverrides.description": "覆写模型的上下文窗口大小，每行一条「模型名=Token 数」，例如 glm-4.6=200000。优先于内置对照表；未列出的模型使用保守的默认值。",
+  "iflow.configuration.contextWindowOverrides.description": "覆写模型的上下文窗口大小，每行一条「模型名=Token 数」，例如 glm-4.6=200000。模型名可带或不带 provider 前缀——auto/deepseek-v4.1-flash 与 deepseek-v4.1-flash 视为同一条。数值必须是纯 Token 数字：写成 960K 不会被解析，该条会被静默丢弃。留空（或不写某个模型）即使用该模型的默认窗口。显式条目优先于内置对照表与当前 Profile 的上限，并会推送给 CLI，使自动压缩阈值与面板显示的窗口一致。",
   "iflow.configuration.costTable.description": "会话成本估算所用的单价表，每行一条「模型名=输入价,输出价」，单位为美元/百万 Token，例如 deepseek-v3=0.27,1.1。只影响面板显示的费用估算，不改变实际计费。",
   "iflow.configuration.thinkingModelRules.description": "判断哪些模型支持思考（推理）的规则，每项包含 pattern（匹配模型名的正则，不区分大小写，先命中者生效）、supportsThinking（是否支持思考），以及可选的 supportedReasoningLevels（支持的思考档位）和 maxThinkingTokens（思考 Token 上限，0 表示内核默认）。内置主流思考模型的默认规则；你在本机 iFlow 配置中手写的条目不会被覆盖。supportsThinking 为 false 的模型，其思考档位下拉会被置灰。保存后从下次会话启动起生效。",
   "iflow.configuration.autoTitle.description": "会话首轮完成后，自动为它生成一个简短的 AI 标题，显示在会话列表中。每个会话只生成一次，会多一次轻量模型调用。默认开启。",

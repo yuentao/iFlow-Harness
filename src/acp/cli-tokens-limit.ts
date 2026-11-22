@@ -38,10 +38,6 @@
 import { readCliSettings } from "./models-query.js";
 import { normalizeModelId, resolveContextWindowWithSource } from "../../shared/context-window.js";
 
-export interface TokensLimitHolder {
-  tokensLimit?: unknown;
-}
-
 /** Where the resolved number came from — mirrors the authority chain above. */
 export type CliTokensLimitSource = "user" | "profile" | "settings" | "builtin-table";
 
@@ -67,14 +63,6 @@ function positiveInt(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value > 0
     ? value
     : undefined;
-}
-
-/** Resolve the effective tokens limit from the active profile and settings root. */
-export function effectiveCliTokensLimit(
-  activeProfile: TokensLimitHolder | null | undefined,
-  settingsTopLevel: TokensLimitHolder | null | undefined,
-): number | undefined {
-  return positiveInt(activeProfile?.tokensLimit) ?? positiveInt(settingsTopLevel?.tokensLimit);
 }
 
 /** Spawn-env patch: sets IFLOW_TOKENS_LIMIT only for a positive integer. */
