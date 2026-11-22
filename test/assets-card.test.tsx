@@ -100,6 +100,30 @@ const SKILL = {
   editable: true,
 };
 
+const RAW_TOML = [
+  "# Command: api-docs",
+  "# Description: 在apipost创建api文档",
+  'description = "在apipost创建api文档"',
+  'prompt = """',
+  "在 apipost 创建 API 文档。",
+  'description = "假描述，不应出现在详情里"',
+  "1. 打开 apipost",
+  '"""',
+  "",
+].join("\n");
+const TOML_FIELDS = {
+  description: "在apipost创建api文档",
+  prompt: "在 apipost 创建 API 文档。\ndescription = \"假描述，不应出现在详情里\"\n1. 打开 apipost",
+};
+const TOML_CMD = {
+  ...CMD,
+  name: "api-docs",
+  path: "C:\\home\\.iflow\\commands\\api-docs.toml",
+  displayPath: "~/.iflow/commands/api-docs.toml",
+  description: "在apipost创建api文档",
+  hash: "hash-toml",
+};
+
 function stateReply(commands: unknown[], agents: unknown[], skills: unknown[]) {
   act(
     () =>
@@ -123,11 +147,24 @@ function stateReply(commands: unknown[], agents: unknown[], skills: unknown[]) {
       ),
   );
 }
-function contentReply(path: string, content: string, hash: string | null) {
+function contentReply(
+  path: string,
+  content: string,
+  hash: string | null,
+  fields?: { description: string | null; prompt: string | null } | null,
+) {
   act(
     () =>
       window.dispatchEvent(
-        new MessageEvent("message", { data: { type: "assetContent", path, content, hash } }),
+        new MessageEvent("message", {
+          data: {
+            type: "assetContent",
+            path,
+            content,
+            hash,
+            ...(fields !== undefined ? { fields } : {}),
+          },
+        }),
       ),
   );
 }
@@ -201,6 +238,61 @@ it("edits an asset file through the read → textarea → hash-guarded save loop
   expect(container.textContent).toContain("保存中…");
   savedReply(1);
   expect(container.textContent).toContain("已保存");
+});
+
+it("renders a .toml detail as structured 描述/提示词 fields, never the raw TOML source", () => {
+  stateReply([TOML_CMD], [], []);
+  clickTitle("详情");
+  expect(container.textContent).toContain("读取中…");
+  contentReply(TOML_CMD.path, RAW_TOML, "hash-toml", TOML_FIELDS);
+
+  // Semantic field labels (FieldLabel) with their values.
+  const labels = [...container.querySelectorAll("span")].map((s) => s.textContent);
+  expect(labels).toContain("描述");
+  expect(labels).toContain("提示词");
+  expect([...container.querySelectorAll("p")].some((p) => p.textContent === TOML_FIELDS.description)).toBe(true);
+  const promptPre = [...container.querySelectorAll("pre")].find((p) => p.getAttribute("title") === "提示词");
+  expect(promptPre).toBeTruthy();
+  expect(promptPre!.textContent).toBe(TOML_FIELDS.prompt);
+
+  // The locating info (path + 详情 chip) stays, but raw TOML never leaks out.
+  expect(container.textContent).toContain("详情");
+  expect(container.textContent).toContain("api-docs.toml");
+  expect(container.textContent).not.toContain("# Command:");
+  expect(container.textContent).not.toContain("# Description:");
+  expect(container.textContent).not.toContain('description = "在apipost创建api文档"');
+  expect(container.textContent).not.toContain('prompt = """');
+});
+
+it("keeps the full raw TOML in edit mode after a structured detail (edit round trip)", () => {
+  stateReply([TOML_CMD], [], []);
+  clickTitle("详情");
+  contentReply(TOML_CMD.path, RAW_TOML, "hash-toml", TOML_FIELDS);
+  click("编辑");
+  const textarea = container.querySelector("textarea")!;
+  // Editing still targets the raw file — the CLI's zod check on `prompt`
+  // would break if the structurer dropped any field.
+  expect(textarea.value).toBe(RAW_TOML);
+  input(textarea, RAW_TOML + "# touched\n");
+  click("保存");
+  const call = send.mock.calls.at(-1)![0];
+  expect(call.type).toBe("saveAsset");
+  expect(call.content).toContain('prompt = """');
+  expect(call.content).toContain("# touched");
+  savedReply(1, {}, TOML_CMD.path);
+  expect(container.textContent).toContain("已保存");
+});
+
+it("falls back to the raw body with a Hint when the host sends no fields", () => {
+  stateReply([TOML_CMD], [], []);
+  clickTitle("详情");
+  contentReply(TOML_CMD.path, RAW_TOML, "hash-toml");
+  expect(container.textContent).toContain("无法提取结构化字段，显示原始文件内容");
+  expect(container.textContent).toContain("# Command: api-docs");
+  expect(container.textContent).toContain('prompt = """');
+  expect(
+    [...container.querySelectorAll("pre")].some((p) => p.textContent?.includes("# Command:")),
+  ).toBe(true);
 });
 
 it("refuses a save whose expected hash drifted on disk (conflict, nothing written)", () => {

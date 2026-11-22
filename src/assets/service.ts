@@ -9,6 +9,7 @@ import type {
   AssetsStateUi,
   HostToWebview,
 } from "../../shared/messages.js";
+import { parseCommandToml } from "../../shared/asset-toml.js";
 import {
   displayPathFor,
   isWithin,
@@ -119,14 +120,6 @@ function headingDescription(body: string): string | null {
   return null;
 }
 
-/** .toml description = "…" (display-only regex, not a TOML parser). */
-function tomlDescription(text: string): string | null {
-  const match = /\bdescription\s*=\s*"([^"]*)"/.exec(text);
-  if (!match) return null;
-  const desc = match[1]!.trim();
-  return desc === "" ? null : desc;
-}
-
 export class AssetsService {
   private disposed = false;
   private writeChain: Promise<void> = Promise.resolve();
@@ -201,7 +194,7 @@ export class AssetsService {
     const description =
       kind === "command"
         ? path.extname(file).toLowerCase() === ".toml"
-          ? tomlDescription(text)
+          ? parseCommandToml(text).description
           : firstScalar(meta, ["description"]) ?? headingDescription(body)
         : firstScalar(meta, ["description"]);
     return {
@@ -406,6 +399,11 @@ export class AssetsService {
         path: target.path,
         content: content ?? "",
         hash: content === null ? null : sha256(content),
+        // Only .toml commands have a structured view. Absent on .md / agents /
+        // skills so the webview honestly falls back to the raw body.
+        ...(target.kind === "command" && target.path.toLowerCase().endsWith(".toml")
+          ? { fields: parseCommandToml(content ?? "") }
+          : {}),
         ...(requestId !== undefined ? { requestId } : {}),
       });
     } catch (error) {

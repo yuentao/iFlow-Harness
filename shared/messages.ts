@@ -1686,6 +1686,17 @@ export interface MemoryStateUi {
 export type AssetKind = "command" | "agent" | "skill";
 export type AssetScope = "global" | "project";
 
+/**
+ * Structured fields parsed from an asset's raw body (currently command .toml
+ * only). `null` member = the key was absent or unparseable. `assetContent.fields`
+ * being absent entirely means this asset type has no structured view (.md,
+ * agents, skills) and the webview should show the raw body.
+ */
+export interface AssetContentFields {
+  description: string | null;
+  prompt: string | null;
+}
+
 export interface AssetUi {
   kind: AssetKind;
   scope: AssetScope;
@@ -2121,8 +2132,11 @@ export type HostToWebview =
       requestId?: number;
       state: AssetsStateUi;
     }
-  /** Reply to `readAsset`: full body + hash for the inline editor. */
-  | { type: "assetContent"; path: string; content: string; hash: string | null; error?: string; requestId?: number }
+  /** Reply to `readAsset`: full body + hash for the inline editor. `fields`
+   * carries the parsed .toml description/prompt for a structured detail view;
+   * absent for raw-only assets (.md / agents / skills). The raw `content` is
+   * always present — editing must round-trip the exact file bytes. */
+  | { type: "assetContent"; path: string; content: string; hash: string | null; fields?: AssetContentFields; error?: string; requestId?: number }
   /** Reply to `saveAsset` / `createAsset`: `conflict` means the file changed
    * on disk since the card read it (or, for create, already exists) — the
    * write did NOT happen and the caller must reload. `requestId` echoes the

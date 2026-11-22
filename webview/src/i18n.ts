@@ -467,6 +467,9 @@ const en: Record<string, string> = {
     "The main session does not load MCP; tools are used by child sessions through the shared proxy",
   "工具 ({0})": "Tools ({0})",
   "提示词 ({0})": "Prompts ({0})",
+  "提示词": "Prompt",
+  // asset detail: structured .toml view vs raw fallback
+  "无法提取结构化字段，显示原始文件内容": "No structured fields to show — displaying the raw file content",
   "参数结构": "Parameter structure",
   "参数结构太大，已省略": "The parameter structure is too large and was omitted",
   // profile-switch choice dialog
