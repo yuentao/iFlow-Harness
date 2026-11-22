@@ -2490,7 +2490,7 @@ ${x}
 
 ---
 
-${e.trim()}`:"";return`${f}${B}${E}`}function Adr(){return`
+${e.trim()}`:"";return z2.env.IFLOW_USER_MEMORY_FIRST&&!["0","false"].includes(z2.env.IFLOW_USER_MEMORY_FIRST.toLowerCase())?`${E}${f}${B}`:`${f}${B}${E}`}function Adr(){return`
 You are iFlow CLI, official CLI for iFlow.
 You are a helpful AI assistant tasked with summarizing conversations.
 `.trim()}function v9a(){return`
