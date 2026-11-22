@@ -15,9 +15,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
+import * as vscode from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import { MCP_SERVER_ALLOWLIST_FLAG, MCP_SERVER_ALLOWLIST_SENTINEL } from "../src/acp/cli-locator.js";
+import { loadPrompt } from "../prompts/index.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -94,6 +96,14 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     iflowHome = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-spawnenv-home-"));
     process.env.IFLOW_HOME = iflowHome;
     delete process.env.IFLOW_SUPER_TOOL;
+    // 宿主 shell 可能带着真实的 IFLOW_SYSTEM_MD；不清掉会掩盖宿主自己设的值。
+    delete process.env.IFLOW_SYSTEM_MD;
+    // stub 默认没有 workspace.fs，materializeSystemPrompt 会写入失败而返回 null；
+    // 这里只补最小读写，其它 fs 调用仍保持原来的报错行为。
+    (vscode.workspace as unknown as { fs: unknown }).fs = {
+      readFile: (uri: { fsPath: string }) => fs.promises.readFile(uri.fsPath),
+      writeFile: (uri: { fsPath: string }, data: Uint8Array) => fs.promises.writeFile(uri.fsPath, data),
+    };
     panel = new ChatPanel(makeContext(storageDir), {
       entryOverride: mockAgent,
       workspaceRoot: here,
@@ -106,7 +116,9 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     delete process.env.ACP_MOCK_ENV_DUMP;
     delete process.env.ACP_MOCK_ARGV_DUMP;
     delete process.env.IFLOW_SUPER_TOOL;
+    delete process.env.IFLOW_SYSTEM_MD;
     delete process.env.IFLOW_HOME;
+    delete (vscode.workspace as unknown as { fs?: unknown }).fs;
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     fs.rmSync(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
@@ -125,6 +137,9 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     expect(env.IFLOW_SUPER_TOOL).toBe("1");
     // 既有契约没被破坏：harness 标记仍在。
     expect(env.IFLOW_HARNESS).toBe("1");
+    // 主会话仍指向原 system-prompt.md，内容逐字节等于主模板（child 变体不得串味）。
+    expect(path.resolve(env.IFLOW_SYSTEM_MD!)).toBe(path.resolve(storageDir, "system-prompt.md"));
+    expect(fs.readFileSync(env.IFLOW_SYSTEM_MD!, "utf8")).toBe(loadPrompt("system-prompt"));
   }, 30000);
 
   it("超流体的 spawn env 没有 IFLOW_SUPER_TOOL（即便宿主 process.env 里设了）", async () => {
@@ -146,6 +161,9 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
       expect(env.IFLOW_SUPER_TOOL).toBeUndefined();
       // 子会话仍是 harness 子进程，只是没有派发工具。
       expect(env.IFLOW_HARNESS).toBe("1");
+      // 子会话必须拿裁剪版系统提示（去掉主会话编排段）。
+      expect(path.resolve(env.IFLOW_SYSTEM_MD!)).toBe(path.resolve(storageDir, "system-prompt-child.md"));
+      expect(fs.readFileSync(env.IFLOW_SYSTEM_MD!, "utf8")).toBe(loadPrompt("system-prompt-child"));
     } finally {
       await child.dispose();
     }

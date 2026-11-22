@@ -157,7 +157,8 @@ export interface SuperAgentHostCallbacks {
   deliverQqMainIntermediateText(...args: Parameters<QqHost["deliverQqMainIntermediateText"]>): ReturnType<QqHost["deliverQqMainIntermediateText"]>;
   forwardQqMainTaskChildQuestion(...args: Parameters<QqHost["forwardQqMainTaskChildQuestion"]>): ReturnType<QqHost["forwardQqMainTaskChildQuestion"]>;
   forwardQqTaskQuestion(...args: Parameters<QqHost["forwardQqTaskQuestion"]>): ReturnType<QqHost["forwardQqTaskQuestion"]>;
-  materializeSystemPrompt(): Promise<string | null>;
+  /** Materialise the system-prompt file for the CLI; child sessions pass "child". */
+  materializeSystemPrompt(variant?: "main" | "child"): Promise<string | null>;
   mcpProjectCwd(): string | null;
   notifyOs(event: OsNotifyEvent, text: string): boolean;
   postToWebview(message: unknown): void;
@@ -302,7 +303,7 @@ export class SuperAgentHost {
   private deliverQqMainIntermediateText(...args: Parameters<SuperAgentHostCallbacks["deliverQqMainIntermediateText"]>) { return this.deps.deliverQqMainIntermediateText(...args); }
   private forwardQqMainTaskChildQuestion(...args: Parameters<SuperAgentHostCallbacks["forwardQqMainTaskChildQuestion"]>) { return this.deps.forwardQqMainTaskChildQuestion(...args); }
   private forwardQqTaskQuestion(...args: Parameters<SuperAgentHostCallbacks["forwardQqTaskQuestion"]>) { return this.deps.forwardQqTaskQuestion(...args); }
-  private materializeSystemPrompt() { return this.deps.materializeSystemPrompt(); }
+  private materializeSystemPrompt(variant: "main" | "child" = "main") { return this.deps.materializeSystemPrompt(variant); }
   private mcpProjectCwd() { return this.deps.mcpProjectCwd(); }
   private notifyOs(...args: Parameters<SuperAgentHostCallbacks["notifyOs"]>) { return this.deps.notifyOs(...args); }
   private postToWebview(message: unknown): void { this.deps.postToWebview(message); }
@@ -1398,7 +1399,7 @@ export class SuperAgentHost {
     const { args } = buildAcpCommand(entry, includeDirectories, {
       mcpServerNames: broker?.names() ?? [],
     });
-    const systemPromptFile = await this.materializeSystemPrompt();
+    const systemPromptFile = await this.materializeSystemPrompt("child");
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
       IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile(),

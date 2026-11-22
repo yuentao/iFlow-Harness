@@ -48,6 +48,35 @@ describe("super agent · 提交契约三处对齐（SA-3）", () => {
     expect(loadPrompt("super-agent-task")).toBe(normalize(templateText));
   });
 
+  it("子会话系统提示裁掉主会话编排段，保留角色锚点与全部动态 token", () => {
+    const childText = readFileSync(path.join(root, "prompts", "system-prompt-child.md"), "utf8");
+    // 与 system-prompt 一样：落盘文本必须和内联/运行时加载的内容逐字一致。
+    expect(loadPrompt("system-prompt-child")).toBe(normalize(childText));
+
+    // 去掉的是主会话专属编排段（约 5,198 tokens），不是整份提示。
+    expect(childText).not.toContain("# Super Agent (managing child sessions)");
+    expect(childText).not.toContain("**You are the orchestrator");
+    expect(childText).not.toContain("## Hard prohibitions for the main session");
+
+    // 必须保留子会话身份锚点，避免与汇报提示词里的主会话锚点互相误判。
+    expect(childText).toContain("# Role (child session)");
+    expect(childText).toContain("你是子会话（SubAgent），只完成委派给你的具体任务");
+    expect(childText).toContain("不要派发子会话");
+
+    // 动态段 token 一个都不能吞：子会话也要知道所在 worktree 的 cwd / 分支 / 环境。
+    for (const token of [
+      "{{iflow:Sandbox}}",
+      "{{iflow:Git Repository}}",
+      "{{iflow:Environment Information}}",
+      "{{iflow:gitStatus}}",
+    ]) {
+      expect(childText, `child 系统提示缺少动态 token: ${token}`).toContain(token);
+    }
+
+    // 反向保护：主会话模板仍是完整版，没被 child 化。
+    expect(systemText).toContain("# Super Agent (managing child sessions)");
+  });
+
   it("任务书模板把 Submitting your work 声明为按隔离档生成的权威口径", () => {
     expect(templateText).toContain(
       "The `Submitting your work` section below is the authoritative submission contract",
