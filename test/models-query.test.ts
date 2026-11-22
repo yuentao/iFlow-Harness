@@ -1,7 +1,9 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   applyThinkingRules,
   mcpScopeOf,
@@ -31,6 +33,9 @@ const tempDir = mkdtempSync(path.join(tmpdir(), "iflow-models-"));
 afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
+
+/** How long the cross-process reader polls the settings file (ms). */
+const READER_WINDOW_MS = 1200;
 
 function settingsFile(content: unknown): string {
   const file = path.join(tempDir, `settings-${Math.random().toString(36).slice(2)}.json`);
@@ -128,6 +133,131 @@ describe("updateCliSettings", () => {
 
   it("returns false for a missing/unreadable settings file", () => {
     expect(updateCliSettings({ language: "zh-CN" }, path.join(tempDir, "missing.json"))).toBe(false);
+  });
+
+  it("keeps mcpServers / tokensLimit and every other key when only apiProfiles is patched", () => {
+    // The regression: a write that loses the user's mcpServers / tokensLimit
+    // made the settings page show "尚未配置 MCP 服务器" and the CLI fall back
+    // to its hard-coded context ceiling.
+    const file = settingsFile({
+      mcpServers: {
+        alpha: { command: "npx", args: ["-y", "alpha"] },
+        beta: { command: "npx", args: ["-y", "beta"] },
+      },
+      tokensLimit: 1000000,
+      compressionTokenThreshold: 0.9,
+      contextWindowLength: 1000000,
+      language: "zh-CN",
+      approvalMode: "default",
+      apiProfiles: { existing: { baseUrl: "https://e/v1", apiKey: "sk-e", modelName: "m-e" } },
+    });
+
+    expect(
+      updateCliSettings(
+        { apiProfiles: { work: { baseUrl: "https://w/v1", apiKey: "sk-w", modelName: "m-w" } } },
+        file,
+      ),
+    ).toBe(true);
+
+    const after = JSON.parse(readFileSync(file, "utf8"));
+    expect(Object.keys(after.mcpServers)).toEqual(["alpha", "beta"]);
+    expect(after.mcpServers.alpha.args).toEqual(["-y", "alpha"]);
+    expect(after.tokensLimit).toBe(1000000);
+    expect(after.compressionTokenThreshold).toBe(0.9);
+    expect(after.contextWindowLength).toBe(1000000);
+    expect(after.language).toBe("zh-CN");
+    expect(after.approvalMode).toBe("default");
+    expect(Object.keys(after.apiProfiles)).toEqual(["work"]);
+  });
+
+  it("replaces the file atomically — never unlinks the target, uses a unique temp path", () => {
+    // Source guard: the old implementation did `unlink(file)` before
+    // `rename(tmp, file)`, which opened a window in which settings.json did
+    // not exist at all. A concurrent reader (the CLI's own saveSettings)
+    // saw "no file", treated the disk as empty and rewrote the whole file
+    // without the user's mcpServers / tokensLimit / language / approvalMode.
+    const source = readFileSync(
+      fileURLToPath(new URL("../src/acp/models-query.ts", import.meta.url)),
+      "utf8",
+    );
+    const start = source.indexOf("export function updateCliSettings(");
+    const end = source.indexOf("export function readActiveEndpoint(");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = source.slice(start, end);
+
+    expect(body).not.toContain("unlinkSync(file)");
+    expect(body).toContain("renameSync(tmp, file)");
+    // A per-writer unique temp path (pid + timestamp + counter) so two
+    // concurrent writers never share (and clobber) one temp file.
+    expect(body).toContain("uniqueTmpPath(file)");
+    expect(source).toContain("process.pid");
+  });
+
+  it("never exposes a missing or half-written settings file to a concurrent reader", async () => {
+    const file = settingsFile({
+      mcpServers: { figma: { command: "npx" } },
+      tokensLimit: 1000000,
+      language: "zh-CN",
+    });
+
+    // A separate process polls the file while we rewrite it over and over.
+    // The reader counts ENOENT (the file vanished) as a failure — that is
+    // exactly the window the old `unlink + rename` sequence opened.
+    // NOTE: the old window is only microseconds wide, so this is an
+    // INVARIANT PROBE, not a deterministic reproduction of the old bug —
+    // the source guard above is the deterministic regression guard.
+    const reader = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const fs=require("fs");const f=process.argv[1];let miss=0,bad=0,ok=0;
+         const end=Date.now()+${READER_WINDOW_MS};
+         while(Date.now()<end){
+           try{const s=fs.readFileSync(f,"utf8");JSON.parse(s);ok++;}
+           catch(e){if(e.code==="ENOENT")miss++;else if(e.code!=="EPERM"&&e.code!=="EBUSY")bad++;}
+           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1);
+         }
+         process.stdout.write(JSON.stringify({miss:miss,bad:bad,ok:ok}));`,
+        file,
+      ],
+      { stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+    );
+    const report = new Promise<string>((resolve, reject) => {
+      let out = "";
+      reader.stdout.on("data", (chunk) => {
+        out += String(chunk);
+      });
+      reader.on("error", reject);
+      reader.on("close", () => resolve(out));
+    });
+
+    let written = 0;
+    for (let i = 0; i < 80; i += 1) {
+      const ok = updateCliSettings(
+        { apiProfiles: { P: { baseUrl: `https://p${i}.example/v1`, apiKey: "sk-p", modelName: "m" } } },
+        file,
+      );
+      if (ok) written += 1;
+      // A concurrent reader holding the file open can make the rename fail
+      // with a Windows sharing violation (EPERM). That write is lost — but
+      // the PREVIOUS content stays intact, which is the guarantee that
+      // matters: no key is ever dropped.
+    }
+    const stats = JSON.parse(await report) as { miss: number; bad: number; ok: number };
+
+    expect(stats.miss).toBe(0); // the file was never observably missing
+    expect(stats.bad).toBe(0); // the reader never saw a half-written file
+    expect(stats.ok).toBeGreaterThan(0); // the reader really did observe the file
+    expect(written).toBeGreaterThan(0);
+    // No temp file is left behind (the temp name is unique per write).
+    expect(readdirSync(path.dirname(file)).filter((n) => n.includes("iflow-harness-tmp"))).toEqual([]);
+    // The key promise of the whole fix: no key is lost by the rewrite.
+    const after = JSON.parse(readFileSync(file, "utf8"));
+    expect(after.mcpServers.figma.command).toBe("npx");
+    expect(after.tokensLimit).toBe(1000000);
+    expect(after.language).toBe("zh-CN");
+    expect(after.apiProfiles.P.baseUrl).toMatch(/^https:\/\/p\d+\.example\/v1$/);
   });
 });
 
