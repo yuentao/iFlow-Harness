@@ -40,7 +40,7 @@ import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
 import { loadCredentials } from "../acp/auth.js";
 import { tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
 import { buildChildSessionSettings, effectiveMcpServerNames } from "../../shared/super-tool-policy.js";
-import { parseCostTable, resolveCost } from "../../shared/context-window.js";
+import { parseContextWindowOverrides, parseCostTable, resolveContextWindowWithSource, resolveCost } from "../../shared/context-window.js";
 import {
   type Block,
   type ContextRefUi,
@@ -1415,6 +1415,15 @@ export class SuperAgentHost {
       // 的名字在进程层就被过滤掉。
       mcpServerNames: effectiveMcpServerNames(mcpAllowlist, brokerNames) ?? brokerNames,
     });
+    // Bridge the panel's user `iflow.contextWindowOverrides` into the child
+    // CLI process, matching the main session (see panel.ts spawnEnv). Only a
+    // real user override is forwarded — builtin-table / fallback values stay
+    // UI-only so they never override an explicit profile tokensLimit.
+    const childUserWindow = resolveContextWindowWithSource(
+      this.store.getState().currentModelId,
+      parseContextWindowOverrides(vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", [])),
+    );
+    const childOverrideWindow = childUserWindow.source === "user" ? (childUserWindow.window ?? undefined) : undefined;
     const systemPromptFile = await this.materializeSystemPrompt("child");
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
@@ -1427,7 +1436,7 @@ export class SuperAgentHost {
       // Same effective context window as the main session: without this the
       // child falls back to 128000 (threshold 102400) and compresses its
       // ~103000-token baseline immediately on start.
-      ...tokensLimitEnvFromSettings(),
+      ...tokensLimitEnvFromSettings(undefined, childOverrideWindow),
     };
     if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
     const client = new AcpClient(
