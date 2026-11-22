@@ -1697,7 +1697,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               >
                 <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
                 <span className="shrink-0">{t("解析中…")}</span>
-                <span className="max-w-[150px] truncate font-mono text-ui-micro">{r.label}</span>
+                <span className="max-w-[150px] truncate font-mono text-ui-micro" title={r.label}>
+                  {r.label}
+                </span>
               </span>
             ))}
             {(showAllContexts ? contexts : contexts.slice(0, CONTEXT_CHIP_MAX)).map((c) => {
@@ -1847,7 +1849,13 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               <span className="max-w-[62%] shrink-0 truncate font-mono text-primary" title={`/${c.name}`}>
                 /{c.name}
               </span>
-              <span className="min-w-0 flex-1 truncate text-ui-caption text-muted-foreground">{c.description}</span>
+              {/* truncate 必配 title：省略号里的原文只有 hover 才拿得到 */}
+              <span
+                className="min-w-0 flex-1 truncate text-ui-caption text-muted-foreground"
+                title={c.description ?? undefined}
+              >
+                {c.description}
+              </span>
               {i === cmdIndex && (
                 <kbd className="ml-auto shrink-0 whitespace-nowrap rounded border border-border px-1 font-mono text-ui-micro text-muted-foreground">
                   {t("Tab 补全")}
@@ -1882,7 +1890,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 <span className="font-mono text-ui-caption text-primary">
                   @{a.kind === "url" ? `url:${a.label}` : a.keyword}
                 </span>
-                <span className="truncate text-ui-caption text-muted-foreground">{a.label}</span>
+                <span className="truncate text-ui-caption text-muted-foreground" title={a.label}>
+                  {a.label}
+                </span>
               </button>
             );
           })}
@@ -1903,6 +1913,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           {mentionKind !== "url" &&
             mentionHits.map((hit, i) => {
               const idx = sourceActions.length + i;
+              const dir = hit.path.split("/").slice(0, -1).join("/");
               return (
                 <button
                   key={hit.path}
@@ -1917,9 +1928,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                   }}
                 >
                   {mentionKind === "folder" && <FolderIcon className="size-3 shrink-0 self-center text-primary" />}
-                  {hit.path.split("/").slice(0, -1).join("/") && (
-                    <span className="min-w-0 truncate text-ui-caption text-muted-foreground">
-                      {hit.path.split("/").slice(0, -1).join("/")}/
+                  {dir && (
+                    <span className="min-w-0 truncate text-ui-caption text-muted-foreground" title={dir}>
+                      {dir}/
                     </span>
                   )}
                   {/* break-all: an unbroken long basename would otherwise force
@@ -1970,7 +1981,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               title={t("iFlow 猜的下一步，点一下填进输入框")}
               onClick={() => applySuggestion(s)}
             >
-              <span className="truncate">{s}</span>
+              {/* truncate 与 title 成对：省略号里的建议全文只有 hover 拿得到。
+                  外层按钮的 title 说的是「点一下填进输入框」这个动作，不是建议本身。 */}
+              <span className="truncate" title={s}>
+                {s}
+              </span>
             </button>
           ))}
           <IconButton

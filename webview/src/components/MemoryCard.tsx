@@ -590,7 +590,9 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
             <section className="space-y-2 px-4 py-3">
               <div className="flex items-center gap-1.5">
                 <span className="text-ui-body font-semibold text-foreground">{t("全局记忆")}</span>
-                <span className="min-w-0 truncate font-mono text-ui-caption text-muted-foreground">{state.home}</span>
+                <span className="min-w-0 truncate font-mono text-ui-caption text-muted-foreground" title={state.home}>
+                  {state.home}
+                </span>
                 <IconButton
                   icon={<RefreshCw className={ICON_INLINE} />}
                   label={t("重新扫描")}
@@ -616,7 +618,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
             <section className="space-y-2 px-4 py-3">
               <div className="flex items-center gap-1.5">
                 <span className="text-ui-body font-semibold text-foreground">{t("项目记忆")}</span>
-                <span className="min-w-0 truncate text-ui-caption text-muted-foreground">
+                <span className="min-w-0 truncate text-ui-caption text-muted-foreground" title={state.cwd ?? undefined}>
                   {state.cwd ?? t("未打开工作区")}
                 </span>
               </div>
@@ -756,10 +758,13 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                     >
                       <FileText className={`${ICON_INLINE} shrink-0 text-muted-foreground`} />
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-ui-body font-semibold text-foreground">
+                        <span className="block truncate text-ui-body font-semibold text-foreground" title={doc.title}>
                           {doc.title}
                         </span>
-                        <span className="block truncate font-mono text-ui-caption text-muted-foreground">
+                        <span
+                          className="block truncate font-mono text-ui-caption text-muted-foreground"
+                          title={doc.displayPath}
+                        >
                           {doc.displayPath}
                         </span>
                       </span>
