@@ -304,4 +304,72 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
       await child.dispose();
     }
   }, 30000);
+
+  it("子会话 MCP 白名单：缺省为 broker 全量，非空取交集且过滤未知名字", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-spawnenv-allowlist-"));
+    const spawnLog = path.join(dir, "spawns.log");
+    fs.writeFileSync(spawnLog, "");
+    try {
+      fs.writeFileSync(
+        path.join(iflowHome, "settings.json"),
+        JSON.stringify({
+          mcpServers: {
+            alpha: {
+              command: process.execPath,
+              args: [fakeMcpServer, "--name", "alpha"],
+              env: { FAKE_MCP_SPAWN_LOG: spawnLog },
+            },
+            beta: {
+              command: process.execPath,
+              args: [fakeMcpServer, "--name", "beta"],
+              env: { FAKE_MCP_SPAWN_LOG: spawnLog },
+            },
+          },
+        }),
+        "utf8",
+      );
+      const spawnChild = async (label: string, dumpFile: string): Promise<SpawnClient> => {
+        process.env.ACP_MOCK_ARGV_DUMP = path.join(storageDir, dumpFile);
+        return (panel as unknown as SpawnEnvInternals).createSuperClient({
+          cwd: here,
+          allowedRoots: [here],
+          includeDirectories: [],
+          label,
+          callbacks: {},
+        });
+      };
+
+      // 缺省（空 allowlist）：必须等于接线前的原表达式 —— broker 全量 server 名。
+      setConfigOverrides({
+        nodePath: process.execPath,
+        "superAgent.childMcpServerAllowlist": [],
+      });
+      const all = await spawnChild("spawn-argv-child-all", "child-allowlist-all-argv.json");
+      try {
+        const argv = readDumpedArgv(path.join(storageDir, "child-allowlist-all-argv.json"));
+        expect([...allowedMcpNames(argv)].sort()).toEqual(["alpha", "beta"]);
+        expect(argv).not.toContain(MCP_SERVER_ALLOWLIST_SENTINEL);
+      } finally {
+        await all.dispose();
+      }
+
+      // 非空 allowlist：只保留 broker 里真实存在的名字，未知名字被过滤。
+      setConfigOverrides({
+        nodePath: process.execPath,
+        "superAgent.childMcpServerAllowlist": ["beta", "does-not-exist"],
+      });
+      const picked = await spawnChild("spawn-argv-child-picked", "child-allowlist-picked-argv.json");
+      try {
+        const argv = readDumpedArgv(path.join(storageDir, "child-allowlist-picked-argv.json"));
+        expect(allowedMcpNames(argv)).toEqual(["beta"]);
+        expect(allowedMcpNames(argv)).not.toContain("does-not-exist");
+        expect(argv).not.toContain(MCP_SERVER_ALLOWLIST_SENTINEL);
+      } finally {
+        await picked.dispose();
+      }
+    } finally {
+      setConfigOverrides({ nodePath: process.execPath });
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  }, 60000);
 });

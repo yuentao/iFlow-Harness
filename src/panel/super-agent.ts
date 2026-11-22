@@ -45,7 +45,7 @@ import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
-import type { McpServer } from "../acp/protocol.js";
+import type { McpServer, SessionSettings } from "../acp/protocol.js";
 import type {
   ContentBlock,
   ExitPlanModeRequest,
@@ -729,6 +729,13 @@ export interface SuperAgentDeps {
    * absent dependency means "no MCP in child sessions" (the previous default).
    */
   childMcpServers?: () => McpServer[];
+  /**
+   * 子会话 `session/new` 的附加 settings（工具白名单，由宿主读配置后经
+   * `buildChildSessionSettings` 算出）。管理器把它与审批策略的
+   * `disallowed_tools` 合并；返回 `undefined` 或未产生任何键时不带 settings，
+   * 缺省请求形状与接线前逐字节一致。可选是为了让既有 fixture 不必补齐。
+   */
+  childSessionSettings?: () => SessionSettings | undefined;
   /** 子会话列表变化（宿主写进 store.superSessions）。 */
   onSessionsChanged: (sessions: SuperSessionUi[]) => void;
   /**
@@ -2802,15 +2809,20 @@ export class SuperAgentManager {
       this.deps.log.info(
         `[${id}] 子会话 MCP 服务器：${childMcpServers.length} 个（${childMcpServers.map((s) => s.name).join(", ") || "无"}]`,
       );
+      // 工具白名单来自宿主配置（buildChildSessionSettings），与审批策略的
+      // 黑名单合并成一份 settings。两者都为空时不带 settings —— 缺省
+      // `session/new` 的请求形状必须与既有行为逐字节一致（既有测试断言
+      // 子会话不传 settings）。
+      const settings: SessionSettings = {
+        ...(this.deps.childSessionSettings?.() ?? {}),
+        ...(policy.disallowedTools.length > 0
+          ? { disallowed_tools: [...policy.disallowedTools] }
+          : {}),
+      };
       const { sessionId } = await client.newSession({
         cwd: isolation.path,
         mcpServers: childMcpServers,
-        // 工具黑名单与主会话的 `settings.disallowed_tools` 同一机制；**为空时
-        // 不带 settings** —— 缺省策略下 `session/new` 的请求形状必须与既有
-        // 行为逐字节一致（既有测试断言子会话不传 settings）。
-        ...(policy.disallowedTools.length > 0
-          ? { settings: { disallowed_tools: [...policy.disallowedTools] } }
-          : {}),
+        ...(Object.keys(settings).length > 0 ? { settings } : {}),
       });
       this.apply(id, { type: "started", cliSessionId: sessionId, at: Date.now() });
 
