@@ -39,7 +39,10 @@ import { buildAcpCommand, concealNodeExecutable, locateNodeExecutable } from "..
 import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
 import { loadCredentials } from "../acp/auth.js";
 import { tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
-import { buildChildSessionSettings, effectiveMcpServerNames } from "../../shared/super-tool-policy.js";
+import {
+  buildChildSessionSettingsForTrust,
+  effectiveMcpServerNamesForTrust,
+} from "../../shared/super-tool-policy.js";
 import { parseContextWindowOverrides, parseCostTable, resolveContextWindowWithSource, resolveCost } from "../../shared/context-window.js";
 import {
   type Block,
@@ -1185,11 +1188,17 @@ export class SuperAgentHost {
       // manager asks for entries the broker (when any server is configured) is
       // already listening. Read lazily: a child spawned later still sees it.
       childMcpServers: () => this.mcpBroker?.sessionServers() ?? [],
+      // 完全信任模式：实时读，开启后子会话直接跑在主仓工作区、不收窄工具/MCP、
+      // 任务书允许 push/PR/合并。缺省 false 保持既有行为逐字节不变。
+      fullTrust: () =>
+        vscode.workspace.getConfiguration("iflow").get<boolean>("superAgent.fullTrust", false),
       // 子会话工具白名单：实时读配置，缺省两个数组都是 [] → 纯函数返回
       // undefined → newSession 不带 settings（既有行为逐字节不变）。MCP
       // 白名单也传进去（它的收窄在 spawn 层完成，settings 里不会多出键）。
+      // 完全信任时纯函数直接返回 undefined，忽略用户配置的白名单。
       childSessionSettings: () =>
-        buildChildSessionSettings(
+        buildChildSessionSettingsForTrust(
+          vscode.workspace.getConfiguration("iflow").get<boolean>("superAgent.fullTrust", false),
           vscode.workspace.getConfiguration("iflow").get<string[]>("superAgent.childToolAllowlist", []),
           vscode.workspace.getConfiguration("iflow").get<string[]>("superAgent.childMcpServerAllowlist", []),
         ),
@@ -1418,14 +1427,17 @@ export class SuperAgentHost {
     // 与启动失败时的 toast 一起如实暴露，绝不伪造共享。
     const broker = await this.ensureMcpBroker();
     const brokerNames = broker?.names() ?? [];
+    const fullTrust = vscode.workspace
+      .getConfiguration("iflow")
+      .get<boolean>("superAgent.fullTrust", false);
     const mcpAllowlist = vscode.workspace
       .getConfiguration("iflow")
       .get<string[]>("superAgent.childMcpServerAllowlist", []);
     const { args } = buildAcpCommand(entry, includeDirectories, {
-      // 空白名单 → effectiveMcpServerNames 返回 undefined → 回退 broker 全量
-      // （接线前的原表达式）；非空则与 broker 实际 server 名取交集，用户写错
-      // 的名字在进程层就被过滤掉。
-      mcpServerNames: effectiveMcpServerNames(mcpAllowlist, brokerNames) ?? brokerNames,
+      // 完全信任：忽略白名单，用 broker 全量 server；broker 为空时不传该参数
+      // （绝不退化成「无 MCP」哨兵）。非完全信任时逐字沿用既有表达式，默认
+      // 行为不变。
+      mcpServerNames: effectiveMcpServerNamesForTrust(fullTrust, mcpAllowlist, brokerNames),
     });
     // Bridge the panel's user `iflow.contextWindowOverrides` into the child
     // CLI process, matching the main session (see panel.ts spawnEnv). Only a

@@ -222,6 +222,11 @@
           "default": "block",
           "markdownDescription": "%iflow.configuration.superAgentDependencyPolicy.description%"
         },
+        "iflow.superAgent.fullTrust": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "%iflow.configuration.superAgentFullTrust.description%"
+        },
         "iflow.superAgent.keepWorktree": {
           "type": "boolean",
           "default": false,

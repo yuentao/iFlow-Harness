@@ -838,6 +838,12 @@ export interface SuperAgentDeps {
    */
   dependencyPolicy?: () => "block" | "continue";
   /**
+   * 完全信任模式（`iflow.superAgent.fullTrust`，每次实时读）。开启后子会话
+   * 直接在主仓工作区运行（不建 worktree）、不收窄工具与 MCP，且任务书允许
+   * push / 开 PR / 合并。缺省 undefined 即 false —— 既有行为逐字节不变。
+   */
+  fullTrust?: () => boolean;
+  /**
    * 是否保留正常完成子会话的工作目录（`iflow.superAgent.keepWorktree`，
    * 每次实时读）。
    *
@@ -1219,6 +1225,7 @@ export class SuperAgentManager {
     const now = Date.now();
     const id = `super-${now.toString(36)}-${(this.seq++).toString(36)}`;
     const repoIsolation = options?.isolation === "repo";
+    const fullTrust = !repoIsolation && (this.deps.fullTrust?.() ?? false);
     const policy = resolveSpawnPolicy({ policy: options?.policy ?? null });
     const runId = options?.runId;
     const wave = options?.wave ?? 0;
@@ -1229,9 +1236,16 @@ export class SuperAgentManager {
       status: "preparing",
       queued: true,
       attempts: 1,
-      isolation: repoIsolation
-        ? { kind: "repo", path: this.deps.repoRoot }
-        : { kind: "directory", path: "", note: "正在准备隔离环境" },
+      // 完全信任：直接落在主仓工作区档（与合并子会话同档，但带 fullTrust
+      // 标记走另一套任务书契约），看板从派发那一刻就显示「完全信任」。
+      isolation:
+        repoIsolation || fullTrust
+          ? {
+              kind: "repo",
+              path: this.deps.repoRoot,
+              ...(fullTrust ? { fullTrust: true, note: "完全信任（主仓工作区）" } : {}),
+            }
+          : { kind: "directory", path: "", note: "正在准备隔离环境" },
       // 归属主会话：归档按它分文件，恢复历史会话时按它取回。
       mainSessionId: this.deps.currentMainSessionId() ?? undefined,
       createdAt: now,
@@ -2666,8 +2680,15 @@ export class SuperAgentManager {
       this.deps.log.info(`super agent: ${id} 重试复用工作目录 ${reused.path}`);
     } else if (session.isolation.kind === "repo") {
       // 主仓工作区档：不建 worktree、不建分支 —— 子会话直接在主仓根目录里
-      // 干活。合并只能在目标分支所在的工作区发生，这一档就是为此存在的。
-      isolation = { kind: "repo", path: this.deps.repoRoot };
+      // 干活。合并子会话与完全信任子会话共用这一档；fullTrust 标记与看板
+      // note 必须带过去，否则任务书会退回「不许 push」的合并契约。
+      isolation = {
+        kind: "repo",
+        path: this.deps.repoRoot,
+        ...(session.isolation.fullTrust
+          ? { fullTrust: true, note: "完全信任（主仓工作区）" }
+          : {}),
+      };
     } else {
       const slug = sanitizeWorktreeName(spec.title);
       const unique = `${Date.now().toString(36)}-${(this.seq++).toString(36)}`;
@@ -5194,7 +5215,14 @@ function describeAttachmentFailures(attachments?: StagedSuperAttachments): strin
 /** 工作目录段落：worktree、目录隔离与主仓工作区三档的边界说明。 */
 function describeIsolation(isolation: SuperSessionUi["isolation"]): string {
   const lines = [`Working directory: ${isolation.path}`];
-  if (isolation.kind === "repo") {
+  if (isolation.fullTrust) {
+    // 完全信任档：跑在主仓工作区里，拥有本机用户的几乎全部权限。边界只留
+    // 「只提交本任务文件 + 禁 force push / --no-verify + 不丢用户未提交改动」。
+    lines.push(
+      "This is the MAIN repository workspace in FULL TRUST mode: no worktree isolation and no branch of your own. You have the full privileges of the local user — you may read and write repository files, run arbitrary commands, push, open pull requests and merge here.",
+      "Hard boundaries: commit only files that belong to this task; never force push (`--force` / `--force-with-lease`) and never use `--no-verify` to bypass hooks; never discard the user's other uncommitted changes.",
+    );
+  } else if (isolation.kind === "repo") {
     // 主仓工作区档：这是唯一一档允许在主仓里动 git 的隔离方式，边界必须
     // 写死 —— 尤其是「不许 git add -A / commit -a / stash」：那会把用户
     // 尚未提交的其它改动卷进合并提交。
@@ -5230,8 +5258,20 @@ function describeRetry(retry: SuperRetryContext): string {
 }
 
 /** 提交契约段落：worktree 内要求自己提交；目录隔离明确不要碰 git；
- * 主仓工作区档则明确「合并提交就是交付物，不许自己提交」。 */
+ * 主仓工作区档则明确「合并提交就是交付物，不许自己提交」；完全信任档
+ * 放开 push / PR / 合并，但仍只提交本任务文件并禁 force push / --no-verify。 */
 function describeSubmission(isolation: SuperSessionUi["isolation"]): string {
+  if (isolation.fullTrust) {
+    return (
+      "\n" +
+      [
+        "Submitting your work:",
+        "- Commit before finishing: stage and commit ONLY the files that belong to this task (use explicit `git add <file>` paths — never `git add -A` / `git add .`, which would sweep the user's uncommitted changes into your commit).",
+        "- Full trust mode: you may push, open pull requests, merge, and switch/create/delete branches in the main repository as needed to deliver the task.",
+        "- Hard boundaries: never force push (`git push --force` / `--force-with-lease`) and never use `--no-verify`; never modify files unrelated to this task or discard the user's uncommitted work.",
+      ].join("\n")
+    );
+  }
   if (isolation.kind === "repo") {
     return (
       "\n" +

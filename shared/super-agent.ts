@@ -243,6 +243,13 @@ export interface SuperIsolation {
    * 与「什么都没有了」。
    */
   recycled?: boolean;
+  /**
+   * 完全信任模式（iflow.superAgent.fullTrust）标记：复用 `repo` 档（主仓工作区、
+   * 无 worktree），但与合并子会话的「不许自己提交/不许 push」契约相反 —— 它
+   * 允许在主仓 push / 开 PR / 合并。缺省即 false，旧记录与合并子会话不带此键，
+   * 因此所有既有判断路径逐字节不变。
+   */
+  fullTrust?: boolean;
   /** 隔离强度的诚实说明（降级时必填）—— 面向用户（中文），只出现在看板气泡里。 */
   note?: string;
   /**
@@ -263,6 +270,7 @@ export interface SuperIsolation {
  * 分支。worktree 档的分支名由看板单独显示，这里只说隔离方式。
  */
 export function superIsolationLabel(isolation: SuperIsolation): string {
+  if (isolation.fullTrust) return "完全信任（主仓工作区）";
   switch (isolation.kind) {
     case "git_worktree":
       return "独立工作目录";
@@ -281,6 +289,7 @@ export function superIsolationLabel(isolation: SuperIsolation): string {
  * 中途翻语言会让模型读着别扭，所以提示词这条路另有一份措辞。
  */
 function superIsolationLabelEn(isolation: SuperIsolation): string {
+  if (isolation.fullTrust) return "main repository workspace (full trust, no isolation)";
   switch (isolation.kind) {
     case "git_worktree":
       return "isolated git worktree";
@@ -301,6 +310,7 @@ function superIsolationLabelEn(isolation: SuperIsolation): string {
 function normalizeIsolation(isolation: SuperIsolation): SuperIsolation {
   if (isolation.kind !== "repo") return isolation;
   const normalized: SuperIsolation = { kind: "repo", path: isolation.path };
+  if (isolation.fullTrust) normalized.fullTrust = true;
   if (isolation.note) normalized.note = isolation.note;
   if (isolation.degradeReason) normalized.degradeReason = isolation.degradeReason;
   return normalized;
