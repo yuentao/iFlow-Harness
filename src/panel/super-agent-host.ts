@@ -38,12 +38,12 @@ import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, locateNodeExecutable } from "../acp/cli-locator.js";
 import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
 import { loadCredentials } from "../acp/auth.js";
-import { tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
+import { resolveCliTokensLimit, tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
 import {
   buildChildSessionSettingsForTrust,
   effectiveMcpServerNamesForTrust,
 } from "../../shared/super-tool-policy.js";
-import { parseContextWindowOverrides, parseCostTable, resolveContextWindowWithSource, resolveCost } from "../../shared/context-window.js";
+import { parseContextWindowOverrides, parseCostTable, resolveCost } from "../../shared/context-window.js";
 import {
   type Block,
   type ContextRefUi,
@@ -1276,16 +1276,19 @@ export class SuperAgentHost {
         void this.drainSuperMerges();
       },
       currentModel: () => this.store.getState().currentModelId,
-      // 方案D：子会话 set_model 成功后同步用户显式覆盖的上下文窗口（只推
-      // source === "user"，与 spawnEnv 启动兜底同一口径，绝不覆盖 profile 的
-      // tokensLimit）。宿主解析窗口、管理器只负责串行 await 调用。
+      // 方案D：子会话 set_model 成功后同步该模型的有效上下文窗口。与主会话
+      // 同一 resolver、同一口径（user override → active profile → settings
+      // 顶层 → 内建表 → 无依据不推），绝不推兜底估算。宿主解析窗口、管理器
+      // 只负责串行 await 调用。
       setTokensLimit: async (client, sessionId, modelId) => {
-        const userWindow = resolveContextWindowWithSource(
+        const resolved = resolveCliTokensLimit({
           modelId,
-          parseContextWindowOverrides(vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", [])),
-        );
-        if (userWindow.source === "user" && userWindow.window != null) {
-          await client.setTokensLimit(sessionId, userWindow.window);
+          overrides: parseContextWindowOverrides(
+            vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
+          ),
+        });
+        if (resolved.limit !== undefined) {
+          await client.setTokensLimit(sessionId, resolved.limit);
         }
       },
       // 子会话归属当前主会话：归档按它分文件，恢复历史会话时按它取回。
@@ -1439,15 +1442,17 @@ export class SuperAgentHost {
       // 行为不变。
       mcpServerNames: effectiveMcpServerNamesForTrust(fullTrust, mcpAllowlist, brokerNames),
     });
-    // Bridge the panel's user `iflow.contextWindowOverrides` into the child
-    // CLI process, matching the main session (see panel.ts spawnEnv). Only a
-    // real user override is forwarded — builtin-table / fallback values stay
-    // UI-only so they never override an explicit profile tokensLimit.
-    const childUserWindow = resolveContextWindowWithSource(
-      this.store.getState().currentModelId,
-      parseContextWindowOverrides(vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", [])),
-    );
-    const childOverrideWindow = childUserWindow.source === "user" ? (childUserWindow.window ?? undefined) : undefined;
+    // Same effective context window as the main session (see panel.ts
+    // spawnEnv), resolved through the very same five-tier authority chain
+    // (user override → active profile → settings top-level → curated table →
+    // nothing). Without this the child falls back to the CLI's own tiny
+    // built-in default and compresses its baseline immediately on start.
+    const childTokensLimitEnv = tokensLimitEnvFromSettings({
+      modelId: this.store.getState().currentModelId,
+      overrides: parseContextWindowOverrides(
+        vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
+      ),
+    });
     const systemPromptFile = await this.materializeSystemPrompt("child");
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
@@ -1458,9 +1463,9 @@ export class SuperAgentHost {
       // 会跳过值为 undefined 的环境变量），即便用户 shell 里设了也不继承。
       IFLOW_SUPER_TOOL: undefined,
       // Same effective context window as the main session: without this the
-      // child falls back to 128000 (threshold 102400) and compresses its
-      // ~103000-token baseline immediately on start.
-      ...tokensLimitEnvFromSettings(undefined, childOverrideWindow),
+      // child falls back to the CLI's own 128000/65000 default and compresses
+      // its baseline immediately on start.
+      ...childTokensLimitEnv,
     };
     if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
     const client = new AcpClient(

@@ -25,7 +25,7 @@ import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, en
 import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
 import type { McpBrokerStatus } from "../acp/mcp-broker.js";
 import { deleteKernelApiProfile, migrateKernelApiProfiles, readKernelApiProfiles, setKernelActiveProfile, writeKernelApiProfile } from "../acp/api-profiles.js";
-import { tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
+import { resolveCliTokensLimit, tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
 import {
   getActiveProfileName,
   loadCredentials,
@@ -7472,20 +7472,24 @@ export class ChatPanel implements vscode.Disposable {
       const spawnEnv: NodeJS.ProcessEnv = { IFLOW_HARNESS: "1", IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile() };
       // Surface the effective context window to the CLI via env (CLI's
       // zOt()/CT("tokensLimit") overlay, spread last in its settings merge),
-      // so auto-compression uses the active profile's limit instead of the
-      // 128000 fallback whose 102400 threshold traps super-agent children.
-      // Bridge `iflow.contextWindowOverrides` into the same channel: only a
-      // real USER override (source === "user") is forwarded. Builtin-table /
-      // fallback numbers are UI estimates, not CLI authority — forwarding
-      // them would override an explicit active-profile tokensLimit and drift
-      // behaviour. An invalid/absent override falls back to settings inside
-      // tokensLimitEnvFromSettings, so this is additive.
-      const userWindow = resolveContextWindowWithSource(
-        this.store.getState().currentModelId,
-        parseContextWindowOverrides(vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", [])),
+      // so the CLI's auto-compression threshold is computed from the SAME
+      // window the panel's occupancy bar shows — one model, one window.
+      //
+      // `resolveCliTokensLimit` is the single authority chain:
+      //   user override → active profile → settings top-level → curated table
+      // and pushes NOTHING when no tier has a grounded number (never a guess).
+      // The curated table IS included on purpose: the CLI's own tables miss
+      // modern ids (its `deepseek` pattern row defaults to 65k), which is
+      // exactly what made every turn trip the 0.8 auto-compression ratio.
+      Object.assign(
+        spawnEnv,
+        tokensLimitEnvFromSettings({
+          modelId: this.store.getState().currentModelId,
+          overrides: parseContextWindowOverrides(
+            vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
+          ),
+        }),
       );
-      const overrideWindow = userWindow.source === "user" ? (userWindow.window ?? undefined) : undefined;
-      Object.assign(spawnEnv, tokensLimitEnvFromSettings(undefined, overrideWindow));
       if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
       // Vendored CLI 内置 `super-agent` 工具的注册开关（工具实现以
       // `process.env.IFLOW_SUPER_TOOL === "1"` 为门控；当前 bundle 尚未包含
@@ -7891,20 +7895,22 @@ export class ChatPanel implements vscode.Disposable {
       if (resp?.success && resp.currentModelId) {
         this.store.sessionMeta({ currentModelId: resp.currentModelId });
         // 方案D：`session/set_model` 只改模型名，不重算 CLI 缓存的 tokensLimit
-        // （getTokensLimit()/JR() 用它算自动压缩阈值）。用户显式覆盖的窗口必须
-        // 在模型切换成功后同步推送，否则热切换后压缩阈值仍停在旧模型的窗口。
-        // 只推 source === "user"：内建表 / 兜底值是 UI 估算，推给 CLI 会覆盖
-        // profile 里显式的 tokensLimit（与 spawnEnv 启动兜底同一口径）。
+        // （getTokensLimit()/JR() 用它算自动压缩阈值）。切换后必须把新模型的
+        // 有效窗口同步推给 CLI，否则热切换后压缩阈值仍停在旧模型的窗口。
+        // 走同一个 resolver（与 spawnEnv 同一口径）：user override → active
+        // profile → settings 顶层 → 内建表；**无依据时不推**（绝不推兜底估算）。
         // 串行 await：set_model 成功 → set_tokens_limit 成功之间不允许发 prompt，
         // 所以模型切换「完成」必须等到这次推送 settle（webview 的 beginPending
         // 门控在 sessionMeta 刷新快照后即释放，真正的护栏是这里的串行等待）。
-        const switchedWindow = resolveContextWindowWithSource(
-          resp.currentModelId,
-          parseContextWindowOverrides(vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", [])),
-        );
-        if (switchedWindow.source === "user" && switchedWindow.window != null) {
+        const switchedWindow = resolveCliTokensLimit({
+          modelId: resp.currentModelId,
+          overrides: parseContextWindowOverrides(
+            vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
+          ),
+        });
+        if (switchedWindow.limit !== undefined) {
           try {
-            await this.client?.setTokensLimit(sessionId, switchedWindow.window);
+            await this.client?.setTokensLimit(sessionId, switchedWindow.limit);
           } catch (error) {
             vscode.window.showWarningMessage(
               vscode.l10n.t("切换模型后同步上下文长度失败：{0}", errorMessage(error)),

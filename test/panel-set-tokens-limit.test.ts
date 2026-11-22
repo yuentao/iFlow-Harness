@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import * as vscode from "vscode";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { readCliSettings } from "../src/acp/models-query.js";
+import { resolveCliTokensLimit } from "../src/acp/cli-tokens-limit.js";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import { setConfigOverrides } from "./vscode-stub.js";
@@ -13,11 +15,17 @@ import { setConfigOverrides } from "./vscode-stub.js";
  * 方案D：模型热切换成功后再串行推送 `session/set_tokens_limit`。
  *
  * `session/set_model` 只改模型名，不重算 CLI 缓存的 tokensLimit（自动压缩阈值
- * 取自 getTokensLimit()/JR()）。面板必须在 set_model 成功后把用户显式覆盖的
- * 上下文窗口推给 CLI，且 set_model → set_tokens_limit 之间不能并发发 prompt。
+ * 取自 getTokensLimit()/JR()）。面板必须在 set_model 成功后把**该模型的有效
+ * 窗口**推给 CLI，且 set_model → set_tokens_limit 之间不能并发发 prompt。
  *
- * 只推 source === "user"：内建表 / 兜底值是 UI 估算，推给 CLI 会覆盖 profile
- * 里显式的 tokensLimit（与 spawnEnv 启动兜底同一口径）。
+ * 窗口口径与 spawnEnv 完全一致（同一个 resolver）：user override → active
+ * profile → settings 顶层 → 内建对照表 → 无依据不推。因此这里既推用户显式
+ * 覆写，也推内建表命中的窗口（CLI 自己的表缺现代模型 id，正是自动压缩误触发
+ * 的根因）；只有**完全无依据**时才什么都不推。
+ *
+ * Hermetic：内核 settings.json 的位置由 `IFLOW_HOME` 决定（内核 loader 的既有
+ * 约定），测试把它指向临时目录，于是断言绝不依赖开发机上的 ~/.iflow。
+ * 这里刻意**不用 vi.mock** —— `--no-isolate` 下模块 mock 会跨测试文件泄漏。
  */
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -79,10 +87,13 @@ describe("ChatPanel 热切换同步 CLI tokensLimit (方案D)", () => {
   let p: PanelInternals;
   let storageDir: string;
   let setTokensLimit: ReturnType<typeof vi.fn>;
+  const originalIflowHome = process.env.IFLOW_HOME;
 
   beforeEach(() => {
-    setConfigOverrides({ checkpoints: false, contextWindowOverrides: ["switch-model=256000"] });
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-set-tokens-"));
+    // 内核 settings.json 指向临时目录：默认没有任何 profile / 顶层 tokensLimit。
+    process.env.IFLOW_HOME = storageDir;
+    setConfigOverrides({ checkpoints: false, contextWindowOverrides: ["switch-model=256000"] });
     panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as PanelInternals;
     setTokensLimit = vi.fn(async () => ({ success: true }));
@@ -97,19 +108,49 @@ describe("ChatPanel 热切换同步 CLI tokensLimit (方案D)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     setConfigOverrides({});
+    if (originalIflowHome === undefined) delete process.env.IFLOW_HOME;
+    else process.env.IFLOW_HOME = originalIflowHome;
     await panel.dispose();
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
-  it("setModel 成功后串行推送用户覆盖的窗口", async () => {
+  it("hermetic：内核 settings 指向临时 IFLOW_HOME，断言不依赖开发机的 ~/.iflow/settings.json", () => {
+    expect(readCliSettings()).toBeNull();
+    // 面板真实使用的那条解析路径同样看不到内核 settings。
+    expect(resolveCliTokensLimit({ modelId: "totally-unknown-model" })).toEqual({
+      limit: undefined,
+      source: undefined,
+    });
+  });
+
+  it("setModel 成功后串行推送用户显式覆写的窗口", async () => {
     await p.setModel("switch-model");
     expect(setTokensLimit).toHaveBeenCalledTimes(1);
     expect(setTokensLimit).toHaveBeenCalledWith("s-switch", 256000);
   });
 
-  it("非 user 覆盖（内建表 / 兜底）不推送，避免覆盖 profile tokensLimit", async () => {
+  it("内建对照表命中的窗口同样推送（CLI 自己的表缺这个模型，只能由宿主补位）", async () => {
+    setConfigOverrides({ checkpoints: false, contextWindowOverrides: [] });
+    await p.setModel("gpt-4o");
+    expect(setTokensLimit).toHaveBeenCalledTimes(1);
+    expect(setTokensLimit).toHaveBeenCalledWith("s-switch", 128000);
+  });
+
+  it("active profile 的 tokensLimit 也推送（profile 优先于内建表）", async () => {
+    fs.writeFileSync(
+      path.join(storageDir, "settings.json"),
+      JSON.stringify({ currentApiProfile: "main", apiProfiles: { main: { tokensLimit: 128000 } } }),
+      "utf8",
+    );
+    setConfigOverrides({ checkpoints: false, contextWindowOverrides: [] });
+    await p.setModel("gpt-4o");
+    expect(setTokensLimit).toHaveBeenCalledTimes(1);
+    expect(setTokensLimit).toHaveBeenCalledWith("s-switch", 128000);
+  });
+
+  it("任何一档都没有依据 → 不推送，也不调 session/set_tokens_limit", async () => {
     setConfigOverrides({ checkpoints: false, contextWindowOverrides: ["another-model=999999"] });
-    await p.setModel("switch-model");
+    await p.setModel("totally-unknown-model");
     expect(setTokensLimit).not.toHaveBeenCalled();
   });
 
@@ -133,7 +174,10 @@ describe("ChatPanel 热切换同步 CLI tokensLimit (方案D)", () => {
     const running = p.setModel("switch-model").then(() => {
       settled = true;
     });
-    await new Promise((r) => setTimeout(r, 10));
+    // 等推送真的发出（而不是靠固定 sleep 猜时序）：此刻 setModel 必须仍未返回。
+    await vi.waitFor(() => {
+      expect(setTokensLimit).toHaveBeenCalledTimes(1);
+    });
     expect(settled).toBe(false);
     release();
     await running;
