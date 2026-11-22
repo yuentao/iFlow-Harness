@@ -940,6 +940,9 @@ export class ChatPanel implements vscode.Disposable {
       refreshMcpStatusFromBroker: () => this.refreshMcpStatusFromBroker(),
       resolveEntry: () => this.resolveEntry(),
       resolveWorkspaceHandshakeCreds: () => this.resolveWorkspaceHandshakeCreds(),
+      // Same effective context window as the main session — ONE computation
+      // site (the panel owns the cold-start lookup-key fallbacks).
+      tokensLimitEnv: () => this.tokensLimitEnv(),
       chunkText: (content) => ChatPanel.chunkText(content),
       sendPrompt: (text, images, files, contexts, options) => this.sendPrompt(text, images, files, contexts, options),
     });
@@ -7415,6 +7418,35 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- Agent lifecycle ----------------------------------------------------------
 
+  /**
+   * The effective context window for every CLI subprocess this panel spawns.
+   *
+   * ONE computation site: the main session spawn AND every child session
+   * spawn go through it, so the two paths can never drift apart (the child
+   * spawn used to recompute the patch inline).
+   *
+   * The lookup key carries the cold-start fallbacks (store's model →
+   * pending switch → workspace model → kernel profile's `modelName`): the
+   * spawn env is built BEFORE the CLI's `session/new` returns, so
+   * `currentModelId` is still null on the very first spawn of a fresh
+   * window. Without the fallbacks the user's `iflow.contextWindowOverrides`
+   * and the curated table both MISS, and the CLI falls back to its own 65k
+   * `deepseek` default — the "every turn auto-compresses" symptom.
+   *
+   * The key is used for TABLE LOOKUPS ONLY; it never changes the model id
+   * the host pushes to the CLI (`session/set_model` stays verbatim).
+   */
+  private tokensLimitEnv(): { IFLOW_TOKENS_LIMIT?: string } {
+    return tokensLimitEnvFromSettings({
+      modelId: this.store.getState().currentModelId,
+      pendingSwitchModel: this.pendingSwitchModel,
+      workspaceModelId: this.workspaceModelId(),
+      overrides: parseContextWindowOverrides(
+        vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
+      ),
+    });
+  }
+
   private async ensureClient(): Promise<AcpClient> {
     // A3: never spawn a new client after the panel is gone — the handshake's
     // post-connect steps would run against a destroyed store.
@@ -7549,15 +7581,13 @@ export class ChatPanel implements vscode.Disposable {
       // The curated table IS included on purpose: the CLI's own tables miss
       // modern ids (its `deepseek` pattern row defaults to 65k), which is
       // exactly what made every turn trip the 0.8 auto-compression ratio.
-      Object.assign(
-        spawnEnv,
-        tokensLimitEnvFromSettings({
-          modelId: this.store.getState().currentModelId,
-          overrides: parseContextWindowOverrides(
-            vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
-          ),
-        }),
-      );
+      //
+      // tokensLimitEnv() is the ONE computation site for that patch (the main
+      // session and every child session go through it), and it carries the
+      // cold-start lookup-key fallbacks — the spawn env is built BEFORE
+      // `session/new` returns, so `currentModelId` is still null on the very
+      // first spawn and the user's override would otherwise MISS.
+      Object.assign(spawnEnv, this.tokensLimitEnv());
       if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
       // Vendored CLI 内置 `super-agent` 工具的注册开关（工具实现以
       // `process.env.IFLOW_SUPER_TOOL === "1"` 为门控；当前 bundle 尚未包含

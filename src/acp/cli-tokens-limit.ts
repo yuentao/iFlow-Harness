@@ -5,14 +5,22 @@
  *
  * Why this exists: the CLI derives its auto-compression threshold from
  * `compressionTokenThreshold` (default 0.8) × effective context window, and
- * resolves that window through its own `JR(model, limit)` chain — an env
- * override, then `~/.iflow/settings.json`'s top-level `tokensLimit`, then a
- * table of a handful of exact model ids, then a regex pattern table whose
- * `default` branch is tiny (65k). A modern id such as
- * `auto/deepseek-v4.1-flash` matches neither exact table and therefore falls
- * into that tiny default: every single turn crossed the 0.8 ratio and ran a
- * FULL auto-compression, while the panel's occupancy bar showed the real 1M
- * window — one model, two windows.
+ * resolves that window through its own `JR(model, limit)` chain. That chain
+ * (probed, CLI 0.5.19 bundle) is, high → low:
+ *   1. an explicit limit (the env override the host pushes),
+ *   2. the Mod's `context-window-loader` → `readTokensLimit()`, i.e. the
+ *      top-level `tokensLimit` of `~/.iflow/settings.json`,
+ *   3. an EXACT-model-id table that holds only the nine Gemini ids — no
+ *      modern id is in it at all,
+ *   4. a regex pattern table whose `deepseek` row is
+ *      `{pattern:/deepseek/i, limits:{v3:128000, default:65000}}`, and
+ *   5. a 128000 last-resort fallback.
+ *
+ * So a modern id such as `auto/deepseek-v4.1-flash` matches neither the
+ * exact table nor (except for its `default` branch) the pattern table and
+ * therefore falls into that tiny 65k default: every single turn crossed the
+ * 0.8 ratio and ran a FULL auto-compression, while the panel's occupancy bar
+ * showed the real 1M window — one model, two windows.
  *
  * The host already knows the real window (curated table + explicit user
  * overrides + the kernel's profile/settings keys), so the host's resolution is
@@ -41,11 +49,19 @@
  * settings file and feeds the two kernel-derived tiers into the shared
  * resolver.
  *
+ * The one thing this adapter adds on top of the shared resolver is the
+ * COLD-START LOOKUP KEY (see {@link lookupKeyFrom}): the model id the two
+ * TABLE tiers match against is resolved through a fallback chain, so a fresh
+ * window — whose `currentModelId` is still null when the spawn env is built —
+ * still hits the user's override and the curated table instead of silently
+ * dropping to the CLI's 65k default.
+ *
  * Zero VSCode dependency (pure logic + models-query, which is itself
  * VSCode-free), so it is directly unit-testable.
  */
 import { statSync } from "node:fs";
 import { readCliSettings, settingsFilePath } from "./models-query.js";
+import type { CliSettingsShape } from "./models-query.js";
 import {
   positiveTokenLimit,
   resolveContextWindowAuthority,
@@ -62,15 +78,22 @@ export interface CliTokensLimitResolution {
   source: CliTokensLimitSource | undefined;
 }
 
-export interface ResolveCliTokensLimitOptions {
-  /** Model id as the host knows it — may carry a `provider/` prefix
-   * (`auto/deepseek-v4.1-flash`); keys are normalized before matching. */
+/** Host-side facts the lookup key can be built from, in decreasing trust. */
+export interface TokensLimitLookupKeyOptions {
+  /** The panel store's current model id (`currentModelId`). */
   modelId?: string | null;
+  /** The model the user just switched to, not effective yet. */
+  pendingSwitchModel?: string | null;
+  /** The model remembered for the current workspace profile. */
+  workspaceModelId?: string | null;
+  /** Kernel settings file to read; defaults to `~/.iflow/settings.json`. */
+  settingsPath?: string;
+}
+
+export interface ResolveCliTokensLimitOptions extends TokensLimitLookupKeyOptions {
   /** Parsed `iflow.contextWindowOverrides` (keys already normalized by
    * `parseContextWindowOverrides`). */
   overrides?: Record<string, number>;
-  /** Kernel settings file to read; defaults to `~/.iflow/settings.json`. */
-  settingsPath?: string;
 }
 
 /** The two kernel-derived tiers of the authority chain (read from the
@@ -80,6 +103,73 @@ export interface KernelTokensLimits {
   profileTokensLimit?: number;
   /** Settings file's top-level `tokensLimit` (tier 3). */
   settingsTokensLimit?: number;
+}
+
+/** First non-empty (trimmed) string of the list, or null. */
+function firstNonEmpty(...values: readonly (string | null | undefined)[]): string | null {
+  for (const value of values) {
+    const text = typeof value === "string" ? value.trim() : "";
+    if (text) return text;
+  }
+  return null;
+}
+
+/** The active kernel profile's `modelName` — the last grounded lookup key. */
+function kernelProfileModelName(settings: CliSettingsShape | null): string | null {
+  const name = settings?.currentApiProfile?.trim();
+  if (!name) return null;
+  return firstNonEmpty(settings?.apiProfiles?.[name]?.modelName);
+}
+
+/**
+ * The lookup key, resolved through the host's own fallbacks (high → low):
+ *
+ *   1. the store's `currentModelId`,
+ *   2. `pendingSwitchModel` — the model the user just switched to, not
+ *      effective yet,
+ *   3. the workspace-remembered model,
+ *   4. the active kernel profile's `modelName`
+ *      (`~/.iflow/settings.json` → `currentApiProfile` → `apiProfiles[…]`),
+ *   5. nothing (null) — the caller must then push NO limit at all.
+ *
+ * WHY the fallbacks exist (cold start): the spawn env is built BEFORE the
+ * CLI's `session/new` returns, so `currentModelId` is still `null` on the
+ * very first spawn of a fresh window (it only arrives with the session's
+ * `_meta.models.currentModelId`). With a null key the user's
+ * `iflow.contextWindowOverrides` and the curated table both MISS, and the
+ * CLI silently falls back to its own 65k `deepseek` default — the exact
+ * "every turn auto-compresses" symptom this resolver exists to prevent.
+ *
+ * The key is used for TABLE LOOKUPS ONLY. It never changes what the host
+ * pushes as the model id (`session/set_model` stays a verbatim pass-through —
+ * see the CLI-model-dual-variable trap in AGENTS.md).
+ */
+function lookupKeyFrom(
+  settings: CliSettingsShape | null,
+  modelId: string | null | undefined,
+  pendingSwitchModel: string | null | undefined,
+  workspaceModelId: string | null | undefined,
+): string | null {
+  return (
+    firstNonEmpty(modelId, pendingSwitchModel, workspaceModelId) ??
+    kernelProfileModelName(settings)
+  );
+}
+
+/**
+ * The model id used to LOOK UP a context window — see
+ * {@link lookupKeyFrom} for the fallback chain and the cold-start rationale.
+ */
+export function resolveTokensLimitLookupKey(
+  options: TokensLimitLookupKeyOptions = {},
+): string | null {
+  const { modelId, pendingSwitchModel, workspaceModelId, settingsPath } = options;
+  return lookupKeyFrom(
+    readCliSettings(settingsPath),
+    modelId,
+    pendingSwitchModel,
+    workspaceModelId,
+  );
 }
 
 /** Spawn-env patch: sets IFLOW_TOKENS_LIMIT only for a positive integer. */
@@ -169,13 +259,39 @@ export function readKernelTokensLimits(settingsPath?: string): KernelTokensLimit
  * Model ids are normalized (`normalizeModelId`: strip the last `/` prefix,
  * lowercase) before matching, so `auto/deepseek-v4.1-flash` and
  * `deepseek-v4.1-flash` hit the very same override entry.
+ *
+ * The LOOKUP KEY for tiers 1 and 4 is resolved through the fallback chain
+ * (store's model → pending switch → workspace model → kernel profile's
+ * `modelName`) so a cold start (no `currentModelId` yet) still hits the
+ * user's override and the curated table. The tier ORDER is unchanged: tier 2
+ * (profile) and tier 3 (settings top-level) still outrank the curated
+ * table, and the fallback key only ever selects WHICH model id the two
+ * TABLE tiers match against — it never reorders the chain.
  */
 export function resolveCliTokensLimit(
   options: ResolveCliTokensLimitOptions = {},
 ): CliTokensLimitResolution {
-  const { modelId, overrides = {}, settingsPath } = options;
+  const { modelId, pendingSwitchModel, workspaceModelId, overrides = {}, settingsPath } = options;
+
+  // The kernel settings file is the authority for tiers 2/3 AND for the
+  // last-resort lookup key (the active profile's modelName) — read it once.
+  const settings = readCliSettings(settingsPath);
+
+  // Lookup key for the two TABLE tiers (see lookupKeyFrom).
+  const lookupKey = lookupKeyFrom(settings, modelId, pendingSwitchModel, workspaceModelId);
+
+  // The two kernel-derived tiers (profile / settings top-level) — read with
+  // the mtime-cached reader (the occupancy bar resolves on every push).
   const { profileTokensLimit, settingsTokensLimit } = readKernelTokensLimits(settingsPath);
-  return resolveContextWindowAuthority({ modelId, overrides, profileTokensLimit, settingsTokensLimit });
+
+  // ONE resolver for both paths (the bar and the CLI): the cold-start
+  // fallback only changes the model id the two table tiers match against.
+  return resolveContextWindowAuthority({
+    modelId: lookupKey,
+    overrides,
+    profileTokensLimit,
+    settingsTokensLimit,
+  });
 }
 
 /**
@@ -183,11 +299,7 @@ export function resolveCliTokensLimit(
  * (and only when) the resolution has a positive integer.
  */
 export function tokensLimitEnvFromSettings(
-  options: {
-    settingsPath?: string;
-    modelId?: string | null;
-    overrides?: Record<string, number>;
-  } = {},
+  options: ResolveCliTokensLimitOptions = {},
 ): { IFLOW_TOKENS_LIMIT?: string } {
   return cliTokensLimitEnv(resolveCliTokensLimit(options).limit);
 }
