@@ -5,7 +5,7 @@ import { validateAuthForm } from "../../../shared/messages";
 import { matchProviderPreset, PROVIDER_PRESETS, type ProviderPreset } from "../../../shared/provider-presets";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Button, Field, ICON_DISPLAY, ICON_INLINE, ModalShell, OptionCard, OptionGroup, SearchInput, TextInput, ToggleChip, fuzzyScore } from "./ui";
+import { Button, Field, Hint, ICON_DISPLAY, ICON_INLINE, ModalShell, OptionCard, OptionGroup, SearchInput, TextInput, ToggleChip, fuzzyScore } from "./ui";
 import type { SettingsTab } from "./SettingsModal";
 import logo from "../assets/iflow.svg";
 
@@ -322,10 +322,11 @@ export function OnboardingWizard({
                   mono
                   ref={apiKeyRef}
                   value={draft.apiKey}
-                  placeholder={auth.saved?.keyTail ? t("已保存（{0}），留空则不改", auth.saved.keyTail) : "sk-…"}
+                  placeholder="sk-…"
                   onChange={(e) => updateDraft({ apiKey: e.target.value })}
                 />
               </Field>
+              {auth.saved?.keyTail && <Hint>{t("已保存（{0}），留空则不改", auth.saved.keyTail)}</Hint>}
               <Field label={t("模型名称")}>
                 <TextInput
                   mono

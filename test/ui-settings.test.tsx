@@ -456,6 +456,34 @@ it("starts a new profile from a provider preset", () => {
   expect(container.textContent).toContain("获取 API Key");
 });
 
+/**
+ * API Key 字段：提示语不能塞进 placeholder。placeholder 既不换行也不省略，
+ * 窄面板下整句被裁掉（「已保存（…fH04），留空则不改」），而且输入框宽度塌缩、
+ * 眼睛按钮悬在框外。已保存提示改为字段下方的次级说明行。
+ */
+it("keeps the saved-key notice out of the API Key placeholder", () => {
+  renderAuthTabWith({
+    authenticated: true,
+    needsSetup: false,
+    saved: { baseUrl: "https://api.deepseek.com", modelName: "deepseek-chat", keyTail: "…fH04" },
+    profiles: [],
+    onboardingDismissed: false,
+  });
+  click("DeepSeek");
+  const keyInput = inputs()[2]!;
+  expect(keyInput.placeholder).toBe("sk-…");
+  expect(keyInput.placeholder).not.toContain("已保存");
+  expect(container.textContent).toContain("已保存（…fH04），留空则不改");
+});
+
+it("omits the saved-key notice when no key is stored", () => {
+  renderAuthTabWith(EMPTY_AUTH);
+  click("DeepSeek");
+  const keyInput = inputs()[2]!;
+  expect(keyInput.placeholder).toBe("sk-…");
+  expect(container.textContent).not.toContain("已保存");
+});
+
 it("opens the provider key page from the preset guidance", () => {
   renderAuthTabWith(EMPTY_AUTH);
   click("DeepSeek");
