@@ -53,6 +53,7 @@ const ALL_KEYS: string[] = [
   "iflow.superAgent.maxConcurrent",
   "iflow.superAgent.maxAttempts",
   "iflow.superAgent.dependencyPolicy",
+  "iflow.superAgent.fullTrust",
   "iflow.superAgent.keepWorktree",
   "iflow.superAgent.maxWorktrees",
   "iflow.superAgent.childToolAllowlist",
