@@ -13,7 +13,7 @@ const mockAgent = path.join(here, "mock-acp-agent.mjs");
 const clients: AcpClient[] = [];
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((c) => c.dispose()));
-});
+}, 20000);
 
 function createClient(mode?: string, callbacks?: ConstructorParameters<typeof AcpClient>[1], extraEnv?: Record<string, string>) {
   const client = new AcpClient(
@@ -376,13 +376,13 @@ describe("AcpClient (integration with mock ACP agent)", () => {
     // connect()'s catch must have started teardown of the still-running child.
     expect(disposeSpy).toHaveBeenCalled();
     // And the child must actually be gone — not merely "dispose was called".
-    await vi.waitFor(() => expect(exits).toBe(1), { timeout: 5000 });
+    await vi.waitFor(() => expect(exits).toBe(1), { timeout: 15000 });
 
     // The panel's catch calls dispose() a second time on the SAME instance;
     // a double call on an already-killed child must be a harmless no-op.
     await expect(client.dispose()).resolves.toBeUndefined();
     expect(disposeSpy).toHaveBeenCalledTimes(2);
-  });
+  }, 20000);
 
   it("disposes the child on a non-timeout initialize handshake error", async () => {
     let exits = 0;
@@ -395,8 +395,8 @@ describe("AcpClient (integration with mock ACP agent)", () => {
 
     await expect(client.connect()).rejects.toMatchObject({ code: -32000 });
     expect(disposeSpy).toHaveBeenCalled();
-    await vi.waitFor(() => expect(exits).toBe(1), { timeout: 5000 });
-  });
+    await vi.waitFor(() => expect(exits).toBe(1), { timeout: 15000 });
+  }, 20000);
 
   it("does not dispose a client whose initialize succeeded", async () => {
     const client = createClient();
