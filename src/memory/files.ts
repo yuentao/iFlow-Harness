@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { renameWithRetry } from "../acp/models-query.js";
 
 /**
  * CLI-side memory contract (probed with test/fixtures/probe-memory.mjs, CLI
@@ -142,6 +143,13 @@ export async function statIfExists(file: string): Promise<{ bytes: number; mtime
  * (the panel and the CLI's save_memory tool) works on the same file, so a
  * concurrent external edit is caught by the caller's expectedHash check; the
  * temp+rename only guarantees readers never see a half-written file.
+ *
+ * The rename is retried on the transient Windows "target is busy" failure —
+ * see `renameWithRetry` in src/acp/models-query.ts for the probed details
+ * (replacing a file means deleting the old one, and Windows refuses to
+ * delete an open file → EPERM while any reader/editor holds a handle). The
+ * async flavour is used here on purpose: the backoff sleeps on the event
+ * loop, so a stuck handle never blocks the extension host.
  */
 export async function writeAtomic(file: string, content: string): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
@@ -151,7 +159,7 @@ export async function writeAtomic(file: string, content: string): Promise<void> 
     // Node's rename replaces an existing file on Windows (libuv uses
     // MOVEFILE_REPLACE_EXISTING). Never delete the target first: a failed
     // replace must leave the previous content intact.
-    await rename(tmp, file);
+    await renameWithRetry(tmp, file);
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => {});
     throw error;
