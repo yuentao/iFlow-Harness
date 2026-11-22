@@ -234,6 +234,22 @@
           "maximum": 100,
           "markdownDescription": "%iflow.configuration.superAgentMaxWorktrees.description%"
         },
+        "iflow.superAgent.childToolAllowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "%iflow.configuration.superAgentChildToolAllowlist.description%"
+        },
+        "iflow.superAgent.childMcpServerAllowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "%iflow.configuration.superAgentChildMcpServerAllowlist.description%"
+        },
         "iflow.qq.enabled": {
           "type": "boolean",
           "default": false,
