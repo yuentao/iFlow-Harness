@@ -1,10 +1,31 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { writeAtomic } from "../src/memory/files";
 import { ATOMIC_REPLACE_RETRY_DELAYS_MS } from "../src/acp/models-query";
+
+/**
+ * Every temp path handed to `writeFile` by `writeAtomic`, recorded by a
+ * pass-through mock of `node:fs/promises`. The mock changes no behavior —
+ * it only lets the test SEE the temp name the writer picked.
+ */
+const { observedTmpPaths } = vi.hoisted(() => ({ observedTmpPaths: [] as string[] }));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    default: actual,
+    writeFile: async (file: unknown, ...rest: unknown[]) => {
+      if (typeof file === "string" && file.includes("iflow-harness-tmp")) {
+        observedTmpPaths.push(file);
+      }
+      return (actual.writeFile as unknown as (...args: unknown[]) => Promise<void>)(file, ...rest);
+    },
+  };
+});
 
 const tempDir = mkdtempSync(path.join(tmpdir(), "iflow-atomic-"));
 afterAll(() => {
@@ -118,5 +139,43 @@ describe("writeAtomic (memory files)", () => {
   it("keeps the retry budget under 1.2s", () => {
     const total = ATOMIC_REPLACE_RETRY_DELAYS_MS.reduce((sum, ms) => sum + ms, 0);
     expect(total).toBeLessThanOrEqual(1200);
+  });
+
+  it("picks a different temp name for two writes in the same millisecond", async () => {
+    const dir = mkdtempSync(path.join(tempDir, "samems-"));
+    const file = path.join(dir, "AGENTS.md");
+    observedTmpPaths.length = 0;
+    // Freeze the clock: both writes now land in the SAME millisecond, so
+    // only the in-process counter can keep their temp names apart.
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      await writeAtomic(file, "# first\n");
+      await writeAtomic(file, "# second\n");
+    } finally {
+      nowSpy.mockRestore();
+    }
+    expect(observedTmpPaths).toHaveLength(2);
+    expect(observedTmpPaths[0]).not.toBe(observedTmpPaths[1]);
+    // The payload must be one of the two writes — never a mix of both
+    // (a shared temp name would have renamed one write's bytes over the
+    // other's).
+    expect(["# first\n", "# second\n"]).toContain(readFileSync(file, "utf8"));
+    expect(tmpLeftovers(dir)).toEqual([]);
+  });
+
+  it("keeps two concurrent writes in the same millisecond from clobbering each other", async () => {
+    const dir = mkdtempSync(path.join(tempDir, "concurrent-"));
+    const file = path.join(dir, "AGENTS.md");
+    observedTmpPaths.length = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      await Promise.all([writeAtomic(file, "# alpha\n"), writeAtomic(file, "# beta\n")]);
+    } finally {
+      nowSpy.mockRestore();
+    }
+    expect(observedTmpPaths).toHaveLength(2);
+    expect(observedTmpPaths[0]).not.toBe(observedTmpPaths[1]);
+    expect(["# alpha\n", "# beta\n"]).toContain(readFileSync(file, "utf8"));
+    expect(tmpLeftovers(dir)).toEqual([]);
   });
 });
