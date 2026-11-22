@@ -7886,6 +7886,28 @@ export class ChatPanel implements vscode.Disposable {
         | undefined;
       if (resp?.success && resp.currentModelId) {
         this.store.sessionMeta({ currentModelId: resp.currentModelId });
+        // 方案D：`session/set_model` 只改模型名，不重算 CLI 缓存的 tokensLimit
+        // （getTokensLimit()/JR() 用它算自动压缩阈值）。用户显式覆盖的窗口必须
+        // 在模型切换成功后同步推送，否则热切换后压缩阈值仍停在旧模型的窗口。
+        // 只推 source === "user"：内建表 / 兜底值是 UI 估算，推给 CLI 会覆盖
+        // profile 里显式的 tokensLimit（与 spawnEnv 启动兜底同一口径）。
+        // 串行 await：set_model 成功 → set_tokens_limit 成功之间不允许发 prompt，
+        // 所以模型切换「完成」必须等到这次推送 settle（webview 的 beginPending
+        // 门控在 sessionMeta 刷新快照后即释放，真正的护栏是这里的串行等待）。
+        const switchedWindow = resolveContextWindowWithSource(
+          resp.currentModelId,
+          parseContextWindowOverrides(vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", [])),
+        );
+        if (switchedWindow.source === "user" && switchedWindow.window != null) {
+          try {
+            await this.client?.setTokensLimit(sessionId, switchedWindow.window);
+          } catch (error) {
+            vscode.window.showWarningMessage(
+              vscode.l10n.t("切换模型后同步上下文长度失败：{0}", errorMessage(error)),
+            );
+            this.store.pushSnapshot();
+          }
+        }
         await this.rememberWorkspaceModel(resp.currentModelId);
         return;
       }

@@ -57,6 +57,17 @@ describe("AcpClient (integration with mock ACP agent)", () => {
     });
   });
 
+  it("round-trips tokensLimit through session/set_tokens_limit", async () => {
+    const client = createClient();
+    await client.connect();
+    const session = await client.newSession({ cwd: "/repo", mcpServers: [] });
+
+    await expect(client.setTokensLimit(session.sessionId, 256000)).resolves.toEqual({
+      success: true,
+      tokensLimit: 256000,
+    });
+  });
+
   it("creates a session and receives the full streaming prompt flow", async () => {
     const updates: SessionNotification[] = [];
     const client = createClient(undefined, { onSessionUpdate: (n) => updates.push(n) });
