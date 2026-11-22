@@ -842,13 +842,19 @@ function ChatSection() {
         <div>
           <ToggleRow
             label={t("完全信任模式")}
-            description={t("子会话直接在主仓工作区运行，不做 worktree 隔离。")}
-            detail={t("开启后子会话保留全部内置工具与 broker 代理的全部 MCP 服务器，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。")}
+            description={t(
+              "子会话直接在主仓工作区运行，不做 worktree 隔离。默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。",
+            )}
+            detail={t(
+              "开启后子会话保留全部内置工具与 broker 代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。",
+            )}
             checked={settings.superAgentFullTrust}
             onChange={(superAgentFullTrust) => update({ superAgentFullTrust })}
           />
           <p className="mt-1 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
-            {t("开启后子会话可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。")}
+            {t(
+              "开启后子会话无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。",
+            )}
           </p>
         </div>
       </SettingsGroup>

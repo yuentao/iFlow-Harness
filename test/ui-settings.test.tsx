@@ -323,6 +323,43 @@ it("toggles auto-title in the Conversation tab", () => {
   expect(updateHostSetting).toHaveBeenCalledWith({ autoTitle: false });
 });
 
+/**
+ * 「完全信任模式」开关（iflow.superAgent.fullTrust，默认关闭）。
+ *
+ * 三件事钉死：①默认关闭；②打开时把取值写回宿主设置（宿主据此喂给
+ * `shared/super-tool-policy.ts` 的策略层）；③宿主已下发开启时读回宿主值，
+ * 不回落成默认值。可见文案必须写清「默认关闭」与它解除的是哪一层限制
+ * （工具白名单 / MCP 服务器白名单），否则用户按不住这个开关。
+ */
+it("keeps the full-trust switch off by default and says so on screen", () => {
+  hostSettings.superAgentFullTrust = false;
+  renderTab("chat", BASIC_AUTH);
+  const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
+  expect(toggle).toBeTruthy();
+  expect(toggle!.getAttribute("aria-checked")).toBe("false");
+  expect(container.textContent).toContain("默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。");
+});
+
+it("writes the full-trust switch value back to host settings", () => {
+  hostSettings.superAgentFullTrust = false;
+  renderTab("chat", BASIC_AUTH);
+  const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]')!;
+  act(() => toggle.click());
+  expect(updateHostSetting).toHaveBeenCalledWith({ superAgentFullTrust: true });
+});
+
+it("reads the full-trust value back from the host settings", () => {
+  hostSettings.superAgentFullTrust = true;
+  try {
+    renderTab("chat", BASIC_AUTH);
+    const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
+    expect(toggle).toBeTruthy();
+    expect(toggle!.getAttribute("aria-checked")).toBe("true");
+  } finally {
+    hostSettings.superAgentFullTrust = false;
+  }
+});
+
 it("renders runtime groups and commits the Node path on blur", () => {
   renderTab("runtime", BASIC_AUTH);
   expect(container.textContent).toContain("检查点");

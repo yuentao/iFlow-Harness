@@ -716,12 +716,12 @@ const en: Record<string, string> = {
   "默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的超流体从不回收。开启后工作目录会留在磁盘上，可随时手动清理。":
     "Off by default: finished worktrees are reclaimed automatically (branches are always kept); failed or interrupted sessions are never reclaimed. When on, worktrees stay on disk for manual cleanup.",
   "完全信任模式": "Full trust mode",
-  "子会话直接在主仓工作区运行，不做 worktree 隔离。":
-    "Child sessions run directly in the main repository workspace, with no worktree isolation.",
-  "开启后子会话保留全部内置工具与 broker 代理的全部 MCP 服务器，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。":
-    "When on, child sessions keep all built-in tools and every broker-proxied MCP server, and may push, open pull requests and merge in the main repository. Takes effect on the next dispatched child session.",
-  "开启后子会话可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。":
-    "In full trust mode child sessions can modify main-repository files, run arbitrary commands and push/open PRs — only enable it for tasks you fully trust.",
+  "子会话直接在主仓工作区运行，不做 worktree 隔离。默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。":
+    "Child sessions run directly in the main repository workspace, with no worktree isolation. Off by default: when on, the tool allowlist and MCP server allowlist are no longer applied to child sessions.",
+  "开启后子会话保留全部内置工具与 broker 代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。":
+    "When on, child sessions keep all built-in tools and every broker-proxied MCP server, may read/write the main repository workspace and run commands, and may push, open pull requests and merge in the main repository. Takes effect on the next dispatched child session.",
+  "开启后子会话无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。":
+    "In full trust mode child sessions can modify main-repository files, run arbitrary commands and push/open PRs without approval — only enable it for tasks you fully trust.",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
   "调整面板整体字号。": "Adjust the panel font size.",
   "审批/提问阻塞时，或整轮完成时发送。":
