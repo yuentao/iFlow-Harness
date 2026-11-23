@@ -173,7 +173,7 @@ function TurnChangesInner({ sessionId, userBlockId }: {
             {item.canUndo && !item.reverted && latest && (
               <IconButton
                 icon={<Undo2 className={ICON_INLINE} />}
-                label={t("撤销此文件的本轮修改")}
+                label={t("回退此文件的本轮修改")}
                 size="sm"
                 tone="danger"
                 className="mr-1.5"
@@ -198,14 +198,14 @@ function TurnChangesInner({ sessionId, userBlockId }: {
           title={t("回滚到这一轮之前")}
           message={
             canRollbackFiles
-              ? t("选择回滚范围：只把文件恢复到这一轮之前、只删除这条消息及之后的对话，或两者都做。")
-              : t("这一轮的快照不完整，无法恢复文件，只能删除这条消息及之后的对话。")
+              ? t("选择回滚范围：只把文件回退到这一轮之前、只删除这条消息及之后的对话，或两者都做。")
+              : t("这一轮的快照不完整，无法回退文件，只能删除这条消息及之后的对话。")
           }
           onCancel={() => setConfirmRollback(false)}
           actions={[
             {
               label: t("文件"),
-              title: canRollbackFiles ? t("只把工作区文件恢复到这一轮之前") : t("这一轮的快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("只把工作区文件回退到这一轮之前") : t("这一轮的快照不完整，无法回退文件"),
               disabled: !canRollbackFiles,
               onClick: () => rollback("files"),
             },
@@ -216,7 +216,7 @@ function TurnChangesInner({ sessionId, userBlockId }: {
             },
             {
               label: t("全部"),
-              title: canRollbackFiles ? t("恢复文件，并删除这条消息及之后的对话") : t("这一轮的快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("回退文件，并删除这条消息及之后的对话") : t("这一轮的快照不完整，无法回退文件"),
               variant: "primary",
               onClick: () => rollback("both"),
             },

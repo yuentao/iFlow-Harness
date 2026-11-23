@@ -1198,7 +1198,7 @@ function UserMessage({
           <>
         {block.origin === "qq" && (
           <div className="mb-1.5 flex items-center gap-1.5" title={t("这条消息来自 QQ 机器人转发的远程用户，不是本机输入")}>
-            <Chip tone="info">{t("QQ")}</Chip>
+            <Chip tone="info">QQ</Chip>
             <span className="text-ui-micro text-muted-foreground">{t("来自 QQ 渠道")}</span>
           </div>
         )}
@@ -1347,14 +1347,14 @@ function UserMessage({
           title={t("回滚到这一轮之前")}
           message={
             canRollbackFiles
-              ? t("选择回滚范围：只把文件恢复到这一轮之前、只删除这条消息及之后的对话，或两者都做。")
-              : t("这一轮的快照不完整，无法恢复文件，只能删除这条消息及之后的对话。")
+              ? t("选择回滚范围：只把文件回退到这一轮之前、只删除这条消息及之后的对话，或两者都做。")
+              : t("这一轮的快照不完整，无法回退文件，只能删除这条消息及之后的对话。")
           }
           onCancel={() => setConfirmRollback(false)}
           actions={[
             {
               label: t("文件"),
-              title: canRollbackFiles ? t("只把工作区文件恢复到这一轮之前") : t("这一轮的快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("只把工作区文件回退到这一轮之前") : t("这一轮的快照不完整，无法回退文件"),
               disabled: !canRollbackFiles,
               onClick: () => rollback("files"),
             },
@@ -1365,7 +1365,7 @@ function UserMessage({
             },
             {
               label: t("全部"),
-              title: canRollbackFiles ? t("恢复文件，并删除这条消息及之后的对话") : t("这一轮的快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("回退文件，并删除这条消息及之后的对话") : t("这一轮的快照不完整，无法回退文件"),
               disabled: !canRollbackFiles,
               variant: "primary",
               onClick: () => rollback("both"),

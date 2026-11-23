@@ -472,6 +472,15 @@ function timelineNodeLabel(node: SuperTimelineNode): string {
   return t(node.label);
 }
 
+/**
+ * todolist 状态词的 webview 侧归一：shared 层给出的「进行中」与看板折叠行的
+ * 基准状态词「运行中」是同一件事，统一成后者再查字典，避免同一状态两种叫法。
+ * 优先级词（高/中/低优先级）与其它段原样返回。
+ */
+function todoDetailPart(part: string): string {
+  return part === "进行中" ? "运行中" : part;
+}
+
 /** 节点时间（HH:MM:SS）。只进 title / aria-label，不铺在行内。 */
 function formatClock(at: number): string {
   const date = new Date(at);
@@ -554,7 +563,7 @@ function SuperTimeline({
           const detail = node.detail
             ? `（${node.detail
                 .split(SUPER_TODO_DETAIL_SEP)
-                .map((part) => t(part))
+                .map((part) => t(todoDetailPart(part)))
                 .join(SUPER_TODO_DETAIL_SEP)}）`
             : "";
           return `${label}${detail}`;
@@ -1459,8 +1468,8 @@ export function SuperAgentBoard({
             {counts.running > 0 && (
               <Chip
                 tone="primary"
-                title={t("{0} 个进行中", counts.running)}
-                ariaLabel={t("{0} 个进行中", counts.running)}
+                title={t("{0} 个运行中", counts.running)}
+                ariaLabel={t("{0} 个运行中", counts.running)}
                 className="@max-[380px]:hidden"
               >
                 <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
@@ -1838,7 +1847,7 @@ export function SuperAgentBoard({
         <ConfirmDialog
           title={t("全部中断")}
           message={t(
-            "中断全部 {0} 个进行中的超流体？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。",
+            "中断全部 {0} 个运行中的超流体？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。",
             confirmCancelAll,
           )}
           confirmLabel={t("全部中断")}

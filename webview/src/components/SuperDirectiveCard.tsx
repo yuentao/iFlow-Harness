@@ -435,13 +435,11 @@ function ActionRows({ actions }: { actions: SuperDirectiveAction[] }) {
           <Chip tone={ACTION_TONES[action.action] ?? "muted"}>
             {t(ACTION_LABELS[action.action] ?? action.action)}
           </Chip>
-          {/* 标题在前、id 在后：用户第一眼能认出针对哪个子会话，id 仍保留
-              便于精确排障。取不到标题（围栏路径 / 记录已清理）时退回裸 id，
-              不留空的括号或分隔符（分层纪律：webview 只渲染宿主给的字段）。 */}
+          {/* 只渲染人能读懂的标识：有标题显示标题，没有标题显示本卡内的序号。
+              内部 sessionId 属于排障信息，不摊到卡面上（分层纪律：webview 只
+              渲染宿主给的可读字段）。 */}
           <code className="min-w-0 break-all font-mono text-ui-micro text-muted-foreground">
-            {action.title?.trim()
-              ? t("{0}（{1}）", action.title.trim(), action.sessionId)
-              : action.sessionId || t("未指定超流体")}
+            {action.title?.trim() || t("第 {0} 个", index + 1)}
           </code>
           {action.keepBranch && (
             <span className="text-ui-micro text-muted-foreground">{t("保留分支")}</span>
@@ -681,7 +679,7 @@ function SuperToolStatusChip({
 const ACTION_RESULT_REASON: Record<SuperActionReceipt["reason"], string> = {
   applied: "已生效",
   "already-terminal": "此前已结束，无需中断",
-  "not-found": "找不到该超流体（可能已被清理或 id 有误）",
+  "not-found": "找不到该超流体（可能已被清理或编号有误）",
   "not-applicable": "当前状态不适用",
 };
 
@@ -761,8 +759,12 @@ function ActionResultNotice({ results }: { results: SuperActionReceipt[] }) {
     );
   }
   const notFound = failed.some((receipt) => receipt.reason === "not-found");
-  const reasons = failed
-    .map((receipt) => `${receipt.sessionId}: ${t(ACTION_RESULT_REASON[receipt.reason])}`)
+  // 内部 sessionId 不上卡面：用「第 N 个」定位（N 与动作行序号一致）。
+  const reasons = results
+    .map((receipt, index) =>
+      receipt.ok ? "" : t("第 {0} 个：{1}", index + 1, t(ACTION_RESULT_REASON[receipt.reason])),
+    )
+    .filter(Boolean)
     .join("；");
   return (
     <div
@@ -776,7 +778,7 @@ function ActionResultNotice({ results }: { results: SuperActionReceipt[] }) {
       <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
       <span className="min-w-0 break-words">
         {notFound
-          ? t("有 {0} 个动作未生效（目标不存在或 id 有误）", failed.length)
+          ? t("有 {0} 个动作未生效（目标不存在或编号有误）", failed.length)
           : t("有 {0} 个动作未生效", failed.length)}
         ：{reasons}
       </span>

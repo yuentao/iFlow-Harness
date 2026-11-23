@@ -293,7 +293,8 @@ export function ApprovalCard({
       </div>
       <div ref={actionsRef} role="group" aria-label={t("审批操作")} className="flex shrink-0 flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         {options.map((opt) => {
-          const label = OPTION_LABEL[opt.kind] ?? opt.name;
+          const canonical = OPTION_LABEL[opt.kind];
+          const label = canonical ? t(canonical) : opt.name;
           const isSafeSide = rejectOption?.optionId === opt.optionId;
           const { variant, className } = optionButton(opt.kind);
           return (
@@ -303,7 +304,7 @@ export function ApprovalCard({
               size="sm"
               disabled={answered || remoteTakeover}
               data-autofocus={isSafeSide ? true : undefined}
-              title={OPTION_LABEL[opt.kind] ? opt.name : undefined}
+              title={canonical ? opt.name : undefined}
               aria-label={approval.toolName ? t("{0}（{1}）", label, approval.toolName) : label}
               className={className}
               icon={opt.kind === "allow_always" ? <Lock className={`${ICON_INLINE} shrink-0`} /> : undefined}

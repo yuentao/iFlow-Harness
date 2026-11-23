@@ -197,7 +197,7 @@ describe("Super Agent 看板表面材质", () => {
     );
     // 只剩身份簇；状态簇连壳都不在，簇间 10px 不会因为空簇多算一次。
     expect(clusters).toHaveLength(1);
-    expect(el.textContent).not.toContain("个进行中");
+    expect(el.textContent).not.toContain("个运行中");
   });
 
   it("展开面板走真亚克力材质（portal 出 header，自带 backdrop blur）", () => {
@@ -488,14 +488,14 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     const keys = translate.mock.calls.map((call) => call[0]);
     for (const todo of todos) expect(keys).not.toContain(todo.content);
     // 静态状态词照常过字典（可翻译）。
-    expect(keys).toContain("进行中");
+    expect(keys).toContain("运行中");
     expect(keys).toContain("高优先级");
 
     // 阶段事实挪进 title / aria-label：派发、启动仍可查，todo 状态也在。
     const described = el.getAttribute("aria-label")!;
     expect(described).toContain("已派出");
     expect(described).toContain("已启动");
-    expect(described).toContain("进行中");
+    expect(described).toContain("运行中");
     expect(described).toContain(longTodo);
   });
 });

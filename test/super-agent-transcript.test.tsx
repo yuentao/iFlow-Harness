@@ -437,7 +437,7 @@ describe("超流体中断确认", () => {
     expect(send).not.toHaveBeenCalled();
     const dialog = document.querySelector('[role="alertdialog"]');
     expect(dialog).toBeTruthy();
-    expect(dialog!.textContent).toContain("中断全部 1 个进行中的超流体？");
+    expect(dialog!.textContent).toContain("中断全部 1 个运行中的超流体？");
 
     clickTextInDialog("全部中断", dialog!);
     expect(send).toHaveBeenCalledWith({ type: "superAgent", action: "cancelAll" });
@@ -912,7 +912,9 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.textContent).toContain("中断");
     expect(card!.textContent).toContain("清理");
     expect(card!.textContent).toContain("回答");
-    expect(card!.textContent).toContain("super-a1");
+    // 内部 sessionId 不上卡面：无标题时按本卡内序号显示。
+    expect(card!.textContent).not.toContain("super-a1");
+    expect(card!.textContent).toContain("第 1 个");
     expect(card!.textContent).toContain("保留分支");
     expect(card!.textContent).toContain("2 个回答");
     // 工具帧 completed 只表示内核回了 ack，不代表动作真的生效。宿主还没

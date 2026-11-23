@@ -176,7 +176,7 @@ it("renders the font-size and density presets in Appearance settings", () => {
 
 it("exposes the redesigned top-level categories", () => {
   expect(container.textContent).toContain("账户与模型");
-  expect(container.textContent).toContain("对话");
+  expect(container.textContent).toContain("会话");
   expect(container.textContent).toContain("外观与交互");
   expect(container.textContent).not.toContain("权限与审批");
   expect(container.textContent).toContain("MCP 与工具");
@@ -502,7 +502,7 @@ function typeInto(input: HTMLInputElement, value: string) {
 it("rejects an empty model name with an inline error", () => {
   contextWindow.view = { overrides: [] };
   renderContextWindowOverrides();
-  typeInto(overrideInput("上下文长度（token）"), "960000");
+  typeInto(overrideInput("上下文窗口"), "960000");
   click("添加");
   expect(container.textContent).toContain("请填写模型名");
   expect(send).not.toHaveBeenCalledWith(
@@ -516,9 +516,9 @@ it("rejects a window value the runtime would silently drop", () => {
   contextWindow.view = { overrides: [] };
   renderContextWindowOverrides();
   typeInto(overrideInput("模型名"), "deepseek-v4.1-flash");
-  typeInto(overrideInput("上下文长度（token）"), "960K");
+  typeInto(overrideInput("上下文窗口"), "960K");
   click("添加");
-  expect(container.textContent).toContain("上下文长度必须是正整数（纯数字，不带 K / M 单位）");
+  expect(container.textContent).toContain("上下文窗口必须是正整数（纯数字，不带 K / M 单位）");
   expect(send).not.toHaveBeenCalledWith(
     expect.objectContaining({ type: "setContextWindowOverrides" }),
   );
@@ -528,7 +528,7 @@ it("submits a new override row under its normalized model name", () => {
   contextWindow.view = { overrides: [] };
   renderContextWindowOverrides();
   typeInto(overrideInput("模型名"), "auto/deepseek-v4.1-flash");
-  typeInto(overrideInput("上下文长度（token）"), "960000");
+  typeInto(overrideInput("上下文窗口"), "960000");
   click("添加");
   expect(send).toHaveBeenCalledWith({
     type: "setContextWindowOverrides",
@@ -568,7 +568,7 @@ it("fills the current model's built-in window into the draft", () => {
   renderContextWindowOverrides();
   click("填入建议值");
   expect(overrideInput("模型名").value).toBe("gemini-2.5-pro");
-  expect(overrideInput("上下文长度（token）").value).toBe("1048576");
+  expect(overrideInput("上下文窗口").value).toBe("1048576");
 });
 
 it("shows a waiting label until the profile-switch choice is answered", () => {

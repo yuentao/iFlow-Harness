@@ -117,7 +117,7 @@ export function SettingsModal({
     {
       label: t("工作方式"),
       tabs: [
-        { id: "chat", icon: MessageSquare, label: t("对话") },
+        { id: "chat", icon: MessageSquare, label: t("会话") },
         { id: "appearance", icon: Palette, label: t("外观与交互") },
       ],
     },
@@ -514,7 +514,7 @@ function ContextWindowOverridesGroup({
       setError(
         check.reason === "model"
           ? t("请填写模型名")
-          : t("上下文长度必须是正整数（纯数字，不带 K / M 单位）"),
+          : t("上下文窗口必须是正整数（纯数字，不带 K / M 单位）"),
       );
       return;
     }
@@ -534,7 +534,7 @@ function ContextWindowOverridesGroup({
     <div className="px-4 py-4">
       <div className="text-ui-body font-medium leading-snug text-foreground">{t("上下文窗口覆写")}</div>
       <Hint className="mt-1">
-        {t("按模型指定上下文长度（token）。没列出的模型用内建表里的值；模型名精确匹配，不支持通配。")}
+        {t("按模型指定上下文窗口（token）。没列出的模型用内建表里的值；模型名精确匹配，不支持通配。")}
       </Hint>
       {rows.length > 0 && (
         <ul className="mt-2 flex flex-col gap-0.5">
@@ -574,7 +574,7 @@ function ContextWindowOverridesGroup({
           className="min-w-0 flex-1"
         />
         <TextInput
-          aria-label={t("上下文长度（token）")}
+          aria-label={t("上下文窗口")}
           value={windowDraft}
           onChange={(event) => {
             setWindowDraft(event.target.value);
@@ -840,10 +840,10 @@ function SuperAgentSection() {
           <ToggleRow
             label={t("完全信任模式")}
             description={t(
-              "子会话直接在主仓工作区运行，不做 worktree 隔离。默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。",
+              "子会话直接在主仓工作区运行，不做 Git 工作目录隔离。默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。",
             )}
             detail={t(
-              "开启后子会话保留全部内置工具与 broker 代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。",
+              "开启后子会话保留全部内置工具与共享代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。",
             )}
             checked={settings.superAgentFullTrust}
             onChange={(superAgentFullTrust) => update({ superAgentFullTrust })}
@@ -1096,7 +1096,7 @@ function AppearanceSection() {
         />
         <ChoiceRow
           label={t("字号")}
-          description={t("调整面板整体字号。")}
+          description={t("调整面板整体字号")}
           detail={t("以标准为基准：紧凑约 0.92 倍，大约 1.1 倍。")}
           value={settings.uiFontSize}
           options={[
@@ -1186,7 +1186,7 @@ function RuntimeSection() {
         <ToggleRow
           label={t("启动时自动打开面板")}
           description={t("VSCode 启动时自动打开聊天面板。")}
-          detail={t("下次启动生效。")}
+          detail={t("下次启动生效")}
           checked={settings.autoOpenPanel}
           onChange={(autoOpenPanel) => update({ autoOpenPanel })}
         />
@@ -1239,7 +1239,7 @@ function RuntimeSection() {
         />
         <TextRow
           label={t("存储目录")}
-          description={t("快照存放在哪里。")}
+          description={t("快照存放在哪里")}
           detail={t("留空则用默认位置；支持 ~ 和相对路径。")}
           value={settings.checkpointDir}
           placeholder="~/.iflow/checkpoints"
@@ -1247,16 +1247,16 @@ function RuntimeSection() {
         />
         <TextRow
           label={t("Node.js 路径")}
-          description={t("留空则自动查找。")}
-          detail={t("修改后重启内核生效。")}
+          description={t("留空则自动查找")}
+          detail={t("修改后重启内核生效")}
           value={settings.nodePath}
           placeholder="C:\\Program Files\\nodejs\\node.exe"
           onCommit={(nodePath) => update({ nodePath })}
         />
         <ChoiceRow
           label={t("内核语言")}
-          description={t("内核的显示语言。")}
-          detail={t("修改后重启内核生效。")}
+          description={t("内核的显示语言")}
+          detail={t("修改后重启内核生效")}
           value={settings.language}
           options={languageOptions}
           onChange={(language) => update({ language })}
@@ -1804,7 +1804,7 @@ function ApiConfigSection({
         />
         <LinesRow
           label={t("成本单价")}
-          description={t("每行写「模型名=输入价,输出价」，单位为美元/百万 token，如 deepseek-v3=0.27,1.1。")}
+          description={t("每行写「模型名=输入价，输出价」，单位为美元/百万 token，如 deepseek-v3=0.27,1.1。")}
           value={settings.costTable}
           placeholder="deepseek-v3=0.27,1.1"
           onCommit={(costTable) => updateHostSetting({ costTable })}

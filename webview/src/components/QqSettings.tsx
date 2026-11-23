@@ -517,59 +517,67 @@ function AccessList({
 const POLICY_OPTIONS: Array<{ value: QqRemotePolicy; label: string; description: string }> = [
   {
     value: "readonly",
-    label: t("只读"),
-    description: t("只读：可以查看工作区，写文件与执行命令会被拒绝。"),
+    label: "只读",
+    description: "只读：可以查看工作区，写文件与执行命令会被拒绝。",
   },
   {
     value: "supervised",
-    label: t("受监督"),
-    description: t(
-      // 分钟数取自 shared/qq-access.ts（与宿主 QQ_APPROVAL_TIMEOUT_MS 同为 4），
-      // 不在 UI 里写死，避免文案与真实超时再次漂移。
-      "受监督：工具调用需在 QQ 审批，{0} 分钟未响应按拒绝处理。",
-      QQ_APPROVAL_TIMEOUT_MINUTES,
-    ),
+    label: "受监督",
+    // 分钟数取自 shared/qq-access.ts（与宿主 QQ_APPROVAL_TIMEOUT_MS 同为 4），
+    // 不在 UI 里写死，避免文案与真实超时再次漂移；渲染时再代入。
+    description: "受监督：工具调用需在 QQ 审批，{0} 分钟未响应按拒绝处理。",
   },
   {
     value: "trusted",
-    label: t("受信任"),
-    description: t("受信任：工具调用无需 QQ 审核直接执行，仅建议对自己完全掌控的账号与群使用。"),
+    label: "受信任",
+    description: "受信任：工具调用无需 QQ 审批直接执行，仅建议对自己完全掌控的账号与群使用。",
   },
 ];
 
 const DETAIL_OPTIONS: Array<{ value: QqResultDetail; label: string; description: string }> = [
-  { value: "summary", label: t("一行结论"), description: t("一行结论：成功或失败，加上改动的文件数。") },
-  { value: "standard", label: t("简短摘要"), description: t("简短摘要：涉及的文件与最终回复。") },
-  { value: "full", label: t("完整回复"), description: t("完整最终回复，受 QQ 单条消息长度限制。") },
+  { value: "summary", label: "一行结论", description: "一行结论：成功或失败，加上改动的文件数。" },
+  { value: "standard", label: "简短摘要", description: "简短摘要：涉及的文件与最终回复。" },
+  { value: "full", label: "完整回复", description: "完整最终回复，受 QQ 单条消息长度限制。" },
 ];
 
-/** 一键接入（官方 QQBot 路线）的说明文案。 */
-const MANAGED_INTRO = t(
-  "使用 QQ 官方机器人，扫码授权后即可从 QQ 远程控制本工作区（需先在 q.qq.com 创建机器人）。",
-);
+/** 选项文案统一在渲染时翻译：顶层求值会早于 setLocale，英文环境会恒显中文。 */
+function translateOptions<T extends string>(
+  options: Array<{ value: T; label: string; description: string }>,
+): Array<{ value: T; label: string; description: string }> {
+  return options.map((option) => ({
+    value: option.value,
+    label: t(option.label),
+    description: t(option.description, QQ_APPROVAL_TIMEOUT_MINUTES),
+  }));
+}
+
+/** 一键接入（官方 QQBot 路线）的说明文案（渲染时再过 t()，见下方组件）。 */
+const MANAGED_INTRO = "使用 QQ 官方机器人，扫码授权后即可从 QQ 远程控制本工作区（需先在 q.qq.com 创建机器人）。";
 
 /** 通道定位：官方合规。 */
-const CHANNEL_LABEL = t("官方合规通道（推荐）");
+const CHANNEL_LABEL = "官方合规通道（推荐）";
 
 /** 一键接入按钮文案。 */
-const MANAGED_START_LABEL = t("一键接入 QQ 机器人");
+const MANAGED_START_LABEL = "一键接入 QQ 机器人";
 
 /** 二维码区标题。 */
-const QR_TITLE = t("扫码授权 QQ 机器人");
+const QR_TITLE = "扫码授权 QQ 机器人";
 
 /**
  * 一键托管阶段机的中文标签（与共享契约的 phase 枚举一一对应，QQBot 官方
  * 授权语义）。`downloading` 沿用通用的「准备中」，不再暗含旧桥接工具的语义。
+ * 这里是中文原文，渲染时统一过 t() —— 顶层求值会早于 setLocale，英文环境会
+ * 恒显中文。
  */
 const MANAGED_PHASE_LABEL: Record<QqManagedStatus["phase"], string> = {
-  idle: t("空闲"),
-  checking: t("检查环境"),
-  downloading: t("准备中"),
-  configuring: t("生成配置"),
-  starting: t("启动中"),
-  waiting_login: t("请用手机 QQ 扫描二维码完成授权"),
-  logged_in: t("已连接 QQ 官方机器人"),
-  error: t("出错"),
+  idle: "空闲",
+  checking: "检查环境",
+  downloading: "准备中",
+  configuring: "生成配置",
+  starting: "启动中",
+  waiting_login: "请用手机 QQ 扫描二维码完成授权",
+  logged_in: "已连接 QQ 官方机器人",
+  error: "出错",
 };
 
 /** 列表里的时间按本地时区渲染成 `YYYY-MM-DD HH:mm`（不需要秒）。 */
@@ -605,8 +613,10 @@ export function QqSettings({
    * {@link ConfirmDialog}（portal 到 body），不自绘弹框。
    */
   const [confirmUnbind, setConfirmUnbind] = useState(false);
-  const policy = POLICY_OPTIONS.find((option) => option.value === value.remotePolicy)!;
-  const detail = DETAIL_OPTIONS.find((option) => option.value === value.resultDetail)!;
+  const policyOptions = translateOptions(POLICY_OPTIONS);
+  const detailOptions = translateOptions(DETAIL_OPTIONS);
+  const policy = policyOptions.find((option) => option.value === value.remotePolicy)!;
+  const detail = detailOptions.find((option) => option.value === value.resultDetail)!;
   const statusTone =
     status?.connected === true ? "success" : status?.connected === false ? "danger" : "muted";
   const statusLabel =
@@ -627,8 +637,8 @@ export function QqSettings({
   const managedError = managedPhase === "error";
   const phaseLabel = managedPhase
     ? managedPhase === "downloading" && qqManagedStatus?.progress !== undefined
-      ? `${MANAGED_PHASE_LABEL[managedPhase]} ${qqManagedStatus.progress}%`
-      : MANAGED_PHASE_LABEL[managedPhase]
+      ? `${t(MANAGED_PHASE_LABEL[managedPhase])} ${qqManagedStatus.progress}%`
+      : t(MANAGED_PHASE_LABEL[managedPhase])
     : "";
   /**
    * 已连接 / 已登录 → 二维码区一律不渲染。
@@ -686,8 +696,8 @@ export function QqSettings({
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="text-ui-label font-semibold text-foreground">{t("一键接入")}</div>
-            <Hint className="mt-0.5">{MANAGED_INTRO}</Hint>
-            <Hint className="mt-0.5">{CHANNEL_LABEL}</Hint>
+            <Hint className="mt-0.5">{t(MANAGED_INTRO)}</Hint>
+            <Hint className="mt-0.5">{t(CHANNEL_LABEL)}</Hint>
             <Hint className="mt-0.5">{t("首次使用需在 q.qq.com 创建机器人（个人账号即可）。")}</Hint>
           </div>
           {managing ? (
@@ -706,7 +716,7 @@ export function QqSettings({
               icon={<Zap className={ICON_INLINE} />}
               onClick={() => onManagedSetup?.("start")}
             >
-              {MANAGED_START_LABEL}
+              {t(MANAGED_START_LABEL)}
             </Button>
           )}
         </div>
@@ -730,7 +740,7 @@ export function QqSettings({
 
         {qqLoginQr && !qrConnected && (
           <div className="mt-3 flex flex-col items-center gap-2 rounded-md border border-border bg-editor/40 px-3 py-3">
-            <div className="text-ui-label font-semibold text-foreground">{QR_TITLE}</div>
+            <div className="text-ui-label font-semibold text-foreground">{t(QR_TITLE)}</div>
             {qrValid ? (
               <>
                 <img
@@ -827,7 +837,7 @@ export function QqSettings({
 
       {pendingUsers.length > 0 && (
         <SettingsGroup
-          title={t("待审核用户")}
+          title={t("待审批用户")}
           hint={t("白名单外的人发来消息时只会出现在这里，不会被执行；放行后即可派发任务，拒绝后不会再出现。")}
         >
           {pendingUsers.map((user) => (
@@ -870,7 +880,7 @@ export function QqSettings({
                     variant="outline-primary"
                     onClick={() => onUserAction?.(user.openid, "approve")}
                   >
-                    {t("批准")}
+                    {t("允许")}
                   </Button>
                   <Button
                     size="sm"
@@ -941,7 +951,7 @@ export function QqSettings({
           <Select
             ariaLabel={t("远程任务策略")}
             value={value.remotePolicy}
-            options={POLICY_OPTIONS}
+            options={policyOptions}
             onChange={(next) => onChange({ remotePolicy: next as QqRemotePolicy })}
           />
         </SettingsRow>
@@ -949,7 +959,7 @@ export function QqSettings({
           <Select
             ariaLabel={t("结果详细度")}
             value={value.resultDetail}
-            options={DETAIL_OPTIONS}
+            options={detailOptions}
             onChange={(next) => onChange({ resultDetail: next as QqResultDetail })}
           />
         </SettingsRow>

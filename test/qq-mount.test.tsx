@@ -188,7 +188,7 @@ describe("QQ 机器人设置页", () => {
 
     expect(container.textContent).toContain("已连接");
     expect(container.textContent).toContain("QQ 官方机器人已连接");
-    expect(container.textContent).toContain("待审核用户");
+    expect(container.textContent).toContain("待审批用户");
     expect(container.textContent).toContain("open********3456");
     expect(container.textContent).not.toContain("openid-123456");
     expect(container.textContent).toContain("群 9876********1098");

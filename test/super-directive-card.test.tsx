@@ -286,7 +286,7 @@ describe("AssistantText 协议块卡片", () => {
     expect(container.querySelector('[data-testid="super-task-salvaged"]')).toBeNull();
   });
 
-  it("super-agent-actions 围栏渲染成操作卡：动作中文名 + 目标超流体 id", () => {
+  it("super-agent-actions 围栏渲染成操作卡：动作中文名 + 序号（不暴露内部 id）", () => {
     render(ACTIONS);
     const body = text();
     expect(body).toContain("超流体操作");
@@ -294,7 +294,13 @@ describe("AssistantText 协议块卡片", () => {
     expect(body).toContain("重试");
     expect(body).toContain("清理");
     expect(body).toContain("回答");
-    expect(body).toContain("super-mwc6c04t-c3");
+    // 内部 sessionId 不上卡面：没有标题时按本卡内序号显示。
+    expect(body).not.toContain("super-mwc6c04t-c3");
+    expect(body).not.toContain("super-mwc6c04t-c4");
+    expect(body).not.toContain("super-mwc6c04t-c5");
+    expect(body).toContain("第 1 个");
+    expect(body).toContain("第 2 个");
+    expect(body).toContain("第 3 个");
     expect(body).toContain("保留分支");
     expect(body).toContain("1 个回答");
     expect(body).not.toContain('"actions"');
@@ -986,7 +992,9 @@ describe("SuperActionsToolCallCard（super-agent 工具 actions 载荷）", () =
     expect(card.textContent).not.toContain("已完成");
     const failed = card.querySelector<HTMLElement>('[data-testid="super-action-result-failed"]');
     expect(failed).toBeTruthy();
-    expect(failed!.textContent).toContain("super-wrong");
+    // 内部 sessionId 不摊到卡面：用「第 N 个」定位失败项。
+    expect(failed!.textContent).not.toContain("super-wrong");
+    expect(failed!.textContent).toContain("第 1 个");
     expect(failed!.textContent).toContain("找不到该超流体");
   });
 
@@ -1006,10 +1014,10 @@ describe("SuperActionsToolCallCard（super-agent 工具 actions 载荷）", () =
     expect(card.querySelector('[data-testid="super-action-result-failed"]')).toBeNull();
   });
 
-  it("宿主回填带标题的动作：显示「标题（id）」而非裸 id，覆盖多种动作类型", () => {
+  it("宿主回填带标题的动作：显示标题而非内部 id，覆盖多种动作类型", () => {
     // 用户实测截图 2026-11-18：中断卡只显示 super-mwm2zrdl-m 这种裸 id，
     // 第一眼认不出针对哪个子会话。标题只存在于宿主的 super-session 记录，
-    // 由 runSuperActions 回填到 block.superActions，卡片直接渲染。
+    // 由 runSuperActions 回填到 block.superActions；内部 id 属排障信息，不上卡面。
     const input = JSON.stringify({ actions: [{ action: "cancel", sessionId: "super-mwm2zrdl-m" }] });
     const block: ToolBlock = {
       ...toolBlock(input, "completed"),
@@ -1026,24 +1034,26 @@ describe("SuperActionsToolCallCard（super-agent 工具 actions 载荷）", () =
     act(() => root.render(<SuperActionsToolCallCard block={block} />));
     const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
     const rows = [...card.querySelectorAll("li")].map((li) => li.textContent ?? "");
-    // cancel 与 cleanup 两种动作都带上了标题 + id。
+    // cancel 与 cleanup 两种动作都只带标题，不再拼内部 id。
     expect(rows[0]).toContain("中断");
-    expect(rows[0]).toContain("修复登录跳转（super-mwm2zrdl-m）");
+    expect(rows[0]).toContain("修复登录跳转");
+    expect(rows[0]).not.toContain("super-mwm2zrdl-m");
     expect(rows[1]).toContain("清理");
-    expect(rows[1]).toContain("补文档（super-cleanup-01）");
+    expect(rows[1]).toContain("补文档");
+    expect(rows[1]).not.toContain("super-cleanup-01");
     expect(rows[1]).toContain("保留分支");
   });
 
-  it("没有标题（流式中 / 旧转录 / 记录已清理）：退回裸 id，不留空括号或分隔符", () => {
+  it("没有标题（流式中 / 旧转录 / 记录已清理）：显示本卡内序号，不暴露内部 sessionId", () => {
     const input = JSON.stringify({ actions: [{ action: "cancel", sessionId: "super-bare-id" }] });
     act(() => root.render(<SuperActionsToolCallCard block={toolBlock(input)} />));
     const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
-    expect(card.textContent).toContain("super-bare-id");
+    expect(card.textContent).not.toContain("super-bare-id");
     expect(card.textContent).not.toContain("（）");
-    expect(card.textContent).not.toContain("(super-bare-id)");
+    expect(card.textContent).toContain("第 1 个");
   });
 
-  it("标题为空字符串：同样降级为裸 id，不显示占位符", () => {
+  it("标题为空字符串：同样显示序号，不显示占位符或内部 id", () => {
     const input = JSON.stringify({ actions: [{ action: "retry", sessionId: "super-empty-title" }] });
     const block: ToolBlock = {
       ...toolBlock(input),
@@ -1051,13 +1061,14 @@ describe("SuperActionsToolCallCard（super-agent 工具 actions 载荷）", () =
     };
     act(() => root.render(<SuperActionsToolCallCard block={block} />));
     const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
-    expect(card.textContent).toContain("super-empty-title");
+    expect(card.textContent).not.toContain("super-empty-title");
     expect(card.textContent).not.toContain("（）");
+    expect(card.textContent).toContain("第 1 个");
   });
 });
 
 describe("操作卡标题渲染（围栏路径与工具调用路径共用 ActionRows）", () => {
-  it("围栏 super-agent-actions 段带 title 时也显示「标题（id）」", () => {
+  it("围栏 super-agent-actions 段带 title 时只显示标题，不带内部 id", () => {
     renderSegment({
       kind: "directive",
       language: "super-agent-actions",
@@ -1071,9 +1082,11 @@ describe("操作卡标题渲染（围栏路径与工具调用路径共用 Action
       },
     });
     const body = text();
-    expect(body).toContain("围栏里的中断标题（super-fence-01）");
-    // 没有 title 的那条仍显示裸 id，且没有空括号。
-    expect(body).toContain("super-fence-02");
+    expect(body).toContain("围栏里的中断标题");
+    expect(body).not.toContain("super-fence-01");
+    // 没有 title 的那条显示本卡内序号，不暴露内部 id，也没有空括号。
+    expect(body).not.toContain("super-fence-02");
     expect(body).not.toContain("（super-fence-02）");
+    expect(body).toContain("第 2 个");
   });
 });

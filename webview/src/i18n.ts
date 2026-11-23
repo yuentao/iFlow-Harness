@@ -50,7 +50,6 @@ const en: Record<string, string> = {
   "需人工合并": "Needs manual merge",
   "已完成、需人工合并的 {0} 个超流体": "Finished child sessions needing a manual merge ({0})",
   "这个超流体的改动已经合并": "This child session's changes are already merged",
-  "{0} 个进行中": "{0} running",
   "{0} 个等你回答": "{0} waiting for you",
   "{0} 个失败": "{0} failed",
   "{0} 个需人工合并": "{0} needing a manual merge",
@@ -72,7 +71,6 @@ const en: Record<string, string> = {
   "阶段轨：{0}": "Timeline: {0}",
   // 子会话 todolist 时间轴：状态 / 优先级是静态词（todo 原文是动态文本，不进字典）
   "待办": "To do",
-  "进行中": "In progress",
   "高优先级": "High priority",
   "中优先级": "Medium priority",
   "低优先级": "Low priority",
@@ -98,7 +96,7 @@ const en: Record<string, string> = {
   "中断": "Interrupt",
   "中断超流体「{0}」？它会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
     "Interrupt child session “{0}”? It stops immediately and this turn's changes are neither committed nor merged; what is already in its working directory is kept, and you can retry later.",
-  "中断全部 {0} 个进行中的超流体？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
+  "中断全部 {0} 个运行中的超流体？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
     "Interrupt all {0} running child sessions? They stop immediately and their changes are neither committed nor merged; what is already in their working directories is kept, and you can retry later.",
   "重试这个超流体：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）":
     "Retry this child session: reuses its working directory and creates no new commit, but clears the previous integration result and re-runs the whole task (spending tokens again)",
@@ -140,7 +138,7 @@ const en: Record<string, string> = {
   "{0} 次修改": "{0} edits",
   "这里只列出 iFlow 记录到改动的文件，可能不包含你手动改的内容，也不代表文件现在的最终差异。点击文件可在编辑器中打开。": "Lists files iFlow recorded changes to; manual edits may be missing, and this is not necessarily the file's final diff. Click a file to open it in the editor.",
   "在编辑器中打开": "Open in editor",
-  "撤销此文件的本轮修改": "Undo this file's changes from this turn",
+  "回退此文件的本轮修改": "Revert this file's changes from this turn",
   "这一轮的变更记录已不可用。": "This turn's change records are no longer available.",
   "正在读取本轮变更…": "Loading turn changes…",
   "本轮没有可显示的改动记录；这不表示没有文件修改。": "No change records to show for this turn; this does not mean no files were modified.",
@@ -176,13 +174,13 @@ const en: Record<string, string> = {
   "文件": "Files",
   "对话": "Chat",
   "全部": "Both",
-  "只把工作区文件恢复到这一轮之前": "Restore workspace files to before this turn",
+  "只把工作区文件回退到这一轮之前": "Restore workspace files to before this turn",
   "只删除这条消息及之后的所有对话": "Delete this message and everything after it",
-  "恢复文件，并删除这条消息及之后的对话": "Restore files and delete this message and everything after it",
-  "这一轮的快照不完整，无法恢复文件": "This turn's snapshot is incomplete, so files cannot be restored",
-  "选择回滚范围：只把文件恢复到这一轮之前、只删除这条消息及之后的对话，或两者都做。":
+  "回退文件，并删除这条消息及之后的对话": "Restore files and delete this message and everything after it",
+  "这一轮的快照不完整，无法回退文件": "This turn's snapshot is incomplete, so files cannot be restored",
+  "选择回滚范围：只把文件回退到这一轮之前、只删除这条消息及之后的对话，或两者都做。":
     "Choose the rollback scope: restore files to before this turn, delete this message and everything after it, or both.",
-  "这一轮的快照不完整，无法恢复文件，只能删除这条消息及之后的对话。":
+  "这一轮的快照不完整，无法回退文件，只能删除这条消息及之后的对话。":
     "This turn's snapshot is incomplete, so files cannot be restored — you can only delete this message and everything after it.",
   // tool cards / message list
   "已完成": "Completed",
@@ -306,7 +304,6 @@ const en: Record<string, string> = {
   "输入 / 查看命令 · @ 引用文件": "Type / for commands, @ to reference files",
   // composer
   "发送": "Send",
-  "停止": "Stop",
   // settings modal (unified: API profiles / MCP / approval policies)
   "设置": "Settings",
   "高级，可选填": "Advanced (optional)",
@@ -446,7 +443,7 @@ const en: Record<string, string> = {
   "连接中…": "Connecting…",
   "未连接": "Not connected",
   "状态不可获取": "Status unavailable",
-  "拿不到连接状态（内核未连接，或没有开启状态上报）":
+  "无法获取连接状态（内核未连接，或没有开启状态上报）":
     "Cannot read the connection status (Core not connected, or status reporting not enabled)",
   "连接状态读取中…": "Reading connection status…",
   "详情": "Details",
@@ -459,7 +456,7 @@ const en: Record<string, string> = {
   "连接失败：": "Connection failed:",
   "这个服务器没有提供工具或提示": "This server provides no tools or prompts",
   "正在读取工具列表…": "Reading the tool list…",
-  "拿不到工具列表（未连接，或没有开启状态上报）":
+  "无法获取工具列表（未连接，或没有开启状态上报）":
     "Cannot read the tool list (not connected, or status reporting not enabled)",
   "主会话不加载 MCP，新建超流体并连接后才会上报工具列表":
     "The main session does not load MCP; the tool list is reported after a child session connects",
@@ -647,7 +644,7 @@ const en: Record<string, string> = {
   "内置表": "Built-in table",
   "AI 补充": "AI supplemented",
   "回退估算": "Fallback estimate",
-  "接口配置档": "API profile",
+  "API 配置": "API profile",
   "内核配置": "Kernel settings",
   "无来源链接": "No source link",
   "来源链接：{0}": "Source link: {0}",
@@ -689,7 +686,7 @@ const en: Record<string, string> = {
   "系统": "System",
   "设置分区": "Settings sections",
   "详细说明": "Details",
-  "会话": "Session",
+  "会话": "Sessions",
   "编排与并发": "Orchestration & concurrency",
   "安全与信任": "Security & trust",
   "并发上限": "Concurrency limit",
@@ -720,27 +717,25 @@ const en: Record<string, string> = {
   "默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的超流体从不回收。开启后工作目录会留在磁盘上，可随时手动清理。":
     "Off by default: finished worktrees are reclaimed automatically (branches are always kept); failed or interrupted sessions are never reclaimed. When on, worktrees stay on disk for manual cleanup.",
   "完全信任模式": "Full trust mode",
-  "子会话直接在主仓工作区运行，不做 worktree 隔离。默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。":
-    "Child sessions run directly in the main repository workspace, with no worktree isolation. Off by default: when on, the tool allowlist and MCP server allowlist are no longer applied to child sessions.",
-  "开启后子会话保留全部内置工具与 broker 代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。":
+  "子会话直接在主仓工作区运行，不做 Git 工作目录隔离。默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。":
+    "Child sessions run directly in the main repository workspace, with no Git worktree isolation. Off by default: when on, the tool allowlist and MCP server allowlist are no longer applied to child sessions.",
+  "开启后子会话保留全部内置工具与共享代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。":
     "When on, child sessions keep all built-in tools and every broker-proxied MCP server, may read/write the main repository workspace and run commands, and may push, open pull requests and merge in the main repository. Takes effect on the next dispatched child session.",
   "开启后子会话无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。":
     "In full trust mode child sessions can modify main-repository files, run arbitrary commands and push/open PRs without approval — only enable it for tasks you fully trust.",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
-  "调整面板整体字号。": "Adjust the panel font size.",
-  "审批/提问阻塞时，或整轮完成时发送。":
-    "Sent when an approval or question blocks, or when a turn completes.",
+  "调整面板整体字号": "Adjust the panel font size",
   "高级外观": "Advanced appearance",
   "可选": "Optional",
   "面板启动时恢复上次使用的会话。": "Restore the last used session when the panel starts.",
   "VSCode 启动时自动打开聊天面板。": "Open the chat panel automatically when VSCode starts.",
-  "下次启动生效。": "Takes effect on the next start.",
+  "下次启动生效": "Takes effect on the next start",
   "检查点": "Checkpoints",
   "磁盘占用": "Disk usage",
   "高级": "Advanced",
   "检查点限额与内核运行时": "Checkpoint limits & Core runtime",
-  "修改后重启内核生效。": "Takes effect after a Core restart.",
-  "内核的显示语言。": "The display language of the Core.",
+  "修改后重启内核生效": "Takes effect after a Core restart",
+  "内核的显示语言": "The display language of the Core",
   "配置 {0} 的操作": "Actions for {0}",
   "服务器 {0} 的操作": "Actions for server {0}",
   "更多操作": "More actions",
@@ -952,7 +947,6 @@ const en: Record<string, string> = {
   "展开任务说明": "Expand the task description",
   "收起任务说明": "Collapse the task description",
   "展开全文（还有 {0} 字）": "Show full text ({0} more characters)",
-  "未指定超流体": "No child session specified",
   // 多张待处理卡的堆叠计数器（审批 / 提问）
   "还有 {0} 张卡片待处理": "{0} more card(s) need you",
   "还有 {0} 张卡片待处理：{1}": "{0} more card(s) need you: {1}",
@@ -1037,10 +1031,10 @@ const en: Record<string, string> = {
     "Snapshots take disk space; limits and other options are under「Advanced」.",
   "工作区文件超过这个数量就不再保存快照。":
     "Stop taking snapshots when the workspace has more files than this.",
-  "快照存放在哪里。": "Where snapshots are stored.",
+  "快照存放在哪里": "Where snapshots are stored",
   "留空则用默认位置；支持 ~ 和相对路径。":
     "Leave empty for the default location; ~ and relative paths are supported.",
-  "留空则自动查找。": "Leave empty to detect it automatically.",
+  "留空则自动查找": "Leave empty to detect it automatically",
   "配置名称（可选，默认用模型名）": "Profile name (optional; defaults to the model name)",
   "如 工作密钥、备用线路": "e.g. Work key, Backup route",
   "接口地址（Base URL）": "Endpoint (Base URL)",
@@ -1063,18 +1057,18 @@ const en: Record<string, string> = {
     "The panel runs the search itself (no session involved) and asks the current model for one extraction pass (extra tokens). Existing rows are never overwritten; anything the sources cannot back is dropped.",
   "检索到的资料会交给当前模型提炼一次，额外消耗 token。":
     "The retrieved text goes to the current model for one extraction pass — extra tokens.",
-  "每行写「模型名=输入价,输出价」，单位为美元/百万 token，如 deepseek-v3=0.27,1.1。":
+  "每行写「模型名=输入价，输出价」，单位为美元/百万 token，如 deepseek-v3=0.27,1.1。":
     "One「model=input price,output price」per line, in USD per million tokens, e.g. deepseek-v3=0.27,1.1.",
   // --- 上下文窗口覆写（结构化编辑器） ---
-  "按模型指定上下文长度（token）。没列出的模型用内建表里的值；模型名精确匹配，不支持通配。":
-    "Set the context length (in tokens) per model. Models you don't list use the built-in table; model names match exactly — no wildcards.",
+  "按模型指定上下文窗口（token）。没列出的模型用内建表里的值；模型名精确匹配，不支持通配。":
+    "Set the context window (in tokens) per model. Models you don't list use the built-in table; model names match exactly — no wildcards.",
   "不生效": "Not applied",
   "删除覆写 {0}": "Delete the override for {0}",
   "模型名": "Model name",
-  "上下文长度（token）": "Context length (tokens)",
+  "上下文窗口": "Context window",
   "请填写模型名": "Enter a model name",
-  "上下文长度必须是正整数（纯数字，不带 K / M 单位）":
-    "The context length must be a positive whole number (digits only — no K / M suffix)",
+  "上下文窗口必须是正整数（纯数字，不带 K / M 单位）":
+    "The context window must be a positive whole number (digits only — no K / M suffix)",
   "当前模型 {0} 的内建上下文窗口是 {1}。":
     "The built-in context window for the current model ({0}) is {1}.",
   "填入建议值": "Fill in the suggestion",
@@ -1205,8 +1199,6 @@ const en: Record<string, string> = {
   "剩余": "Expires in",
   "测试连接": "Test connection",
   "解除绑定": "Unbind",
-  "待审核用户": "Pending users",
-  "暂无待审核用户": "No pending users",
   "白名单外的人发来消息时只会出现在这里，不会被执行；放行后即可派发任务，拒绝后不会再出现。":
     "Messages from people outside the allowlist only show up here and are never executed; approve to let them dispatch tasks, reject to hide them for good.",
   "来源": "Source",
@@ -1266,8 +1258,8 @@ const en: Record<string, string> = {
   "受监督：工具调用需在 QQ 审批，{0} 分钟未响应按拒绝处理。":
     "Supervised: tool calls need approval in QQ; no response within {0} minutes counts as a rejection.",
   "受信任": "Trusted",
-  "受信任：工具调用无需 QQ 审核直接执行，仅建议对自己完全掌控的账号与群使用。":
-    "Trusted: tool calls run without QQ review — only for accounts and groups you fully control.",
+  "受信任：工具调用无需 QQ 审批直接执行，仅建议对自己完全掌控的账号与群使用。":
+    "Trusted: tool calls run without QQ approval — only for accounts and groups you fully control.",
   "结果详细度": "Result detail",
   "一行结论": "One-line verdict",
   "一行结论：成功或失败，加上改动的文件数。":
@@ -1321,7 +1313,6 @@ const en: Record<string, string> = {
     "This message came from a remote user via the QQ bot — it is not local input",
   "私聊": "Private chat",
   "群聊": "Group chat",
-  "批准": "Approve",
   // QQ 远程任务元信息 tag：融入子会话看板，挂在对应子会话 title 后
   "渠道：{0}": "Channel: {0}",
   "发起人：{0}": "From: {0}",
@@ -1444,6 +1435,48 @@ const en: Record<string, string> = {
   "新会话生效": "Applies to new sessions",
   "根变更对已建立的会话无效，新建会话后生效":
     "Root changes do not affect an established session — they take effect in a new session",
+  // --- 本批文案审查补齐的缺键（英文环境曾回落中文） ---
+  "tokens": "tokens",
+  // 看板：残留分支清单（多选批量处置）
+  "正在获取残留分支…": "Fetching leftover branches…",
+  "刷新残留清单": "Refresh leftover list",
+  "全选": "Select all",
+  "合并选中（{0}）": "Merge selected ({0})",
+  "丢弃选中（{0}）": "Discard selected ({0})",
+  "选择残留分支 {0}": "Select leftover branch {0}",
+  "未合并": "Unmerged",
+  "工作目录已不存在": "Worktree no longer exists",
+  "让智能体把选中的 {0} 个分支合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。":
+    "Let the agent merge the {0} selected branches into the current branch? It performs the merge and handles conflicts itself; your working branch will change.",
+  "丢弃选中的 {0} 项残留？工作目录会被删除；若分支上还有未合并的提交，git 分支会被保留以便事后审查。此操作不可撤销。":
+    "Discard the {0} selected leftovers? Their worktrees are deleted; a branch with unmerged commits is kept for later review. This cannot be undone.",
+  "残留清单已过期，正在重新获取": "The leftover list was stale — fetching it again",
+  // 管理动作卡：结果摘要与状态
+  "未找到目标": "Target not found",
+  "部分未生效": "Partially applied",
+  "已执行": "Sent",
+  "动作已全部生效": "All actions applied",
+  "有 {0} 个动作未生效": "{0} action(s) did not take effect",
+  "有 {0} 个动作未生效（目标不存在或编号有误）":
+    "{0} action(s) did not take effect (target missing or wrong number)",
+  "第 {0} 个": "No. {0}",
+  "第 {0} 个：{1}": "No. {0}: {1}",
+  "已生效": "Applied",
+  "此前已结束，无需中断": "Already finished — nothing to interrupt",
+  "找不到该超流体（可能已被清理或编号有误）":
+    "Child session not found (it may have been cleaned up, or the number is wrong)",
+  "当前状态不适用": "Not applicable in its current state",
+  // QQ：待审批用户
+  "待审批用户": "Pending users",
+  "允许": "Allow",
+  "启用后可配置一键接入、白名单与执行策略；关闭期间不会接收 QQ 消息。":
+    "Once enabled you can set up one-click access, allowlists and the execution policy; no QQ messages are received while it is off.",
+  "解除绑定后，QQ 远程任务与消息接入都会停止，需要重新扫码授权才能再次使用。":
+    "After unbinding, QQ remote tasks and message access both stop; you must scan the QR code again to use them.",
+  // 设置页：保存失败兜底提示
+  "保存失败，请稍后重试": "Save failed — try again later",
+  "审批/提问/计划阻塞时，或整轮完成时发送。":
+    "Sent when an approval, question or plan blocks, or when a turn completes.",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {
