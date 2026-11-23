@@ -31,7 +31,8 @@
 //
 // 开发期同步新 Mod(2026-11-15 迁入 in-repo 快照后):
 //   1. 在外部 fork checkout 注入新 Mod —— 注入本体在 bundle/iflow.js
-//      与 15 个 *-loader.cjs(含 super-agent-loader.cjs),不在 bundle/entry.js;
+//      与 bundle/*-loader.cjs(含 super-agent-loader.cjs / memory-scope-loader.cjs,
+//      数量随 Mod 增删漂移,别写死数字),不在 bundle/entry.js;
 //      iFlowMods 的 apply-patch.mjs 要求锚点唯一 + round-trip 校验。
 //   2. IFLOW_VENDOR_FORK_DIR=<新 fork> 或 `npm run vendor:cli -- --from-dir
 //      <新 fork> --force` 生成 vendor/iflow-cli(裁剪产物)。

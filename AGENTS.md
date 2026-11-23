@@ -81,6 +81,7 @@ npm run package        # vendor:cli --force && build && vsce package --no-depend
 - **同步新 Mod 的链路**：在外部 fork checkout 注入 → `npm run vendor:cli -- --from-dir <新 fork> --force` 生成 `vendor/iflow-cli` → 把裁剪产物（去掉嵌套 `.gitignore`）同步回 `vendor/iflow-fork/` 并提交 → `npm run harness` 验收（改 PRUNE 清单尤其必须，见陷阱 #21）。
 - **`--force` 不能省**：幂等检查只比 `package.json` version，同版本 ≠ 同内容（Mod 注入可以不 bump 版本）。
 - **注入本体在 `bundle/iflow.js` 与 `*-loader.cjs`**（含 `super-agent-loader.cjs`），不在 `bundle/entry.js`；锚点必须唯一 + round-trip 校验，换 CLI bundle 版本后锚点会漂移、硬失败。
+- **`memory-scope-loader.cjs`（save_memory 的 scope 参数）**：锚点是 `createToolRegistry()` 里的 `t(cA),`（`cA` 即上游 `save_memory` 工具类），已替换为一段 `(()=>{...})()` 注册块——`require("./memory-scope-loader.cjs").create({base:Li,kinds:Fi,icons:Mi,types:Dt,upstream:cA})` 返回的工具类同名替换，**不再保留裸 `t(cA),`**（否则会出现两个同名工具）。`scope` 可选值 `global|project`，**默认 global**（不传参与上游字节一致）；`global` 写 `Tn()/contextFileName`（`Tn()` 认 `IFLOW_HOME`，否则 `~/.iflow`），`project` 写 `config.getWorkingDir()/contextFileName`。写入本身完全委托上游 `cA.performAddMemoryEntry`，所以 `## iFlow Added Memories` 的字节布局不会漂移；`..` 段 / 绝对路径 / 越界路径一律拒绝。开关 `IFLOW_MEMORY_SCOPE=0|false` 直接返回上游类（等同原工具）；`upstream` 缺失时 `create()` 返回 null，锚点回退注册 `cA`。记忆仍在 `session/new` / `session/load` 时加载，热更新需新会话或恢复会话。
 - **锚点来源**：外部 fork checkout 的 `reverse/` 分析工作区（可读化产物 + `ANALYSIS.md` 行号地图 + 指纹重扫脚本）。它不进仓库也不进 VSIX（`PRUNE_DIRS` 含 `reverse`）；单靠快照无法重做锚点定位，换版本前先在外部 fork 侧完成。
 - **默认规则双目录**：源在 `scripts/iflow-defaults/`（进 git），构建复制到 `vendor/iflow-defaults/`；连接前只把 `~/.iflow/` **缺失的**规则文件种过去（`ensureIflowDefaultConfigs`），**永不覆盖**用户文件；`settings.json` / `iflow_accounts.json` / `oauth_creds*` 等携带凭据的文件固定不同步。
 - **`.vscodeignore` 关键例外**：`node_modules/**` 被排除，但 `!vendor/iflow-cli/node_modules/**` 必须保留，否则 VSIX 安装后起不来（本地 dev 感知不到）。
@@ -136,7 +137,7 @@ npm run package        # vendor:cli --force && build && vsce package --no-depend
 - 扩展侧文件回调限制在工作区范围（`allowedRoots` / `--include-directories` 同源），但执行类工具跑在本机真实 shell，审批卡不是沙箱。
 
 ### 记忆与知识库
-- CLI 层级记忆 loader 硬编码 `os.homedir()/.iflow`（不认 `IFLOW_HOME`），面板统一用 `memoryHome()`；`~/.iflow/memory.md` 当前 loader 不读取，只能作遗留文件展示；ACP 下 `/memory add` 不执行，快捷记忆必须由扩展直接写文件；记忆在 `session/new` / `session/load` 时加载，热更新要重启 CLI 并恢复会话。
+- CLI 层级记忆 loader 硬编码 `os.homedir()/.iflow`（不认 `IFLOW_HOME`），面板统一用 `memoryHome()`；`~/.iflow/memory.md` 当前 loader 不读取，只能作遗留文件展示；ACP 下 `/memory add` 不执行，快捷记忆必须由扩展直接写文件；记忆在 `session/new` / `session/load` 时加载，热更新要重启 CLI 并恢复会话。**注意两条路径口径不同**：`save_memory` 写 `Nz() = join(Tn(), contextFileName)`，而 `Tn()` **认 `IFLOW_HOME`**（未设置才回落 `~/.iflow`）；层级 loader 才是不认 `IFLOW_HOME` 的那个。`memory-scope-loader.cjs` 新增可选 `scope`（`global` 默认 / `project` 写 `config.getWorkingDir()`），写入仍委托上游 `performAddMemoryEntry`。
 - 事实追加/删除按 `## iFlow Added Memories` 节处理（`MEMORY_MARKER`），项目记忆文件名遵循 CLI `contextFileName`，不硬编码 `AGENTS.md`。
 - 知识库注入用文末的托管块（`setManagedKnowledgeBlock` 生成 `## 项目知识库` + `@.iflow/knowledge/index.md`，由一对 `iflow-harness:knowledge` 注释标记包裹）；检测/注入/取消必须遍历所有项目记忆文件（陷阱 #30）。**正文里不要内联写那对标记的字面量**——`setManagedKnowledgeBlock` 取第一个匹配，重复出现会把中间段落当成托管块内容替换掉。
 

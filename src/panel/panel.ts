@@ -488,7 +488,9 @@ export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // writing
   "write_file",
   "replace",
-  // writes ~/.iflow/memory.md; the panel persists memory host-side instead
+  // writes the memory file (global ~/.iflow/AGENTS.md, or the project
+  // AGENTS.md when the memory-scope loader's `scope:"project"` is used); the
+  // panel persists memory host-side instead
   "save_memory",
   // defensive: declared at L3160 but not registered in this bundle version
   // (class `Aut` is never passed to `t(...)`); kept for future CLI versions
