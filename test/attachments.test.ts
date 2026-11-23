@@ -97,7 +97,16 @@ describe("sweepStaleAttachmentDirs", () => {
     // stat() follows symlinks, so a dangling link deterministically throws
     // inside the sweep loop — the failure must be logged-and-skipped, never
     // abort the remaining entries nor reject the promise.
-    symlinkSync(path.join(root, "no-such-target"), path.join(root, "dangling"));
+    //
+    // On Windows the fixture is a directory JUNCTION, not a symbolic link:
+    // creating a symbolic link needs SeCreateSymbolicLinkPrivilege (or
+    // Developer Mode), which a non-elevated process does not have — the
+    // setup would fail with EPERM before the sweep was ever exercised. A
+    // junction needs no privilege and Node reports it as a symbolic link,
+    // so `stat()` follows it and throws ENOENT exactly like on POSIX.
+    // POSIX keeps the plain symlink (the `type` argument is ignored there).
+    const linkType = process.platform === "win32" ? "junction" : undefined;
+    symlinkSync(path.join(root, "no-such-target"), path.join(root, "dangling"), linkType);
     const skipped: string[] = [];
     const removed = await sweepStaleAttachmentDirs({ root, log: (m) => skipped.push(m) });
     expect(removed).toBe(1);

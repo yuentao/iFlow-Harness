@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync, renameSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -191,7 +191,10 @@ describe("updateCliSettings", () => {
     expect(body).not.toContain("unlinkSync(file)");
     // The replace goes through the retrying helper — on Windows the plain
     // rename is refused with EPERM while any handle is open on the target.
-    expect(body).toContain("renameWithRetrySync(tmp, file)");
+    // (The third argument is the optional test seam for the injected
+    // rename; production callers leave it unset.)
+    expect(body).toContain("renameWithRetrySync(tmp, file");
+    expect(body).toContain("options?.rename");
     // A per-writer unique temp path (pid + timestamp + counter) so two
     // concurrent writers never share (and clobber) one temp file.
     expect(body).toContain("uniqueTmpPath(file)");
@@ -343,6 +346,20 @@ function tmpLeftovers(dir: string): string[] {
   return readdirSync(dir).filter((n) => n.includes("iflow-harness-tmp"));
 }
 
+/**
+ * Windows refuses to replace an open file (`rename` → EPERM) because
+ * replacing a file means deleting the old one, and Windows will not delete
+ * an open file. POSIX has no such rule: `rename(2)` replaces a file another
+ * process still holds open, without complaint.
+ *
+ * So the hold-based cases below only have a premise on Windows. On
+ * macOS/Linux the "first rename was refused" never happens and the case
+ * would assert nothing, so it is skipped there — and the portable cases
+ * that follow drive the very same contract through an injected `rename`,
+ * so the retry / visible-failure behaviour is verified on EVERY platform.
+ */
+const itWindows = it.skipIf(process.platform !== "win32");
+
 /** Run `fn` and return the thrown error (fails the test when it does not throw). */
 function captureError(fn: () => void): NodeJS.ErrnoException {
   try {
@@ -354,7 +371,7 @@ function captureError(fn: () => void): NodeJS.ErrnoException {
 }
 
 describe("atomic replace retry (Windows file-in-use)", () => {
-  it("succeeds once the reader releases the file (the first rename was refused)", async () => {
+  itWindows("succeeds once the reader releases the file (the first rename was refused)", async () => {
     const file = isolatedSettingsFile({
       mcpServers: { figma: { command: "npx" } },
       language: "zh-CN",
@@ -378,7 +395,7 @@ describe("atomic replace retry (Windows file-in-use)", () => {
     }
   });
 
-  it("fails VISIBLY and keeps the previous content when the hold never ends", async () => {
+  itWindows("fails VISIBLY and keeps the previous content when the hold never ends", async () => {
     const file = isolatedSettingsFile({
       mcpServers: { figma: { command: "npx" } },
       language: "zh-CN",
@@ -405,7 +422,7 @@ describe("atomic replace retry (Windows file-in-use)", () => {
     }
   });
 
-  it("throws the ORIGINAL error (code + message) when the retry budget runs out", async () => {
+  itWindows("throws the ORIGINAL error (code + message) when the retry budget runs out", async () => {
     const file = isolatedSettingsFile({ language: "zh-CN" });
     const holder = holdFileOpen(file, 60_000);
     try {
@@ -466,6 +483,95 @@ describe("atomic replace retry (Windows file-in-use)", () => {
     });
     expect(attempts).toBe(3);
   });
+
+  // --- portable counterparts of the Windows-only cases above ---------------
+  // The rename is INJECTED so the transient refusal can be produced on every
+  // platform. On POSIX a rename over an open file succeeds, so the real
+  // file-in-use premise simply cannot be reproduced there — but the
+  // behaviour under test (retry → recover / retry → visible failure) is
+  // platform-independent and must be verified everywhere.
+
+  it("recovers once the transient refusal clears (portable: injected rename)", () => {
+    const file = isolatedSettingsFile({
+      mcpServers: { figma: { command: "npx" } },
+      language: "zh-CN",
+    });
+    let attempts = 0;
+    const ok = updateCliSettings({ language: "en-US" }, file, {
+      rename: (from, to) => {
+        attempts += 1;
+        if (attempts <= 2) {
+          const err: NodeJS.ErrnoException = new Error("EPERM: operation not permitted");
+          err.code = "EPERM";
+          throw err;
+        }
+        renameSync(from, to);
+      },
+    });
+    expect(ok).toBe(true);
+    // Two refusals were absorbed by the retry, the third attempt went through.
+    expect(attempts).toBe(3);
+    const after = JSON.parse(readFileSync(file, "utf8"));
+    expect(after.language).toBe("en-US");
+    expect(after.mcpServers.figma.command).toBe("npx"); // nothing else lost
+    expect(tmpLeftovers(path.dirname(file))).toEqual([]);
+  });
+
+  it("fails VISIBLY and keeps the previous content when every replace is refused (portable: injected rename)", () => {
+    const file = isolatedSettingsFile({
+      mcpServers: { figma: { command: "npx" } },
+      language: "zh-CN",
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const ok = updateCliSettings({ language: "en-US" }, file, {
+        rename: () => {
+          const err: NodeJS.ErrnoException = new Error("EPERM: operation not permitted");
+          err.code = "EPERM";
+          throw err;
+        },
+      });
+      // Not a silent success: the panel turns `false` into the
+      // "无法写入内核配置 {0}" toast, so the user sees the failed save.
+      expect(ok).toBe(false);
+      const after = JSON.parse(readFileSync(file, "utf8"));
+      expect(after.language).toBe("zh-CN"); // previous content intact
+      expect(after.mcpServers.figma.command).toBe("npx");
+      expect(tmpLeftovers(path.dirname(file))).toEqual([]); // no temp file left behind
+      // The original error is not swallowed either — code + message reach
+      // the host log, so EPERM can be told apart from a permission problem.
+      const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(logged).toContain("EPERM");
+    } finally {
+      warn.mockRestore();
+    }
+  }, 20_000);
+
+  it("surfaces the ORIGINAL error (code + message) once the retry budget is exhausted (portable: injected rename)", () => {
+    const dir = mkdtempSync(path.join(tempDir, "budget-"));
+    const file = path.join(dir, "settings.json");
+    writeFileSync(file, JSON.stringify({ language: "zh-CN" }), "utf8");
+    const tmp = path.join(dir, "tmp.json");
+    writeFileSync(tmp, "{}", "utf8");
+    let attempts = 0;
+    const error = captureError(() =>
+      renameWithRetrySync(tmp, file, {
+        rename: () => {
+          attempts += 1;
+          const err: NodeJS.ErrnoException = new Error("EPERM: operation not permitted");
+          err.code = "EPERM";
+          throw err;
+        },
+      }),
+    );
+    // One attempt per scheduled delay, plus the last one that exhausts the budget.
+    expect(attempts).toBe(ATOMIC_REPLACE_RETRY_DELAYS_MS.length + 1);
+    // The very error the OS raised — not a generic "write failed".
+    expect(error.code).toBe("EPERM");
+    expect(error.message).toContain("EPERM");
+    // The target is untouched: a refused replace never truncates it.
+    expect(JSON.parse(readFileSync(file, "utf8")).language).toBe("zh-CN");
+  }, 20_000);
 
   it("keeps the sync backoff budget under 1.2s (the host is single-threaded)", () => {
     const total = ATOMIC_REPLACE_RETRY_DELAYS_MS.reduce((sum, ms) => sum + ms, 0);

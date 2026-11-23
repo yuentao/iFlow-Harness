@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, renameSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -86,6 +86,20 @@ function tmpLeftovers(dir: string): string[] {
   return readdirSync(dir).filter((n) => n.includes("iflow-harness-tmp"));
 }
 
+/**
+ * Windows refuses to replace an open file (`rename` → EPERM) because
+ * replacing a file means deleting the old one, and Windows will not delete
+ * an open file. POSIX has no such rule — `rename(2)` replaces a file another
+ * process still holds open.
+ *
+ * So the hold-based cases below only have a premise on Windows. On
+ * macOS/Linux the "first rename was refused" never happens and the case
+ * would assert nothing, so it is skipped there — and the portable cases
+ * that follow drive the very same contract through an injected `rename`,
+ * so the retry / visible-failure behaviour is verified on EVERY platform.
+ */
+const itWindows = it.skipIf(process.platform !== "win32");
+
 describe("writeAtomic (memory files)", () => {
   it("writes the file when nothing holds it open", async () => {
     const dir = mkdtempSync(path.join(tempDir, "plain-"));
@@ -95,7 +109,7 @@ describe("writeAtomic (memory files)", () => {
     expect(tmpLeftovers(dir)).toEqual([]);
   });
 
-  it("recovers once the reader releases the file (the first rename was refused)", async () => {
+  itWindows("recovers once the reader releases the file (the first rename was refused)", async () => {
     const dir = mkdtempSync(path.join(tempDir, "hold-"));
     const file = path.join(dir, "AGENTS.md");
     writeFileSync(file, "# old\n", "utf8");
@@ -114,7 +128,7 @@ describe("writeAtomic (memory files)", () => {
     }
   });
 
-  it("rejects with the original error and keeps the old content when the hold never ends", async () => {
+  itWindows("rejects with the original error and keeps the old content when the hold never ends", async () => {
     const dir = mkdtempSync(path.join(tempDir, "stuck-"));
     const file = path.join(dir, "AGENTS.md");
     writeFileSync(file, "# old\n", "utf8");
@@ -140,6 +154,62 @@ describe("writeAtomic (memory files)", () => {
     const total = ATOMIC_REPLACE_RETRY_DELAYS_MS.reduce((sum, ms) => sum + ms, 0);
     expect(total).toBeLessThanOrEqual(1200);
   });
+
+  // --- portable counterparts of the Windows-only cases above ---------------
+  // The rename is INJECTED so the transient refusal can be produced on every
+  // platform. On POSIX a rename over an open file succeeds, so the real
+  // file-in-use premise simply cannot be reproduced there — but the
+  // behaviour under test (retry → recover / retry → visible failure) is
+  // platform-independent and must be verified everywhere.
+
+  it("recovers once the transient refusal clears (portable: injected rename)", async () => {
+    const dir = mkdtempSync(path.join(tempDir, "retry-"));
+    const file = path.join(dir, "AGENTS.md");
+    writeFileSync(file, "# old\n", "utf8");
+    let attempts = 0;
+    await writeAtomic(file, "# new\n", {
+      rename: async (from, to) => {
+        attempts += 1;
+        if (attempts <= 2) {
+          const error: NodeJS.ErrnoException = new Error("EPERM: operation not permitted");
+          error.code = "EPERM";
+          throw error;
+        }
+        renameSync(from, to);
+      },
+    });
+    // Two refusals were absorbed by the retry, the third attempt went through.
+    expect(attempts).toBe(3);
+    expect(readFileSync(file, "utf8")).toBe("# new\n");
+    expect(tmpLeftovers(dir)).toEqual([]);
+  });
+
+  it("rejects with the original error and keeps the old content when the budget runs out (portable: injected rename)", async () => {
+    const dir = mkdtempSync(path.join(tempDir, "stuck-"));
+    const file = path.join(dir, "AGENTS.md");
+    writeFileSync(file, "# old\n", "utf8");
+    let attempts = 0;
+    const error = await writeAtomic(file, "# new\n", {
+      rename: async () => {
+        attempts += 1;
+        const err: NodeJS.ErrnoException = new Error("EPERM: operation not permitted");
+        err.code = "EPERM";
+        throw err;
+      },
+    }).then(
+      () => null,
+      (err: unknown) => err as NodeJS.ErrnoException,
+    );
+    // One attempt per scheduled delay, plus the last one that exhausts the budget.
+    expect(attempts).toBe(ATOMIC_REPLACE_RETRY_DELAYS_MS.length + 1);
+    expect(error).not.toBeNull();
+    // The very error the OS raised — not a generic "write failed".
+    expect(error!.code).toBe("EPERM");
+    expect(error!.message).toContain("EPERM");
+    // A refused replace never truncates the target.
+    expect(readFileSync(file, "utf8")).toBe("# old\n");
+    expect(tmpLeftovers(dir)).toEqual([]);
+  }, 20_000);
 
   it("picks a different temp name for two writes in the same millisecond", async () => {
     const dir = mkdtempSync(path.join(tempDir, "samems-"));
