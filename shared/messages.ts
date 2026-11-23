@@ -1924,6 +1924,18 @@ export interface HostSettingsUi {
   /** Wall-clock ceiling (seconds) for the turn-end memory extraction.
    * 0 = no limit. */
   memoryExtractTimeoutSeconds: number;
+  /** 记忆整理总开关（`iflow.memoryMaintenanceEnabled`）。默认关闭。 */
+  memoryMaintenanceEnabled: boolean;
+  /** 记忆整理周期（天，`iflow.memoryMaintenanceIntervalDays`）。 */
+  memoryMaintenanceIntervalDays: number;
+  /** 记忆整理的空闲阈值（分钟，`iflow.memoryMaintenanceIdleMinutes`）。 */
+  memoryMaintenanceIdleMinutes: number;
+  /** 全局记忆托管区块的 token 预算（`iflow.memoryMaintenanceGlobalTokenBudget`）。 */
+  memoryMaintenanceGlobalTokenBudget: number;
+  /** 项目记忆单文件的 token 预算（`iflow.memoryMaintenanceProjectTokenBudget`）。 */
+  memoryMaintenanceProjectTokenBudget: number;
+  /** 整理策略：report = 只出报告不写盘；apply = 实际写回。 */
+  memoryMaintenanceStrategy: "report" | "apply";
   /** Wall-clock ceiling (seconds) for the next-step prediction.
    * 0 = no limit. */
   nextStepTimeoutSeconds: number;

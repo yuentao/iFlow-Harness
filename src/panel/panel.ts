@@ -53,7 +53,7 @@ import type {
   McpServerStatusView,
   SessionSettings,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
 import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
@@ -83,6 +83,7 @@ import {
   clampMaxSuperWorktrees,
   DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   DEFAULT_MAX_SUPER_WORKTREES,
+  hasActiveSuperSession,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
   type SuperIntegrationMode,
@@ -127,7 +128,18 @@ import { MemoryService } from "../memory/service.js";
 import { AssetsService } from "../assets/service.js";
 import { resolveSkill, skillRoots } from "../skills/service.js";
 import { buildSkillPrompt, parseSkillInvocation, type SkillInvocation } from "../../shared/skills.js";
-import { isWithin, memoryHome } from "../memory/files.js";
+import { isWithin, memoryHome, readIfExists, sha256 } from "../memory/files.js";
+import {
+  DEFAULT_GLOBAL_BUDGET_TOKENS,
+  DEFAULT_PROJECT_BUDGET_TOKENS,
+  MaintenanceConflictError,
+  type MaintenanceBudgets,
+  type MaintenanceDeps,
+  type MaintenanceLogLevel,
+} from "../memory/maintenance.js";
+import { MaintenanceScheduler } from "../memory/maintenance-scheduler.js";
+import { discoverMemoryFiles } from "../memory/discovery.js";
+import { estimateMarkdownTokens } from "../../shared/memory-curate.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 import { normalizeModelId, parseContextWindowOverrides, parseCostTable, resolveContextWindowAuthority, resolveCostWithSource } from "../../shared/context-window.js";
@@ -801,6 +813,162 @@ export class DisposedError extends Error {
   }
 }
 
+// --- 记忆整理接入层（P1） -----------------------------------------------------
+//
+// 分界：`src/memory/maintenance.ts` / `maintenance-scheduler.ts` 负责「读 → 规划 →
+// 备份 → 写 → 记账」与定时触发；这里只把 panel 的能力（配置、空闲态、globalState、
+// MemoryService）适配成它们要的回调。下面三个导出是测试接缝 ——
+// `test/panel-memory-maintenance.test.ts` 用假 deps / 假时钟驱动同一套适配器，
+// 不去碰真实的 ~/.iflow。
+
+/** 跨窗口互斥锁的 globalState 键。值形如 `{ at: number; owner: string }`。 */
+export const MEMORY_MAINTENANCE_LOCK_KEY = "iflow.memoryMaintenance.lock";
+/** 锁过期时间：超过它视为上一个持有者已退出（进程崩溃 / 关窗不会永久卡住）。 */
+export const MEMORY_MAINTENANCE_LOCK_TTL_MS = 30 * 60_000;
+
+export interface MemoryMaintenanceLock {
+  acquire(): Promise<boolean>;
+  release(): Promise<void>;
+}
+
+/**
+ * 基于 globalState 的跨窗口互斥锁。
+ *
+ * VSCode 的 globalState 在多个窗口间共享同一份存储，但没有 compare-and-swap，
+ * 所以这里用「写入后回读 owner」自校验：只有读回自己的 owner 才算拿到锁。锁带
+ * 时间戳，超过 TTL 即视为上一个持有者已死 —— 崩溃或强关的窗口不会永久阻塞整理。
+ * 同窗口内再用 `held` 标志兜住重入（调度器本身也有 running 标志）。
+ */
+export function createMemoryMaintenanceLock(
+  memento: vscode.Memento,
+  owner: string,
+  now: () => number = Date.now,
+): MemoryMaintenanceLock {
+  let held = false;
+  const read = (): { at?: unknown; owner?: unknown } | undefined =>
+    memento.get<{ at?: unknown; owner?: unknown }>(MEMORY_MAINTENANCE_LOCK_KEY);
+  return {
+    async acquire(): Promise<boolean> {
+      if (held) return false;
+      const existing = read();
+      if (
+        existing &&
+        existing.owner !== owner &&
+        typeof existing.at === "number" &&
+        now() - existing.at < MEMORY_MAINTENANCE_LOCK_TTL_MS
+      ) {
+        return false;
+      }
+      await memento.update(MEMORY_MAINTENANCE_LOCK_KEY, { at: now(), owner });
+      const check = read();
+      if (!check || check.owner !== owner) return false;
+      held = true;
+      return true;
+    },
+    async release(): Promise<void> {
+      if (!held) return;
+      held = false;
+      const check = read();
+      if (check && check.owner === owner) {
+        await memento.update(MEMORY_MAINTENANCE_LOCK_KEY, undefined);
+      }
+    },
+  };
+}
+
+export interface MemoryMaintenanceIdleInput {
+  status: AgentStatus;
+  initializing: boolean;
+  replaying: boolean;
+  pendingApproval: boolean;
+  pendingQuestions: boolean;
+  pendingProfileSwitch: boolean;
+  /** 宿主侧还在等回包的审批数（`pendingApprovals` 映射）。 */
+  pendingApprovals: number;
+  /** 排队等发送的提示数。 */
+  queuedPrompts: number;
+  /** 是否有非终态子会话（preparing / running / awaiting_input）。 */
+  activeChildSessions: boolean;
+  /** 最后一次用户活动（webview 消息 / 回合落定）的时间戳。 */
+  lastActivityAt: number;
+  now: number;
+  idleMinutes: number;
+}
+
+/**
+ * 保守的空闲判定：任何一项拿不准都判「不空闲」—— 宁可漏跑一次整理，也不在用户
+ * 正在对话、子会话正在跑、或还有待审批/待提问时改记忆文件。
+ */
+export function isMemoryMaintenanceIdle(input: MemoryMaintenanceIdleInput): boolean {
+  if (input.status !== "idle") return false;
+  if (input.initializing || input.replaying) return false;
+  if (input.pendingApproval || input.pendingQuestions || input.pendingProfileSwitch) return false;
+  if (input.pendingApprovals > 0) return false;
+  if (input.queuedPrompts > 0) return false;
+  if (input.activeChildSessions) return false;
+  if (!Number.isFinite(input.idleMinutes) || input.idleMinutes <= 0) return false;
+  return input.now - input.lastActivityAt >= input.idleMinutes * 60_000;
+}
+
+export interface MemoryMaintenanceDepsOptions {
+  getCwd(): string | null;
+  getWorkspaceRoots(): string[];
+  getContextFileName(): string | string[] | null;
+  /** 记忆 home（`~/.iflow`）：备份 / meta / events 都落在这里。 */
+  home: string;
+  /** 读一个记忆文件；不存在返回 null（适配器把它记为该文件的读取错误）。 */
+  readFile(file: string): Promise<string | null>;
+  /** 走 MemoryService 的写入通道，必须带乐观哈希并在不匹配时抛冲突错误。 */
+  writeFile(file: string, content: string, expectedHash: string): Promise<void>;
+  /** true = 只报告不写盘（strategy === "report"）。 */
+  dryRun(): boolean;
+  now?(): Date;
+  log?(level: MaintenanceLogLevel, message: string, detail?: unknown): void;
+  budgets?(): MaintenanceBudgets;
+}
+
+/**
+ * 生产 `MaintenanceDeps` 适配器。
+ *
+ * - `listFiles` 复用 `discoverMemoryFiles`（与记忆卡片同一套发现规则），只保留
+ *   已存在且可写的文件；`scope` 取发现结果的 global / project，`kind` 透传 role。
+ * - `readFile` 同时算 sha256（与 `files.ts` 同一算法），作为写入的乐观并发校验值。
+ * - `writeFile` 在 report 策略下是空操作 —— 核心编排仍会产出 before/after 与节省量，
+ *   调用方据此汇报「预计应用」；真正写盘由 `MemoryService` 完成。
+ * - `budgets` 用 getter：设置页改了预算，下一轮立即生效，不需要重建调度器。
+ */
+export function buildMemoryMaintenanceDeps(options: MemoryMaintenanceDepsOptions): MaintenanceDeps {
+  return {
+    async listFiles() {
+      const files = await discoverMemoryFiles({
+        cwd: options.getCwd(),
+        workspaceRoots: options.getWorkspaceRoots(),
+        contextFileName: options.getContextFileName(),
+        home: options.home,
+      });
+      return files
+        .filter((file) => file.exists && file.editable)
+        .map((file) => ({ path: file.path, scope: file.scope, kind: file.role }));
+    },
+    async readFile(file) {
+      const content = await options.readFile(file);
+      if (content === null) throw new Error(`记忆文件不存在：${file}`);
+      return { content, hash: sha256(content) };
+    },
+    async writeFile(file, content, expectedHash) {
+      // report 策略：不写盘，只让核心编排把「将要发生的改动」算进报告。
+      if (options.dryRun()) return;
+      await options.writeFile(file, content, expectedHash);
+    },
+    home: options.home,
+    now: options.now ?? (() => new Date()),
+    ...(options.log ? { log: options.log } : {}),
+    get budgets(): MaintenanceBudgets {
+      return options.budgets ? options.budgets() : {};
+    },
+  };
+}
+
 export class ChatPanel implements vscode.Disposable {
   public static readonly viewId = "iflow.chatPanel";
 
@@ -822,6 +990,18 @@ export class ChatPanel implements vscode.Disposable {
   private store: SessionStore;
   /** F3 Phase 1: global/project memory files (read/edit, not the CLI agent). */
   private readonly memory: MemoryService;
+  /** P1 记忆整理调度器：panel 创建时 start()，dispose 时 dispose()。 */
+  private maintenance: MaintenanceScheduler | null = null;
+  /** 生产 deps：discovery → listFiles、sha256 → readFile、MemoryService → writeFile。 */
+  private maintenanceDeps: MaintenanceDeps | null = null;
+  /** 跨窗口互斥锁（globalState + 时间戳 TTL）。 */
+  private maintenanceLock: MemoryMaintenanceLock | null = null;
+  /** 最后一次用户活动：webview 消息或回合落定。空闲判定基于它。 */
+  private lastUserActivityAt = Date.now();
+  /** 上一次观察到的会话状态（用于识别「回合刚落定」这一活动）。 */
+  private lastObservedStatus: AgentStatus = "idle";
+  /** 记忆 token 总量的短缓存（5 分钟）：避免每个空闲 tick 都全量扫描工作区。 */
+  private maintenanceTokensCache: { at: number; total: number } | null = null;
   private readonly assets: AssetsService;
   /** Tool diff / revert host logic (阶段 1 下沉). All panel methods in the
    * "Diff revert" section are thin delegates to this instance, so the
@@ -1562,6 +1742,48 @@ export class ChatPanel implements vscode.Disposable {
         void vscode.window.showTextDocument(vscode.Uri.file(file), { preview: false });
       },
     });
+    // P1 记忆整理：deps + 跨窗口锁 + 调度器。`start()` 只挂一个 unref 的定时器，
+    // 真正的触发还要依次过 enabled / 空闲 / 到期 / 锁四道闸（见 maintenance-scheduler）。
+    this.maintenanceLock = createMemoryMaintenanceLock(
+      this.context.globalState,
+      `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    );
+    const maintenanceDeps = buildMemoryMaintenanceDeps({
+      getCwd: () => this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
+      getWorkspaceRoots: () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+      getContextFileName: () =>
+        readCliSettings(path.join(os.homedir(), ".iflow", "settings.json"))?.contextFileName ?? null,
+      home: memoryHome(),
+      readFile: (file) => readIfExists(file),
+      writeFile: (file, content, expectedHash) => this.writeMaintenanceFile(file, content, expectedHash),
+      dryRun: () => this.maintenanceStrategy() === "report",
+      log: (level, message, detail) => this.logMaintenance(level, message, detail),
+      budgets: () => this.maintenanceBudgets(),
+    });
+    this.maintenanceDeps = maintenanceDeps;
+    this.maintenance = new MaintenanceScheduler({
+      deps: maintenanceDeps,
+      // 周期 / 空闲阈值构造时取一次；设置页改动后由 updateConfig 热更新。
+      intervalDays: this.maintenanceConfigNumber("memoryMaintenanceIntervalDays", 7, 1, 90),
+      idleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
+      enabled: () =>
+        vscode.workspace.getConfiguration("iflow").get<boolean>("memoryMaintenanceEnabled", false),
+      isIdle: () => this.isMaintenanceIdle(),
+      // 调度状态放扩展自己的 storage：P0 的 sidecar（meta.json）属于记忆 home 的
+      // 事实统计，与 CLI 读写的记忆文件同源；「本窗口上次何时整理」是窗口级调度
+      // 簿记，写进 ~/.iflow 只会污染记忆目录，因此分开存放。
+      statePath: path.join(
+        (this.context.storageUri ?? this.context.globalStorageUri).fsPath,
+        "memory-maintenance",
+        "state.json",
+      ),
+      // 只按周期触发：两个 token 预算是「单文件规划预算」（deps.budgets），不作为
+      // 总量阈值 —— 否则无法再压缩的记忆会让每一轮 tick 都重跑。
+      measure: () => this.measureMaintenanceTokens(),
+      acquireLock: () => this.maintenanceLock?.acquire() ?? Promise.resolve(false),
+      releaseLock: () => this.maintenanceLock?.release() ?? Promise.resolve(),
+    });
+    this.maintenance.start();
     this.assets = new AssetsService({
       log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m) },
       getCwd: () => this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
@@ -1587,6 +1809,12 @@ export class ChatPanel implements vscode.Disposable {
       toolArgsCap: ChatPanel.TOOL_ARGS_CAP,
     });
     this.store.onStateChange = (state) => {
+      // 记忆整理的空闲时钟：回合落定（非 idle → idle）也算一次活动，这样长回合
+      // 结束后仍会先等满 idleMinutes 再整理。
+      if (state.status === "idle" && this.lastObservedStatus !== "idle") {
+        this.lastUserActivityAt = Date.now();
+      }
+      this.lastObservedStatus = state.status;
       this.updateStatusBar(state);
       // M1 P0-6: occupancy-warning state machine (pure numeric compare per
       // push; toast/dismiss are post-only, no re-entrancy into the store).
@@ -1739,6 +1967,17 @@ export class ChatPanel implements vscode.Disposable {
             // Every mirrored setting lives in the same settings panel; a
             // direct VSCode-side edit must repaint it too.
             if (e.affectsConfiguration("iflow")) this.postHostSettings();
+        // 记忆整理的周期 / 空闲阈值是调度器构造参数，配置变更要热更新
+        // （idleMinutes 变化会重建 tick 定时器）。
+        if (
+          e.affectsConfiguration("iflow.memoryMaintenanceIntervalDays")
+          || e.affectsConfiguration("iflow.memoryMaintenanceIdleMinutes")
+        ) {
+          this.maintenance?.updateConfig({
+            intervalDays: this.maintenanceConfigNumber("memoryMaintenanceIntervalDays", 7, 1, 90),
+            idleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
+          });
+        }
         if (e.affectsConfiguration("iflow.language")) {
           this.syncCliSettingsToDisk();
         }
@@ -1953,6 +2192,10 @@ export class ChatPanel implements vscode.Disposable {
     // QQ_BRIDGE_STOP_TIMEOUT_MS），关闭流程不能被一个卡住的 socket 拖死。
     await this.raceQqTeardown(this.stopQq());
     this.client = null;
+    this.maintenance?.dispose();
+    this.maintenance = null;
+    this.maintenanceDeps = null;
+    this.maintenanceLock = null;
     this.memory.dispose();
     this.assets.dispose();
     this.toolDiff.dispose();
@@ -2332,6 +2575,9 @@ export class ChatPanel implements vscode.Disposable {
 
   private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {
     this.log.trace(`webview → host: ${msg.type}`);
+    // 任何 webview → host 消息都代表一次用户交互（发送、审批回复、按钮…），
+    // 刷新记忆整理的空闲时钟：整理只在它之后 idleMinutes 分钟才允许跑。
+    this.lastUserActivityAt = Date.now();
     // `qqConfigAction`（连测试 / 解绑 / 扫码三动作）是 webview→host 命令；
     // 它历史上只声明在 HostToWebview 上（方向写反），Wave3-C2 已在
     // WebviewToHost 补上声明，「修正消息方向」这次又把 HostToWebview 上的
@@ -2670,6 +2916,43 @@ export class ChatPanel implements vscode.Disposable {
             Math.min(600, Math.max(0, Math.trunc(msg.memoryExtractTimeoutSeconds))),
           ]);
         }
+        // 记忆整理：周期 / 空闲阈值 / 两个 token 预算 / 策略。范围与 package.json 一致。
+        if (typeof msg.memoryMaintenanceEnabled === "boolean") {
+          writes.push(["memoryMaintenanceEnabled", msg.memoryMaintenanceEnabled]);
+        }
+        if (msg.memoryMaintenanceIntervalDays !== undefined && Number.isFinite(msg.memoryMaintenanceIntervalDays)) {
+          writes.push([
+            "memoryMaintenanceIntervalDays",
+            Math.min(90, Math.max(1, Math.trunc(msg.memoryMaintenanceIntervalDays))),
+          ]);
+        }
+        if (msg.memoryMaintenanceIdleMinutes !== undefined && Number.isFinite(msg.memoryMaintenanceIdleMinutes)) {
+          writes.push([
+            "memoryMaintenanceIdleMinutes",
+            Math.min(240, Math.max(1, Math.trunc(msg.memoryMaintenanceIdleMinutes))),
+          ]);
+        }
+        if (
+          msg.memoryMaintenanceGlobalTokenBudget !== undefined
+          && Number.isFinite(msg.memoryMaintenanceGlobalTokenBudget)
+        ) {
+          writes.push([
+            "memoryMaintenanceGlobalTokenBudget",
+            Math.min(50_000, Math.max(500, Math.trunc(msg.memoryMaintenanceGlobalTokenBudget))),
+          ]);
+        }
+        if (
+          msg.memoryMaintenanceProjectTokenBudget !== undefined
+          && Number.isFinite(msg.memoryMaintenanceProjectTokenBudget)
+        ) {
+          writes.push([
+            "memoryMaintenanceProjectTokenBudget",
+            Math.min(50_000, Math.max(500, Math.trunc(msg.memoryMaintenanceProjectTokenBudget))),
+          ]);
+        }
+        if (msg.memoryMaintenanceStrategy === "report" || msg.memoryMaintenanceStrategy === "apply") {
+          writes.push(["memoryMaintenanceStrategy", msg.memoryMaintenanceStrategy]);
+        }
         if (msg.nextStepTimeoutSeconds !== undefined && Number.isFinite(msg.nextStepTimeoutSeconds)) {
           writes.push([
             "nextStepTimeoutSeconds",
@@ -2749,6 +3032,16 @@ export class ChatPanel implements vscode.Disposable {
           writes.push(["superAgent.fullTrust", msg.superAgentFullTrust]);
         }
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
+        // 周期 / 空闲阈值写盘后热更新调度器（写失败时配置仍是旧值，与设置页显示一致）。
+        if (
+          msg.memoryMaintenanceIntervalDays !== undefined
+          || msg.memoryMaintenanceIdleMinutes !== undefined
+        ) {
+          this.maintenance?.updateConfig({
+            intervalDays: this.maintenanceConfigNumber("memoryMaintenanceIntervalDays", 7, 1, 90),
+            idleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
+          });
+        }
         // 调高上限后排队的子会话立刻有机会起跑；调低不影响已在运行的会话，
         // 但 pump 本身是幂等且只按新上限放行，所以两种情况都能直接调。
         if (msg.superAgentMaxConcurrent !== undefined) this.superAgent?.pumpQueue();
@@ -3157,6 +3450,158 @@ export class ChatPanel implements vscode.Disposable {
     return Math.min(100, Math.max(50, Math.trunc(raw))) / 100;
   }
 
+  // --- P1 记忆整理（接入层） -------------------------------------------------
+
+  /** 整理策略：`report` 只出报告，`apply` 才真正写盘（默认 report）。 */
+  private maintenanceStrategy(): "report" | "apply" {
+    const raw = vscode.workspace.getConfiguration("iflow").get<string>("memoryMaintenanceStrategy", "report");
+    return raw === "apply" ? "apply" : "report";
+  }
+
+  /** 读一个记忆整理数值设置并夹到 [min, max]；非法值回落 fallback。 */
+  private maintenanceConfigNumber(key: string, fallback: number, min: number, max: number): number {
+    const raw = vscode.workspace.getConfiguration("iflow").get<number>(key, fallback);
+    if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
+    return Math.min(max, Math.max(min, Math.trunc(raw)));
+  }
+
+  /** 单文件规划预算：全局一个文件，项目按每个文件算（见 maintenance.ts 的 budgetFor）。 */
+  private maintenanceBudgets(): MaintenanceBudgets {
+    return {
+      global: this.maintenanceConfigNumber(
+        "memoryMaintenanceGlobalTokenBudget",
+        DEFAULT_GLOBAL_BUDGET_TOKENS,
+        500,
+        50_000,
+      ),
+      project: this.maintenanceConfigNumber(
+        "memoryMaintenanceProjectTokenBudget",
+        DEFAULT_PROJECT_BUDGET_TOKENS,
+        500,
+        50_000,
+      ),
+    };
+  }
+
+  /**
+   * 空闲判定（保守）：无 streaming / 无待审批与待提问 / 无子会话运行 / 无排队提示，
+   * 且距最后一次用户活动 ≥ idleMinutes。任何一项拿不准都判「不空闲」。
+   */
+  private isMaintenanceIdle(): boolean {
+    if (this.disposed) return false;
+    const state = this.store.getState();
+    return isMemoryMaintenanceIdle({
+      status: state.status,
+      initializing: state.initializing,
+      replaying: state.replaying,
+      pendingApproval: Boolean(state.pendingApproval),
+      pendingQuestions: Boolean(state.pendingQuestions),
+      pendingProfileSwitch: Boolean(state.pendingProfileSwitch),
+      pendingApprovals: this.pendingApprovals.size,
+      queuedPrompts: state.queue?.length ?? 0,
+      activeChildSessions: hasActiveSuperSession(state.superSessions),
+      lastActivityAt: this.lastUserActivityAt,
+      now: Date.now(),
+      idleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
+    });
+  }
+
+  /**
+   * 写回整理后的记忆文件：先按读到的 sha256 做乐观校验，再走 `MemoryService.saveFile`
+   * 的串行写入通道（原子写 + 可编辑白名单 + 冲突回报）。写入后回读确认 ——
+   * saveFile 只 post 结果、不抛错，回读让冲突如实落进报告的 `conflict` 状态，
+   * 而不是谎报 applied。
+   */
+  private async writeMaintenanceFile(file: string, content: string, expectedHash: string): Promise<void> {
+    const current = await readIfExists(file);
+    const currentHash = current === null ? null : sha256(current);
+    if (currentHash !== expectedHash) throw new MaintenanceConflictError();
+    await this.memory.saveFile({ path: file, content, expectedHash });
+    const after = await readIfExists(file);
+    if (after !== content) throw new MaintenanceConflictError();
+  }
+
+  /** 记忆整理日志：接 LogOutputChannel（level 映射到通道的 info/warn/error）。 */
+  private logMaintenance(level: MaintenanceLogLevel, message: string, detail?: unknown): void {
+    if (level === "error") this.log.error(message, detail ?? "");
+    else if (level === "warn") this.log.warn(message, detail ?? "");
+    else this.log.info(message, detail ?? "");
+  }
+
+  /**
+   * 当前记忆 token 总量（各记忆文件正文的估算值）。调度器只在配置了总量预算时
+   * 使用它；默认按周期触发，所以这里保持「读得到就报，读不到按 0」。
+   *
+   * 计量要走一次 discovery 目录扫描，而 tick 每次空闲都会问一次 —— 用 5 分钟
+   * 的短缓存把扫描频率压住（记忆文件的变化量级远小于 5 分钟）。
+   */
+  private async measureMaintenanceTokens(): Promise<number> {
+    const deps = this.maintenanceDeps;
+    if (!deps) return 0;
+    const cached = this.maintenanceTokensCache;
+    if (cached && Date.now() - cached.at < 5 * 60_000) return cached.total;
+    try {
+      const files = await deps.listFiles();
+      let total = 0;
+      for (const file of files) {
+        const content = await readIfExists(file.path);
+        if (content !== null) total += estimateMarkdownTokens(content);
+      }
+      this.maintenanceTokensCache = { at: Date.now(), total };
+      return total;
+    } catch (error) {
+      this.log.warn(`记忆整理：token 计量失败：${errorMessage(error)}`);
+      return 0;
+    }
+  }
+
+  /**
+   * 手动触发一轮整理（命令面板 `iflow.curateMemory`）。绕过 enabled / 空闲 / 到期
+   * 判定，但仍遵守「已在运行」与跨窗口锁；完成后用 toast 汇报应用/跳过/冲突条数
+   * 与节省的 token。report 策略下 writeFile 是空操作，汇报为「预计应用」。
+   */
+  async curateMemoryNow(): Promise<void> {
+    const scheduler = this.maintenance;
+    if (!scheduler) return;
+    const dryRun = this.maintenanceStrategy() === "report";
+    const report = await scheduler.runNow("manual");
+    if (!report) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("记忆整理未能开始：可能已在运行，或另一个窗口正在整理。"),
+      );
+      return;
+    }
+    let applied = 0;
+    let skipped = 0;
+    let conflict = 0;
+    let failed = 0;
+    for (const file of report.files) {
+      if (file.status === "applied") applied++;
+      else if (file.status === "skipped") skipped++;
+      else if (file.status === "conflict") conflict++;
+      else failed++;
+    }
+    const message = dryRun
+      ? vscode.l10n.t(
+          "记忆整理（仅报告）：预计应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 预计节省 {3} tokens",
+          applied,
+          skipped,
+          conflict,
+          report.savedTokens,
+        )
+      : vscode.l10n.t(
+          "记忆整理完成：应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 节省 {3} tokens",
+          applied,
+          skipped,
+          conflict,
+          report.savedTokens,
+        );
+    this.store.sendToast(failed > 0 ? "warning" : "info", message);
+    // apply 之后刷新记忆卡片（saveFile 已逐条 post memorySaved，这里再拉一次全量状态）。
+    if (!dryRun) void this.memory.sendState();
+  }
+
   /** Mirror every extension setting the settings panel renders. VSCode
    * configuration stays authoritative; a direct edit in VSCode re-pushes via
    * the onDidChangeConfiguration listener. */
@@ -3177,6 +3622,22 @@ export class ChatPanel implements vscode.Disposable {
         MEMORY_EXTRACT_TIMEOUT_MS / 1000,
         600,
       ),
+      memoryMaintenanceEnabled: config.get<boolean>("memoryMaintenanceEnabled", false),
+      memoryMaintenanceIntervalDays: this.maintenanceConfigNumber("memoryMaintenanceIntervalDays", 7, 1, 90),
+      memoryMaintenanceIdleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
+      memoryMaintenanceGlobalTokenBudget: this.maintenanceConfigNumber(
+        "memoryMaintenanceGlobalTokenBudget",
+        DEFAULT_GLOBAL_BUDGET_TOKENS,
+        500,
+        50_000,
+      ),
+      memoryMaintenanceProjectTokenBudget: this.maintenanceConfigNumber(
+        "memoryMaintenanceProjectTokenBudget",
+        DEFAULT_PROJECT_BUDGET_TOKENS,
+        500,
+        50_000,
+      ),
+      memoryMaintenanceStrategy: this.maintenanceStrategy(),
       nextStepTimeoutSeconds: this.timeoutSeconds("nextStepTimeoutSeconds", NEXT_STEP_TIMEOUT_MS / 1000, 300),
       compressTimeoutSeconds: this.timeoutSeconds("compressTimeoutSeconds", 0, 600),
       autoCompressThresholdPercent: Math.round(this.autoCompressThresholdRatio() * 100),
