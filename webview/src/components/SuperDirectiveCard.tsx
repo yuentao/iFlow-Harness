@@ -53,7 +53,7 @@ import {
   type SuperDirectiveTask,
 } from "../../../shared/super-agent";
 import type { ToolBlock } from "../../../shared/messages";
-import { parseSuperToolCall } from "../../../shared/super-tool-call";
+import { parseSuperToolCall, resolveSuperToolCallKind } from "../../../shared/super-tool-call";
 import { DELEGATION_ORIGIN_ATTR } from "./SuperDelegationFly";
 import { Button, Chip, ICON_INLINE, IconButton } from "./ui";
 import { Markdown, copyText } from "./Markdown";
@@ -529,7 +529,8 @@ interface SuperToolTaskView {
 type SuperToolCallParse =
   | { ok: true; tasks: SuperToolTaskView[]; error: string | null }
   | { ok: false; reason: "pending" }
-  | { ok: false; reason: "invalid"; detail: string };
+  | { ok: false; reason: "invalid"; detail: string }
+  | { ok: false; reason: "conflict" };
 
 /** 折叠态任务书预览预算：与围栏任务卡同源，按块截断而不是切半句。 */
 const SUPER_TOOL_PREVIEW_CHARS = 200;
@@ -585,6 +586,13 @@ function superToolCallFailureDetail(block: ToolBlock): string {
  * 混合载荷（部分条目合法）时宿主同时给 tasks 与 error，卡片两者都呈现。
  */
 function parseSuperToolCallPayload(block: ToolBlock): SuperToolCallParse {
+  // 载荷同时带 tasks 与 actions：宿主 `parseSuperToolCall` 判为 conflict 并
+  // 整份拒绝（一条都不执行，见 shared/super-tool-call.ts）。渲染层必须先按
+  // 同一份纯函数识别出来 —— 否则下面回解 input 会成功拿到 tasks，把一次被
+  // 宿主拒绝的调用画成「已派发」。
+  if (resolveSuperToolCallKind("dispatch", block.input) === "conflict") {
+    return { ok: false, reason: "conflict" };
+  }
   const hostError = block.superTasksError?.trim() || null;
   const host = block.superTasks;
   if (host && host.length > 0) {
@@ -928,11 +936,14 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
   );
   const tasks = parsed.ok ? parsed.tasks : [];
   // 成功分支里也可能带 error（混合载荷：坏条目被丢弃、合法条目照常派发）。
+  // conflict 是宿主判过的结构错误（整份拒绝），同样按「未派发」呈现。
   const dispatchError = parsed.ok
     ? parsed.error
     : parsed.reason === "invalid"
       ? parsed.detail
-      : null;
+      : parsed.reason === "conflict"
+        ? t("参数冲突")
+        : null;
   return (
     <DirectiveSurface
       className="my-2"
@@ -974,6 +985,16 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
             </div>
           )}
         </>
+      ) : parsed.reason === "conflict" ? (
+        // 宿主判为参数冲突：tasks 与 actions 互斥，整份载荷被拒绝，一条都没
+        // 派发。卡面只说清结构问题与正确做法，不摊开原始 JSON。
+        <div className="px-3 py-2">
+          <DirectiveFailureBanner
+            testId="super-tool-call-conflict"
+            text={t("tasks 与 actions 不能同时传入，请拆成两次调用")}
+            rawInput={block.input || undefined}
+          />
+        </div>
       ) : parsed.reason === "pending" ? (
         <div className="flex items-center gap-2 px-3 py-2 text-ui-caption text-muted-foreground">
           <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />

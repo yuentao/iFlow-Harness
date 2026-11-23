@@ -768,6 +768,45 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.querySelector('[data-testid="super-tool-call-partial"]')).toBeTruthy();
   });
 
+  it("tasks 与 actions 并存的冲突载荷渲染成错误态：明确未派发、不画任务列表", () => {
+    const conflictInput = JSON.stringify({
+      tasks: [{ title: "只读审查", task: "只读审查 src/panel/panel.ts" }],
+      actions: [{ action: "retry", sessionId: "super-a1" }],
+    });
+    renderBlock(toolBlock({ input: conflictInput, status: "completed" }));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.classList.contains("super-directive-card")).toBe(true);
+    expect(card!.querySelector('[data-testid="super-tool-call-conflict"]')).toBeTruthy();
+    expect(card!.textContent).toContain("tasks 与 actions 不能同时传入，请拆成两次调用");
+    // 宿主整份拒绝：工具帧 completed 也不能挂绿色「已完成」，更不能画任务列表。
+    expect(card!.textContent).toContain("未派发");
+    expect(card!.textContent).not.toContain("已完成");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(0);
+    // 冲突载荷既不是派发也不是管理动作：操作卡 / 通用工具卡都不该出现。
+    expect(container.querySelector('[data-testid="super-actions-tool-call-card"]')).toBeNull();
+    expect(container.querySelector(".tool-card")).toBeNull();
+    // 原始 JSON 仍不摊到卡面。
+    expect(card!.querySelector("pre")).toBeNull();
+  });
+
+  it("input 被截断时仍靠宿主写回的参数冲突诊断诚实降级", () => {
+    renderBlock(
+      toolBlock({
+        // 展示串被截断 → 回解不出结构；宿主诊断是真源。
+        input: '{"tasks":[{"title":"半截',
+        superTasksError: "参数冲突：tasks 与 actions 不能同时传入，请拆成两次调用",
+        status: "completed",
+      }),
+    );
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("参数冲突：tasks 与 actions 不能同时传入");
+    expect(card!.textContent).toContain("未派发");
+    expect(card!.textContent).not.toContain("已完成");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(0);
+  });
+
   it("宿主解析出的 superTasks 直接渲染成任务列表（input 有损也不怕）", () => {
     renderBlock(
       toolBlock({

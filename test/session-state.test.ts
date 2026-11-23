@@ -3414,6 +3414,33 @@ describe("委派工具调用的任务结构（superTasks）", () => {
     ]);
   });
 
+  it("tasks 与 actions 并存（conflict）：不产生 superTasks，块带参数冲突标记", () => {
+    // 派发与动作互斥：宿主 parseSuperToolCall 把这种载荷判为 conflict 并整份
+    // 拒绝（一条都不执行）。状态层不能只解析 tasks 半边，否则转录卡会把一次
+    // 被宿主拒绝的调用画成「已派发」。
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-super-conflict",
+        toolName: "super-agent",
+        title: "Delegate 1 task",
+        status: "pending",
+        args: {
+          tasks: [{ title: "只读审查", task: "只读审查 src/panel/panel.ts" }],
+          actions: [{ action: "retry", sessionId: "super-a1" }],
+        },
+      }),
+    );
+    const block = state.blocks[0];
+    expect(block?.kind).toBe("tool");
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toBeUndefined();
+    expect(block.superTasksError).toContain("参数冲突");
+    expect(block.superTasksError).toContain("tasks 与 actions");
+  });
+
   it("缺 title 的载荷：不产生 superTasks，给出 title 必填的诊断", () => {
     const state = initialSessionState();
     applySessionUpdate(
