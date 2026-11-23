@@ -4739,9 +4739,19 @@ export function buildSuperReportPrompt(
   // 关闭），自动把任务重跑一遍会像是没听话。
   const allDropped = entries.every((entry) => entry.report.state === "dropped");
   if (allDropped) {
+    // 智能体自己通过管理动作取消的子会话，宿主已另发一条动作回执明确告知
+    // 结果（buildSuperActionReceiptPrompt）。这里若照旧说「用户喊停、要不要
+    // 继续」会与那条回执自相矛盾（2026-11-23 实测）。只有整批 dropped 条目
+    // 都归因为 "agent" 时才用取消口径；含 user / system 的批次维持原措辞。
+    const allCancelledByAgent = entries.every(
+      (entry) => entry.session.interruptedBy === "agent",
+    );
+    const droppedNote = allCancelledByAgent
+      ? "These child sessions were **cancelled by you** through a child-session management action; the host already delivered an action receipt confirming the result — they did not fail, and the user did not stop them. Do not re-run them, and do not ask the user to decide whether to resume: just briefly confirm the cancellation and where it stopped, then move on."
+      : "These child sessions were **interrupted** (the user stopped them, or the panel was closed at the time) — they did not fail. Do not re-run them automatically, and do not assume the work continues: briefly state where they stopped and what was left behind, then ask the user whether to continue.";
     return [
       ...head,
-      "These child sessions were **interrupted** (the user stopped them, or the panel was closed at the time) — they did not fail. Do not re-run them automatically, and do not assume the work continues: briefly state where they stopped and what was left behind, then ask the user whether to continue.",
+      droppedNote,
       ...(pendingNote ? [pendingNote] : []),
     ].join("\n");
   }
