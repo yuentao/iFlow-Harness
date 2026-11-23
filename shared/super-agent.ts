@@ -4894,7 +4894,11 @@ const SUPER_ACTION_LABEL_EN: Record<SuperActionReceipt["action"], string> = {
  * **正文是英文**：与子会话汇报提示词同款约定（子会话跑的是同一份英文系统提示）。
  * 协议标记（`[子会话动作回执]`）保持原样：宿主与模型约定用它识别「这是回执」。
  */
-export function buildSuperActionReceiptPrompt(receipts: readonly SuperActionReceipt[]): string {
+export function buildSuperActionReceiptPrompt(
+  receipts: readonly SuperActionReceipt[],
+  /** 已并入本回执的 agent-cancel dropped 汇报（方案 B：不再另起汇报轮）。 */
+  mergedReports: readonly SuperReportEntry[] = [],
+): string {
   if (receipts.length === 0) return "";
   const lines = receipts.map((receipt) => {
     const outcome =
@@ -4908,10 +4912,24 @@ export function buildSuperActionReceiptPrompt(receipts: readonly SuperActionRece
     const detail = receipt.detail ? ` (${receipt.detail})` : "";
     return `- ${SUPER_ACTION_LABEL_EN[receipt.action]} child session #${receipt.sessionId}: ${outcome}${detail}`;
   });
+  const mergedLines = mergedReports.map(({ session, report }) => {
+    const summary = report.summary.trim() || (session.summary ?? "").trim() || (session.error ?? "").trim();
+    const where = summary ? ` — where it stopped: ${summary}` : "";
+    return `- Child session #${session.id} "${session.title}" ${superReportLabel(report.state)} (cancelled by you)${where}`;
+  });
   return [
     "[子会话动作回执]",
     "The host executed the child-session management actions from your previous message. This is not a user message, and it is not something you said earlier.",
     ...lines,
+    ...(mergedLines.length > 0
+      ? [
+          "",
+          "[Cancelled child-session state — merged into this receipt]",
+          "The final states below are delivered together with this action receipt. The host will NOT send a separate status-report turn for these cancellations — this is the ONLY host turn for them.",
+          ...mergedLines,
+          "Acknowledge the applied cancellation and where it stopped together, briefly, then move on. Do not re-run these child sessions, do not ask the user whether to resume, and do not answer this state in a later separate turn.",
+        ]
+      : []),
     "",
     "Actions reported as applied — including idempotent repeats of an already-finished child session — must NOT be sent again: repeating them cannot change the outcome and only wastes a turn.",
     "For an action that was NOT applied, check the board for the current child-session ids and send a corrected action instead of repeating the same one.",

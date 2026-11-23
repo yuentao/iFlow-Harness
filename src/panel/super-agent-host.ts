@@ -134,6 +134,32 @@ type PendingSuperReportPrompt = {
   reportKeys?: string[];
 };
 
+/**
+ * 一条待投递的动作回执（方案 B）：结构与汇报项兼容，因而可直接复用
+ * delivered-unacked 账本。带 `reportKeys` 时说明它已并入同一次 agent cancel
+ * 的 dropped 上报 —— 这轮同时是汇报轮（reportTurn / finalReport）。
+ */
+type PendingSuperActionReceipt = PendingSuperReportPrompt & {
+  /** 本条回执覆盖的 agent cancel 目标子会话 id。 */
+  cancelSessionIds?: string[];
+};
+
+/** agent cancel 的 dropped 汇报：暂存到同一 cancel 的动作回执入队时合并。 */
+type HeldAgentCancelReport = {
+  item: PendingSuperReportPrompt;
+  entries: SuperReportEntry[];
+  sessionIds: string[];
+  at: number;
+};
+
+/** delivered-unacked 账本条目：重投目标是汇报队列还是回执队列。 */
+type UnackedSuperDelivery = {
+  kind: "report" | "receipt";
+  item: PendingSuperReportPrompt;
+  attempts: number;
+  at: number;
+};
+
 /** Structural mirror of the panel's SuperMergeDispatchResult (no panel import). */
 export type SuperMergeDispatchResult =
   | { dispatched: true; mergeSessionId: string }
@@ -234,10 +260,19 @@ export class SuperAgentHost {
    * 这些报告的缓冲键刻意保持 in-flight（不 confirm），条目重新入投递队列，由
    * 心跳重投 —— 回合中途失败 / Stop 时汇报不会「投出去即丢」。
    */
-  readonly reportDeliveryUnacked = new Map<string, { item: PendingSuperReportPrompt; attempts: number; at: number }>();
+  readonly reportDeliveryUnacked = new Map<string, UnackedSuperDelivery>();
   /** 隐藏汇报回合最多重投几次，之后确认出缓冲、靠 QQ 兜底缓存送真实结论。 */
   maxReportDeliveryAttempts = 3;
-  pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }> = [];
+  /**
+   * 方案 B 关联登记簿：`runSuperActions` 里由主 Agent 主动 cancel 的目标 id。
+   * `manager.cancel(id,"agent")` 会同步触发 notifyReport → settleSuperReportsIfReady，
+   * 借此把「本次 cancel 的 dropped 上报」暂存下来，等同一批动作回执入队时合并。
+   * QQ 指令侧的 cancel（qq-host）不登记，照旧走独立汇报轮（它没有动作回执）。
+   */
+  private readonly agentCancelWithReceiptIds = new Set<string>();
+  /** 等待并入动作回执的 agent-cancel 汇报；绝不静默丢弃（回执入队 / 换会话时回退）。 */
+  private readonly pendingAgentCancelMerges: HeldAgentCancelReport[] = [];
+  pendingSuperActionReceipts: PendingSuperActionReceipt[] = [];
   superReportRunning = false;
   static readonly SUPER_AUTO_TURN_PRIORITY = [
     "reports",
@@ -1543,6 +1578,11 @@ export class SuperAgentHost {
     this.superActionPendingBody = "";
     this.superActionZeroWarned = false;
     this.superActionReceiptLast = "";
+    // 方案 B：换会话时同批 cancel 回执已不会再与本会话关联，暂存汇报必须
+    // 回退为普通汇报轮（按归属主会话过滤投递），不能留在 in-flight 里烂掉。
+    for (const held of this.pendingAgentCancelMerges) this.pendingSuperReportPrompts.push(held.item);
+    this.pendingAgentCancelMerges.length = 0;
+    this.agentCancelWithReceiptIds.clear();
   }
 
 
@@ -2105,6 +2145,10 @@ export class SuperAgentHost {
             break;
           }
           case "cancel": {
+            // 方案 B 关联点：这条 cancel 一定会产生动作回执，先登记目标 id。
+            // manager.cancel 内部同步 notifyReport → settleSuperReportsIfReady，
+            // 它会据此把 dropped 上报暂存、稍后并入本回执，而不是另起一轮。
+            this.agentCancelWithReceiptIds.add(action.sessionId);
             const outcome = await manager.cancel(action.sessionId, "agent");
             receipt = {
               action: "cancel",
@@ -2236,12 +2280,55 @@ export class SuperAgentHost {
    */
   queueSuperActionReceipt(receipts: readonly SuperActionReceipt[]): void {
     if (receipts.length === 0 || this.disposed) return;
-    const text = buildSuperActionReceiptPrompt(receipts);
-    if (!text) return;
+    const cancelIds = new Set(
+      receipts.filter((receipt) => receipt.action === "cancel").map((receipt) => receipt.sessionId),
+    );
+    // 方案 B：把同一批 agent cancel 暂存的 dropped 汇报并入这条回执 —— 主会话
+    // 只收到一轮 hidden prompt（回执文本里同时说明取消结果与停在哪里）。
+    const merged = this.pendingAgentCancelMerges.filter((held) =>
+      held.sessionIds.some((id) => cancelIds.has(id)),
+    );
+    const text = buildSuperActionReceiptPrompt(
+      receipts,
+      merged.flatMap((held) => held.entries),
+    );
+    // 无论合并命中与否都收口登记簿：命中的已消费，没命中的由 leftover 回退
+    // 为普通汇报轮 —— 暂存汇报绝不永久卡在缓冲的 in-flight 标记上。
+    const leftovers = this.pendingAgentCancelMerges.filter((held) => !merged.includes(held));
+    this.pendingAgentCancelMerges.length = 0;
+    this.agentCancelWithReceiptIds.clear();
+    const flushLeftovers = (): void => {
+      for (const held of leftovers) this.pendingSuperReportPrompts.push(held.item);
+      if (leftovers.length > 0) {
+        this.ensureSuperHeartbeat();
+        void this.drainSuperAutoTurns();
+      }
+    };
+    if (!text) {
+      flushLeftovers();
+      return;
+    }
     // 同一份回执不重复排队（否则主会话会反复收到一模一样的「已生效」）。
-    if (text === this.superActionReceiptLast) return;
+    // 去重命中时把暂存汇报一并回退，杜绝「回执被吞掉、汇报也没了」。
+    if (text === this.superActionReceiptLast) {
+      flushLeftovers();
+      return;
+    }
     this.superActionReceiptLast = text;
-    this.pendingSuperActionReceipts.push({ mainSessionId: this.currentMainSessionId(), text });
+    const reportKeys = merged.flatMap((held) => held.item.reportKeys ?? []);
+    const fallbackText = merged
+      .map((held) => held.item.fallbackText)
+      .filter((value): value is string => !!value && value.length > 0)
+      .join("\n");
+    const final = merged.some((held) => held.item.final === true);
+    this.pendingSuperActionReceipts.push({
+      mainSessionId: this.currentMainSessionId(),
+      text,
+      ...(reportKeys.length > 0
+        ? { reportKeys, fallbackText, final, cancelSessionIds: [...cancelIds] }
+        : {}),
+    });
+    flushLeftovers();
     this.ensureSuperHeartbeat();
     void this.drainSuperAutoTurns();
   }
@@ -2265,6 +2352,26 @@ export class SuperAgentHost {
       return;
     }
     const item = this.pendingSuperActionReceipts[index]!;
+    // 方案 B：带 reportKeys 的回执同时是一条汇报轮 —— 它承载了同一次 cancel
+    // 的 dropped 上报，因此必须保留汇报轮的 finalReport / QQ 兜底语义。
+    const hasMergedReport = (item.reportKeys?.length ?? 0) > 0;
+    let reportAnchorId: string | undefined;
+    let reportAnchorLen = 0;
+    let reportTextBefore = 0;
+    if (hasMergedReport) {
+      const visibleBefore = this.store.getState().blocks.filter(
+        (block) => block.kind === "text" && !block.system,
+      );
+      const anchor = visibleBefore[visibleBefore.length - 1];
+      reportAnchorId = anchor?.id;
+      reportAnchorLen = anchor?.kind === "text" ? anchor.text.length : 0;
+      reportTextBefore = visibleBefore.length;
+      const cleanFallback = sanitizeQqReportFallback(item.fallbackText);
+      if (cleanFallback && owner && this.qqHost.qqFinalRescueOwnerPending(owner)) {
+        this.qqHost.qqFinalRescueText.set(owner, cleanFallback);
+        this.qqHost.qqReportFallbackText.set(owner, cleanFallback);
+      }
+    }
     this.superReportRunning = true;
     try {
       this.clearSuperWaitHeartbeat();
@@ -2272,6 +2379,16 @@ export class SuperAgentHost {
       const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
         delegateOnBusy: false,
         hidden: true,
+        ...(hasMergedReport
+          ? {
+              // 与汇报轮同款：不重复注入看板摘要；finalReport 让 QQ 最终
+              // 答复仍能由这一轮（而不是被合并掉的那条汇报轮）投递。
+              internal: true,
+              reportTurn: true,
+              finalReport: item.final === true,
+              finalFallbackText: item.fallbackText,
+            }
+          : {}),
       });
       // 回合没跑起来（主会话被别的回合占着）：这条回执**留在队列里**，等空闲
       // 时重投 —— 回执丢了主会话就会重复发同一个动作。
@@ -2282,6 +2399,29 @@ export class SuperAgentHost {
       // 宁可找不到（已被删除会话清掉）也不误删别的会话刚投出的回执。
       const pos = this.pendingSuperActionReceipts.indexOf(item);
       if (pos !== -1) this.pendingSuperActionReceipts.splice(pos, 1);
+      if (hasMergedReport) {
+        const reportTurnText = this.captureQqReportTurnText(
+          reportAnchorId,
+          reportTextBefore,
+          reportAnchorLen,
+        );
+        // 与 drainSuperReports 同一口径：只有真正 settle（没被 Stop 压住、
+        // 没落在 error）才 confirm 上报键；否则转入 delivered-unacked，由心跳
+        // 把这条**回执**重投 —— 上报绝不因为回执轮被打断而丢失。
+        const genuinelySettled =
+          this.store.getState().status !== "error" && !this.autoTurnsHeld();
+        if (genuinelySettled) {
+          this.pendingSuperReports.get(item.mainSessionId ?? "")?.confirm(item.reportKeys ?? []);
+        } else {
+          this.markReportDelivered(item, reportTurnText, "receipt");
+        }
+        // R2 迟到补发缓存：与汇报轮同源，只缓存本轮新增正文。
+        if (reportTurnText && owner && this.qqHost.qqFinalRescueOwnerPending(owner)) {
+          this.qqHost.qqFinalRescueText.set(owner, reportTurnText);
+        }
+        // 与原 allDropped 汇报一致（suppressQqProgress:true）：这类纯 host-state
+        // 确认不作为 QQ 中间正文转发，避免一次 cancel 在 QQ 上回两次。
+      }
     } catch (error) {
       this.log.warn(`super agent action receipt delivery failed: ${errorMessage(error)}`);
     } finally {
@@ -2610,7 +2750,7 @@ export class SuperAgentHost {
     // 宿主注入的纯 host-state，不是新结论 —— 一次取消会连带状态上报 + 动作
     // 回执两条通知，各自的 assistant 转述若都转发到 QQ 就是重复投递。
     const allDropped = batch.length > 0 && batch.every((entry) => entry.report.state === "dropped");
-    this.pendingSuperReportPrompts.push({
+    const reportItem: PendingSuperReportPrompt = {
       mainSessionId: reportOwner,
       text,
       // 只有「所有子会话都已结束」的汇总轮才是 final：迟到补发（rescueDue）
@@ -2619,7 +2759,31 @@ export class SuperAgentHost {
       fallbackText,
       suppressQqProgress: allDropped,
       reportKeys,
-    });
+    };
+    // 方案 B：同一次 agent cancel 的 dropped 上报不单独成为一轮 —— 主会话此前
+    // 已收到动作回执，再收一条状态上报就会对同一 cancel 回答两次（用户实测）。
+    // 只拦「由 runSuperActions 产生（必带动作回执）」的整批 agent 取消；
+    // QQ 指令侧 cancel（没有动作回执）与非 agent 取消照旧走汇报轮。
+    const mergeIntoReceipt =
+      allDropped &&
+      batch.every(
+        (entry) =>
+          entry.session.interruptedBy === "agent" &&
+          this.agentCancelWithReceiptIds.has(entry.session.id),
+      );
+    if (mergeIntoReceipt) {
+      this.pendingAgentCancelMerges.push({
+        item: reportItem,
+        entries: batch,
+        sessionIds: batch.map((entry) => entry.session.id),
+        at: Date.now(),
+      });
+      this.log.info(
+        `super agent: held ${batch.length} agent-cancel report(s) for merging into the action receipt`,
+      );
+    } else {
+      this.pendingSuperReportPrompts.push(reportItem);
+    }
     this.ensureSuperHeartbeat();
     // 用户按过停止时补一次常驻「继续处理」提示：此后才结束的子会话此前不会
     // 触发 announceDeferredAutoTurns（那时待处理数还是 0），于是恢复只剩「下
@@ -2814,7 +2978,11 @@ export class SuperAgentHost {
    * delivered-unacked 账本 —— 缓冲键保持 in-flight（不 confirm），汇报正文与 QQ
    * 兜底缓存共用一份。回合中途 Stop / 失败时报告不会「投出去即丢」。
    */
-  markReportDelivered(item: PendingSuperReportPrompt, _reportTurnText: string): void {
+  markReportDelivered(
+    item: PendingSuperReportPrompt,
+    _reportTurnText: string,
+    kind: "report" | "receipt" = "report",
+  ): void {
     const keys = item.reportKeys;
     if (!keys || keys.length === 0) {
       // 无去重键（测试桩 / 老调用）：没有可追踪的缓冲项，维持旧语义直接了结。
@@ -2823,6 +2991,7 @@ export class SuperAgentHost {
     const key = keys.join(",");
     const prev = this.reportDeliveryUnacked.get(key);
     this.reportDeliveryUnacked.set(key, {
+      kind,
       item,
       attempts: (prev?.attempts ?? 0) + 1,
       at: Date.now(),
@@ -2884,7 +3053,13 @@ export class SuperAgentHost {
       // in-flight 标记就是这件事的幂等键（键 = 子会话 id : attempt，见
       // superReportKey）；真正投成功时由 confirm 一次性清掉。
       this.reportDeliveryUnacked.delete(key);
-      this.pendingSuperReportPrompts.push(rec.item);
+      // 方案 B：合并了上报的回执必须回到回执队列重投（文本里已含 dropped
+      // 状态）；若错放回汇报队列，Stop 后再投就又变成两条独立消息。
+      if (rec.kind === "receipt") {
+        this.pendingSuperActionReceipts.push(rec.item as PendingSuperActionReceipt);
+      } else {
+        this.pendingSuperReportPrompts.push(rec.item);
+      }
       requeued = true;
     }
     if (requeued) {
@@ -3079,6 +3254,9 @@ export class SuperAgentHost {
     // 待投递的动作回执也算「还有活儿」：心跳停了回执就永远投不出去，主会话
     // 于是不知道自己刚发的动作生效没有（→ 重复发同一个动作）。
     if (this.pendingSuperActionReceipts.length > 0) return true;
+    // 暂存的 agent-cancel 上报在等同批回执入队：缓冲里虽是 in-flight，也必须
+    // 续命到回执把它 confirm（或被 Stop 打断后走 unacked 重投）。
+    if (this.pendingAgentCancelMerges.length > 0) return true;
     // 待补投的「被改道用户消息」同样是欠着主会话的一轮：心跳停了它就永远
     // 投不出去，那条消息又会像修复前一样在主会话里丢失。
     if (this.pendingDelegatedUserTurns.length > 0) return true;
