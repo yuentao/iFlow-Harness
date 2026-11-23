@@ -3617,8 +3617,10 @@ export class ChatPanel implements vscode.Disposable {
    * L2 语义合并实现：把托管事实分批喂给模型，解析后把建议映射回**原始**事实文本。
    *
    * 纪律：
-   *  - 分批按 `MAX_MERGE_FACTS`，逐批「拼提示词 → 调模型 → 解析」，任一批失败
-   *    （网关无响应）只丢这一批，不影响其它批；
+   *  - 分批按 `MAX_MERGE_FACTS`，逐批「拼提示词 → 调模型 → 解析」；每批单独
+   *    try/catch：任一批抛错只丢这一批（warn 记录批次序号与错误摘要）并继续
+   *    后续批次，空回包同样跳过该批；全部批次失败时返回空建议、不抛错，让维护层
+   *    正常降级为纯 L1；
    *  - 发送前用 `stripFileMentions` 去掉 `@` 标记（陷阱 #26：`@path` 会让思考模型
    *    陷入「要不要先读文件」的推理死循环）；解析回来后把 keep/absorb 反查回原始
    *    文本，`suggestionsToActions` 才能按文本定位行号；
@@ -3641,40 +3643,60 @@ export class ChatPanel implements vscode.Disposable {
       return { suggestions, rejected };
     }
 
-    for (const chunk of chunkFacts(facts, MAX_MERGE_FACTS)) {
+    const batches = chunkFacts(facts, MAX_MERGE_FACTS);
+    // 失败批次计数：返回结构（MaintenanceDeps.suggestMerges）只有
+    // suggestions/rejected 两个字段，加字段会外溢到 src/memory/ 的类型契约，
+    // 所以失败只进日志（逐批一条 + 末尾一条汇总）。
+    let failedBatches = 0;
+    for (let batch = 0; batch < batches.length; batch++) {
       if (this.disposed) break;
-      // 去掉 @ 标记后发送；stripped → original 反查表（首个映射优先）。
-      const stripped = chunk.map((fact) => stripFileMentions(fact));
-      const originalByStripped = new Map<string, string>();
-      for (let i = 0; i < stripped.length; i++) {
-        const key = (stripped[i] ?? "").trim();
-        const original = chunk[i] ?? "";
-        if (key && !originalByStripped.has(key)) originalByStripped.set(key, original);
-      }
-      const prompt = buildMergePrompt(template, stripped);
-      const raw = await this.completeInternalPrompt(
-        prompt,
-        MEMORY_CURATE_TIMEOUT_MS,
-        MEMORY_CURATE_IDLE_MS,
-      );
-      if (!raw) continue; // 该批无回包：丢弃，继续下一批
-      const parsed = parseMergeResponse(raw, stripped);
-      rejected.push(...parsed.rejected);
-      for (const suggestion of parsed.suggestions) {
-        const keep = originalByStripped.get(suggestion.keep.trim()) ?? suggestion.keep;
-        if (seenKeep.has(keep)) continue;
-        const absorb = suggestion.absorb.map(
-          (item) => originalByStripped.get(item.trim()) ?? item,
-        );
-        // 反查后可能出现 keep==absorb 或重复项（两个不同 stripped 文本映射到同一
-        // 原文），这类建议已不可安全执行，丢弃。
-        if (absorb.some((item) => item === keep) || new Set(absorb).size !== absorb.length) {
-          rejected.push({ suggestion, reason: "反查原始事实后出现自吸收或重复项" });
-          continue;
+      const chunk = batches[batch] ?? [];
+      const batchNo = batch + 1;
+      try {
+        // 去掉 @ 标记后发送；stripped → original 反查表（首个映射优先）。
+        const stripped = chunk.map((fact) => stripFileMentions(fact));
+        const originalByStripped = new Map<string, string>();
+        for (let i = 0; i < stripped.length; i++) {
+          const key = (stripped[i] ?? "").trim();
+          const original = chunk[i] ?? "";
+          if (key && !originalByStripped.has(key)) originalByStripped.set(key, original);
         }
-        seenKeep.add(keep);
-        suggestions.push({ keep, absorb, merged: suggestion.merged, reason: suggestion.reason });
+        const prompt = buildMergePrompt(template, stripped);
+        const raw = await this.completeInternalPrompt(
+          prompt,
+          MEMORY_CURATE_TIMEOUT_MS,
+          MEMORY_CURATE_IDLE_MS,
+        );
+        if (!raw) continue; // 该批无回包：丢弃，继续下一批
+        const parsed = parseMergeResponse(raw, stripped);
+        rejected.push(...parsed.rejected);
+        for (const suggestion of parsed.suggestions) {
+          const keep = originalByStripped.get(suggestion.keep.trim()) ?? suggestion.keep;
+          if (seenKeep.has(keep)) continue;
+          const absorb = suggestion.absorb.map(
+            (item) => originalByStripped.get(item.trim()) ?? item,
+          );
+          // 反查后可能出现 keep==absorb 或重复项（两个不同 stripped 文本映射到同一
+          // 原文），这类建议已不可安全执行，丢弃。
+          if (absorb.some((item) => item === keep) || new Set(absorb).size !== absorb.length) {
+            rejected.push({ suggestion, reason: "反查原始事实后出现自吸收或重复项" });
+            continue;
+          }
+          seenKeep.add(keep);
+          suggestions.push({ keep, absorb, merged: suggestion.merged, reason: suggestion.reason });
+        }
+      } catch (error) {
+        // 单批瞬时故障（未来底层若改为抛错）只丢这一批，不中断整体。
+        failedBatches += 1;
+        this.log.warn(
+          `L2 语义合并：第 ${batchNo}/${batches.length} 批调用失败，跳过该批：${errorMessage(error)}`,
+        );
       }
+    }
+    if (failedBatches > 0) {
+      this.log.warn(
+        `L2 语义合并：${failedBatches}/${batches.length} 批调用失败，仅保留成功批次的建议`,
+      );
     }
     return { suggestions, rejected };
   }
