@@ -1715,6 +1715,25 @@ describe("super agent · 动作回执", () => {
   it("没有回执时不产出提示词（不发空回合）", () => {
     expect(buildSuperActionReceiptPrompt([])).toBe("");
   });
+
+  it("方案 B：并入的 agent-cancel 上报写明是同一轮，且带上停止位置", () => {
+    const text = buildSuperActionReceiptPrompt(
+      [{ action: "cancel", sessionId: "super-1", ok: true, reason: "applied" }],
+      [
+        {
+          session: session({ id: "super-1", status: "cancelled", interruptedBy: "agent" }),
+          report: { state: "dropped", summary: "已跑到一半，停在登录跳转", at: 2000 },
+        },
+      ],
+    );
+    expect(text).toContain("[子会话动作回执]");
+    expect(text).toContain("merged into this receipt");
+    expect(text).toContain("super-1");
+    expect(text).toContain("已跑到一半，停在登录跳转");
+    // 关键：明确要求主会话把取消与状态当成同一轮，不再对这个 cancel 回答第二次。
+    expect(text).toContain("ONLY host turn");
+    expect(text).toContain("do not answer this state in a later separate turn");
+  });
 });
 
 describe("super agent · 让智能体合并的请求", () => {
