@@ -4954,7 +4954,7 @@ export function classifySuperFailureKind(error: string): SuperFailureKind {
   if (/blocked|destructive|guard|护栏|依赖.*失败|上游/.test(text)) return "blocked";
   if (/interrupt|cancel|abort|中断|已停止|stopped by|user stop/.test(text)) return "interrupted";
   if (
-    /退出|exit|crash|崩溃|timeout|超时|无响应|限流|rate.?limit|econn|network|网络瞬断|watchdog|看门狗/.test(
+    /退出|exit|crash|崩溃|timeout|timed?[\s-]+out|超时|无响应|限流|rate.?limit|econn|network|网络瞬断|watchdog|看门狗/.test(
       text,
     )
   ) {
