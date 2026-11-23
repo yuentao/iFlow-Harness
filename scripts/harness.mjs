@@ -223,6 +223,12 @@ const wireTap = (direction, message) => {
   if (record) wire.push({ t: Date.now(), dir: direction, msg: redactWireValue(message) });
 };
 
+// Flips right before our own teardown. dispose() kills the child through
+// killTree → `taskkill /T /F` on Windows, which always reports exitCode=1
+// regardless of the CLI's real status, so an exit observed after this flag
+// turns true is expected and must not be reported as an agent crash.
+let expectingExit = false;
+
 const client = new AcpClient(
   { command, args: acpArgs, cwd: root, env: childEnv, wireTap },
   {
@@ -241,7 +247,14 @@ const client = new AcpClient(
     // The CLI's stderr can echo the endpoint (and, if a key is embedded in a
     // URL, the key itself) — redact before forwarding.
     onStderr: (line) => console.error(`[stderr] ${redactSecrets(line, credentials?.apiKey)}`),
-    onExit: (code, signal) => console.error(`[harness] agent exit code=${code} signal=${signal}`),
+    // An exit we triggered ourselves is expected: report it as a teardown so
+    // the taskkill-forced exitCode=1 is not mistaken for an agent crash.
+    onExit: (code, signal) =>
+      console.error(
+        expectingExit
+          ? `[harness] agent torn down (code=${code}, signal=${signal}) — expected (client.dispose())`
+          : `[harness] agent exit code=${code} signal=${signal}`,
+      ),
     onRequestPermission: async (req) => {
       console.log(`[harness] permission requested for tool=${req.toolCall?.toolName} → denied (safe mode)`);
       return { outcome: { outcome: "cancelled" } };
@@ -364,6 +377,7 @@ try {
     }
     summary.finishedAt = new Date().toISOString();
     console.log("\n[harness] probe complete");
+    expectingExit = true;
     await client.dispose();
     process.exit(0);
   }
@@ -380,6 +394,7 @@ try {
   summary.errors.push(message);
   console.error(`\n[harness] FAIL:`, message);
 } finally {
+  expectingExit = true;
   await client.dispose();
 }
 
