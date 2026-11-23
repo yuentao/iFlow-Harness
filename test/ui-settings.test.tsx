@@ -16,6 +16,12 @@ const hostSettings = vi.hoisted(() => ({
   autoMemoryCapture: false,
   autoTitle: true,
   memoryExtractTimeoutSeconds: 90,
+  memoryMaintenanceEnabled: false,
+  memoryMaintenanceIntervalDays: 7,
+  memoryMaintenanceIdleMinutes: 15,
+  memoryMaintenanceGlobalTokenBudget: 4000,
+  memoryMaintenanceProjectTokenBudget: 2500,
+  memoryMaintenanceStrategy: "report" as const,
   nextStepTimeoutSeconds: 25,
   compressTimeoutSeconds: 0,
   autoCompressThresholdPercent: 95,
@@ -826,6 +832,87 @@ describe("回合末 timeout rows follow their toggle", () => {
     expect(number("记忆提取超时")).toBe("90");
     expect(number("压缩超时")).toBe("0");
     expect(number("自动压缩阈值")).toBe("95");
+  });
+});
+
+/**
+ * 记忆整理（P1）：新设置分组在「对话」页渲染，且每个控件都通过
+ * updateHostSetting 写回宿主。总开关关闭时从属行（策略 / 周期 / 阈值 / 预算）
+ * 必须隐藏 —— 避免用户以为关掉开关仍在按默认值整理。
+ */
+describe("记忆整理设置", () => {
+  const label = (text: string) => text;
+
+  beforeEach(() => {
+    hostSettings.memoryMaintenanceEnabled = false;
+    hostSettings.memoryMaintenanceIntervalDays = 7;
+    hostSettings.memoryMaintenanceIdleMinutes = 15;
+    hostSettings.memoryMaintenanceGlobalTokenBudget = 4000;
+    hostSettings.memoryMaintenanceProjectTokenBudget = 2500;
+    hostSettings.memoryMaintenanceStrategy = "report";
+  });
+
+  it("在对话页渲染记忆整理分组与总开关", () => {
+    renderTab("chat", BASIC_AUTH);
+    expect(container.textContent).toContain("记忆整理");
+    const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="定期整理记忆"]');
+    expect(toggle).toBeTruthy();
+    expect(toggle!.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("打开总开关会写回宿主设置", () => {
+    renderTab("chat", BASIC_AUTH);
+    const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="定期整理记忆"]')!;
+    act(() => toggle.click());
+    expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceEnabled: true });
+  });
+
+  it("关闭时隐藏策略与数值行", () => {
+    renderTab("chat", BASIC_AUTH);
+    expect(container.textContent).not.toContain("整理策略");
+    expect(container.textContent).not.toContain("整理周期");
+    expect(container.textContent).not.toContain("空闲阈值");
+    expect(container.textContent).not.toContain("全局记忆预算");
+    expect(container.textContent).not.toContain("项目记忆预算");
+  });
+
+  it("打开后渲染策略分段控件并写回所选值", () => {
+    hostSettings.memoryMaintenanceEnabled = true;
+    renderTab("chat", BASIC_AUTH);
+    expect(container.textContent).toContain("整理策略");
+    const apply = [...container.querySelectorAll<HTMLButtonElement>('button[role="radio"]')].find(
+      (b) => b.textContent === "直接应用",
+    );
+    expect(apply).toBeTruthy();
+    act(() => apply!.click());
+    expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceStrategy: "apply" });
+  });
+
+  it("渲染周期 / 阈值 / 两个预算的当前值", () => {
+    hostSettings.memoryMaintenanceEnabled = true;
+    renderTab("chat", BASIC_AUTH);
+    const number = (name: string) =>
+      container.querySelector<HTMLInputElement>(`input[aria-label="${name}"]`)?.value;
+    expect(number(label("整理周期"))).toBe("7");
+    expect(number(label("空闲阈值"))).toBe("15");
+    expect(number(label("全局记忆预算"))).toBe("4000");
+    expect(number(label("项目记忆预算"))).toBe("2500");
+  });
+
+  it("提交空闲阈值时写回宿主设置", () => {
+    hostSettings.memoryMaintenanceEnabled = true;
+    renderTab("chat", BASIC_AUTH);
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="空闲阈值"]')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setter.call(input, "30");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => {
+      input.focus();
+      input.blur();
+    });
+    expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceIdleMinutes: 30 });
   });
 });
 

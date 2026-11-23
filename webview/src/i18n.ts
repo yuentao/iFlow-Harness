@@ -870,6 +870,34 @@ const en: Record<string, string> = {
   "这些是模型从最近对话里挑出来的长期记忆候选。勾选你想保留的内容，并确认存到哪一侧。":
     "These long-term memory candidates were picked out of the recent conversation. Check what to keep and confirm which side it is stored on.",
   "自动提取记忆": "Auto-extract memories",
+  // --- 记忆整理（P1） ---
+  "记忆整理": "Memory curation",
+  "只在面板空闲时运行，默认只出报告":
+    "Runs only while the panel is idle; reports by default",
+  "定期整理记忆": "Curate memories on a schedule",
+  "空闲时清理记忆托管区块：去重、合并、归档低价值条目。":
+    "Tidy the managed memory sections while idle: dedupe, merge and archive low-value facts.",
+  "只在没有进行中的回合、没有待处理的审批或提问、没有运行中的子会话，且空闲达到阈值时运行。默认关闭。":
+    "Runs only when no turn is streaming, no approval or question is pending, no child session is running, and the panel has been idle for the threshold. Off by default.",
+  "整理策略": "Curation strategy",
+  "报告只汇总改动，应用才真正改写记忆文件。":
+    "Report only summarises the changes; apply actually rewrites the memory files.",
+  "应用策略下每个文件先备份；若期间被其它程序改动则跳过该文件，绝不覆盖。":
+    "In apply mode each file is backed up first; a file changed by another program in the meantime is skipped, never overwritten.",
+  "仅报告": "Report only",
+  "直接应用": "Apply",
+  "整理周期": "Curation interval",
+  "每隔多少天自动整理一次。": "How often automatic curation runs, in days.",
+  "空闲阈值": "Idle threshold",
+  "面板空闲多少分钟后才整理。": "Only curate after the panel has been idle this many minutes.",
+  "全局记忆预算": "Global memory budget",
+  "全局记忆托管区块的 token 预算，超出后优先归档。":
+    "Token budget for the managed global memory section; low-value facts are archived when exceeded.",
+  "项目记忆预算": "Project memory budget",
+  "每个项目记忆文件的 token 预算。":
+    "Token budget for the managed section of each project memory file.",
+  "天": "days",
+  "分钟": "min",
   // F3 Phase 3: project knowledge
   "项目知识库": "Project knowledge",
   "{0} 篇文档": "{0} doc(s)",

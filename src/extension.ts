@@ -58,6 +58,10 @@ export function activate(context: vscode.ExtensionContext): void {
       const sel = readActiveSelection();
       if (sel) void chatPanel.rememberSelection(sel.path, sel.range, sel.text);
     }),
+    // P1 记忆整理：手动触发一轮（绕过周期 / 空闲判定，仍遵守锁与「已在运行」）。
+    vscode.commands.registerCommand("iflow.curateMemory", () => {
+      void chatPanel.curateMemoryNow();
+    }),
     // M1 P0-7: export the active session from the command palette too (the
     // panel's session dropdown carries the same action once M1 UI lands).
     vscode.commands.registerCommand("iflow.exportSessionMarkdown", () => {

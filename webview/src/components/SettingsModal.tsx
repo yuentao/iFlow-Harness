@@ -968,6 +968,72 @@ function ChatSection() {
           )}
         </div>
       </SettingsGroup>
+      <SettingsGroup title={t("记忆整理")} hint={t("只在面板空闲时运行，默认只出报告")}>
+        <div>
+          <ToggleRow
+            label={t("定期整理记忆")}
+            description={t("空闲时清理记忆托管区块：去重、合并、归档低价值条目。")}
+            detail={t(
+              "只在没有进行中的回合、没有待处理的审批或提问、没有运行中的子会话，且空闲达到阈值时运行。默认关闭。",
+            )}
+            checked={settings.memoryMaintenanceEnabled}
+            onChange={(memoryMaintenanceEnabled) => update({ memoryMaintenanceEnabled })}
+          />
+          {settings.memoryMaintenanceEnabled && (
+            <DependentRow>
+              <ChoiceRow
+                label={t("整理策略")}
+                description={t("报告只汇总改动，应用才真正改写记忆文件。")}
+                detail={t(
+                  "应用策略下每个文件先备份；若期间被其它程序改动则跳过该文件，绝不覆盖。",
+                )}
+                value={settings.memoryMaintenanceStrategy}
+                options={[
+                  { value: "report", label: t("仅报告") },
+                  { value: "apply", label: t("直接应用") },
+                ]}
+                onChange={(memoryMaintenanceStrategy) => update({ memoryMaintenanceStrategy })}
+              />
+              <NumberRow
+                label={t("整理周期")}
+                description={t("每隔多少天自动整理一次。")}
+                value={settings.memoryMaintenanceIntervalDays}
+                min={1}
+                max={90}
+                unit={t("天")}
+                onCommit={(memoryMaintenanceIntervalDays) => update({ memoryMaintenanceIntervalDays })}
+              />
+              <NumberRow
+                label={t("空闲阈值")}
+                description={t("面板空闲多少分钟后才整理。")}
+                value={settings.memoryMaintenanceIdleMinutes}
+                min={1}
+                max={240}
+                unit={t("分钟")}
+                onCommit={(memoryMaintenanceIdleMinutes) => update({ memoryMaintenanceIdleMinutes })}
+              />
+              <NumberRow
+                label={t("全局记忆预算")}
+                description={t("全局记忆托管区块的 token 预算，超出后优先归档。")}
+                value={settings.memoryMaintenanceGlobalTokenBudget}
+                min={500}
+                max={50000}
+                unit={t("tokens")}
+                onCommit={(memoryMaintenanceGlobalTokenBudget) => update({ memoryMaintenanceGlobalTokenBudget })}
+              />
+              <NumberRow
+                label={t("项目记忆预算")}
+                description={t("每个项目记忆文件的 token 预算。")}
+                value={settings.memoryMaintenanceProjectTokenBudget}
+                min={500}
+                max={50000}
+                unit={t("tokens")}
+                onCommit={(memoryMaintenanceProjectTokenBudget) => update({ memoryMaintenanceProjectTokenBudget })}
+              />
+            </DependentRow>
+          )}
+        </div>
+      </SettingsGroup>
     </div>
   );
 }
