@@ -601,8 +601,9 @@ describe("超流体 shell 护栏 · 审批选项", () => {
 });
 
 describe("超流体 shell 护栏 · repo 档合并超流体的任务书硬边界", () => {
+  /** 真合并子会话的上下文：repo 档 + 合并目标表登记（mergeChild）。 */
   function repoCtx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
-    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, ...overrides };
+    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, mergeChild: true, ...overrides };
   }
 
   // 越界动作在「即将执行」的那一帧就终止整个合并子会话 —— 推送 / 改写历史
@@ -698,6 +699,53 @@ describe("超流体 shell 护栏 · repo 档合并超流体的任务书硬边界
     );
     expect(verdict?.decision).toBe("deny");
     expect(verdict?.severity).toBe("session");
+  });
+
+  // 回归：完全信任子会话同样跑在 repo 档（主仓工作区），但任务书允许
+  // push / 建 PR / 合并 —— 只看隔离档位会把它的正常动作误判成越界并终止。
+  describe("非合并的 repo 档（完全信任）不受合并边界约束", () => {
+    /** 完全信任子会话：repo 档，但没有合并目标（mergeChild 缺省 false）。 */
+    function trustCtx(): ChildShellGuardContext {
+      return { cwd: REPO, repoRoot: REPO, repoWorkspace: true };
+    }
+
+    const allowed: Array<{ name: string; command: string }> = [
+      { name: "git push（完全信任任务书明确允许）", command: "git push origin main" },
+      { name: "git push --force-with-lease", command: "git push --force-with-lease" },
+      { name: "git rebase", command: "git rebase origin/main" },
+      { name: "git stash", command: "git stash" },
+      { name: "git branch -D（允许切/删分支）", command: "git branch -D feature/x" },
+      { name: "git switch", command: "git switch main" },
+      { name: "git add -A", command: "git add -A" },
+      { name: "git commit -am", command: 'git commit -am "work"' },
+    ];
+
+    for (const testCase of allowed) {
+      it(testCase.name, () => {
+        const result = classifyChildShellCommand(testCase.command, trustCtx());
+        expect(result.decision).toBe("allow");
+        expect(result.reason).toBeUndefined();
+      });
+    }
+
+    it("破坏性 git 仍然拦（丢的是用户未提交改动，与任务书无关）", () => {
+      for (const command of ["git reset --hard", "git clean -fd", "git checkout -- .", "git restore ."]) {
+        const result = classifyChildShellCommand(command, trustCtx());
+        expect(result.decision).toBe("deny");
+        expect(result.severity).toBe("session");
+        // 文案必须说清「主仓工作区」，不能再谎称是合并子会话。
+        expect(result.reason).toContain("MAIN repository workspace");
+        expect(result.reason).not.toContain("merge child session");
+        expect(result.reason).not.toContain("Finish the merge");
+      }
+    });
+
+    it("只读命令在合并 / 非合并两档都放行", () => {
+      for (const command of ["git status", "git diff", "git log --oneline -3", "git show HEAD"]) {
+        expect(classifyChildShellCommand(command, trustCtx()).decision).toBe("allow");
+        expect(classifyChildShellCommand(command, repoCtx()).decision).toBe("allow");
+      }
+    });
   });
 });
 

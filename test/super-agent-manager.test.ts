@@ -1329,6 +1329,43 @@ describe("super agent · 合并超流体（主仓工作区档）", () => {
     expect(client.disposed).toBe(true);
   }, 30000);
 
+  it("真合并子会话的 git push 仍按合并边界拦截（宿主从 mergeTargets 传 mergeChild）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, ["commit", "hang"], "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    const branch = harness.sessions[0]!.isolation.branch!;
+
+    const merge = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(merge).not.toBeNull();
+    await until(() => harness.clients.length === 2);
+    const client = harness.clients[1]!;
+    await until(() => client.prompts.length === 1);
+
+    client.callbacks.onSessionUpdate?.({
+      sessionId: "sub",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "run_shell_command",
+        kind: "execute",
+        status: "in_progress",
+        title: "git push origin main",
+        args: { command: "git push origin main" },
+      },
+    } as never);
+
+    await until(() => harness.sessions.find((s) => s.id === merge!.id)?.status === "failed");
+    const mergeSession = harness.sessions.find((s) => s.id === merge!.id);
+    expect(mergeSession?.error).toContain("Host guard");
+    expect(mergeSession?.error).toContain("merge-only boundary");
+    expect(client.disposed).toBe(true);
+  }, 30000);
+
   it("清理合并超流体只移除记录，绝不删主仓工作区", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, ["commit", "merge-noop"], "manual");

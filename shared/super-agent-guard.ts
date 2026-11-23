@@ -51,7 +51,8 @@ export interface ChildShellGuardContext {
    */
   nodeModulesIsLink?: boolean;
   /**
-   * 子会话是否直接跑在**主仓工作区**（repo 档 / 合并子会话，无隔离）。
+   * 子会话是否直接跑在**主仓工作区**（repo 档：合并子会话与完全信任子会话
+   * 共用这一档，无隔离）。
    *
    * 这一档没有自己的分支与临时工作目录：`git reset --hard` / `git clean -fd`
    * / `git checkout -- .` 会直接在用户的工作区里丢掉未提交改动，不可逆。
@@ -59,8 +60,22 @@ export interface ChildShellGuardContext {
    * 破坏性 git 规则的判定**只在这一档生效** —— 由宿主按
    * `session.isolation.kind === "repo"` 显式传入，不靠路径猜测（repo 档的
    * 子会话可以 `cd` 到子目录里执行 git，路径相等判断会漏）。
+   *
+   * 注意：合并任务书的硬边界（push / rebase / 切分支 / stash）**不**看这个
+   * 字段，而看 {@link mergeChild} —— 完全信任子会话在同一档里被允许 push。
    */
   repoWorkspace?: boolean;
+  /**
+   * 子会话是否是真**合并子会话**（`spawnMerge` 派出、任务书是合并任务）。
+   *
+   * 与 {@link repoWorkspace} 分开：完全信任子会话（`isolation.fullTrust`）
+   * 同样跑在主仓工作区（kind === "repo"），但它的任务书允许 push / 建 PR /
+   * 合并 —— 只看隔离档位会把这类正常动作当成「越过合并边界」并终止会话
+   * （误判）。合并任务书的硬边界（push / rebase / 删分支 / 切分支 / stash /
+   * 扫走用户改动的 `git add -A`）**只对真正的合并子会话生效**，由宿主持有
+   * 的合并目标表（`mergeTargets`）显式传入；缺省 false 即不做合并边界判定。
+   */
+  mergeChild?: boolean;
   /**
    * 读取子会话工作目录内的脚本文件内容（可选）。
    *
@@ -254,11 +269,14 @@ const MERGE_STAGE_GIT_REASON =
  * repo 档写/编辑工具命中受保护路径的拒绝文案（`session` 档）。
  *
  * `.git/` 是仓库元数据（config / hooks / MERGE_HEAD / refs），`.iflow/super/`
- * 是宿主自己的子会话工作树与归档元数据 —— 两者都不是合并产物，改写它们
+ * 是宿主自己的子会话工作树与归档元数据 —— 两者都不是任务产物，改写它们
  * 等于绕过宿主的安全网。命令还没执行就终止，避免留下半改写的元数据。
+ *
+ * 文案刻意不写「合并子会话」：这条检查按 `repoWorkspace` 生效，完全信任
+ * 子会话同样命中，谎称它是合并子会话会把执行者引向错误的结论。
  */
 const PROTECTED_PATH_REASON =
-  "Blocked by the host guard: this merge child session must not write to protected repository metadata (.git/) or the host's Super Agent metadata (.iflow/super/). Only resolve the conflicted source files and let git create the merge commit.";
+  "Blocked by the host guard: this child session runs in the MAIN repository workspace and must not write to protected repository metadata (.git/) or the host's Super Agent metadata (.iflow/super/). Edit only the files that belong to your task and let git manage its own metadata.";
 
 const LINK_REASON =
   "Blocked by the host guard: creating a link (mklink / junction / symlink) that points at node_modules is not allowed. A child session must not share the main workspace's dependencies — deleting a linked node_modules (e.g. `npm ci`) destroys the real dependency tree. Install dependencies inside your own working directory instead.";
@@ -314,9 +332,10 @@ function classifyText(
 
   // ① repo 档（主仓工作区）的破坏性 git 命令 —— 不可逆地丢掉用户未提交
   //    改动。worktree 档不走这条规则（毁掉的是自己的临时目录）。
-  //    紧随其后的是 repo 档合并任务书的硬边界（push / rebase / 删分支 /
-  //    切分支 / stash / 扫走用户改动的 add -A）—— 同样只作用于 repo 档，
-  //    在命令执行的那一帧就终止，不等它真的跑起来。
+  //    紧随其后的是**真合并子会话**的任务书硬边界（push / rebase / 删分支 /
+  //    切分支 / stash / 扫走用户改动的 add -A）—— 只看 mergeChild，不看隔离
+  //    档位（完全信任子会话同样跑在主仓工作区，但允许 push / 合并）。命中
+  //    就在命令执行的那一帧终止，不等它真的跑起来。
   const gitVerdict =
     classifyDestructiveGit(segments, ctx) ?? classifyMergeBoundaryGit(segments, ctx);
   if (gitVerdict) return gitVerdict;
@@ -392,8 +411,9 @@ export function classifyChildToolCall(
  *
  * 背景：`run_shell_command` 的命令文本走 {@link classifyChildToolCall}，
  * 但 `write_file` / `replace` 这类工具根本不带命令文本，护栏对它们完全失明
- * —— 而合并子会话就跑在主仓工作区，能直接改写 `.git/config`、hooks、
- * MERGE_HEAD 或宿主的 `.iflow/super/` 子会话元数据，绕过全部安全网。
+ * —— 而 repo 档子会话（合并 / 完全信任）就跑在主仓工作区，能直接改写
+ * `.git/config`、hooks、MERGE_HEAD 或宿主的 `.iflow/super/` 子会话元数据，
+ * 绕过全部安全网。
  * 这条检查补上这个缺口：只对 repo 档（`repoWorkspace`）生效，只看「即将
  * 执行」的两帧，目标落在受保护路径下即终止会话。
  *
@@ -647,7 +667,7 @@ function classifyDestructiveGit(
 }
 
 /**
- * repo 档合并子会话的「任务书硬边界」git 规则（仅 `repoWorkspace` 生效）。
+ * 真合并子会话的「任务书硬边界」git 规则（仅 `ctx.mergeChild` 生效）。
  *
  * {@link classifyDestructiveGit} 管的是「丢用户未提交文件」，这里管的是
  * 「越过合并任务书写死的边界」：push / rebase / 删分支 / 切分支 / stash
@@ -655,19 +675,26 @@ function classifyDestructiveGit(
  * 结果（推送到远端、改写历史、丢掉来源分支、藏起用户改动）。预检帧据此
  * 终止整个子会话。
  *
+ * 判据是 `mergeChild` 而不是隔离档位：完全信任子会话也跑在主仓工作区
+ * （`repoWorkspace`），但它的任务书明确允许 push / 建 PR / 合并 —— 把
+ * 「跑在主仓工作区」当成合并子会话会让完全信任子会话的正常动作被误杀。
+ * 宿主按合并目标表（`mergeTargets`）显式传入。
+ *
  * 另一类 `git add -A` / `git commit -a` 会把用户**其它**未提交改动卷进
  * 合并提交：后果严重但可由用户恢复，且这类命令常出现在冲突解决中途 ——
  * 终止会话会把仓库留在 MERGE_HEAD 中间态（任务书明令禁止）。因此按
  * `tool` 档处理：审批路径拒掉单次调用，预检路径刻意不终止（见
  * MERGE_STAGE_GIT_REASON 的说明）。
  *
- * worktree 档完全不受这些规则约束：那些子会话本就被允许 push / 建 PR。
+ * worktree 档与非合并的 repo 档（完全信任）完全不受这些规则约束：那些
+ * 子会话本就被允许 push / 建 PR / 合并。破坏性 git 仍由
+ * {@link classifyDestructiveGit} 按 `repoWorkspace` 拦截。
  */
 function classifyMergeBoundaryGit(
   segments: string[][],
   ctx: ChildShellGuardContext,
 ): ChildShellGuardResult | null {
-  if (!ctx.repoWorkspace) return null;
+  if (!ctx.mergeChild) return null;
   for (const tokens of segments) {
     const invocation = findGitInvocation(tokens);
     if (!invocation) continue;
