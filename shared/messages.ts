@@ -1469,6 +1469,117 @@ export function payloadChars(block: Block): number {
   }
 }
 
+const VALID_BLOCK_KINDS = new Set<Block["kind"]>([
+  "user", "text", "thought", "tool", "subagent", "compression", "injected", "plan",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function str(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+/**
+ * 把一条来源不可信的转录块修补成 BlockView 可以安全渲染的形状。
+ *
+ * 「查看实时进度」把 `superTranscripts` 原样喂给 BlockView；正常实时流由
+ * reducer 产出、字段完整，但历史转录快照（`readSuperTranscriptSnapshot` 只校验
+ * 外层是数组，不校验块元素）或旧版 wire 可能带缺字段的块：`text` 缺 `text`
+ * 会在 `block.text.trim()` 抛错、user/thought 缺 `text` 会让 `marked(undefined)`
+ * 抛错、plan 缺 `entries` 会在 `block.entries.length` 抛错——任一都会冒泡到
+ * page 级 ErrorBoundary，把整个面板变成白屏回退界面。
+ *
+ * 纯函数、逐字段修补：类型合法就原样返回（identity 稳定，不破坏 memo /
+ * zustand selector），只有真正缺字段的块才重建。无法识别 kind 的垃圾块返回
+ * null 由调用方丢弃（宁可少显示一条畸形记录，也不要整屏崩）。
+ */
+function coerceBlock(raw: unknown, idFallback: string): Block | null {
+  if (!isRecord(raw) || typeof raw.kind !== "string" || !VALID_BLOCK_KINDS.has(raw.kind as Block["kind"])) {
+    return null;
+  }
+  const b = raw;
+  const id = str(b.id, idFallback);
+  switch (b.kind) {
+    case "text":
+    case "thought": {
+      const text = str(b.text);
+      if (text === b.text && id === b.id) return raw as unknown as Block;
+      return { ...b, id, text, system: b.system === true } as unknown as Block;
+    }
+    case "user": {
+      const text = str(b.text);
+      const images = Array.isArray(b.images) ? b.images.filter((s): s is string => typeof s === "string") : undefined;
+      const captions = Array.isArray(b.imageCaptions)
+        ? b.imageCaptions.map((c) => str(c))
+        : undefined;
+      if (text === b.text && id === b.id && images === b.images && captions === b.imageCaptions) return raw as unknown as Block;
+      return {
+        ...b, id, text,
+        ...(images ? { images } : {}),
+        ...(captions ? { imageCaptions: captions } : {}),
+      } as unknown as Block;
+    }
+    case "tool": {
+      const toolKind = str(b.toolKind, "other");
+      const locations = Array.isArray(b.locations) ? b.locations : [];
+      const status = str(b.status, "pending");
+      const diff = isRecord(b.diff) ? b.diff : null;
+      if (toolKind === b.toolKind && locations === b.locations && status === b.status && diff === b.diff && id === b.id) {
+        return raw as unknown as Block;
+      }
+      return {
+        ...b, id, toolKind, locations, status, diff,
+        toolName: str(b.toolName), title: str(b.title), output: str(b.output),
+      } as unknown as Block;
+    }
+    case "subagent": {
+      const entries = Array.isArray(b.entries) ? sanitizeTranscriptBlocks(b.entries) : [];
+      if (entries === b.entries && id === b.id) return raw as unknown as Block;
+      return { ...b, id, entries, title: str(b.title), status: str(b.status, "in_progress") } as unknown as Block;
+    }
+    case "plan": {
+      const entries = Array.isArray(b.entries) ? b.entries : [];
+      if (entries === b.entries && id === b.id) return raw as unknown as Block;
+      return { ...b, id, entries } as unknown as Block;
+    }
+    case "compression": {
+      const notice = str(b.notice);
+      const summary = typeof b.summary === "string" ? b.summary : null;
+      if (notice === b.notice && summary === b.summary && id === b.id) return raw as unknown as Block;
+      return { ...b, id, notice, summary, newTokenCount: typeof b.newTokenCount === "number" ? b.newTokenCount : null } as unknown as Block;
+    }
+    case "injected": {
+      const items = Array.isArray(b.items) ? b.items : [];
+      if (items === b.items && id === b.id) return raw as unknown as Block;
+      return { ...b, id, notice: str(b.notice), items } as unknown as Block;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * 把来源不可信的转录块数组（历史快照 / 旧版 wire）规范化成 BlockView 可安全
+ * 渲染的形状。幂等：全部块合法时返回原数组引用。畸形块被修补或丢弃，而非让
+ * 渲染期抛错冒泡成 page 级白屏。
+ */
+export function sanitizeTranscriptBlocks(blocks: readonly unknown[]): Block[] {
+  const out: Block[] = [];
+  let changed = false;
+  for (let i = 0; i < blocks.length; i++) {
+    const coerced = coerceBlock(blocks[i], `sanitized-${i}`);
+    if (coerced === null) {
+      changed = true;
+      continue;
+    }
+    out.push(coerced);
+    if (coerced !== blocks[i]) changed = true;
+  }
+  return changed ? out : (blocks as unknown as Block[]);
+}
+
 export function evictBlockPayloads(
   blocks: readonly Block[],
   keepRecent: number,
