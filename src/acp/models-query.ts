@@ -375,7 +375,20 @@ export async function renameWithRetry(
 export function updateCliSettings(
   patch: Partial<CliSettingsShape>,
   settingsPath?: string,
-  options?: { createIfMissing?: boolean },
+  options?: {
+    createIfMissing?: boolean;
+    /**
+     * Test seam: replaces the `rename` used for the atomic replace.
+     *
+     * Production callers leave it unset — the default is the real
+     * `renameSync` inside {@link renameWithRetrySync}. Tests inject a
+     * failing rename so the retry / visible-failure contract can be
+     * asserted on EVERY platform: on POSIX a `rename` over an open file
+     * SUCCEEDS, so the Windows file-in-use refusal cannot be reproduced
+     * there and a real hold-based test would assert nothing.
+     */
+    rename?: (from: string, to: string) => void;
+  },
 ): boolean {
   const file = settingsPath ?? settingsFilePath();
   let tmp: string | null = null;
@@ -411,7 +424,7 @@ export function updateCliSettings(
     // stays VISIBLE: when the budget is exhausted the error is logged with
     // its original code + message and `false` is returned, which the panel
     // surfaces as the "无法写入内核配置 {0}" toast.
-    renameWithRetrySync(tmp, file);
+    renameWithRetrySync(tmp, file, options?.rename ? { rename: options.rename } : undefined);
     tmp = null; // renamed away — nothing to clean up
     return true;
   } catch (error) {

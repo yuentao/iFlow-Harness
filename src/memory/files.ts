@@ -173,7 +173,22 @@ function uniqueTmpPath(file: string): string {
  * async flavour is used here on purpose: the backoff sleeps on the event
  * loop, so a stuck handle never blocks the extension host.
  */
-export async function writeAtomic(file: string, content: string): Promise<void> {
+export async function writeAtomic(
+  file: string,
+  content: string,
+  options?: {
+    /**
+     * Test seam: replaces the `rename` used for the atomic replace.
+     *
+     * Production callers leave it unset — the default is the real rename
+     * inside `renameWithRetry`. Tests inject a failing rename so the
+     * transient-retry contract can be asserted on EVERY platform: on POSIX
+     * a `rename` over an open file SUCCEEDS, so the Windows file-in-use
+     * refusal cannot be reproduced there.
+     */
+    rename?: (from: string, to: string) => Promise<void>;
+  },
+): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
   const tmp = uniqueTmpPath(file);
   try {
@@ -181,7 +196,7 @@ export async function writeAtomic(file: string, content: string): Promise<void> 
     // Node's rename replaces an existing file on Windows (libuv uses
     // MOVEFILE_REPLACE_EXISTING). Never delete the target first: a failed
     // replace must leave the previous content intact.
-    await renameWithRetry(tmp, file);
+    await renameWithRetry(tmp, file, options?.rename ? { rename: options.rename } : undefined);
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => {});
     throw error;
