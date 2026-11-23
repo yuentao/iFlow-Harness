@@ -3895,16 +3895,22 @@ export class SuperAgentHost {
 
 
   /**
-   * 是否已有一个合并子会话在跑。
+   * 是否已有一个**真合并子会话**在跑。
    *
    * 合并子会话跑在**主仓工作区**里（没有版本隔离）：两个合并同时改同一个
    * 工作区会把仓库状态搅乱，所以同一时刻只能有一个。
+   *
+   * 判据必须来自管理器的合并目标表（`spawnMerge` 登记），**不能**按
+   * `isolation.kind === "repo"` 扫会话列表：完全信任子会话共用这一档（主仓
+   * 工作区），但它既不执行合并，也不占用主会话的汇报车道 —— 把它算成合并
+   * 子会话会挡住真正的合并派发与主会话汇报。部分测试替身只实现 list /
+   * spawnMerge，缺这个查询时按「没有合并子会话」处理，绝不回退到旧口径。
    */
   superMergeChildRunning(): boolean {
-    return (this.store.getState().superSessions ?? []).some(
-      (session) =>
-        session.isolation.kind === "repo" && !isTerminalSuperStatus(session.status),
-    );
+    const manager = this.superAgent;
+    if (!manager) return false;
+    if (typeof manager.hasRunningMergeChild !== "function") return false;
+    return manager.hasRunningMergeChild();
   }
 
   /** Text of an agent message chunk (the wire carries a single ContentBlock). */

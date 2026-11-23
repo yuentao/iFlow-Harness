@@ -1323,11 +1323,28 @@ export class SuperAgentManager {
     return child;
   }
 
-  /** 是否已有一个合并子会话在跑（主仓工作区没有版本隔离）。 */
+  /**
+   * 是否已有一个**真合并子会话**在跑（主仓工作区没有版本隔离）。
+   *
+   * 判据是合并目标表（`spawnMerge` 登记、`finalizeMergeChild` / 清理时删除）
+   * 而不是 `isolation.kind === "repo"`：完全信任子会话也跑在主仓工作区，
+   * 把它算成合并子会话会让真正的合并请求被拒派（队列永久卡住）。
+   */
   private repoMergeRunning(): boolean {
-    for (const session of this.sessions.values()) {
-      if (session.isolation.kind !== "repo") continue;
-      if (!isTerminalSuperStatus(session.status)) return true;
+    return this.hasRunningMergeChild();
+  }
+
+  /**
+   * 是否真有合并子会话在跑（只认 `spawnMerge` 派出、尚未收尾的那一个）。
+   *
+   * 宿主用它在汇报 / 回执 / 委派轮的 drain 上做互斥：只有合并子会话在主仓
+   * 工作区跑 git 时才需要让主会话避让。完全信任子会话不占这条车道 ——
+   * 否则它的存在会挡住主会话的汇报（真实故障：汇报轮永远投不出去）。
+   */
+  hasRunningMergeChild(): boolean {
+    for (const id of this.mergeTargets.keys()) {
+      const session = this.sessions.get(id);
+      if (session && !isTerminalSuperStatus(session.status)) return true;
     }
     return false;
   }
@@ -3159,6 +3176,10 @@ export class SuperAgentManager {
             cwd: session.isolation.path,
             repoRoot: this.deps.repoRoot,
             repoWorkspace: session.isolation.kind === "repo",
+            // 合并任务书的硬边界只对**真合并子会话**生效：完全信任子会话
+            // 同样跑在 repo 档（主仓工作区），但它的任务书允许 push / 合并。
+            // 真源就是派发时登记的合并目标表，不看隔离档位。
+            mergeChild: this.mergeTargets.has(id),
             nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
             readLocalFile: (filePath) => {
               try {
@@ -3344,6 +3365,8 @@ export class SuperAgentManager {
       cwd: session.isolation.path,
       repoRoot: this.deps.repoRoot,
       repoWorkspace: session.isolation.kind === "repo",
+      // 与预检路径同一口径：合并边界只看真合并子会话。
+      mergeChild: this.mergeTargets.has(id),
       nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
     });
     return verdict.decision === "deny" ? { reason: verdict.reason } : null;

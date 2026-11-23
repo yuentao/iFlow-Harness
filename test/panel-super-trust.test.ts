@@ -10,6 +10,7 @@ vi.setConfig({ testTimeout: 60000, hookTimeout: 60000 });
 import type { AcpClient, AcpClientCallbacks } from "../src/acp/client.js";
 import { SuperAgentManager, buildTaskPrompt } from "../src/panel/super-agent.js";
 import { superIsolationLabel, type SuperSessionUi } from "../shared/super-agent.js";
+import { classifyChildShellCommand } from "../shared/super-agent-guard.js";
 import {
   buildChildSessionSettingsForTrust,
   effectiveMcpServerNamesForTrust,
@@ -226,4 +227,140 @@ describe("super agent · fullTrust 派发（cwd / allowedRoots / 无 worktree）
       await manager.dispose();
     }
   }, 8000);
+});
+
+describe("super agent · 完全信任子会话不被当作合并子会话（回归）", () => {
+  it("护栏：同一 repo 档里只有 mergeChild 受合并边界约束", () => {
+    const trustCtx = { cwd: "/work", repoRoot: "/work", repoWorkspace: true };
+    // 完全信任任务书允许 push / 合并：这些不能再被当成「越过合并边界」。
+    for (const command of ["git push origin main", "git rebase origin/main", "git stash"]) {
+      const verdict = classifyChildShellCommand(command, trustCtx);
+      expect(verdict.decision).toBe("allow");
+    }
+    // 破坏性 git 依旧拦（丢的是用户未提交改动），文案不得谎称合并子会话。
+    for (const command of ["git reset --hard", "git clean -fd", "git restore ."]) {
+      const verdict = classifyChildShellCommand(command, trustCtx);
+      expect(verdict.decision).toBe("deny");
+      expect(verdict.reason).toContain("MAIN repository workspace");
+      expect(verdict.reason).not.toContain("merge child session");
+      expect(verdict.reason).not.toContain("Finish the merge");
+    }
+    // 真合并子会话仍受硬边界约束。
+    const mergeCtx = { ...trustCtx, mergeChild: true };
+    for (const command of ["git push origin main", "git rebase origin/main", "git stash"]) {
+      const verdict = classifyChildShellCommand(command, mergeCtx);
+      expect(verdict.decision).toBe("deny");
+      expect(verdict.reason).toContain("merge-only boundary");
+    }
+    // 只读命令在两档都放行。
+    for (const command of ["git status", "git diff", "git log --oneline -2", "git show HEAD"]) {
+      expect(classifyChildShellCommand(command, trustCtx).decision).toBe("allow");
+      expect(classifyChildShellCommand(command, mergeCtx).decision).toBe("allow");
+    }
+  });
+
+  it("完全信任子会话在跑时仍能派发真合并子会话；第二个合并仍被拒", async () => {
+    const repoRoot = makeRepo();
+    let clientSpawned = false;
+    let trustCallbacks: AcpClientCallbacks | null = null;
+    const manager = new SuperAgentManager({
+      repoRoot,
+      fullTrust: () => true,
+      createClient: async (params) => {
+        clientSpawned = true;
+        // 只记第一个（完全信任子会话）的回调：合并子会话的帧不在本用例范围。
+        trustCallbacks ??= params.callbacks;
+        return {
+          callbacks: params.callbacks,
+          async newSession() {
+            return { sessionId: "sub" };
+          },
+          async setMode() {
+            return {};
+          },
+          async setModel() {
+            return {};
+          },
+          // 停在运行中：完全信任子会话始终是非终态，模拟它在跑。
+          prompt() {
+            return new Promise(() => {});
+          },
+          async cancel() {},
+          async dispose() {
+            params.callbacks.onExit?.(0, null);
+          },
+        } as unknown as AcpClient;
+      },
+      onSessionsChanged: () => {},
+      onReport: () => {},
+      currentModel: () => null,
+      currentMainSessionId: () => "main-1",
+      integrationMode: () => "manual",
+      maxConcurrentSessions: () => 5,
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    });
+    try {
+      const trust = manager.spawn({ title: "信任任务", task: "干活" });
+      expect(trust.isolation.kind).toBe("repo");
+      expect(trust.isolation.fullTrust).toBe(true);
+      await waitFor(() => clientSpawned);
+      // 完全信任子会话在跑，但它不是合并子会话。
+      expect(manager.hasRunningMergeChild()).toBe(false);
+
+      // 核心回归：完全信任子会话执行 `git push` 不能被当成「越过合并边界」
+      // 终止整个会话（旧的 repo 档判定会在这里把它打成 failed）。
+      trustCallbacks!.onSessionUpdate?.({
+        sessionId: "sub",
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "t1",
+          toolName: "run_shell_command",
+          kind: "execute",
+          status: "in_progress",
+          title: "git push origin main",
+          args: { command: "git push origin main" },
+        },
+      } as never);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const trustLive = manager.get(trust.id);
+      expect(trustLive?.status).not.toBe("failed");
+      expect(trustLive?.error).toBeUndefined();
+
+      const source: SuperSessionUi = {
+        id: "src-1",
+        title: "改登录",
+        task: "干活",
+        status: "completed",
+        isolation: {
+          kind: "git_worktree",
+          path: "/tmp/wt",
+          branch: "iflow/super/fix-login-abcd1234",
+          baseRef: "abc",
+        },
+        createdAt: 1,
+        updatedAt: 2,
+        reports: [],
+      };
+      const merge = await manager.spawnMerge({
+        source,
+        task: "合并任务",
+        title: "合并分支 iflow/super/fix-login-abcd1234",
+      });
+      // 旧口径（任何 repo 档都算合并子会话）会在这里返回 null。
+      expect(merge).not.toBeNull();
+      expect(merge!.isolation.kind).toBe("repo");
+      expect(merge!.isolation.fullTrust).toBeUndefined();
+      expect(manager.hasRunningMergeChild()).toBe(true);
+
+      // 真合并子会话在跑 → 同一工作区不能再派第二个。
+      const second = await manager.spawnMerge({
+        source,
+        task: "合并任务",
+        title: "合并分支 iflow/super/fix-login-abcd1234",
+      });
+      expect(second).toBeNull();
+    } finally {
+      await manager.dispose();
+    }
+  }, 15000);
 });
