@@ -3,6 +3,7 @@ import {
   applyBlockPatch,
   EVICT_KEEP_BLOCKS,
   evictBlockPayloads,
+  sanitizeTranscriptBlocks,
   type Block,
   type ContextWindowOverridesUi,
   type HostSettingsUi,
@@ -3047,12 +3048,17 @@ export const useChat = create<ChatStore>((set, get) => ({
           get().send({ type: "superAgent", action: "transcript", sessionId: msg.sessionId });
           return s;
         }
-        const next =
+        const merged =
           msg.from <= 0 ? msg.blocks : [...prev.slice(0, msg.from), ...msg.blocks];
+        // 历史转录快照 / 旧版 wire 可能带缺字段的畸形块（见 shared 的
+        // sanitizeTranscriptBlocks 注释）。「查看实时进度」把这块数组原样喂给
+        // BlockView，任一畸形块都会在渲染期抛错、冒泡成 page 级白屏。入站时
+        // 先规范化：合法块 identity 不变，畸形块被修补或丢弃。
+        const safe = sanitizeTranscriptBlocks(merged);
         // Same payload budget as the main transcript: a long-running child can
         // accumulate large tool outputs, and the detail pane only mounts a
         // window of blocks at a time.
-        const capped = evictBlockPayloads(next, EVICT_KEEP_BLOCKS);
+        const capped = evictBlockPayloads(safe, EVICT_KEEP_BLOCKS);
         return { superTranscripts: { ...s.superTranscripts, [msg.sessionId]: capped } };
       });
       return;
