@@ -2616,7 +2616,16 @@ export class SuperAgentHost {
    * （它的 onReport 不会再来第二次）。
    */
   settleSuperReportsIfReady(): void {
-    if (this.disposed || this.superReportRunning) return;
+    // **刻意不检查 `superReportRunning`**：本方法不发送任何回合，只把「已终态」
+    // 的缓冲条目搬进 `pendingSuperReportPrompts` 投递队列（幂等键是 drainSettled
+    // 的 in-flight 标记，同一条汇报不会被取两次）。真正「同一时刻只有一个回合」
+    // 由 drainSuperReports 的重入锁与 mainLane 保证。
+    //
+    // 旧实现在这里 `|| this.superReportRunning` 早退，于是「上一轮汇报还在飞时
+    // 又有子会话结束」这条完成事件既不进队列也不标 in-flight —— 只能等下一拍
+    // 心跳（1.5s）重算，多个子会话并发完成就被攒成一条合并汇报（实测：看板 2 个
+    // completed，主会话只收到 1 条上报）。
+    if (this.disposed) return;
     if (this.pendingSuperReports.size === 0) return;
     const live = this.superAgent?.list() ?? [];
     // 来源子会话已不存在：结论不能静默丢 —— 用**全部**活子会话判（别的会话

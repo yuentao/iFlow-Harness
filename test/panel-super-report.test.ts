@@ -102,6 +102,7 @@ type PanelInternals = {
   touchActiveSession: () => Promise<void>;
   drainSuperAutoTurns: () => Promise<void>;
   refreshSuperWaitHeartbeat: () => void;
+  superReportRunning: boolean;
   queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
   pendingSuperReports: Map<string, InternalBuffer>;
   pendingSuperReportPrompts: Array<{
@@ -308,5 +309,173 @@ describe("ChatPanel · 汇报投递可靠性（G2）", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.prompt[0]!.text).toContain("当前 attempt 的结论");
     expect(calls[0]!.prompt[0]!.text).not.toContain("过期的失败结论");
+  });
+
+  it("并发完成不被吞：上一轮汇报在飞时，新完成的子会话各自立刻入队（N 个完成 = N 次上报）", async () => {
+    // 用户实测回归：看板已显示 2 个子会话 completed，主会话却只收到 1 条汇报。
+    // 旧实现在 settleSuperReportsIfReady 开头 `|| this.superReportRunning` 早退：
+    // 上一轮汇报回合还在 await sendPrompt 时，后续完成的子会话既不进队列也不标
+    // in-flight，只能等 1.5s 后的心跳把缓冲一次性 drainSettled → 攒成一条合并汇报。
+    const a = child({ id: "super-a", status: "completed", summary: "A 完成" });
+    const b = child({ id: "super-b", status: "completed", summary: "B 完成" });
+    const c = child({ id: "super-c", status: "completed", summary: "C 完成" });
+    manager.list = () => [a];
+
+    // A 先完成：汇报回合开跑（calls[0] 挂着，superReportRunning=true）。
+    p.queueSuperReport([{ session: a, report: { state: "ready", summary: "A 完成", at: 1 } }]);
+    await flush();
+    expect(calls).toHaveLength(1);
+    expect(p.superReportRunning).toBe(true);
+
+    // A 的回合还在飞，B、C 先后完成。
+    manager.list = () => [a, b];
+    p.queueSuperReport([{ session: b, report: { state: "ready", summary: "B 完成", at: 2 } }]);
+    await flush();
+    manager.list = () => [a, b, c];
+    p.queueSuperReport([{ session: c, report: { state: "ready", summary: "C 完成", at: 3 } }]);
+    await flush();
+
+    // 关键断言：B、C 各自已作为独立汇报项进入投递队列 —— 不是攒在缓冲里等心跳。
+    // 队列里此刻有正在飞的 A（投递成功才出队）+ 排队的 B + 排队的 C。
+    expect(p.pendingSuperReportPrompts.map((item) => item.text)).toEqual([
+      expect.stringContaining("A 完成"),
+      expect.stringContaining("B 完成"),
+      expect.stringContaining("C 完成"),
+    ]);
+
+    // 放行 A → drain 循环接着投 B；再放行 → 投 C。三条独立汇报全部送达。
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await flush();
+    await flush();
+    await flush();
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await flush();
+    await flush();
+    await flush();
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+
+    const delivered = calls.map((call) => call.prompt[0]!.text ?? "").join("\n---\n");
+    expect(delivered).toContain("A 完成");
+    expect(delivered).toContain("B 完成");
+    expect(delivered).toContain("C 完成");
+    // 三条各自独立成轮（不是一条合并汇报里塞三份）。
+    expect(calls.filter((call) => (call.prompt[0]!.text ?? "").includes("A 完成"))).toHaveLength(1);
+    expect(calls.filter((call) => (call.prompt[0]!.text ?? "").includes("B 完成"))).toHaveLength(1);
+    expect(calls.filter((call) => (call.prompt[0]!.text ?? "").includes("C 完成"))).toHaveLength(1);
+  });
+
+  it("settle 不受 superReportRunning 影响：汇报回合在飞时仍能把新终态条目搬进队列", async () => {
+    // 直接钉住根因：把 superReportRunning 置为 true（模拟上一轮还在 await），
+    // settleSuperReportsIfReady 仍必须取件入队 —— 它只搬队列、不发回合。
+    const done2 = child({ id: "super-late", status: "completed", summary: "后来完成" });
+    manager.list = () => [done2];
+    p.superReportRunning = true;
+
+    p.queueSuperReport([
+      { session: done2, report: { state: "ready", summary: "后来完成", at: 5 } },
+    ]);
+    await flush();
+
+    expect(p.pendingSuperReportPrompts.map((item) => item.text)).toEqual([
+      expect.stringContaining("后来完成"),
+    ]);
+    // 一条都没投出去（重入锁仍然生效：superReportRunning 挡的是发送，不是取件）。
+    expect(calls).toHaveLength(0);
+  });
+
+  it("主会话忙时并发完成的汇报不丢：忙窗口内全部入队，空闲后 N 条各自独立送达", async () => {
+    // 用户实测形态：3 个子会话几乎同时结束，而主会话此刻正在 streaming。
+    // 旧实现的 superReportRunning 早退会让后来的完成事件既不进队列也不标
+    // in-flight；即便只修了那一处，忙窗口里也必须逐条入队、一条不丢。
+    const a = child({ id: "super-a", status: "completed", summary: "A 完成" });
+    const b = child({ id: "super-b", status: "completed", summary: "B 完成" });
+    const c = child({ id: "super-c", status: "completed", summary: "C 完成" });
+    manager.list = () => [a, b, c];
+    p.store.replaceState({ ...p.store.getState(), status: "streaming" });
+
+    p.queueSuperReport([{ session: a, report: { state: "ready", summary: "A 完成", at: 1 } }]);
+    p.queueSuperReport([{ session: b, report: { state: "ready", summary: "B 完成", at: 2 } }]);
+    p.queueSuperReport([{ session: c, report: { state: "ready", summary: "C 完成", at: 3 } }]);
+    await flush();
+
+    // 主会话忙：一条都投不出去，但三条都在队列里（各自独立，不是合并成一条）。
+    expect(calls).toHaveLength(0);
+    expect(p.pendingSuperReportPrompts.map((item) => item.text)).toEqual([
+      expect.stringContaining("A 完成"),
+      expect.stringContaining("B 完成"),
+      expect.stringContaining("C 完成"),
+    ]);
+
+    // 主会话空闲 → 逐条投递，每条等自己的回合结束。
+    p.store.replaceState({ ...p.store.getState(), status: "idle" });
+    for (let round = 0; round < 3; round += 1) {
+      void p.drainSuperAutoTurns();
+      await flush();
+      await flush();
+      expect(calls).toHaveLength(round + 1);
+      calls[round]!.resolve({ stopReason: "end_turn" });
+      await flush();
+      await flush();
+    }
+
+    // N 个完成 = N 次独立上报，每条只含自己的子会话结论。
+    expect(calls).toHaveLength(3);
+    const texts = calls.map((call) => call.prompt[0]!.text ?? "");
+    expect(texts.filter((text) => text.includes("A 完成"))).toHaveLength(1);
+    expect(texts.filter((text) => text.includes("B 完成"))).toHaveLength(1);
+    expect(texts.filter((text) => text.includes("C 完成"))).toHaveLength(1);
+    expect(p.pendingSuperReportPrompts).toHaveLength(0);
+  });
+
+  it("看门狗把子会话置 failed 后再来一条汇报：先前已入队的待汇报项一条不丢", async () => {
+    // 看门狗在 manager 层把卡死的子会话归一为 failed 并再触发一次 onReport。
+    // 宿主侧的风险是：这次 settle/心跳重算会不会把先前已入队（in-flight）的
+    // 汇报清掉。断言队列是「累加」而不是「覆盖」。
+    const doneA = child({ id: "super-a", status: "completed", summary: "A 完成" });
+    manager.list = () => [doneA];
+    p.store.replaceState({ ...p.store.getState(), status: "streaming" });
+    p.queueSuperReport([{ session: doneA, report: { state: "ready", summary: "A 完成", at: 1 } }]);
+    await flush();
+    expect(p.pendingSuperReportPrompts).toHaveLength(1);
+
+    // 看门狗触发：另一个会话被归一为 failed，onReport 送来它的 failed 汇报。
+    const killed = child({ id: "super-b", status: "failed", error: "子会话运行中无响应超时" });
+    manager.list = () => [doneA, killed];
+    p.queueSuperReport([
+      { session: killed, report: { state: "failed", summary: "子会话运行中无响应超时", at: 2 } },
+    ]);
+    await flush();
+
+    // A 那条仍在队列首位（没有被这次 settle 清掉），B 追加在后。
+    expect(p.pendingSuperReportPrompts.map((item) => item.text)).toEqual([
+      expect.stringContaining("A 完成"),
+      expect.stringContaining("无响应超时"),
+    ]);
+  });
+
+  it("已 in-flight 的汇报来源被清理时：不以「已归档迟到结论」重复提示，也不重复入队", async () => {
+    const toasts: string[] = [];
+    vi.spyOn(p.store, "sendToast").mockImplementation(((...args: unknown[]) => {
+      toasts.push(String(args[1]));
+      return 1;
+    }) as unknown as PanelInternals["store"]["sendToast"]);
+
+    const doneA = child({ id: "super-a", status: "completed", summary: "A 完成" });
+    manager.list = () => [doneA];
+    p.store.replaceState({ ...p.store.getState(), status: "streaming" });
+    p.queueSuperReport([{ session: doneA, report: { state: "ready", summary: "A 完成", at: 1 } }]);
+    await flush();
+    // 已入队 = 已标 in-flight。
+    expect(p.pendingSuperReportPrompts).toHaveLength(1);
+
+    // 来源被清理（list 里没了）：takeMissing 必须跳过 in-flight 条目，
+    // 否则同一条汇报会既走 hidden 回合、又弹一条「已归档迟到结论」。
+    manager.list = () => [];
+    p.refreshSuperWaitHeartbeat();
+    await flush();
+
+    expect(toasts.some((text) => text.includes("已归档"))).toBe(false);
+    expect(p.pendingSuperReportPrompts).toHaveLength(1);
   });
 });

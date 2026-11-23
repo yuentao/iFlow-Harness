@@ -1531,6 +1531,46 @@ describe("super agent · 看板摘要", () => {
     expect(beforeOmitted.indexOf("active-55")).toBeLessThan(beforeOmitted.indexOf("old-0"));
   });
 
+  it("终态子会话超预算时降级为精简行保住 id，不整条折叠进 omitted", () => {
+    // 用户实测回归：3 个子会话完成，看板却把第 3 条折叠成「… (1 more child
+    // session(s) omitted for budget)」—— 主 Agent 既看不到它的结论，也拿不到
+    // 它的 id 去核对 / 合并 / retry。旧实现只对**活跃**行降级为精简行，终态
+    // 行放不下就整条丢弃；真实汇报结论常在 400 字符量级，3 条就能超 4000 预算。
+    const done = [0, 1, 2].map((i) =>
+      session({
+        id: `super-${i}`,
+        title: `任务 ${i}`,
+        status: "completed",
+        summary: `结${"过".repeat(399)}#${i}`,
+      }),
+    );
+    const digest = buildSuperDigest(done);
+    expect(digest.length).toBeLessThanOrEqual(SUPER_DIGEST_MAX_CHARS);
+    // 三个 id 一个都不能丢。
+    for (const entry of done) expect(digest).toContain(entry.id);
+    // 预算足够容纳精简行 → 不该出现省略注记。
+    expect(digest).not.toMatch(/omitted for budget/);
+  });
+
+  it("条目多到连精简行都放不下时：仍硬保证预算上限，并如实注明省略数量", () => {
+    // 降级只能救「行太长」，救不了「行太多」：这时必须回退到省略，且最终
+    // 长度仍不得超过预算（否则提示词会被无界撑大）。
+    const many = Array.from({ length: 200 }, (_, i) =>
+      session({
+        id: `super-${i}`,
+        title: `任务 ${i}`,
+        status: "completed",
+        summary: `结${"过".repeat(399)}#${i}`,
+      }),
+    );
+    const digest = buildSuperDigest(many);
+    expect(digest.length).toBeLessThanOrEqual(SUPER_DIGEST_MAX_CHARS);
+    expect(digest).toMatch(/\d+ more child session\(s\) omitted for budget/);
+    // 保留部分仍然从头部开始（最近的派发顺序），尾部如实折叠。
+    expect(digest).toContain("super-0");
+    expect(digest).not.toContain("super-199");
+  });
+
   it("单行摘要压成一行并截断过长文本", () => {
     const line = describeSuperSessionLine(
       session({ status: "completed", summary: `第一行\n第二行${"长".repeat(300)}` }),

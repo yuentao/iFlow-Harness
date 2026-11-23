@@ -4329,21 +4329,56 @@ export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
     activeOmitted += 1;
   }
   const kept = activeLines.slice(0, activeLines.length - activeOmitted);
+  // 终态条目：先尽量保留完整行（含结论摘要），放不下的**降级成精简行**
+  // （id + 状态 + 短标题）继续填，只有两档都放不下才计入 omitted。
+  //
+  // 旧实现只对活跃行做降级，终态行放不下就整条丢弃 —— 实测 3 个已完成的
+  // 子会话（结论各约 400 字符）第 3 个直接被折叠进「… (1 more omitted)」，
+  // 主 Agent 既不知道它存在，也不会去核对 / 合并它的结论（用户报告「汇报
+  // 在注入时以 omitted for budget 被省略」）。id 一旦折叠，主 Agent 连
+  // cancel / answer / retry 都无从下手；保留精简行则至少能看见「有这么一个
+  // 已完成的子会话」。
   const inactiveLines = inactive.map((session) => describeSuperSessionLine(session));
-  let inactiveKept = 0;
-  while (
-    inactiveKept < inactiveLines.length &&
-    fits(
-      [...kept, ...inactiveLines.slice(0, inactiveKept + 1)],
-      activeOmitted + (inactiveLines.length - inactiveKept - 1),
-    )
-  ) {
-    inactiveKept += 1;
+  const inactiveCompact = inactive.map((session) => describeSuperSessionCompactLine(session));
+  /** 已保留的终态行（与 `inactive` 同下标），以及它是否已降级为精简行。 */
+  const inactiveOut: string[] = [];
+  const inactiveOutIndex: number[] = [];
+  let skipped = 0;
+  for (let i = 0; i < inactiveLines.length; i += 1) {
+    // 剩余未处理条目一律按「会被省略」估算注记长度：注记本身占预算，
+    // 已跳过的那些也要算进去，否则会一边塞行一边低估 omitted 文案。
+    const omittedIfSkipped = skipped + (inactiveLines.length - i - 1);
+    if (fits([...kept, ...inactiveOut, inactiveLines[i]!], activeOmitted + omittedIfSkipped)) {
+      inactiveOut.push(inactiveLines[i]!);
+      inactiveOutIndex.push(i);
+      continue;
+    }
+    if (fits([...kept, ...inactiveOut, inactiveCompact[i]!], activeOmitted + omittedIfSkipped)) {
+      inactiveOut.push(inactiveCompact[i]!);
+      inactiveOutIndex.push(i);
+      continue;
+    }
+    skipped += 1;
   }
-  return render(
-    [...kept, ...inactiveLines.slice(0, inactiveKept)],
-    activeOmitted + (inactiveLines.length - inactiveKept),
-  );
+  // 收尾裁剪：上面的估算偏保守（跳过的条目数可能比预想更多），再逐条回退
+  // 直到真的放进预算，硬保证 ≤ 上限。回退时先尝试把完整行降级为精简行
+  // （保住 id + 状态），只有连精简行都放不下才整条丢弃。
+  let inactiveOmitted = inactiveLines.length - inactiveOut.length;
+  while (
+    inactiveOut.length > 0 &&
+    !fits([...kept, ...inactiveOut], activeOmitted + inactiveOmitted)
+  ) {
+    const last = inactiveOut.length - 1;
+    const compact = inactiveCompact[inactiveOutIndex[last]!]!;
+    if (inactiveOut[last] !== compact && fits([...kept, ...inactiveOut.slice(0, last), compact], activeOmitted + inactiveOmitted)) {
+      inactiveOut[last] = compact;
+      continue;
+    }
+    inactiveOut.pop();
+    inactiveOutIndex.pop();
+    inactiveOmitted += 1;
+  }
+  return render([...kept, ...inactiveOut], activeOmitted + inactiveOmitted);
 }
 
 // ---------------------------------------------------------------------------
