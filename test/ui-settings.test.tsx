@@ -837,9 +837,10 @@ describe("回合末 timeout rows follow their toggle", () => {
 });
 
 /**
- * 记忆整理（P1）：新设置分组在「对话」页渲染，且每个控件都通过
- * updateHostSetting 写回宿主。总开关关闭时从属行（策略 / 周期 / 阈值 / 预算）
- * 必须隐藏 —— 避免用户以为关掉开关仍在按默认值整理。
+ * 记忆整理（P1）：设置分组在「记忆与知识」页渲染（整理的是记忆文件本身，
+ * 因此归入该分类，不再挂在「对话」页），且每个控件都通过 updateHostSetting
+ * 写回宿主。总开关关闭时从属行（策略 / 周期 / 阈值 / 预算）必须隐藏 ——
+ * 避免用户以为关掉开关仍在按默认值整理。
  */
 describe("记忆整理设置", () => {
   const label = (text: string) => text;
@@ -854,23 +855,31 @@ describe("记忆整理设置", () => {
     hostSettings.memoryMaintenanceStrategy = "report";
   });
 
-  it("在对话页渲染记忆整理分组与总开关", () => {
-    renderTab("chat", BASIC_AUTH);
+  it("在记忆与知识页渲染记忆整理分组与总开关", () => {
+    renderTab("memory", BASIC_AUTH);
     expect(container.textContent).toContain("记忆整理");
-    const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="定期整理记忆"]');
-    expect(toggle).toBeTruthy();
-    expect(toggle!.getAttribute("aria-checked")).toBe("false");
+    const toggles = container.querySelectorAll<HTMLButtonElement>('button[role="switch"][aria-label="定期整理记忆"]');
+    // 只渲染一次：迁移后原分类与新分类不得同时出现。
+    expect(toggles).toHaveLength(1);
+    const toggle = toggles[0]!;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("对话页不再残留记忆整理分组", () => {
+    renderTab("chat", BASIC_AUTH);
+    expect(container.textContent).not.toContain("记忆整理");
+    expect(container.querySelector('button[role="switch"][aria-label="定期整理记忆"]')).toBeNull();
   });
 
   it("打开总开关会写回宿主设置", () => {
-    renderTab("chat", BASIC_AUTH);
+    renderTab("memory", BASIC_AUTH);
     const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="定期整理记忆"]')!;
     act(() => toggle.click());
     expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceEnabled: true });
   });
 
   it("关闭时隐藏策略与数值行", () => {
-    renderTab("chat", BASIC_AUTH);
+    renderTab("memory", BASIC_AUTH);
     expect(container.textContent).not.toContain("整理策略");
     expect(container.textContent).not.toContain("整理周期");
     expect(container.textContent).not.toContain("空闲阈值");
@@ -881,7 +890,7 @@ describe("记忆整理设置", () => {
 
   it("打开后渲染策略分段控件并写回所选值", () => {
     hostSettings.memoryMaintenanceEnabled = true;
-    renderTab("chat", BASIC_AUTH);
+    renderTab("memory", BASIC_AUTH);
     expect(container.textContent).toContain("整理策略");
     const apply = [...container.querySelectorAll<HTMLButtonElement>('button[role="radio"]')].find(
       (b) => b.textContent === "直接应用",
@@ -893,7 +902,7 @@ describe("记忆整理设置", () => {
 
   it("渲染周期 / 阈值 / 三个预算的当前值", () => {
     hostSettings.memoryMaintenanceEnabled = true;
-    renderTab("chat", BASIC_AUTH);
+    renderTab("memory", BASIC_AUTH);
     const number = (name: string) =>
       container.querySelector<HTMLInputElement>(`input[aria-label="${name}"]`)?.value;
     expect(number(label("整理周期"))).toBe("7");
@@ -905,7 +914,7 @@ describe("记忆整理设置", () => {
 
   it("提交空闲阈值时写回宿主设置", () => {
     hostSettings.memoryMaintenanceEnabled = true;
-    renderTab("chat", BASIC_AUTH);
+    renderTab("memory", BASIC_AUTH);
     const input = container.querySelector<HTMLInputElement>('input[aria-label="空闲阈值"]')!;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
     act(() => {
@@ -921,7 +930,7 @@ describe("记忆整理设置", () => {
 
   it("提交总量预算时写回宿主设置", () => {
     hostSettings.memoryMaintenanceEnabled = true;
-    renderTab("chat", BASIC_AUTH);
+    renderTab("memory", BASIC_AUTH);
     const input = container.querySelector<HTMLInputElement>('input[aria-label="总量预算"]')!;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
     act(() => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import {
   AlertTriangle,
   Check,
@@ -218,7 +218,16 @@ function MemoryFileCard({
  * old instruction. The card offers 「新建会话」 and 「重启 CLI」 (restart restores
  * the current session, rebuilding the instruction).
  */
-export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: SectionHeaderSetter }) {
+export function MemorySection({
+  busy,
+  onHeader,
+  footer,
+}: {
+  busy: boolean;
+  onHeader: SectionHeaderSetter;
+  /** 追加在页尾的额外内容（宿主传入「记忆整理」设置分组）。编辑态不渲染。 */
+  footer?: ReactNode;
+}) {
   const send = useChat((s) => s.send);
   const sessionId = useChat((s) => s.state?.sessionId ?? null);
   const [state, setState] = useState<MemoryStateUi | null>(null);
@@ -879,6 +888,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           </div>
         </>
       )}
+      {footer}
     </div>
   );
 }
