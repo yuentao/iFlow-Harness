@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from "node:os";
 import path from "node:path";
 import type { Block, HostToWebview, MemoryFileUi, MemoryStateUi } from "../shared/messages.js";
-import { MemoryService, type MemoryServiceOptions } from "../src/memory/service.js";
+import { MemoryConflictError, MemoryService, type MemoryServiceOptions } from "../src/memory/service.js";
+import { createBackup } from "../src/memory/backup.js";
 import { MEMORY_MARKER } from "../src/memory/files.js";
 
 const dirs: string[] = [];
@@ -563,5 +564,99 @@ describe("MemoryService", () => {
       [],
     );
     expect(messages.some((message) => message.type === "memoryCandidates")).toBe(false);
+  });
+
+  it("rewriteFacts replaces managed facts and leaves the rest of the file intact", async () => {
+    const home = tempDir("iflow-mem-home-");
+    const root = tempDir("iflow-mem-ws-");
+    const global = path.join(home, "AGENTS.md");
+    writeFileSync(
+      global,
+      `# Notes\n\n${MEMORY_MARKER}\n- use npm\n- keep this\n\n## Other\nbody\n`,
+      "utf8",
+    );
+    const { service } = makeService(home, root);
+
+    const result = await service.rewriteFacts(global, [{ from: "use npm", to: "use pnpm" }]);
+    expect(result).toEqual({ applied: 1, skipped: 0 });
+    const next = readFileSync(global, "utf8");
+    expect(next).toContain("- use pnpm");
+    expect(next).not.toContain("- use npm");
+    expect(next).toContain("- keep this");
+    expect(next).toContain("# Notes");
+    expect(next).toContain("## Other\nbody");
+  });
+
+  it("rewriteFacts counts unmatched rewrites in skipped", async () => {
+    const home = tempDir("iflow-mem-home-");
+    const root = tempDir("iflow-mem-ws-");
+    const global = path.join(home, "AGENTS.md");
+    writeFileSync(global, `${MEMORY_MARKER}\n- use npm\n`, "utf8");
+    const { service } = makeService(home, root);
+
+    const result = await service.rewriteFacts(global, [
+      { from: "use npm", to: "use pnpm" },
+      { from: "not present", to: "whatever" },
+    ]);
+    expect(result).toEqual({ applied: 1, skipped: 1 });
+    expect(readFileSync(global, "utf8")).toContain("- use pnpm");
+  });
+
+  it("rewriteFacts throws a conflict when expectedHash is stale", async () => {
+    const home = tempDir("iflow-mem-home-");
+    const root = tempDir("iflow-mem-ws-");
+    const global = path.join(home, "AGENTS.md");
+    writeFileSync(global, `${MEMORY_MARKER}\n- use npm\n`, "utf8");
+    const { service } = makeService(home, root);
+
+    await expect(
+      service.rewriteFacts(global, [{ from: "use npm", to: "use pnpm" }], "stale-hash"),
+    ).rejects.toBeInstanceOf(MemoryConflictError);
+    // The rejected write must not have touched the file.
+    expect(readFileSync(global, "utf8")).toContain("- use npm");
+  });
+
+  it("archiveFacts moves a fact to Archived Memories without touching fenced code", async () => {
+    const home = tempDir("iflow-mem-home-");
+    const root = tempDir("iflow-mem-ws-");
+    const global = path.join(home, "AGENTS.md");
+    const fenced = "```\n- not a fact inside a fence\n```";
+    writeFileSync(
+      global,
+      `# Notes\n\n${MEMORY_MARKER}\n- retire me\n- keep me\n\n${fenced}\n\n## Other\nbody\n`,
+      "utf8",
+    );
+    const { service } = makeService(home, root);
+
+    const result = await service.archiveFacts(global, ["retire me"]);
+    expect(result).toEqual({ archived: 1 });
+    const next = readFileSync(global, "utf8");
+    // Removed from the live section, appended under the archived heading.
+    expect(next).toContain("## Archived Memories");
+    expect(next).toContain("- retire me");
+    expect(next).toContain("- keep me");
+    // Fenced code is preserved verbatim and its bullet is NOT archived.
+    expect(next).toContain(fenced);
+    expect(next.split("- not a fact inside a fence").length - 1).toBe(1);
+    // The archived heading sits at the file end, after the Other section.
+    expect(next.indexOf("## Archived Memories")).toBeGreaterThan(next.indexOf("## Other"));
+  });
+
+  it("restoreFromBackup restores prior content and backs up the current one", async () => {
+    const home = tempDir("iflow-mem-home-");
+    const root = tempDir("iflow-mem-ws-");
+    const global = path.join(home, "AGENTS.md");
+    const original = `${MEMORY_MARKER}\n- original fact\n`;
+    writeFileSync(global, original, "utf8");
+    const backup = await createBackup(home, global, original, new Date("2026-11-01T00:00:00.000Z"));
+    expect(backup.backupPath).not.toBeNull();
+
+    // Simulate a later edit that clobbered the fact.
+    writeFileSync(global, `${MEMORY_MARKER}\n- changed fact\n`, "utf8");
+    const { service } = makeService(home, root);
+
+    const result = await service.restoreFromBackup(backup.backupPath!, global);
+    expect(result.ok).toBe(true);
+    expect(readFileSync(global, "utf8")).toBe(original);
   });
 });
