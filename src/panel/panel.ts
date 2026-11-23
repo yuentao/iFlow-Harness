@@ -137,9 +137,9 @@ import {
   type MaintenanceDeps,
   type MaintenanceLogLevel,
 } from "../memory/maintenance.js";
-import { MaintenanceScheduler } from "../memory/maintenance-scheduler.js";
+import { DEFAULT_TOTAL_TOKEN_BUDGET, MaintenanceScheduler } from "../memory/maintenance-scheduler.js";
 import { discoverMemoryFiles } from "../memory/discovery.js";
-import { estimateMarkdownTokens } from "../../shared/memory-curate.js";
+import { planCuration } from "../../shared/memory-curate.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 import { normalizeModelId, parseContextWindowOverrides, parseCostTable, resolveContextWindowAuthority, resolveCostWithSource } from "../../shared/context-window.js";
@@ -1777,9 +1777,16 @@ export class ChatPanel implements vscode.Disposable {
         "memory-maintenance",
         "state.json",
       ),
-      // 只按周期触发：两个 token 预算是「单文件规划预算」（deps.budgets），不作为
-      // 总量阈值 —— 否则无法再压缩的记忆会让每一轮 tick 都重跑。
+      // 两种触发来源：周期（intervalDays）与容量（memoryMaintenanceTotalTokenBudget）。
+      // 容量超预算时即使未到周期也触发，但带冷却（max(6h, intervalDays/4)），避免
+      // 无法再压缩的记忆让每个 tick 都重跑。
       measure: () => this.measureMaintenanceTokens(),
+      totalTokenBudget: this.maintenanceConfigNumber(
+        "memoryMaintenanceTotalTokenBudget",
+        DEFAULT_TOTAL_TOKEN_BUDGET,
+        1_000,
+        200_000,
+      ),
       acquireLock: () => this.maintenanceLock?.acquire() ?? Promise.resolve(false),
       releaseLock: () => this.maintenanceLock?.release() ?? Promise.resolve(),
     });
@@ -1967,15 +1974,22 @@ export class ChatPanel implements vscode.Disposable {
             // Every mirrored setting lives in the same settings panel; a
             // direct VSCode-side edit must repaint it too.
             if (e.affectsConfiguration("iflow")) this.postHostSettings();
-        // 记忆整理的周期 / 空闲阈值是调度器构造参数，配置变更要热更新
+        // 记忆整理的周期 / 空闲阈值 / 总量预算是调度器参数，配置变更要热更新
         // （idleMinutes 变化会重建 tick 定时器）。
         if (
           e.affectsConfiguration("iflow.memoryMaintenanceIntervalDays")
           || e.affectsConfiguration("iflow.memoryMaintenanceIdleMinutes")
+          || e.affectsConfiguration("iflow.memoryMaintenanceTotalTokenBudget")
         ) {
           this.maintenance?.updateConfig({
             intervalDays: this.maintenanceConfigNumber("memoryMaintenanceIntervalDays", 7, 1, 90),
             idleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
+            totalTokenBudget: this.maintenanceConfigNumber(
+              "memoryMaintenanceTotalTokenBudget",
+              DEFAULT_TOTAL_TOKEN_BUDGET,
+              1_000,
+              200_000,
+            ),
           });
         }
         if (e.affectsConfiguration("iflow.language")) {
@@ -2950,6 +2964,15 @@ export class ChatPanel implements vscode.Disposable {
             Math.min(50_000, Math.max(500, Math.trunc(msg.memoryMaintenanceProjectTokenBudget))),
           ]);
         }
+        if (
+          msg.memoryMaintenanceTotalTokenBudget !== undefined
+          && Number.isFinite(msg.memoryMaintenanceTotalTokenBudget)
+        ) {
+          writes.push([
+            "memoryMaintenanceTotalTokenBudget",
+            Math.min(200_000, Math.max(1_000, Math.trunc(msg.memoryMaintenanceTotalTokenBudget))),
+          ]);
+        }
         if (msg.memoryMaintenanceStrategy === "report" || msg.memoryMaintenanceStrategy === "apply") {
           writes.push(["memoryMaintenanceStrategy", msg.memoryMaintenanceStrategy]);
         }
@@ -3032,14 +3055,21 @@ export class ChatPanel implements vscode.Disposable {
           writes.push(["superAgent.fullTrust", msg.superAgentFullTrust]);
         }
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
-        // 周期 / 空闲阈值写盘后热更新调度器（写失败时配置仍是旧值，与设置页显示一致）。
+        // 周期 / 空闲阈值 / 总量预算写盘后热更新调度器（写失败时配置仍是旧值，与设置页显示一致）。
         if (
           msg.memoryMaintenanceIntervalDays !== undefined
           || msg.memoryMaintenanceIdleMinutes !== undefined
+          || msg.memoryMaintenanceTotalTokenBudget !== undefined
         ) {
           this.maintenance?.updateConfig({
             intervalDays: this.maintenanceConfigNumber("memoryMaintenanceIntervalDays", 7, 1, 90),
             idleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
+            totalTokenBudget: this.maintenanceConfigNumber(
+              "memoryMaintenanceTotalTokenBudget",
+              DEFAULT_TOTAL_TOKEN_BUDGET,
+              1_000,
+              200_000,
+            ),
           });
         }
         // 调高上限后排队的子会话立刻有机会起跑；调低不影响已在运行的会话，
@@ -3529,8 +3559,10 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 当前记忆 token 总量（各记忆文件正文的估算值）。调度器只在配置了总量预算时
-   * 使用它；默认按周期触发，所以这里保持「读得到就报，读不到按 0」。
+   * 当前记忆 token 总量（各记忆文件**托管区块**的合计，与整理/预算同口径）。
+   *
+   * 调度器用它做「超总量预算立即整理」判定（容量触发）；计量口径取托管区块而非
+   * 整份文件：整理压低的就是注入模型的活动记忆，归档区 / 其它 `## ` 区块不该算进预算。
    *
    * 计量要走一次 discovery 目录扫描，而 tick 每次空闲都会问一次 —— 用 5 分钟
    * 的短缓存把扫描频率压住（记忆文件的变化量级远小于 5 分钟）。
@@ -3545,7 +3577,9 @@ export class ChatPanel implements vscode.Disposable {
       let total = 0;
       for (const file of files) {
         const content = await readIfExists(file.path);
-        if (content !== null) total += estimateMarkdownTokens(content);
+        // beforeTokens 是托管区块（`## iFlow Added Memories` … 下一个 `## `）的 token 数，
+        // 与 planCuration 的去重/归档预算完全同口径。
+        if (content !== null) total += planCuration(content).beforeTokens;
       }
       this.maintenanceTokensCache = { at: Date.now(), total };
       return total;
@@ -3636,6 +3670,12 @@ export class ChatPanel implements vscode.Disposable {
         DEFAULT_PROJECT_BUDGET_TOKENS,
         500,
         50_000,
+      ),
+      memoryMaintenanceTotalTokenBudget: this.maintenanceConfigNumber(
+        "memoryMaintenanceTotalTokenBudget",
+        DEFAULT_TOTAL_TOKEN_BUDGET,
+        1_000,
+        200_000,
       ),
       memoryMaintenanceStrategy: this.maintenanceStrategy(),
       nextStepTimeoutSeconds: this.timeoutSeconds("nextStepTimeoutSeconds", NEXT_STEP_TIMEOUT_MS / 1000, 300),

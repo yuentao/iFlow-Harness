@@ -81,6 +81,7 @@ const ALL_KEYS: string[] = [
   "iflow.memoryMaintenanceIdleMinutes",
   "iflow.memoryMaintenanceGlobalTokenBudget",
   "iflow.memoryMaintenanceProjectTokenBudget",
+  "iflow.memoryMaintenanceTotalTokenBudget",
   "iflow.memoryMaintenanceStrategy",
   "iflow.nextStepTimeoutSeconds",
   "iflow.compressTimeoutSeconds",

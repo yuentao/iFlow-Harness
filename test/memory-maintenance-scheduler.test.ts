@@ -328,3 +328,88 @@ describe("MaintenanceScheduler: 状态持久化", () => {
     harness.scheduler.dispose();
   });
 });
+
+/**
+ * 容量触发（总量预算）：超预算时即使未到周期也跑，但带冷却
+ * （max(6 小时, intervalDays/4)），冷却期内不再因容量触发。
+ *
+ * intervalDays=7 → 冷却 = 7d/4 = 42 小时；所有用例的时钟都停在周期内
+ * （远小于 7 天），以隔离「容量」这一条触发来源。
+ */
+describe("MaintenanceScheduler: 总量预算容量触发", () => {
+  const baseState = (extra: Record<string, unknown> = {}) => ({
+    lastRunAt: CLOCK,
+    nextPlanAt: "2026-12-01T00:00:00.000Z",
+    failureCount: 0,
+    ...extra,
+  });
+
+  async function setup(measureTotal: number, extraState: Record<string, unknown> = {}) {
+    const home = tempHome();
+    const statePath = path.join(home, "memory-maintenance", "schedule.json");
+    await saveState(statePath, baseState(extraState) as Parameters<typeof saveState>[1]);
+    let lists = 0;
+    const clock = { at: new Date(CLOCK) };
+    const harness = makeHarness({
+      deps: makeDeps(home, { onList: () => lists++ }),
+      statePath,
+      intervalDays: 7,
+      totalTokenBudget: 1_000,
+      measure: async () => measureTotal,
+      now: () => clock.at,
+    });
+    harness.scheduler.start();
+    return { harness, lists: () => lists, clock };
+  }
+
+  it("超总量预算且未到周期时触发", async () => {
+    const { harness, lists } = await setup(5_000);
+    await harness.fire();
+
+    expect(lists()).toBe(1);
+    expect(harness.scheduler.getState().lastCapacityRunAt).toBe(CLOCK);
+    harness.scheduler.dispose();
+  });
+
+  it("未超预算且未到周期时不触发", async () => {
+    const { harness, lists } = await setup(500);
+    await harness.fire();
+
+    expect(lists()).toBe(0);
+    expect(harness.scheduler.getState().lastCapacityRunAt).toBeUndefined();
+    harness.scheduler.dispose();
+  });
+
+  it("冷却期内即使仍超预算也不触发", async () => {
+    const { harness, lists, clock } = await setup(5_000);
+    await harness.fire();
+    expect(lists()).toBe(1);
+
+    // 冷却 = 42 小时；推进 1 小时仍在其内。
+    clock.at = new Date(Date.parse(CLOCK) + 60 * 60_000);
+    await harness.fire();
+    expect(lists()).toBe(1);
+    harness.scheduler.dispose();
+  });
+
+  it("冷却期外再次超预算时再次触发", async () => {
+    const { harness, lists, clock } = await setup(5_000);
+    await harness.fire();
+    expect(lists()).toBe(1);
+
+    // 42 小时冷却之后（仍远小于 7 天周期）。
+    clock.at = new Date(Date.parse(CLOCK) + 43 * 60 * 60_000);
+    await harness.fire();
+    expect(lists()).toBe(2);
+    harness.scheduler.dispose();
+  });
+
+  it("旧状态缺 lastCapacityRunAt 时视为无冷却，超预算即触发", async () => {
+    // extraState 不写 lastCapacityRunAt，模拟旧版本落盘的状态文件。
+    const { harness, lists } = await setup(5_000);
+    await harness.fire();
+
+    expect(lists()).toBe(1);
+    harness.scheduler.dispose();
+  });
+});

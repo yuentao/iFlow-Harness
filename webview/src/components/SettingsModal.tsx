@@ -1030,6 +1030,18 @@ function ChatSection() {
                 unit={t("tokens")}
                 onCommit={(memoryMaintenanceProjectTokenBudget) => update({ memoryMaintenanceProjectTokenBudget })}
               />
+              <NumberRow
+                label={t("总量预算")}
+                description={t("所有记忆托管区块的 token 合计阈值，超出即整理。")}
+                detail={t(
+                  "超过它时即使未到整理周期也会触发整理；冷却期为 6 小时与周期的四分之一中较大者，冷却期内不重复触发。",
+                )}
+                value={settings.memoryMaintenanceTotalTokenBudget}
+                min={1000}
+                max={200000}
+                unit={t("tokens")}
+                onCommit={(memoryMaintenanceTotalTokenBudget) => update({ memoryMaintenanceTotalTokenBudget })}
+              />
             </DependentRow>
           )}
         </div>

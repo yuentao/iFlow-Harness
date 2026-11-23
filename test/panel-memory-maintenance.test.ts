@@ -174,6 +174,36 @@ describe("记忆整理：调度器接入（假 deps / 假时钟）", () => {
     expect(releases).toBe(0);
     harness.scheduler.dispose();
   });
+
+  it("measure 与 totalTokenBudget 接入后，未到周期但超预算也会触发", async () => {
+    const home = tempDir();
+    const statePath = path.join(home, "state.json");
+    // 上一轮刚跑过（未到 7 天周期），但 token 合计已超总量预算。
+    writeFileSync(
+      statePath,
+      JSON.stringify({ lastRunAt: CLOCK, failureCount: 0 }),
+      "utf8",
+    );
+    let lists = 0;
+    const fake = makeFakeDeps(home);
+    const counted = { lists: () => lists };
+    const harness = makeHarness(
+      {
+        ...fake.deps,
+        listFiles: async () => {
+          lists++;
+          return [{ path: path.join(home, "AGENTS.md"), scope: "global", kind: "primary" }];
+        },
+      },
+      { statePath, totalTokenBudget: 1_000, measure: async () => 50_000 },
+    );
+    harness.scheduler.start();
+
+    await harness.fire();
+    expect(counted.lists()).toBe(1);
+    expect(harness.scheduler.getState().lastCapacityRunAt).toBe(CLOCK);
+    harness.scheduler.dispose();
+  });
 });
 
 describe("记忆整理：跨窗口锁", () => {

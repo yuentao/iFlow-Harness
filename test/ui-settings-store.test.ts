@@ -24,6 +24,7 @@ const baseSettings: HostSettingsUi = {
   memoryMaintenanceIdleMinutes: 15,
   memoryMaintenanceGlobalTokenBudget: 4000,
   memoryMaintenanceProjectTokenBudget: 2500,
+  memoryMaintenanceTotalTokenBudget: 12000,
   memoryMaintenanceStrategy: "report",
   nextStepTimeoutSeconds: 25,
   compressTimeoutSeconds: 0,
