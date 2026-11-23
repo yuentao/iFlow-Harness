@@ -821,3 +821,124 @@ describe("超流体写工具护栏 · repo 档受保护路径预检", () => {
     ).toBeNull();
   });
 });
+
+describe("超流体 shell 护栏 · 命令位识别不误伤只读检索", () => {
+  /** repo 档 + 合并目标：最严的一档，任何误判都会终止整个会话。 */
+  function mergeCtx(): ChildShellGuardContext {
+    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, mergeChild: true };
+  }
+
+  // 搜索模式 / 参数值里的 git 不是命令位。旧实现扫描任意 token，会把
+  // 它们读成真实 git 调用（push 直接终止整个合并子会话）。
+  const readOnlySearches: Array<{ name: string; command: string }> = [
+    {
+      name: "Select-String 里未加引号的 git push",
+      command: "Select-String -Path docs -Pattern git push",
+    },
+    {
+      name: "Select-String 里未加引号的 git reset --hard",
+      command: "Select-String -Path docs -Pattern git reset --hard",
+    },
+    {
+      name: "rg 里未加引号的 git stash",
+      command: "rg -n git stash test/",
+    },
+    {
+      name: "rg 里未加引号的 git push origin main",
+      command: "rg -n git push origin main",
+    },
+    {
+      name: "powershell -Command 里跑只读检索",
+      command: 'powershell -Command "Select-String -Path docs -Pattern git push"',
+    },
+  ];
+
+  for (const testCase of readOnlySearches) {
+    it(`${testCase.name} → 放行`, () => {
+      const result = classifyChildShellCommand(testCase.command, mergeCtx());
+      expect(result.decision).toBe("allow");
+      expect(result.reason).toBeUndefined();
+    });
+  }
+
+  it("真正的命令位（包装命令内层首词）是 git push 时仍被拦", () => {
+    const result = classifyChildShellCommand('cmd /c "git push origin main"', mergeCtx());
+    expect(result.decision).toBe("deny");
+    expect(result.severity).toBe("session");
+  });
+});
+
+describe("超流体 shell 护栏 · 合并边界放行只读 git 形态", () => {
+  function mergeCtx(): ChildShellGuardContext {
+    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, mergeChild: true };
+  }
+
+  const readOnlyAllowed: Array<{ name: string; command: string }> = [
+    { name: "git stash list（只读列举）", command: "git stash list" },
+    { name: "git stash show（只读查看）", command: "git stash show" },
+    { name: "git stash show -p", command: "git stash show -p" },
+    { name: "git push --dry-run", command: "git push --dry-run" },
+    { name: "git push --dry-run origin main", command: "git push --dry-run origin main" },
+  ];
+
+  for (const testCase of readOnlyAllowed) {
+    it(`${testCase.name} → 放行`, () => {
+      const result = classifyChildShellCommand(testCase.command, mergeCtx());
+      expect(result.decision).toBe("allow");
+      expect(result.reason).toBeUndefined();
+    });
+  }
+
+  const stillBlocked: Array<{ name: string; command: string }> = [
+    { name: "git stash（默认 push）", command: "git stash" },
+    { name: "git stash push", command: "git stash push" },
+    { name: "git stash pop", command: "git stash pop" },
+    { name: "git stash apply", command: "git stash apply" },
+    { name: "git stash drop", command: "git stash drop" },
+    { name: "git stash clear", command: "git stash clear" },
+    { name: "git push origin main（非 dry-run）", command: "git push origin main" },
+  ];
+
+  for (const testCase of stillBlocked) {
+    it(`${testCase.name} → 仍终止会话`, () => {
+      const result = classifyChildShellCommand(testCase.command, mergeCtx());
+      expect(result.decision).toBe("deny");
+      expect(result.severity).toBe("session");
+      expect(result.reason).toContain("merge-only boundary");
+    });
+  }
+});
+
+describe("超流体 shell 护栏 · checkout 文件检出不误判切分支", () => {
+  function mergeCtx(): ChildShellGuardContext {
+    return { cwd: REPO, repoRoot: REPO, repoWorkspace: true, mergeChild: true };
+  }
+
+  // 带路径分隔符或文件扩展名的目标 = 单文件/路径检出，不离开合并现场。
+  const fileCheckouts: Array<{ name: string; command: string }> = [
+    { name: "git checkout src/panel/a.ts（路径分隔符）", command: "git checkout src/panel/a.ts" },
+    { name: "git checkout docs/README.md", command: "git checkout docs/README.md" },
+    { name: "git checkout config.json（扩展名判定）", command: "git checkout config.json" },
+    { name: "git checkout README.md", command: "git checkout README.md" },
+  ];
+
+  for (const testCase of fileCheckouts) {
+    it(`${testCase.name} → 放行（不是切分支）`, () => {
+      const result = classifyChildShellCommand(testCase.command, mergeCtx());
+      expect(result.decision).toBe("allow");
+    });
+  }
+
+  it("git checkout main（没有路径特征）→ 仍判切分支", () => {
+    const result = classifyChildShellCommand("git checkout main", mergeCtx());
+    expect(result.decision).toBe("deny");
+    expect(result.severity).toBe("session");
+    expect(result.reason).toContain("merge-only boundary");
+  });
+
+  it("git switch main 仍判切分支", () => {
+    const result = classifyChildShellCommand("git switch main", mergeCtx());
+    expect(result.decision).toBe("deny");
+    expect(result.severity).toBe("session");
+  });
+});
