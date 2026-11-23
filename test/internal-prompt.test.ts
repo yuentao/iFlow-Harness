@@ -14,7 +14,7 @@ import { buildFollowupPrompt, parseFollowupResponse } from "../shared/turn-follo
 import { buildAssetGenPrompt } from "../shared/asset-gen.js";
 import { buildModelMetadataPrompt } from "../shared/model-metadata.js";
 import { buildIncrementalKnowledgePrompt, buildKnowledgePrompt } from "../src/memory/knowledge.js";
-import { renderPrompt } from "../prompts/index.js";
+import { loadPrompt, renderPrompt } from "../prompts/index.js";
 import type { Block } from "../shared/messages.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -744,6 +744,7 @@ const SHIPPED_TEMPLATES = [
   "asset-gen-contracts",
   "knowledge",
   "knowledge-incremental",
+  "memory-curate",
 ];
 
 describe("prompt templates (prompts/)", () => {
@@ -751,6 +752,14 @@ describe("prompt templates (prompts/)", () => {
     for (const name of SHIPPED_TEMPLATES) {
       expect(existsSync(path.join(here, "..", "prompts", `${name}.md`), "utf8")).toBe(true);
     }
+  });
+
+  it("registers memory-curate in prompts/index.ts so loadPrompt resolves it", () => {
+    // L2 语义合并依赖这条模板；未注册时 loadPrompt 会抛「not registered」，
+    // 而该错误只会在真实整理时暴露 —— 这里提前钉住。
+    const text = loadPrompt("memory-curate");
+    expect(text).toContain("{{facts}}");
+    expect(text).toContain('"merges"');
   });
 
   it("makes the main session an orchestrator that only delegates, plans, manages and reports", () => {
