@@ -2232,13 +2232,10 @@ function SuperSessionRow({
   // 波次标记只在真的带 wave 时显示：0 或缺省 = 旧数据，不印「第 0 波」。
   const wave =
     typeof session.wave === "number" && session.wave > 0 ? Math.trunc(session.wave) : null;
-  // 尝试次数只在真的重试过、或声明了上限时显示 —— 否则每行都挂「尝试 1/1」是噪音。
+  // 尝试次数只在真的重试过（attempts > 1）时显示 —— 首次尝试连「尝试 1/2」都是噪音。
   const attempts = session.attempts ?? 1;
   const maxAttempts = session.maxAttempts;
-  const attemptChip =
-    attempts > 1 || (maxAttempts !== undefined && maxAttempts > 1)
-      ? { attempts, maxAttempts }
-      : null;
+  const attemptChip = attempts > 1 ? { attempts, maxAttempts } : null;
   // 失败分类：与状态文案重复的分类不再挂 chip（cancelled 已写「已中断」、
   // awaiting_input 已写「等你回答」），避免同一事实在一条 32px 行里说两遍。
   const failureKind = superBoardFailureKind(session);
@@ -2586,7 +2583,15 @@ function SuperSessionRow({
             )}
             {/* 「上次运行」已上移到折叠行状态后的静音 chip（展开态也会渲染那一行），
                 这里不再重复，避免展开后读两遍。完整历史说明仍在 titleHint。 */}
-            {(session.attempts ?? 1) > 1 && <span>{t("第 {0} 次尝试", session.attempts ?? 1)}</span>}
+            {/* 尝试信息从折叠行转移到展开详情：重试过、或声明了上限时都能
+                在这里查到完整次数（含上限），折叠列表不再常驻「尝试 N/M」。 */}
+            {attempts > 1 || (maxAttempts !== undefined && maxAttempts > 1) ? (
+              <span>
+                {maxAttempts !== undefined
+                  ? t("已尝试 {0} 次，最多 {1} 次", attempts, maxAttempts)
+                  : t("已尝试 {0} 次", attempts)}
+              </span>
+            ) : null}
           </div>
 
           {/* No visible reason line under the buttons any more: the board

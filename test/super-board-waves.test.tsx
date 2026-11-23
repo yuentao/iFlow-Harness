@@ -323,6 +323,18 @@ describe("子会话行 · 波次 / 尝试 / 失败分类 / 单行诊断", () => 
     expect(scope.textContent).not.toContain("尝试 1/1");
   });
 
+  it("首次尝试即使声明上限也不挂「尝试 1/N」chip，详情里仍能看到尝试次数", () => {
+    render([
+      session({ id: "a", title: "首次任务", status: "running", attempts: 1, maxAttempts: 2 }),
+    ]);
+    expand();
+    act(() => rowButton("首次任务").click());
+
+    const text = panel().textContent ?? "";
+    expect(text).not.toContain("尝试 1/2");
+    expect(text).toContain("已尝试 1 次，最多 2 次");
+  });
+
   it("失败分类翻成中文文案（terminal / retryable），不显示英文枚举", () => {
     render([
       session({
