@@ -521,7 +521,7 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     // not_found answers with an info toast, no card mutation
     p.store.replaceState({ ...p.store.getState(), blocks: structuredClone(blocks) });
     await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "q-session", agentId: "parent" });
-    expect(toasts.at(-1)?.message).toContain("该子代理已结束");
+    expect(toasts.at(-1)?.message).toContain("该进程内子代理已结束");
     // a terminal card is no longer a valid target
     p.store.replaceState({ ...p.store.getState(), status: "idle" });
     await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "q-session", agentId: "child" });

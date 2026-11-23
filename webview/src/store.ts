@@ -852,7 +852,7 @@ function createMockHost(): HostApi {
           at: Date.now() - 62_000,
           kind: "session",
           level: "info",
-          message: "子会话已启动，模型 glm-5.3-flash-free",
+          message: "超流体已启动，模型 glm-5.3-flash-free",
         },
         {
           at: Date.now() - 18_000,
@@ -901,7 +901,7 @@ function createMockHost(): HostApi {
           at: Date.now() - 118_000,
           kind: "session",
           level: "info",
-          message: "子会话已启动",
+          message: "超流体已启动",
         },
         {
           at: Date.now() - 20_000,
@@ -957,7 +957,7 @@ function createMockHost(): HostApi {
           at: Date.now() - 298_000,
           kind: "session",
           level: "info",
-          message: "子会话已启动，模型 deepseek-v4-pro",
+          message: "超流体已启动，模型 deepseek-v4-pro",
         },
         {
           at: Date.now() - 190_000,
@@ -1031,7 +1031,7 @@ function createMockHost(): HostApi {
           at: Date.now() - 418_000,
           kind: "session",
           level: "info",
-          message: "子会话已启动（仅目录隔离）",
+          message: "超流体已启动（仅目录隔离）",
         },
         {
           at: Date.now() - 400_000,
@@ -1087,7 +1087,7 @@ function createMockHost(): HostApi {
           at: Date.now() - 538_000,
           kind: "session",
           level: "info",
-          message: "子会话已启动",
+          message: "超流体已启动",
         },
         {
           at: Date.now() - 516_000,
@@ -2336,7 +2336,7 @@ function createMockHost(): HostApi {
         // The mock mirrors the agent-cancel Mod: only the targeted agent
         // stops; the parent turn keeps running with an interrupted result.
         // (No real subagent lifecycle here, so settle the demo turn.)
-        demoBlocks.push({ kind: "text", text: "*（已停止该子代理，整轮继续，mock）*" });
+        demoBlocks.push({ kind: "text", text: "*（已停止该进程内子代理，整轮继续，mock）*" });
         settleMockTurn();
         return;
       }

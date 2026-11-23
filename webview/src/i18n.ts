@@ -19,9 +19,9 @@ function isEnglish(): boolean {
 }
 
 const en: Record<string, string> = {
-  // Super Agent (child sessions of the main session)
+  // Superfluid (the Super Agent feature of the main session)
   "委派指令": "Delegation directive",
-  "超流体": "Super Fluid",
+  "超流体": "Superfluid",
   "准备中": "Preparing",
   "等你回答": "Waiting for you",
   "已中断": "Interrupted",
@@ -30,16 +30,16 @@ const en: Record<string, string> = {
   "由系统中断": "Interrupted by system",
   "不弹审批": "No approval prompts",
   "超流体里的工具调用（包括运行命令）会直接执行，不会先征求你的同意":
-    "Tool calls in a child session — shell commands included — run directly, without asking you first",
+    "Tool calls in a Superfluid — shell commands included — run directly, without asking you first",
   // 看板头帮助按钮（HelpTip）里的统一说明：不弹审批 / 合并规则 / 清理规则。
   "看板说明": "Board help",
   "超流体结束之后才能合并；已经合并过、或者没有改动可合并的超流体，不需要再合并":
-    "A child session can be merged only after it finishes; one whose changes are already merged, or that has nothing to merge, does not need merging",
+    "A Superfluid can be merged only after it finishes; one whose changes are already merged, or that has nothing to merge, does not need merging",
   "超流体还在运行时不能清理，请先中断它":
-    "A running child session cannot be cleaned up — interrupt it first",
+    "A running Superfluid cannot be cleaned up — interrupt it first",
   "按未回答继续": "it continues with “no answer”",
-  "已提交，等待超流体继续": "Submitted — waiting for the child session to continue",
-  "超流体 {0}：{1}": "Child session {0}: {1}",
+  "已提交，等待超流体继续": "Submitted — waiting for the Superfluid to continue",
+  "超流体 {0}：{1}": "Superfluid {0}: {1}",
   "让智能体合并分支": "Let the agent merge the branch",
   "已自动合并": "Auto-merged",
   "合并冲突": "Merge conflict",
@@ -48,58 +48,58 @@ const en: Record<string, string> = {
   "未自动合并": "Not auto-merged",
   "无需合并": "No merge needed",
   "需人工合并": "Needs manual merge",
-  "已完成、需人工合并的 {0} 个超流体": "Finished child sessions needing a manual merge ({0})",
-  "这个超流体的改动已经合并": "This child session's changes are already merged",
+  "已完成、需人工合并的 {0} 个超流体": "Finished Superfluids needing a manual merge ({0})",
+  "这个超流体的改动已经合并": "This Superfluid's changes are already merged",
   "{0} 个等你回答": "{0} waiting for you",
   "{0} 个失败": "{0} failed",
   "{0} 个需人工合并": "{0} needing a manual merge",
   "全部中断": "Interrupt all",
-  "超流体看板": "Child-session board",
-  "展开超流体看板": "Expand the child-session board",
-  "收起超流体看板": "Collapse the child-session board",
-  "超流体待答问题": "Child session waiting for your answer",
-  "展开已完成的超流体": "Expand the finished child sessions",
-  "收起已完成的超流体": "Collapse the finished child sessions",
-  "已完成并合并的 {0} 个超流体": "Finished and merged child sessions ({0})",
-  "已完成、无需合并的 {0} 个超流体": "Finished child sessions with nothing to merge ({0})",
-  "已完成的 {0} 个超流体": "Finished child sessions ({0})",
+  "超流体看板": "Superfluid board",
+  "展开超流体看板": "Expand the Superfluid board",
+  "收起超流体看板": "Collapse the Superfluid board",
+  "超流体待答问题": "Superfluid waiting for your answer",
+  "展开已完成的超流体": "Expand the finished Superfluids",
+  "收起已完成的超流体": "Collapse the finished Superfluids",
+  "已完成并合并的 {0} 个超流体": "Finished and merged Superfluids ({0})",
+  "已完成、无需合并的 {0} 个超流体": "Finished Superfluids with nothing to merge ({0})",
+  "已完成的 {0} 个超流体": "Finished Superfluids ({0})",
   "派发": "Dispatch",
   "已派出": "Dispatched",
   "已启动": "Started",
   "在等你回答": "Waiting for you",
   "第 {0} 次": "Attempt {0}",
   "阶段轨：{0}": "Timeline: {0}",
-  // 子会话 todolist 时间轴：状态 / 优先级是静态词（todo 原文是动态文本，不进字典）
+  // 超流体 todolist 时间轴：状态 / 优先级是静态词（todo 原文是动态文本，不进字典）
   "待办": "To do",
   "高优先级": "High priority",
   "中优先级": "Medium priority",
   "低优先级": "Low priority",
-  "合并超流体分支": "Merge the child session's branch",
+  "合并超流体分支": "Merge the Superfluid's branch",
   "让智能体把分支 {0} 合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。":
     "Let the agent merge branch {0} into the current branch? It performs the merge itself and handles conflicts; your working branch will change.",
   "让智能体合并": "Let the agent merge",
   "超流体还没结束，等它完成再合并":
-    "The child session has not finished — merge it after it completes",
+    "The Superfluid has not finished — merge it after it completes",
   "让一个超流体把这条分支合并到当前分支，冲突由它自己解决":
-    "Let a child session merge this branch into the current branch and resolve conflicts itself",
-  "这个超流体没有可合并的分支": "This child session has no branch to merge",
-  "清理超流体": "Clean up the child session",
+    "Let a Superfluid merge this branch into the current branch and resolve conflicts itself",
+  "这个超流体没有可合并的分支": "This Superfluid has no branch to merge",
+  "清理超流体": "Clean up the Superfluid",
   "删除超流体「{0}」的工作目录？分支上未合并的提交会保留；工作目录里尚未提交的改动会被一起删掉，无法恢复。":
-    "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in that directory are deleted for good.",
+    "Delete the working directory of Superfluid “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in that directory are deleted for good.",
   "清理": "Clean up",
   "清理中": "Cleaning up",
   "合并中": "Merging",
   "重试中": "Retrying",
-  "超流体还在运行，请先中断再清理": "The child session is still running — interrupt it before cleaning up",
-  "中断这个超流体": "Interrupt this child session",
-  "中断超流体": "Interrupt the child session",
+  "超流体还在运行，请先中断再清理": "The Superfluid is still running — interrupt it before cleaning up",
+  "中断这个超流体": "Interrupt this Superfluid",
+  "中断超流体": "Interrupt the Superfluid",
   "中断": "Interrupt",
   "中断超流体「{0}」？它会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
-    "Interrupt child session “{0}”? It stops immediately and this turn's changes are neither committed nor merged; what is already in its working directory is kept, and you can retry later.",
+    "Interrupt Superfluid “{0}”? It stops immediately and this turn's changes are neither committed nor merged; what is already in its working directory is kept, and you can retry later.",
   "中断全部 {0} 个运行中的超流体？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
-    "Interrupt all {0} running child sessions? They stop immediately and their changes are neither committed nor merged; what is already in their working directories is kept, and you can retry later.",
+    "Interrupt all {0} running Superfluids? They stop immediately and their changes are neither committed nor merged; what is already in their working directories is kept, and you can retry later.",
   "重试这个超流体：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）":
-    "Retry this child session: reuses its working directory and creates no new commit, but clears the previous integration result and re-runs the whole task (spending tokens again)",
+    "Retry this Superfluid: reuses its working directory and creates no new commit, but clears the previous integration result and re-runs the whole task (spending tokens again)",
   "第 {0} 次尝试": "Attempt {0}",
   "独立工作目录": "Its own working directory",
   "只隔离了目录": "Directory only — no branch isolation",
@@ -111,26 +111,26 @@ const en: Record<string, string> = {
   "工作目录 {0} 个": "{0} working directories",
   "已结束 {0} 个可清理": "{0} finished and ready to clean up",
   "清理已结束": "Clean up finished",
-  "清理已结束的超流体": "Clean up finished child sessions",
+  "清理已结束的超流体": "Clean up finished Superfluids",
   "将删除 {0} 个超流体的工作目录；它们的分支都会保留（未合并的提交不会丢），但工作目录里尚未提交的改动会被一起删掉，无法恢复。":
-    "Delete the working directories of {0} child sessions? Their branches are all kept (unmerged commits are not lost), but uncommitted changes in those directories are deleted for good.",
+    "Delete the working directories of {0} Superfluids? Their branches are all kept (unmerged commits are not lost), but uncommitted changes in those directories are deleted for good.",
   "查看实时进度": "Show live progress",
-  "超流体实时进度": "Child session live progress",
+  "超流体实时进度": "Superfluid live progress",
   "查看已保存的转录": "View saved transcript",
-  "超流体历史转录": "Child session saved transcript",
+  "超流体历史转录": "Superfluid saved transcript",
   "已保存的转录": "Saved transcript",
   "上次运行": "From a previous run",
   "这次超流体在上一次运行里就已经结束（扩展重启后恢复的历史记录）":
-    "This child session had already finished in a previous run (a historical record restored after the extension restarted)",
+    "This Superfluid had already finished in a previous run (a historical record restored after the extension restarted)",
   "准备中…": "Preparing…",
   "暂无输出": "No output yet",
-  "超流体需要你回答": "The child session needs an answer",
+  "超流体需要你回答": "The Superfluid needs an answer",
   "提交回答": "Send answer",
-  "超流体合计开销": "Total child-session usage",
+  "超流体合计开销": "Total Superfluid usage",
   "输入 {0} · 输出 {1}": "Input {0} · Output {1}",
   "按公开单价估算，仅供参考": "Estimated at published prices; indicative only",
   "输入是上一次请求实际携带的上下文；输出按超流体的文字估算":
-    "Input is the context the last request actually carried; output is estimated from the child's text",
+    "Input is the context the last request actually carried; output is estimated from the Superfluid's text",
   "本轮变更": "Changes this turn",
   "变更说明": "Changes-this-turn help",
   "1 个文件已更改": "1 file changed",
@@ -255,13 +255,16 @@ const en: Record<string, string> = {
   "对话已经超出模型能记住的上限，自动压缩也没能救回来。可以发送 /compress 再压一次，或新建会话继续。":
     "The conversation exceeded what the model can remember and auto-compression could not recover it. Send /compress to compact again, or start a new session to continue.",
   "运行中": "Running",
+  // 资产卡：用户自定义的「子代理定义文件」仍是「子代理」，不要与进程内子代理混淆。
   "子代理": "Subagent",
-  "停止此子代理": "Stop this subagent",
+  // `task` 工具在会话内派生的子代理 —— 与超流体是两个概念。
+  "进程内子代理": "In-process sub-agent",
+  "停止此进程内子代理": "Stop this in-process sub-agent",
   "已停止": "Stopped",
   "耗时": "Duration",
   "查看完整记录": "View full log",
-  "token 数为按对话估算，包含子代理": "Token count is estimated from the conversation and includes subagents",
-  "启动子代理 {0}：{1}": "Launch subagent {0}: {1}",
+  "token 数为按对话估算，包含进程内子代理": "Token count is estimated from the conversation and includes in-process sub-agents",
+  "启动进程内子代理 {0}：{1}": "Launch in-process sub-agent {0}: {1}",
   "读取 {0}": "Reading {0}",
   "运行：{0}": "Running: {0}",
   "更新任务清单": "Updating todos",
@@ -275,14 +278,14 @@ const en: Record<string, string> = {
   "正在回滚对话…": "Rolling back the conversation…",
   "正在恢复会话…": "Restoring session…",
   "删除中…": "Deleting…",
-  // Super Agent: 等待子会话汇报期间的「新会话」按钮禁用说明
+  // Super Agent: 等待超流体汇报期间的「新会话」按钮禁用说明
   "超流体还在运行，等它们汇报完才能新建会话":
-    "Child sessions are still running — you can start a new session once they have reported",
+    "Superfluids are still running — you can start a new session once they have reported",
   // 用户按了停止、汇报被压住：「新会话」必须放行，否则面板死锁。
   "已停止：可以新建会话，待处理的汇报仍留在原会话":
     "Stopped — you can start a new session; pending results stay with the original session",
   "你按了停止，还有 {0} 项超流体结果没处理。新建会话不会丢掉它们：结果留在原会话里，切回去才会继续处理。要新建吗？":
-    "You pressed Stop and {0} child-session result(s) are still unprocessed. Starting a new session will not lose them: they stay with the original session and are processed when you switch back. Start a new session?",
+    "You pressed Stop and {0} Superfluid result(s) are still unprocessed. Starting a new session will not lose them: they stay with the original session and are processed when you switch back. Start a new session?",
   // 恢复进行中：「新会话」按钮可点（宿主会放弃恢复并立刻新建会话）
   "取消正在进行的会话恢复并新建会话": "Cancel the session restore in progress and start a new session",
   "删除会话 {0}": "Delete session {0}",
@@ -427,17 +430,17 @@ const en: Record<string, string> = {
   "项目级和全局有同名服务器时，内核会用项目级那份整体替换全局的（不会合并字段）":
     "When a server name exists in both scopes, the Core replaces the global entry with the project one wholesale (fields are not merged)",
   "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的超流体会通过共享代理使用这些 server。":
-    "This edits the global configuration (~/.iflow/settings.json). Restart the Core after saving — new child sessions use these servers through the shared proxy.",
+    "This edits the global configuration (~/.iflow/settings.json). Restart the Core after saving — new Superfluids use these servers through the shared proxy.",
   "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后重启内核，新建的超流体会通过共享代理使用这些 server。":
-    "This edits the project configuration (<workspace>/.iflow/settings.json). For a name that also exists globally, the Core replaces the global entry with the project one wholesale (fields are not merged). Restart the Core after saving — new child sessions use these servers through the shared proxy.",
+    "This edits the project configuration (<workspace>/.iflow/settings.json). For a name that also exists globally, the Core replaces the global entry with the project one wholesale (fields are not merged). Restart the Core after saving — new Superfluids use these servers through the shared proxy.",
   "这些 MCP server 仅供超流体使用，主会话不加载 MCP。":
-    "These MCP servers are used only by Super Agent child sessions; the main session does not load MCP.",
+    "These MCP servers are used only by Superfluids; the main session does not load MCP.",
   "保存中…": "Saving…",
-  // MCP status indicators + detail sub-page (child-session view is authoritative)
+  // MCP status indicators + detail sub-page (Superfluid view is authoritative)
   "状态未知": "Status unknown",
   "已禁用": "Disabled",
-  "已在超流体连接": "Connected in child sessions",
-  "超流体连接失败": "Child session connection failed",
+  "已在超流体连接": "Connected in Superfluids",
+  "超流体连接失败": "Superfluid connection failed",
   "主会话未加载 MCP": "Not loaded in the main session",
   "已连接": "Connected",
   "连接中…": "Connecting…",
@@ -451,17 +454,17 @@ const en: Record<string, string> = {
   "刷新": "Refresh",
   "刷新中…": "Refreshing…",
   "这些工具说明会在超流体中占用约 {0} tokens 上下文（估算）":
-    "These tool descriptions take about {0} tokens of context in child sessions (estimated)",
-  "超流体连接失败：": "Child session connection failed:",
+    "These tool descriptions take about {0} tokens of context in Superfluids (estimated)",
+  "超流体连接失败：": "Superfluid connection failed:",
   "连接失败：": "Connection failed:",
   "这个服务器没有提供工具或提示": "This server provides no tools or prompts",
   "正在读取工具列表…": "Reading the tool list…",
   "无法获取工具列表（未连接，或没有开启状态上报）":
     "Cannot read the tool list (not connected, or status reporting not enabled)",
   "主会话不加载 MCP，新建超流体并连接后才会上报工具列表":
-    "The main session does not load MCP; the tool list is reported after a child session connects",
+    "The main session does not load MCP; the tool list is reported after a Superfluid connects",
   "主会话不加载 MCP，工具由超流体通过共享代理使用":
-    "The main session does not load MCP; tools are used by child sessions through the shared proxy",
+    "The main session does not load MCP; tools are used by Superfluids through the shared proxy",
   "工具 ({0})": "Tools ({0})",
   "提示词 ({0})": "Prompts ({0})",
   "提示词": "Prompt",
@@ -692,37 +695,37 @@ const en: Record<string, string> = {
   "并发上限": "Concurrency limit",
   "个": "sessions",
   "集成模式": "Integration mode",
-  "超流体完成后，把它的改动并回当前分支的方式。": "How a finished child session's changes are merged back into the current branch.",
+  "超流体完成后，把它的改动并回当前分支的方式。": "How a finished Superfluid's changes are merged back into the current branch.",
   "自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的超流体生效。":
-    "Auto-merge: merge into the current branch (conflicts are previewed first and your uncommitted changes are protected); Open PR: push the branch and open a pull request (needs the gh CLI); Manual: just keep the branch for you to merge from the board. Takes effect on the next child session that finishes.",
+    "Auto-merge: merge into the current branch (conflicts are previewed first and your uncommitted changes are protected); Open PR: push the branch and open a pull request (needs the gh CLI); Manual: just keep the branch for you to merge from the board. Takes effect on the next Superfluid that finishes.",
   "自动合并": "Auto-merge",
   "创建 PR": "Open PR",
   "手动": "Manual",
   "最大尝试次数": "Max attempts",
   "次": "attempts",
-  "超流体失败后最多自动尝试几次（含首次）。": "How many times a failed child session is retried automatically, including the first attempt.",
+  "超流体失败后最多自动尝试几次（含首次）。": "How many times a failed Superfluid is retried automatically, including the first attempt.",
   "默认 2，可设 1–5；填 1 表示不自动重试。修改后对下一个启动的超流体生效。":
-    "Defaults to 2, range 1–5; 1 means no automatic retry. Takes effect on the next child session that starts.",
+    "Defaults to 2, range 1–5; 1 means no automatic retry. Takes effect on the next Superfluid that starts.",
   "依赖策略": "Dependency policy",
-  "上游任务失败时，依赖它的超流体怎么处理。": "What happens to a child session whose upstream task failed.",
+  "上游任务失败时，依赖它的超流体怎么处理。": "What happens to a Superfluid whose upstream task failed.",
   "阻塞：跳过后续任务并标记为阻塞；继续：让它照常执行。默认阻塞。":
     "Block: skip the dependent task and mark it as blocked; Continue: run it anyway. Blocking is the default.",
   "阻塞": "Block",
   "工作目录上限": "Worktree limit",
-  "磁盘上最多保留几个已结束超流体的工作目录。": "How many finished child-session worktrees to keep on disk at most.",
+  "磁盘上最多保留几个已结束超流体的工作目录。": "How many finished Superfluid worktrees to keep on disk at most.",
   "默认 10，可设 0–100；填 0 表示不限。超出时按修改时间从旧到新回收，分支一律保留，有未提交改动的目录不会被回收。":
     "Defaults to 10, range 0–100; 0 means no limit. When exceeded, the oldest are removed first by modification time; branches are always kept and worktrees with uncommitted changes are never removed.",
   "保留工作目录": "Keep worktree",
-  "超流体完成后，是否保留它的工作目录。": "Whether to keep a finished child session's working directory.",
+  "超流体完成后，是否保留它的工作目录。": "Whether to keep a finished Superfluid's working directory.",
   "默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的超流体从不回收。开启后工作目录会留在磁盘上，可随时手动清理。":
-    "Off by default: finished worktrees are reclaimed automatically (branches are always kept); failed or interrupted sessions are never reclaimed. When on, worktrees stay on disk for manual cleanup.",
+    "Off by default: finished worktrees are reclaimed automatically (branches are always kept); failed or interrupted Superfluids are never reclaimed. When on, worktrees stay on disk for manual cleanup.",
   "完全信任模式": "Full trust mode",
-  "子会话直接在主仓工作区运行，不做 Git 工作目录隔离。默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。":
-    "Child sessions run directly in the main repository workspace, with no Git worktree isolation. Off by default: when on, the tool allowlist and MCP server allowlist are no longer applied to child sessions.",
-  "开启后子会话保留全部内置工具与共享代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。":
-    "When on, child sessions keep all built-in tools and every broker-proxied MCP server, may read/write the main repository workspace and run commands, and may push, open pull requests and merge in the main repository. Takes effect on the next dispatched child session.",
-  "开启后子会话无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。":
-    "In full trust mode child sessions can modify main-repository files, run arbitrary commands and push/open PRs without approval — only enable it for tasks you fully trust.",
+  "超流体直接在主仓工作区运行，不做 Git 工作目录隔离。默认关闭：开启后不再向超流体施加工具白名单与 MCP 服务器白名单限制。":
+    "Superfluids run directly in the main repository workspace, with no Git worktree isolation. Off by default: when on, the tool allowlist and MCP server allowlist are no longer applied to Superfluids.",
+  "开启后超流体保留全部内置工具与共享代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。":
+    "When on, Superfluids keep all built-in tools and every broker-proxied MCP server, may read/write the main repository workspace and run commands, and may push, open pull requests and merge in the main repository. Takes effect on the next dispatched Superfluid.",
+  "开启后超流体无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。":
+    "In full trust mode Superfluids can modify main-repository files, run arbitrary commands and push/open PRs without approval — only enable it for tasks you fully trust.",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
   "调整面板整体字号": "Adjust the panel font size",
   "高级外观": "Advanced appearance",
@@ -872,8 +875,8 @@ const en: Record<string, string> = {
   "定期整理记忆": "Curate memories on a schedule",
   "空闲时清理记忆托管区块：去重、合并、归档低价值条目。":
     "Tidy the managed memory sections while idle: dedupe, merge and archive low-value facts.",
-  "只在没有进行中的回合、没有待处理的审批或提问、没有运行中的子会话，且空闲达到阈值时运行。默认关闭。":
-    "Runs only when no turn is streaming, no approval or question is pending, no child session is running, and the panel has been idle for the threshold. Off by default.",
+  "只在没有进行中的回合、没有待处理的审批或提问、没有运行中的超流体，且空闲达到阈值时运行。默认关闭。":
+    "Runs only when no turn is streaming, no approval or question is pending, no Superfluid is running, and the panel has been idle for the threshold. Off by default.",
   "整理策略": "Curation strategy",
   "报告只汇总改动，应用才真正改写记忆文件。":
     "Report only summarises the changes; apply actually rewrites the memory files.",
@@ -917,7 +920,7 @@ const en: Record<string, string> = {
   "正在生成…": "Generating…",
   "生成失败": "Generation failed",
   // super-agent 协议块卡片（转录里取代裸 JSON 代码块）
-  "超流体委派": "Child-session delegation",
+  "超流体委派": "Superfluid delegation",
   "{0} 个任务": "{0} task(s)",
   "第 {0}/{1} 个任务": "Task {0}/{1}",
   "这段内容没能完整读取，下面的任务书仅供参考，可能还没有真正派出去":
@@ -929,13 +932,13 @@ const en: Record<string, string> = {
   "tasks 与 actions 不能同时传入，请拆成两次调用":
     "tasks and actions cannot be sent in the same call — split them into two calls",
   "复制原始参数": "Copy raw arguments",
-  "超流体操作": "Child session actions",
+  "超流体操作": "Superfluid actions",
   "{0} 个动作": "{0} action(s)",
   "回答": "Answer",
   "{0} 个回答": "{0} answer(s)",
   "保留分支": "Keep branch",
   "正在编写任务书…": "Writing the task brief…",
-  "正在编写超流体操作…": "Writing child session actions…",
+  "正在编写超流体操作…": "Writing Superfluid actions…",
   "原始指令内容": "Raw directive content",
   "{0} · {1} 字符": "{0} · {1} chars",
   "内容格式不对，读不出来": "The content is malformed and cannot be read",
@@ -966,10 +969,10 @@ const en: Record<string, string> = {
   // 2026-11-16 文案优化：设置 / 引导 / 认证（键变更后的新词条）
   "设置保存在哪里": "Where settings are saved",
   "外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后由新超流体使用最新配置。":
-    "Panel preferences such as appearance and sound live in your VSCode user settings and follow VSCode Settings Sync. API profiles and keys, MCP and language live in the local iFlow config (keys are plaintext — mind who can read this machine); new child sessions pick up the latest config after a Core restart.",
+    "Panel preferences such as appearance and sound live in your VSCode user settings and follow VSCode Settings Sync. API profiles and keys, MCP and language live in the local iFlow config (keys are plaintext — mind who can read this machine); new Superfluids pick up the latest config after a Core restart.",
   "打开 VSCode 设置": "Open VSCode settings",
   "重启内核，当前会话会自动恢复。语言改动在重启后生效；MCP 仅供超流体使用，重启后的新超流体会通过共享代理加载。":
-    "Restart the Core — the current session comes back automatically. Language changes apply after the restart; MCP is used only by child sessions, which load it through the shared proxy after a restart.",
+    "Restart the Core — the current session comes back automatically. Language changes apply after the restart; MCP is used only by Superfluids, which load it through the shared proxy after a restart.",
   "内容需要是列表（最外层用 [ ]）": "The content must be a list (wrap it in [ ])",
   "JSON 格式有误，请检查括号与引号": "Invalid JSON — check the brackets and quotes",
   "用 JSON 列表写明哪些模型支持思考：每项包含 pattern（模型匹配）与 supportsThinking（是否支持）。保存后写入本机 iFlow 配置，重启内核生效。":
@@ -979,9 +982,9 @@ const en: Record<string, string> = {
     "Give the session a short title once its first turn finishes.",
   "每个会话只生成一次，会额外消耗少量 token。":
     "Generated once per session; costs a small amount of extra tokens.",
-  "最多同时运行几个超流体。": "How many child sessions may run at once.",
+  "最多同时运行几个超流体。": "How many Superfluids may run at once.",
   "默认 5，可设 1–20。超出上限的派发会排队，等有空位再开始；调低后已经在跑的超流体不受影响。":
-    "Defaults to 5, adjustable 1–20. Extra dispatches queue up and start when a slot frees; lowering the limit does not interrupt child sessions already running.",
+    "Defaults to 5, adjustable 1–20. Extra dispatches queue up and start when a slot frees; lowering the limit does not interrupt Superfluids already running.",
   "每轮结束可能多花一次模型调用": "Each turn may cost one extra model call",
   "每轮回复结束后，推测你接下来可能想做什么，显示在输入框上方。":
     "After each reply, guess what you may want next and show it above the composer.",
@@ -1039,7 +1042,7 @@ const en: Record<string, string> = {
   "如 工作密钥、备用线路": "e.g. Work key, Backup route",
   "接口地址（Base URL）": "Endpoint (Base URL)",
   "这是正在使用的配置。正在生成或有超流体在跑，暂时不能保存。":
-    "This is the profile in use. It cannot be saved while a turn is generating or a child session is running.",
+    "This is the profile in use. It cannot be saved while a turn is generating or a Superfluid is running.",
   "配置与密钥以明文保存在本机 iFlow 配置中。编辑正在使用的配置会重新连接；编辑其他配置只是保存，不会切换。":
     "Profiles and keys are stored in plaintext in the local iFlow config. Editing the profile in use reconnects the session; editing another one only saves it.",
   "还没有 API 配置，暂时无法开始对话": "No API profile yet — chat is unavailable for now.",
@@ -1136,10 +1139,10 @@ const en: Record<string, string> = {
   "删除资产文件": "Delete asset file",
   "确定删除「{0}」吗？删除后无法恢复。": "Delete \"{0}\"? This cannot be undone.",
   "预估成本（token 估算 × 公开单价，仅供参考）": "Estimated cost (token estimate × published rates; for reference only)",
-  "派发为超流体（Enter）": "Dispatch as child session (Enter)",
+  "派发为超流体（Enter）": "Dispatch as Superfluid (Enter)",
   "取消增强": "Cancel enhancement",
   "增强提示词": "Enhance prompt",
-  "派发为超流体 (Enter)": "Dispatch as child session (Enter)",
+  "派发为超流体 (Enter)": "Dispatch as Superfluid (Enter)",
   "安装 MCP 模板": "Install MCP template",
   "模板目录": "Template folder",
   "这个模板已经找不到了": "This template is no longer available",
@@ -1179,7 +1182,7 @@ const en: Record<string, string> = {
   "可用模型": "Available models",
   "回答操作": "Answer actions",
   "已运行 {0}": "Ran for {0}",
-  "超流体在等你的回答；不回答会在倒计时结束后按「未回答」继续。": "The child session is waiting for your answer; if you do not answer, it continues as “unanswered” when the countdown ends.",
+  "超流体在等你的回答；不回答会在倒计时结束后按「未回答」继续。": "The Superfluid is waiting for your answer; if you do not answer, it continues as “unanswered” when the countdown ends.",
   "到 DeepSeek 开放平台创建 API Key，粘贴到 API Key 输入框即可。": "Create an API key on the DeepSeek platform and paste it into the API key field.",
   "到 Moonshot 开放平台创建 API Key，用于 Kimi 系列模型。": "Create an API key on the Moonshot platform for Kimi models.",
   "到智谱开放平台创建 API Key，用于 GLM 系列模型。": "Create an API key on the Zhipu platform for GLM models.",
@@ -1326,7 +1329,6 @@ const en: Record<string, string> = {
   "确认关闭": "Confirm disconnect",
   // 看板波次 / 诊断视图
   "看板视图": "Board view",
-  "子会话": "Child sessions",
   "按波次": "By wave",
   "诊断": "Diagnostics",
   "第 {0} 波": "Wave {0}",
@@ -1378,18 +1380,18 @@ const en: Record<string, string> = {
   // 看板：清理确认 / 残留分支 / 判定卡死 / 最近活动 / 集成结果
   "冲突": "Conflict",
   "移除超流体「{0}」的看板记录？它的工作目录与分支之前已经清理过，这次只删除记录。":
-    "Remove the board record for child session “{0}”? Its worktree and branch were already cleaned up; this only removes the record.",
+    "Remove the board record for Superfluid “{0}”? Its worktree and branch were already cleaned up; this only removes the record.",
   "移除超流体「{0}」的看板记录？它直接跑在主工作区（没有独立工作目录与分支），清理不会删除主仓里的任何文件。":
-    "Remove the board record for child session “{0}”? It ran directly in the main workspace (no separate worktree or branch); cleanup will not delete any files in the main repo.",
+    "Remove the board record for Superfluid “{0}”? It ran directly in the main workspace (no separate worktree or branch); cleanup will not delete any files in the main repo.",
   "删除超流体「{0}」的独立目录？它只有目录隔离、没有分支，目录里的全部内容会被删掉，无法恢复。":
-    "Delete the standalone directory of child session “{0}”? It has directory isolation only and no branch; everything inside will be deleted and cannot be recovered.",
+    "Delete the standalone directory of Superfluid “{0}”? It has directory isolation only and no branch; everything inside will be deleted and cannot be recovered.",
   "删除超流体「{0}」的工作目录？工作目录里有未提交的改动时会被拒绝清理（请先提交或丢弃）；分支上还有未合并的提交时只删工作目录、保留分支，已合并或没有提交时分支一并删除。":
-    "Delete the worktree of child session “{0}”? Cleanup is refused while the worktree has uncommitted changes (commit or discard them first); if the branch still has unmerged commits only the worktree is deleted and the branch is kept, otherwise the branch is deleted too.",
+    "Delete the worktree of Superfluid “{0}”? Cleanup is refused while the worktree has uncommitted changes (commit or discard them first); if the branch still has unmerged commits only the worktree is deleted and the branch is kept, otherwise the branch is deleted too.",
   "删除 {0} 个 git 工作目录：有未提交的改动时会被拒绝清理；分支上还有未合并的提交时只删目录、保留分支，已合并或没有提交时分支一并删除":
     "Delete {0} git worktree(s): cleanup is refused when a worktree has uncommitted changes; a branch with unmerged commits is kept while only its worktree is deleted, otherwise the branch is deleted too",
   "删除 {0} 个只有目录隔离的独立目录：它们没有分支，目录内容会全部删除":
     "Delete {0} standalone director(ies) with directory isolation only: they have no branch and their contents will be deleted",
-  "将清理 {0} 个超流体：{1}。": "About to clean up {0} child session(s): {1}.",
+  "将清理 {0} 个超流体：{1}。": "About to clean up {0} Superfluid(s): {1}.",
   "活动未知": "Activity unknown",
   "最近活动 {0} 前": "Last activity {0} ago",
   "判定卡死": "Mark as stuck",
@@ -1415,13 +1417,13 @@ const en: Record<string, string> = {
   "{0} 个待处置分支": "{0} branch(es) to handle",
   "{0} 个待处置": "{0} to handle",
   "这些分支来自已中断或放弃的超流体，改动尚未并入当前分支":
-    "These branches come from interrupted or abandoned child sessions; their changes are not merged into the current branch yet",
+    "These branches come from interrupted or abandoned Superfluids; their changes are not merged into the current branch yet",
   "合并残留分支 {0}": "Merge leftover branch {0}",
   "合并": "Merge",
   "丢弃残留分支 {0}": "Discard leftover branch {0}",
   "中断中": "Interrupting",
   "这个超流体没有产生改动，不需要合并":
-    "This child session produced no changes; no merge is needed",
+    "This Superfluid produced no changes; no merge is needed",
   "改动已经提到 PR，请打开 PR 处理合并":
     "The changes are in a PR — open the PR to handle the merge",
   "已运行时长": "Elapsed",
@@ -1464,7 +1466,7 @@ const en: Record<string, string> = {
   "已生效": "Applied",
   "此前已结束，无需中断": "Already finished — nothing to interrupt",
   "找不到该超流体（可能已被清理或编号有误）":
-    "Child session not found (it may have been cleaned up, or the number is wrong)",
+    "Superfluid not found (it may have been cleaned up, or the number is wrong)",
   "当前状态不适用": "Not applicable in its current state",
   // QQ：待审批用户
   "待审批用户": "Pending users",

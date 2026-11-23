@@ -344,7 +344,7 @@ it("keeps the full-trust switch off by default and says so on screen", () => {
   const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
   expect(toggle).toBeTruthy();
   expect(toggle!.getAttribute("aria-checked")).toBe("false");
-  expect(container.textContent).toContain("默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。");
+  expect(container.textContent).toContain("默认关闭：开启后不再向超流体施加工具白名单与 MCP 服务器白名单限制。");
 });
 
 it("writes the full-trust switch value back to host settings", () => {

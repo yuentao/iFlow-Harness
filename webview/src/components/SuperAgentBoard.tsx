@@ -103,7 +103,7 @@ type BoardView = "sessions" | "waves" | "diagnostics";
  * （屏幕阅读器导航与既有回归测试）错误地指向视图切换。
  */
 const BOARD_VIEW_OPTIONS: ReadonlyArray<{ value: BoardView; label: string }> = [
-  { value: "sessions", label: "子会话" },
+  { value: "sessions", label: "超流体" },
   { value: "waves", label: "按波次" },
   { value: "diagnostics", label: "诊断" },
 ];
@@ -1663,7 +1663,7 @@ export function SuperAgentBoard({
               role="tabpanel"
               aria-label={t(
                 BOARD_VIEW_OPTIONS.find((option) => option.value === boardView)?.label ??
-                  "子会话",
+                  "超流体",
               )}
               className="max-h-[40vh] divide-y divide-border/50 overflow-y-auto px-3 py-2"
             >

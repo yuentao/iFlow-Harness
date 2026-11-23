@@ -3289,12 +3289,12 @@ export class ChatPanel implements vscode.Disposable {
           if (res?.stopped) {
             this.store.markSubagentStopped(msg.agentId);
           } else if (res?.reason === "not_found") {
-            this.store.sendToast("info", vscode.l10n.t("该子代理已结束"));
+            this.store.sendToast("info", vscode.l10n.t("该进程内子代理已结束"));
           } else {
-            this.store.sendToast("warning", vscode.l10n.t("停止子代理失败"));
+            this.store.sendToast("warning", vscode.l10n.t("停止进程内子代理失败"));
           }
         } catch {
-          this.store.sendToast("warning", vscode.l10n.t("停止子代理失败"));
+          this.store.sendToast("warning", vscode.l10n.t("停止进程内子代理失败"));
         }
         break;
       }

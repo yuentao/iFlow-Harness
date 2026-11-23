@@ -703,9 +703,9 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
  * verbatim.
  */
 function localizeStepTitle(title: string): string {
-  if (/^task$/i.test(title.trim())) return t("子代理");
+  if (/^task$/i.test(title.trim())) return t("进程内子代理");
   let m = /^Launch agent\(([^)]*)\):\s*([\s\S]*)$/.exec(title);
-  if (m) return t("启动子代理 {0}：{1}", m[1], m[2]);
+  if (m) return t("启动进程内子代理 {0}：{1}", m[1], m[2]);
   m = /^Reading\s+([\s\S]+)$/.exec(title);
   if (m) return t("读取 {0}", m[1]);
   m = /^Running:\s*([\s\S]*)$/.exec(title);
@@ -846,7 +846,7 @@ const SubAgentCard = memo(function SubAgentCard({ block, chrome = "card" }: { bl
         {canStop && (
           <IconButton
             icon={<Square className="size-3" />}
-            label={t("停止此子代理")}
+            label={t("停止此进程内子代理")}
             size="sm"
             tone="danger"
             onClick={() => send({ type: "stopSubagent", sessionId: sessionId!, agentId: block.agentId })}
@@ -854,7 +854,7 @@ const SubAgentCard = memo(function SubAgentCard({ block, chrome = "card" }: { bl
         )}
       </div>
       <div className={`flex flex-wrap gap-3 font-mono text-ui-caption text-muted-foreground ${flat ? "px-2 pb-1" : "px-3 pb-2"}`}>
-        <span title={t("token 数为按对话估算，包含子代理")}>
+        <span title={t("token 数为按对话估算，包含进程内子代理")}>
           {block.tokens === undefined ? "—" : `≈ ${block.tokens.toLocaleString()} tokens`}
         </span>
         <span>{t("耗时")} {duration}</span>

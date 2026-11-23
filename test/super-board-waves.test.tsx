@@ -391,7 +391,7 @@ describe("旧数据降级 · 回归红线", () => {
     ]);
     expand();
 
-    for (const label of ["子会话", "按波次", "诊断"]) {
+    for (const label of ["超流体", "按波次", "诊断"]) {
       viewTab(label);
       const text = panel().textContent ?? "";
       expect(text).not.toContain("undefined");
@@ -402,7 +402,7 @@ describe("旧数据降级 · 回归红线", () => {
     }
 
     // 回到平铺视图，旧任务仍在。
-    viewTab("子会话");
+    viewTab("超流体");
     expect(panel().textContent).toContain("旧任务一");
     expect(panel().textContent).toContain("旧任务二");
   });

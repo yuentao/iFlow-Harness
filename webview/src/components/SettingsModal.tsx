@@ -840,17 +840,17 @@ function SuperAgentSection() {
           <ToggleRow
             label={t("完全信任模式")}
             description={t(
-              "子会话直接在主仓工作区运行，不做 Git 工作目录隔离。默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。",
+              "超流体直接在主仓工作区运行，不做 Git 工作目录隔离。默认关闭：开启后不再向超流体施加工具白名单与 MCP 服务器白名单限制。",
             )}
             detail={t(
-              "开启后子会话保留全部内置工具与共享代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。",
+              "开启后超流体保留全部内置工具与共享代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。",
             )}
             checked={settings.superAgentFullTrust}
             onChange={(superAgentFullTrust) => update({ superAgentFullTrust })}
           />
           <p className="mt-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-ui-label leading-relaxed text-warning">
             {t(
-              "开启后子会话无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。",
+              "开启后超流体无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。",
             )}
           </p>
         </div>
@@ -994,7 +994,7 @@ function MemoryMaintenanceGroup() {
           label={t("定期整理记忆")}
           description={t("空闲时清理记忆托管区块：去重、合并、归档低价值条目。")}
           detail={t(
-            "只在没有进行中的回合、没有待处理的审批或提问、没有运行中的子会话，且空闲达到阈值时运行。默认关闭。",
+            "只在没有进行中的回合、没有待处理的审批或提问、没有运行中的超流体，且空闲达到阈值时运行。默认关闭。",
           )}
           checked={settings.memoryMaintenanceEnabled}
           onChange={(memoryMaintenanceEnabled) => update({ memoryMaintenanceEnabled })}

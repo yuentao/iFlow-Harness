@@ -286,7 +286,7 @@ describe("设置页 UI", () => {
     const security = group("安全与信任");
     expect(security.querySelector('button[role="switch"][aria-label="完全信任模式"]')).toBeTruthy();
     expect(security.textContent).toContain(
-      "开启后子会话无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。",
+      "开启后超流体无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。",
     );
   });
 
@@ -305,7 +305,7 @@ describe("设置页 UI", () => {
 
   it("英文词典里有对应的英文文案", () => {
     setLocale("en-US");
-    expect(t("超流体")).toBe("Super Fluid");
+    expect(t("超流体")).toBe("Superfluid");
     expect(t("编排与并发")).toBe("Orchestration & concurrency");
     expect(t("安全与信任")).toBe("Security & trust");
     expect(t("最大尝试次数")).toBe("Max attempts");
