@@ -122,7 +122,7 @@ function normalizePathKey(target: string): string {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-type SuperToolCallOutcome = "dispatched" | "actions" | "rejected" | "dropped";
+type SuperToolCallOutcome = "dispatched" | "actions" | "rejected" | "dropped" | "failed";
 
 /** 一条待投递给主会话的子会话汇报回合（delivered-unacked 账本与队列共用）。 */
 type PendingSuperReportPrompt = {
@@ -1633,11 +1633,11 @@ export class SuperAgentHost {
   dispatchSuperTasks(
     blocks: readonly SuperTaskSpec[][],
     issues: readonly string[] = [],
-  ): void {
+  ): { dispatched: number; duplicates: number; managerAvailable: boolean } {
     const manager = this.deps.getSuperAgent();
     if (!manager) {
       this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
-      return;
+      return { dispatched: 0, duplicates: 0, managerAvailable: false };
     }
     if (issues.length > 0) {
       // 宿主侧可诊断日志：字段级原因里带 tasks[i]，这里整条记下来（尤其 title 必填
@@ -1660,6 +1660,9 @@ export class SuperAgentHost {
       this.queueSuperToolCallCorrection(issues[0] ?? "");
     }
     let dispatched = 0;
+    let attempted = 0;
+    let duplicates = 0;
+    let blockErrors = 0;
     let droppedAttachments = 0;
     for (const tasks of blocks) {
       // 波次计划（任务 A 纯函数）：依赖模式 = 最长依赖路径，批次模式 = batch 排名；
@@ -1673,6 +1676,7 @@ export class SuperAgentHost {
           vscode.l10n.t("委派指令的依赖/批次配置有误，已整块忽略：{0}", reasons[0] ?? ""),
         );
         this.queueSuperToolCallCorrection(reasons[0] ?? "");
+        blockErrors++;
         continue;
       }
       // 一次委派块 = 一个运行组；runId 让看板按组聚合、pump 按组解析依赖。
@@ -1681,6 +1685,7 @@ export class SuperAgentHost {
         // 同一份载荷在正文里被重复写出时只派发第一次。
         const dedupeKey = SuperAgentHost.superDirectiveFingerprint(superDirectiveDedupeKey([task]));
         if (this.superDispatchedDirectives.has(dedupeKey)) {
+          duplicates++;
           this.log.info(`super agent: skipped-duplicate directive 「${task.title}」`);
           continue;
         }
@@ -1688,7 +1693,22 @@ export class SuperAgentHost {
           droppedAttachments += count;
         });
         const wave = plan.taskWave[superTaskKey(task)] ?? 0;
-        const session = manager.spawn(spec, { runId, wave });
+        attempted++;
+        let session: ReturnType<SuperAgentManager["spawn"]>;
+        try {
+          session = manager.spawn(spec, { runId, wave });
+        } catch (error) {
+          // spawn 抛错绝不能冒到 onSessionUpdate：上层 jsonrpc 通知分发若被
+          // 一帧异常打断，整条流都会停。这里记 failed 并继续处理后续任务。
+          const reason = errorMessage(error);
+          this.log.error(`super agent: spawn failed 「${spec.title}」: ${reason}`);
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("派发超流体「{0}」失败：{1}", spec.title, reason),
+          );
+          this.queueSuperToolCallCorrection(`spawn failed: ${reason}`);
+          continue;
+        }
         // 注入回合（qqInjectedTaskId 非空）里派生的子会话归属该 QQ 主任务：记下
         // 映射，子会话随后 ask_user_question 时才能把提醒转发给同一个 QQ 用户。
         // 本地回合派生（qqInjectedTaskId 为空）不登记，保持本地提问不转发。
@@ -1706,9 +1726,33 @@ export class SuperAgentHost {
         vscode.l10n.t("超流体派发指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
       );
     }
-    // 全部命中重复时没有「已经派发」这件事可报 ——
-    // 发一条「已派发 0 个」只会让用户以为出了错。
-    if (dispatched === 0) return;
+    if (dispatched === 0) {
+      // 零派发绝不能静默：用户/模型都以为指令已生效正是这次要消灭的故障。
+      if (attempted === 0 && duplicates > 0) {
+        // 纯重复：载荷此前已派发过（同一份载荷从正文 / 工具两条通道到达）。
+        this.log.info(
+          `super agent: all ${duplicates} directive task(s) were already dispatched — skipped as duplicate(s)`,
+        );
+        this.store.sendToast(
+          "info",
+          vscode.l10n.t("该超流体指令已派发过，已跳过 {0} 个重复任务", duplicates),
+        );
+      } else if (attempted === 0 && blockErrors === 0) {
+        // 载荷里没有可派发的任务（空块 / 全被过滤）：给一条可见提示。
+        this.log.warn("super agent: no super session dispatched — the payload had no dispatchable task");
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("超流体派发指令没有产生任何子会话，请检查任务载荷"),
+        );
+      } else if (attempted > 0) {
+        // 每个失败已各自 toast；这里补一条汇总，避免只剩零散错误。
+        this.log.warn(
+          `super agent: all ${attempted} spawn attempt(s) failed — nothing dispatched (${duplicates} duplicate(s) skipped)`,
+        );
+      }
+      // blockErrors>0 且 attempted===0：整块错误已 toast，不再重复。
+      return { dispatched, duplicates, managerAvailable: true };
+    }
     // 提示里报实际生效的上限（设置页可调），而不是写死的常量。
     const concurrency = clampMaxConcurrentSuperSessions(
       vscode.workspace
@@ -1719,6 +1763,7 @@ export class SuperAgentHost {
       "info",
       vscode.l10n.t("已派发 {0} 个超流体（并发上限 {1}）", dispatched, concurrency),
     );
+    return { dispatched, duplicates, managerAvailable: true };
   }
 
 
@@ -1774,10 +1819,17 @@ export class SuperAgentHost {
       `super agent: accepted structured ${parsed.kind} tool call (${update.toolCallId || "no-id"})`,
     );
     if (parsed.kind === "dispatch") {
-      this.dispatchSuperTasks(parsed.tasks, parsed.issues);
-      // 记账放在派发之后：dispatchSuperTasks 是同步的，完成后才写终态，
-      // 避免「记了已派发、实际抛错」的假账。
-      this.recordSuperToolCallOutcome(toolCallId, "dispatched");
+      const result = this.dispatchSuperTasks(parsed.tasks, parsed.issues);
+      // 记账必须反映真实结果，不能只因为「解析成功」就写 dispatched：
+      //  - 没有管理器 → 零 spawn，记 failed（旧实现这里记 dispatched 是假账）；
+      //  - 有管理器但一条都没派出去（spawn 全抛错 / 无任务）→ 记 failed；
+      //  - 纯重复载荷此前确实已派发过 → 仍记 dispatched。
+      const outcome: SuperToolCallOutcome = !result.managerAvailable
+        ? "failed"
+        : result.dispatched > 0 || result.duplicates > 0
+          ? "dispatched"
+          : "failed";
+      this.recordSuperToolCallOutcome(toolCallId, outcome);
       return;
     }
     // 同一工具帧会在 pending / in_progress 两帧各带一次载荷；动作没有载荷
@@ -1949,8 +2001,11 @@ export class SuperAgentHost {
     const key = owner ?? "";
     const used = this.superToolCallCorrections.get(key) ?? 0;
     if (used >= SuperAgentHost.SUPER_TOOL_CALL_CORRECTION_CAP) {
-      this.log.info(
-        `super agent: parameter-correction prompt suppressed (${used}/${SuperAgentHost.SUPER_TOOL_CALL_CORRECTION_CAP} used this round)`,
+      // 配额压制只压 hidden prompt，不压「这次错了」的事实：调用方已经弹过
+      // toast，这里再用 warn 把原因（截断）留在日志里，避免缺 title 这类
+      // 结构性错误只剩队列里一条永远投不出去的提示。
+      this.log.warn(
+        `super agent: parameter-correction prompt suppressed (${used}/${SuperAgentHost.SUPER_TOOL_CALL_CORRECTION_CAP} used this round); the malformed payload was already surfaced via toast/log: ${detail.slice(0, 160)}`,
       );
       return;
     }
