@@ -68,7 +68,7 @@ const DESCRIPTION =
   "Delegate work to one or more child sessions, or manage existing ones. Each child session runs in its own git " +
   "worktree on its own branch, so several children can change this project at once without stepping on each other. " +
   "Pass EITHER `tasks` to dispatch children, OR `actions` to manage children already on the board. One call " +
-  "carries one kind: tasks OR actions, never both. Each task needs a self-contained `task` brief plus an optional " +
+  "carries one kind: tasks OR actions, never both. Each task needs a self-contained `task` brief plus a required " +
   "short `title` and optional `attachments` paths; it can also carry `id` (a stable block-unique label), " +
   "`dependsOn` (an array of `id`/`title` labels this task waits for), `batch` (a 1-based batch number for " +
   "batch-mode waves), and `maxAttempts` (the maximum attempts allowed for this task). Use EITHER `dependsOn` " +
@@ -119,7 +119,8 @@ function create(bag) {
                 properties: {
                   title: {
                     type: T_STRING,
-                    description: "Short label for the child session (keep it under 24 characters).",
+                    description:
+                      "Required short label for the child session (keep it under 24 characters). A task whose title is missing or blank is rejected.",
                   },
                   task: {
                     type: T_STRING,
@@ -154,8 +155,10 @@ function create(bag) {
                       "Maximum number of attempts allowed for this task before retry policy stops retrying it.",
                   },
                 },
-                // title 是可选的短标签（宿主缺失时回退到 task 首行），只强制 task。
-                required: ["task"],
+                // title 与 task 都必填：宿主 shared/super-agent.ts 对 trim 后为空
+                // 的 title 一律拒绝（绝不拿 task 正文顶替标题）。schema 必须与宿主
+                // 同口径，否则模型会以为 title 可省，派发时被宿主整条拒掉。
+                required: ["task", "title"],
               },
             },
             // 子会话管理动作与 `super-agent-actions` 围栏协议逐字段同形：宿主收到
@@ -214,10 +217,10 @@ function create(bag) {
      * failed，模型立刻知道「这次没派出去」，而不是收到一个假的 ack 后继续
      * 往下写）。
      *
-     *  - tasks / actions 二选一，且被选中的那个必须是非空数组；
+     *  - tasks / actions 二选一（两者同时非空直接报错），被选中的那个必须是非空数组；
      *  - 每个 task 必须是非数组对象；
      *  - `task` 必须是非空字符串；
-     *  - `title` 可选，但存在时必须是字符串；
+     *  - `title` 必填：trim 后必须是非空字符串（与宿主同口径，绝不回退到 task 正文）；
      *  - `attachments` 可选，但存在时必须是字符串数组；
      *  - `id` 可选，但存在时必须是字符串；
      *  - `dependsOn` 可选，但存在时必须是字符串数组；
@@ -230,6 +233,13 @@ function create(bag) {
       if (!params || typeof params !== "object" || Array.isArray(params)) {
         return "parameters must be an object with either tasks or actions";
       }
+      // 流式修复层（stream-toolcall-repair-loader.cjs）发现 super-agent 载荷
+      // 被截断时不会本地修补，而是把该哨兵对象交回这里：当场判失败，模型在
+      // 同一轮收到明确原因后重发完整载荷，而不是派发一个 title 丢失 / 正文被
+      // 砍断的任务。
+      if (params.__iflowStreamTruncated === true) {
+        return "tool-call arguments were truncated in the stream; re-send the complete tasks payload";
+      }
       const hasTasksField = params.tasks !== undefined && params.tasks !== null;
       const hasActionsField = params.actions !== undefined && params.actions !== null;
       // 派发与管理二选一：两个都空（或都没给）时明确报错，避免模型传
@@ -238,9 +248,16 @@ function create(bag) {
       if (!hasTasksField && !hasActionsField) {
         return "either tasks or actions must be a non-empty array";
       }
-      // 两个字段同时出现时不在这里额外禁止：宿主的载荷分流对它有既有语义
-      // （非空 actions 且没有非空 tasks 时按管理动作处理），loader 只负责
-      // 校验各自的结构。
+      // tasks 与 actions 同时非空时直接报错：旧实现把这种载荷按派发处理，
+      // 管理动作被静默丢弃（或反过来），调用方以为两件事都做了。只新增「两边
+      // 都有实质内容」这一条拒绝；其余组合（如 tasks 为空数组）仍走下面的
+      // 逐字段校验，行为不变。
+      if (
+        hasTasksField && Array.isArray(params.tasks) && params.tasks.length > 0 &&
+        hasActionsField && Array.isArray(params.actions) && params.actions.length > 0
+      ) {
+        return "tasks and actions are mutually exclusive: pass either tasks (dispatch) or actions (manage), never both in one call";
+      }
       if (hasTasksField) {
         if (!Array.isArray(params.tasks)) return "tasks must be an array";
         if (params.tasks.length === 0) return "tasks must be a non-empty array";
@@ -252,8 +269,11 @@ function create(bag) {
           if (typeof task.task !== "string" || task.task.trim().length === 0) {
             return `tasks[${i}].task must be a non-empty string`;
           }
-          if (task.title !== undefined && typeof task.title !== "string") {
-            return `tasks[${i}].title must be a string`;
+          // title 必填：缺失 / 非字符串 / trim 后为空一律拒绝。与宿主
+          // shared/super-agent.ts 的 parseSuperDelegationPayload 同口径 —— 这里
+          // 刻意不实现「用 task 正文顶替 title」的兜底（那会推翻 5055190 的设计）。
+          if (typeof task.title !== "string" || task.title.trim().length === 0) {
+            return `tasks[${i}].title is required and must be a non-empty string`;
           }
           if (task.attachments !== undefined) {
             if (!Array.isArray(task.attachments)) {
