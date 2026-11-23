@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node
 import os from "node:os";
 import path from "node:path";
 import type { MemoryScope } from "../shared/messages.js";
+import { estimateMarkdownTokens } from "../shared/memory-curate.js";
 import { sha256 } from "../src/memory/files.js";
 import {
   MaintenanceConflictError,
@@ -491,5 +492,112 @@ describe("runMaintenance: L2 语义合并", () => {
 
     expect(calls).toBe(0);
     expect(report.files[0]?.l2).toBeUndefined();
+  });
+
+  it("merge 与 L1 archive 抢同一行时 merge 被丢弃、archive 照常生效", async () => {
+    const home = tempHome();
+    const file = path.join(home, "AGENTS.md");
+    // 三条事实中 "pnpm" 归一化后最短，rankArchiveCandidates 会先归档它。
+    const fixture = [
+      "# 记忆",
+      "",
+      "## iFlow Added Memories",
+      "",
+      "- pnpm",
+      "- 项目使用 pnpm 管理依赖",
+      "- 回答使用中文",
+      "",
+    ].join("\n");
+    // 预算 = 恰好归档掉 "- pnpm" 后托管区块的 token 数：planCuration 只会归档一条。
+    const budget = estimateMarkdownTokens(
+      ["## iFlow Added Memories", "", "- 项目使用 pnpm 管理依赖", "- 回答使用中文"].join("\n"),
+    );
+    const { deps, store } = createDeps({
+      home,
+      files: [{ path: file, scope: "global", content: fixture }],
+      budgets: { global: budget },
+      suggestMerges: async () => ({
+        suggestions: [
+          {
+            // absorb 指向 L1 archive 会移除的 "- pnpm" 行。
+            keep: "项目使用 pnpm 管理依赖",
+            absorb: ["pnpm"],
+            merged: "依赖统一用 pnpm 管理",
+            reason: "同一约定",
+          },
+        ],
+        rejected: [],
+      }),
+    });
+
+    const report = await runMaintenance(deps, "manual");
+
+    const entry = report.files[0];
+    // archive 生效、merge 被丢弃。
+    expect(entry?.status).toBe("applied");
+    expect(entry?.archived).toBe(1);
+    expect(entry?.merged).toBe(0);
+    expect(entry?.l2).toBe("ran");
+    expect(entry?.rejectedMerges?.some((item) => item.reason.includes("冲突"))).toBe(true);
+
+    const stored = store.get(file) ?? "";
+    // L1 的保留项还在，merge 的合并文本没有写进去。
+    expect(stored).toContain("- 项目使用 pnpm 管理依赖");
+    expect(stored).not.toContain("依赖统一用 pnpm 管理");
+    // archive 真的把 "pnpm" 移到了归档区。
+    expect(stored).toContain("## Archived Memories");
+    expect(stored).toContain("- pnpm");
+  });
+
+  it("两条 L2 merge 涉及同一行时只保留首条、另一条进 rejected", async () => {
+    const home = tempHome();
+    const file = path.join(home, "AGENTS.md");
+    const fixture = [
+      "# 记忆",
+      "",
+      "## iFlow Added Memories",
+      "",
+      "- 使用 pnpm 管理依赖",
+      "- 依赖安装统一用 pnpm",
+      "- 回答使用中文",
+      "",
+    ].join("\n");
+    const { deps, store } = createDeps({
+      home,
+      files: [{ path: file, scope: "global", content: fixture }],
+      suggestMerges: async () => ({
+        suggestions: [
+          {
+            keep: "使用 pnpm 管理依赖",
+            absorb: ["依赖安装统一用 pnpm"],
+            merged: "依赖统一用 pnpm 管理",
+            reason: "同一约定",
+          },
+          {
+            // 同样 absorb "依赖安装统一用 pnpm"（同一行），与上一条抢行。
+            keep: "回答使用中文",
+            absorb: ["依赖安装统一用 pnpm"],
+            merged: "中文回答，依赖用 pnpm",
+            reason: "跨行合并",
+          },
+        ],
+        rejected: [],
+      }),
+    });
+
+    const report = await runMaintenance(deps, "manual");
+
+    const entry = report.files[0];
+    expect(entry?.status).toBe("applied");
+    // 只有首条 merge 生效。
+    expect(entry?.merged).toBe(1);
+    expect(entry?.l2).toBe("ran");
+    expect(entry?.rejectedMerges).toHaveLength(1);
+    expect(entry?.rejectedMerges?.[0]?.reason).toContain("冲突");
+
+    const stored = store.get(file) ?? "";
+    expect(stored).toContain("- 依赖统一用 pnpm 管理");
+    expect(stored).not.toContain("- 依赖安装统一用 pnpm");
+    expect(stored).not.toContain("中文回答，依赖用 pnpm");
   });
 });
