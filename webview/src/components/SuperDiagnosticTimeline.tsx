@@ -96,14 +96,14 @@ function DiagnosticEntry({
             className="min-w-0 flex-1 gap-1.5"
             onClick={() => setOpen((v) => !v)}
           >
-            <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground" title={t("事件时间")}>
+            <span className="shrink-0 text-ui-caption tabular-nums text-muted-foreground" title={t("事件时间")}>
               {clock || "--:--:--"}
             </span>
             <span className={`flex shrink-0 items-center gap-1 ${visual.textClass}`}>
               {visual.icon}
-              <span className="text-ui-micro font-medium">{t(visual.label)}</span>
+              <span className="text-ui-caption font-medium">{t(visual.label)}</span>
             </span>
-            <span className="shrink-0 text-ui-micro font-medium text-foreground">
+            <span className="shrink-0 text-ui-caption font-medium text-foreground">
               {kindLabel(entry.kind)}
             </span>
             {/* 子会话产出的原文：不过字典、窄屏 truncate、不挤掉级别与 chevron。 */}
@@ -113,14 +113,14 @@ function DiagnosticEntry({
           </DisclosureButton>
         ) : (
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
-            <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground" title={t("事件时间")}>
+            <span className="shrink-0 text-ui-caption tabular-nums text-muted-foreground" title={t("事件时间")}>
               {clock || "--:--:--"}
             </span>
             <span className={`flex shrink-0 items-center gap-1 ${visual.textClass}`}>
               {visual.icon}
-              <span className="text-ui-micro font-medium">{t(visual.label)}</span>
+              <span className="text-ui-caption font-medium">{t(visual.label)}</span>
             </span>
-            <span className="shrink-0 text-ui-micro font-medium text-foreground">
+            <span className="shrink-0 text-ui-caption font-medium text-foreground">
               {kindLabel(entry.kind)}
             </span>
             <span className="min-w-0 flex-1 truncate text-ui-caption text-muted-foreground" title={entry.message}>
@@ -148,7 +148,7 @@ export function SuperDiagnosticTimeline({
 }) {
   return (
     <div className="flex flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-2 py-1.5 text-ui-micro text-muted-foreground">
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-2 py-1.5 text-ui-caption text-muted-foreground">
         <span className="font-medium text-foreground">{t("诊断事件")}</span>
         <Chip tone="muted" title={t("共 {0} 条", summary.total)}>
           <span className="tabular-nums">{t("共 {0} 条", summary.total)}</span>

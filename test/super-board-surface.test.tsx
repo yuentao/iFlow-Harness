@@ -287,7 +287,7 @@ describe("Super Agent 看板阶段轨", () => {
 
   /** 节点文案（标签在 DOM 里常驻，窄容器只是被 CSS 隐藏）。 */
   function labels(): HTMLElement[] {
-    return Array.from(rail().querySelectorAll<HTMLElement>("span.text-ui-micro"));
+    return Array.from(rail().querySelectorAll<HTMLElement>("span.text-ui-caption"));
   }
 
   it("折叠行只报状态，阶段轨只在展开后出现一次", () => {
@@ -478,7 +478,7 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     expect(dots).toHaveLength(4);
 
     // 最后一条长文本完整出现在 DOM（不是省略号、不是被容器切掉）。
-    const labels = Array.from(el.querySelectorAll<HTMLElement>("span.text-ui-micro"));
+    const labels = Array.from(el.querySelectorAll<HTMLElement>("span.text-ui-caption"));
     const last = labels.at(-1)!;
     expect(last.textContent).toBe(longTodo);
     expect(last.className).toContain("break-words");
@@ -1793,9 +1793,9 @@ describe("Super Agent 看板 · 已中断状态静音色与中断来源", () => 
     return el!;
   }
 
-  /** 折叠行状态 chip 的文案节点（内层 text-ui-micro），其父才是着色状态 span。 */
+  /** 折叠行状态 chip 的文案节点（内层 text-ui-caption），其父才是着色状态 span。 */
   function statusLabel(trigger: HTMLButtonElement, text: string): HTMLElement {
-    const el = [...trigger.querySelectorAll<HTMLElement>("span.text-ui-micro")].find(
+    const el = [...trigger.querySelectorAll<HTMLElement>("span.text-ui-caption")].find(
       (s) => s.textContent === text,
     );
     expect(el).toBeTruthy();

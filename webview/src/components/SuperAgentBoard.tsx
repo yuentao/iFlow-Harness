@@ -585,7 +585,7 @@ function SuperTimeline({
           />
           {labeled && (
             <span
-              className={`min-w-0 break-words text-ui-micro font-medium ${timelineText(node)}`}
+              className={`min-w-0 break-words text-ui-caption font-medium ${timelineText(node)}`}
             >
               {timelineNodeLabel(node)}
             </span>
@@ -1506,7 +1506,7 @@ export function SuperAgentBoard({
           role="img"
           aria-label={t("不弹审批")}
           title={t("超流体里的工具调用（包括运行命令）会直接执行，不会先征求你的同意")}
-          className="flex shrink-0 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-ui-micro font-medium text-warning"
+          className="flex shrink-0 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-ui-caption font-medium text-warning"
         >
           <ShieldOff className="size-3 shrink-0" aria-hidden="true" />
           <span className="@max-[380px]:hidden">{t("不弹审批")}</span>
@@ -1548,7 +1548,7 @@ export function SuperAgentBoard({
                 <div className="flex min-w-0 items-center gap-1.5 px-2 pt-1">
                   <CircleHelp className="size-3 shrink-0 text-warning" aria-hidden="true" />
                   <span
-                    className="min-w-0 truncate text-ui-micro font-medium text-foreground"
+                    className="min-w-0 truncate text-ui-body font-medium text-foreground"
                     title={session.title}
                   >
                     {session.title}
@@ -1584,7 +1584,7 @@ export function SuperAgentBoard({
             className={`stream-in fixed z-35 overflow-hidden rounded-lg border border-border/70 acrylic-frosted${anchor ? "" : " invisible"}${frozen ? " opacity-40" : ""}`}
           >
             <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
-              <span className="flex min-w-0 items-center gap-1.5 text-ui-label font-medium text-foreground">
+              <span className="flex min-w-0 items-center gap-1.5 text-ui-title font-medium text-foreground">
                 <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
                 <span className="truncate">{t("超流体")}</span>
               </span>
@@ -1699,7 +1699,7 @@ export function SuperAgentBoard({
                     onClick={() => setShowFolded((v) => !v)}
                   >
                     {showFolded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
-                    <span className="shrink-0">
+                    <span className="shrink-0 text-ui-body">
                       {foldedOutcomes.needsAttention > 0
                         ? t("已完成、需人工合并的 {0} 个超流体", folded.length)
                         : foldedOutcomes.nothingToMerge === 0
@@ -1723,7 +1723,7 @@ export function SuperAgentBoard({
               )}
               {(totals.input > 0 || totals.output > 0) && (
                 <div
-                  className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 text-ui-micro text-muted-foreground"
+                  className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 text-ui-caption text-muted-foreground"
                   title={t("按公开单价估算，仅供参考")}
                 >
                   <span className="font-medium text-foreground">{t("超流体合计开销")}</span>
@@ -1740,7 +1740,7 @@ export function SuperAgentBoard({
                   only for FINISHED children — a live child's directory must not
                   be deleted under a running process (the row action says the same). */}
               {worktreeSessions.length > 0 && (
-                <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 text-ui-micro text-muted-foreground">
+                <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 text-ui-caption text-muted-foreground">
                   <span className="font-medium text-foreground">
                     {t("工作目录 {0} 个", worktreeSessions.length)}
                   </span>
@@ -1933,7 +1933,7 @@ function RecentActivity({ session, now }: { session: SuperBoardSession; now: num
       : t("距最近一次诊断或进度更新的时间");
   return (
     <span
-      className={`flex shrink-0 items-center gap-1 text-ui-micro tabular-nums max-[380px]:hidden ${silent ? "text-warning" : "text-muted-foreground"}`}
+      className={`flex shrink-0 items-center gap-1 text-ui-caption tabular-nums max-[380px]:hidden ${silent ? "text-warning" : "text-muted-foreground"}`}
       title={title}
       data-super-recent-activity={session.id}
     >
@@ -2026,7 +2026,7 @@ function SuperResidueList({
     if (!loading) return null;
     return (
       <div
-        className="mb-2 flex items-center gap-2 rounded-sm border border-border/50 px-2 py-1.5 text-ui-micro text-muted-foreground"
+        className="mb-2 flex items-center gap-2 rounded-sm border border-border/50 px-2 py-1.5 text-ui-caption text-muted-foreground"
         aria-busy="true"
       >
         <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
@@ -2043,7 +2043,7 @@ function SuperResidueList({
         <Chip tone="warning" title={t("{0} 个待处置分支", branches.length)}>
           {t("{0} 个待处置", branches.length)}
         </Chip>
-        <span className="text-ui-micro text-muted-foreground">
+        <span className="text-ui-caption text-muted-foreground">
           {t("这些分支来自已中断或放弃的超流体，改动尚未并入当前分支")}
         </span>
         <span className="ml-auto flex items-center gap-1">
@@ -2099,7 +2099,7 @@ function SuperResidueList({
                 >
                   {name}
                 </span>
-                <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-ui-micro text-muted-foreground">
+                <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-ui-caption text-muted-foreground">
                   {branch.branch && (
                     <span
                       className="inline-flex items-center gap-1 font-mono"
@@ -2359,7 +2359,7 @@ function SuperSessionRow({
         >
           <span className={`flex shrink-0 items-center gap-1 ${STATUS_TEXT[chip.tone]}`}>
             {chip.icon}
-            <span className="text-ui-micro font-medium">{chip.label}</span>
+            <span className="text-ui-caption font-medium">{chip.label}</span>
           </span>
           {/* 历史恢复记录（进程已随上次扩展退出）：原先「上次运行」只在展开
               详情里，折叠时看不出这条是旧记录。状态后补一个静音 chip，窄屏可
@@ -2369,7 +2369,7 @@ function SuperSessionRow({
               {t("上次运行")}
             </Chip>
           )}
-          <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
+          <span className="min-w-0 flex-1 truncate text-ui-body font-medium" title={titleHint}>
             {session.title}
           </span>
           {/* 波次标记：只在真实带 wave 时出现，旧数据不占位。 */}
@@ -2411,7 +2411,7 @@ function SuperSessionRow({
             </Chip>
           )}
           {interruptSourceLabel && (
-            <span className="shrink-0 text-ui-micro text-muted-foreground">
+            <span className="shrink-0 text-ui-caption text-muted-foreground">
               {interruptSourceLabel}
             </span>
           )}
@@ -2421,7 +2421,7 @@ function SuperSessionRow({
           {!isTerminalSuperStatus(session.status) && (
             <RecentActivity session={session} now={now} />
           )}
-          <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground" title={t("已运行时长")}>
+          <span className="shrink-0 text-ui-caption tabular-nums text-muted-foreground" title={t("已运行时长")}>
             {elapsedText(session, now)}
           </span>
           <ChevronDown
@@ -2481,7 +2481,7 @@ function SuperSessionRow({
 
           {/* statusDetail：宿主给的一句话状态说明（缺省不渲染）。 */}
           {session.statusDetail && (
-            <div className="flex items-start gap-1.5 text-ui-micro text-muted-foreground">
+            <div className="flex items-start gap-1.5 text-ui-caption text-muted-foreground">
               <Info className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
               <span className="min-w-0 flex-1 break-words">{session.statusDetail}</span>
             </div>
@@ -2490,7 +2490,7 @@ function SuperSessionRow({
           {/* lastError：分类 chip + 原文消息。消息是子会话/宿主产出的原文，
               绝不过 t() 字典；分类 chip 复用上面的失败分类映射。 */}
           {session.lastError && (
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-ui-micro">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-ui-caption">
               {failureKind && (
                 <Chip tone={FAILURE_TONE[failureKind]} className="shrink-0">
                   {failureKindLabel(failureKind)}
@@ -2506,7 +2506,7 @@ function SuperSessionRow({
           )}
 
           {/* Isolation: full ref + worktree path, mono and selectable. */}
-          <div className="flex min-w-0 items-center gap-1.5 text-ui-micro text-muted-foreground">
+          <div className="flex min-w-0 items-center gap-1.5 text-ui-caption text-muted-foreground">
             <GitBranch className="size-3 shrink-0" aria-hidden="true" />
             {session.isolation.released ? (
               <span className="min-w-0 flex-1 truncate">
@@ -2570,7 +2570,7 @@ function SuperSessionRow({
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-micro text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption text-muted-foreground">
             {session.tokens && (
               <span
                 className="font-mono tabular-nums"
@@ -2824,7 +2824,7 @@ function SuperSessionLive({
             {chip.label}
           </Chip>
           {interruptSourceLabel && (
-            <span className="text-ui-micro text-muted-foreground">{interruptSourceLabel}</span>
+            <span className="text-ui-caption text-muted-foreground">{interruptSourceLabel}</span>
           )}
           <span className="text-ui-caption tabular-nums text-muted-foreground">
             {session.startedAt === undefined
@@ -2832,7 +2832,7 @@ function SuperSessionLive({
               : t("已运行 {0}", elapsedText(session, now))}
           </span>
           {session.model && <Chip tone="muted">{session.model}</Chip>}
-          <span className="ml-auto text-ui-micro text-muted-foreground">
+          <span className="ml-auto text-ui-caption text-muted-foreground">
             {historical ? t("已保存的转录") : t("实时输出")}
           </span>
         </div>
@@ -2929,7 +2929,7 @@ function SuperPendingArea({ session }: { session: SuperSessionUi }) {
       >
         {sent ? t("已提交，等待超流体继续") : t("超流体需要你回答")}
       </div>
-      <div className="mt-1 text-ui-micro text-muted-foreground">
+      <div className="mt-1 text-ui-caption text-muted-foreground">
         {t("超流体在等你的回答；不回答会在倒计时结束后按「未回答」继续。")}
       </div>
       <div className="mt-1.5">
@@ -2987,7 +2987,7 @@ function SuperTaskDescription({ task, short }: { task: string; short: string }) 
   if (!short && !full) return null;
   const expandable = full.length > short.length;
   return (
-    <div className="min-w-0 text-ui-caption text-muted-foreground">
+    <div className="min-w-0 text-ui-label text-muted-foreground">
       <span
         className={`block break-words ${open ? "max-h-64 overflow-y-auto whitespace-pre-wrap" : "truncate"}`}
         title={open ? undefined : short}
