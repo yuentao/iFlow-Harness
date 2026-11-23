@@ -82,6 +82,10 @@ type FakeManager = {
 
 type PanelInternals = {
   superAgent: unknown;
+  /** 模拟「没有子会话管理器」时覆盖它（deps 每次调用都会重新读）。 */
+  getSuperAgent: () => unknown;
+  /** 结构化工具调用的终态账本（toolCallId → outcome）。 */
+  superToolCallOutcomes: Map<string, string>;
   client: { setMode: ReturnType<typeof vi.fn> } | null;
   onSessionUpdate: (n: { sessionId: string; update: ToolCallFrame }) => void;
   sendPrompt: (...args: unknown[]) => Promise<boolean>;
@@ -239,6 +243,121 @@ describe("Super Agent · 结构化工具调用兜底", () => {
       update: frame({ sessionUpdate: "tool_call_update", status: "completed", args }),
     });
     expect(manager.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("没有子会话管理器时工具帧不记 dispatched（记 failed、零 spawn）", () => {
+    const toast = vi.spyOn(p.store, "sendToast");
+    // 模拟「没有打开的工作区 / 管理器不可用」：deps.getSuperAgent 返回 null。
+    p.getSuperAgent = () => null;
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        toolCallId: "tc-no-manager",
+        status: "in_progress",
+        args: { tasks: [{ title: "无管理器", task: "正文" }] },
+      }),
+    });
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    // 假账回归：旧实现无论有没有 spawn 都写 dispatched。
+    expect(p.superToolCallOutcomes.get("tc-no-manager")).toBe("failed");
+    expect(p.superToolCallOutcomes.get("tc-no-manager")).not.toBe("dispatched");
+    expect(
+      toast.mock.calls.some(
+        (call) => call[0] === "warning" && String(call[1]).includes("没有打开的工作区"),
+      ),
+    ).toBe(true);
+  });
+
+  it("重复载荷 dispatched===0：给一条可见提示 + 日志（不再静默返回）", () => {
+    const args = { tasks: [{ title: "只派一次", task: "正文" }] };
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({ toolCallId: "tc-first", args }),
+    });
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+
+    // 不同工具调用、同一份载荷：去重命中 → 零派发，但必须留可见痕迹。
+    const toast = vi.spyOn(p.store, "sendToast");
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({ toolCallId: "tc-second", args }),
+    });
+
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    const infos = toast.mock.calls.filter((call) => call[0] === "info");
+    expect(infos.some((call) => String(call[1]).includes("重复"))).toBe(true);
+    expect(
+      p.log.lines.some((line) => line.message.includes("already dispatched")),
+    ).toBe(true);
+    expect(p.superToolCallOutcomes.get("tc-second")).toBe("dispatched");
+  });
+
+  it("spawn 抛错：该帧记 failed、toast 可见，后续帧仍能派发", () => {
+    manager.spawn.mockImplementationOnce(() => {
+      throw new Error("boom-spawn");
+    });
+    const toast = vi.spyOn(p.store, "sendToast");
+
+    expect(() =>
+      p.onSessionUpdate({
+        sessionId: "tool-session",
+        update: frame({
+          toolCallId: "tc-throw",
+          args: { tasks: [{ title: "会炸", task: "正文" }] },
+        }),
+      }),
+    ).not.toThrow();
+
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    expect(p.superToolCallOutcomes.get("tc-throw")).toBe("failed");
+    expect(
+      toast.mock.calls.some(
+        (call) => call[0] === "warning" && String(call[1]).includes("boom-spawn"),
+      ),
+    ).toBe(true);
+    expect(
+      p.log.lines.some((line) => line.level === "error" && line.message.includes("spawn failed")),
+    ).toBe(true);
+
+    // 一帧异常不能吞掉整条流：后续工具帧照常派发。
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        toolCallId: "tc-after",
+        args: { tasks: [{ title: "后续", task: "正文" }] },
+      }),
+    });
+    expect(manager.spawn).toHaveBeenCalledTimes(2);
+    expect(p.superToolCallOutcomes.get("tc-after")).toBe("dispatched");
+  });
+
+  it("缺 title 的结构性错误：纠错配额耗尽后仍留 toast + warn 日志", async () => {
+    const toast = vi.spyOn(p.store, "sendToast");
+    for (let i = 0; i < 3; i += 1) {
+      p.onSessionUpdate({
+        sessionId: "tool-session",
+        update: frame({
+          toolCallId: `tc-title-${i}`,
+          status: "in_progress",
+          args: { tasks: [{ task: "缺标题" }] },
+        }),
+      });
+    }
+    await flush();
+
+    // 每次调用都有可见 toast（不被纠错配额压制）。
+    const warnings = toast.mock.calls.filter((call) => call[0] === "warning");
+    expect(warnings).toHaveLength(3);
+    expect(warnings.every((call) => String(call[1]).includes("title 必填"))).toBe(true);
+
+    // 第三次的 hidden prompt 被配额压制，但 warn 日志仍带原因（可诊断）。
+    const warns = p.log.lines.filter((line) => line.level === "warn");
+    expect(warns.some((line) => line.message.includes("title 必填"))).toBe(true);
+    expect(
+      warns.some((line) => line.message.includes("parameter-correction prompt suppressed")),
+    ).toBe(true);
+    expect(manager.spawn).not.toHaveBeenCalled();
   });
 
   it("管理动作工具帧：走取消链路", async () => {

@@ -4606,12 +4606,12 @@ export function extractSuperActions(text: string, fromOffset = 0): SuperActionSc
 
 /** 解析动作块正文。null = 格式非法（要提示），[] = 合法但无可执行动作（静默）。 */
 function parseActionBody(body: string): SuperAction[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return null;
-  }
+  // 与派发通道同源：动作正文也走宽松修复（原始换行 / 尾逗号 / 非法转义），
+  // 修不好才判非法。严格 JSON.parse 会让同一份脏 JSON「围栏能派发、动作却
+  // 静默丢失」—— 两条通道的容错口径必须一致（复用 parseJsonLoose，不另写）。
+  const loose = parseJsonLoose(body);
+  if (!loose.ok) return null;
+  const parsed = loose.value;
   const raw = Array.isArray(parsed)
     ? parsed
     : isRecord(parsed) && Array.isArray(parsed.actions)

@@ -501,7 +501,17 @@ export class JsonRpcPeer {
 
     if (hasMethod && !hasId) {
       const notification = msg as JsonRpcNotification;
-      this.notificationHandlers.get(notification.method)?.(notification.params);
+      const handler = this.notificationHandlers.get(notification.method);
+      if (!handler) return;
+      try {
+        handler(notification.params);
+      } catch (error) {
+        // 单条通知的回调抛错绝不能冒到 NDJSON 解析循环：那会让同一 chunk 里
+        // 后续的通知帧全部停止分发（一帧异常吞掉整条流）。记录后继续处理。
+        console.warn(
+          `[iflow-harness] notification handler failed for ${notification.method}: ${errorMessage(error)}`,
+        );
+      }
       return;
     }
 
