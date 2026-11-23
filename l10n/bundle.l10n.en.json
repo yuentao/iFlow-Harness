@@ -282,7 +282,7 @@
   "（完整结果请在面板查看）": "(See the panel for the full result.)",
   "超流体任务已完成，但未产生可转发的正文摘要。": "The child-session task finished, but produced no forwardable summary.",
   "超流体「{0}」在等你回答": "Child session “{0}” is waiting for your answer.",
-  "超流体": "Child session",
+  "超流体": "Super Fluid",
   "待办": "To do",
   "进行中": "In progress",
   "已完成": "Completed",

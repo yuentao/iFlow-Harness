@@ -305,6 +305,7 @@ describe("设置页 UI", () => {
 
   it("英文词典里有对应的英文文案", () => {
     setLocale("en-US");
+    expect(t("超流体")).toBe("Super Fluid");
     expect(t("编排与并发")).toBe("Orchestration & concurrency");
     expect(t("安全与信任")).toBe("Security & trust");
     expect(t("最大尝试次数")).toBe("Max attempts");

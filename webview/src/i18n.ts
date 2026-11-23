@@ -21,7 +21,7 @@ function isEnglish(): boolean {
 const en: Record<string, string> = {
   // Super Agent (child sessions of the main session)
   "委派指令": "Delegation directive",
-  "超流体": "Child sessions",
+  "超流体": "Super Fluid",
   "准备中": "Preparing",
   "等你回答": "Waiting for you",
   "已中断": "Interrupted",
