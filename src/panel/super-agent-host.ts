@@ -1476,6 +1476,12 @@ export class SuperAgentHost {
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
       IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile(),
+      // 子会话专属标记：CLI 侧 super-child-memory MOD 仅在 --experimental-acp
+      // + 本键=1 时把层级记忆里的项目 AGENTS.md/IFLOW.md 全文换成随包下发的
+      // 精简纪律切片（~/.iflow 全局记忆与其它段保留）。主会话 spawnEnv 不带
+      // 此键，行为与上游逐字节一致。IFLOW_SUPER_MEMORY=0|false 可在 CLI 侧
+      // 显式退回上游；loader 缺失/抛错亦静默回退。
+      IFLOW_SUPER_CHILD: "1",
       // 子会话绝不能拿到主会话的内置 `super-agent` 工具开关：那个工具负责
       // 派发子会话，给了子会话就等于允许无限套娃。AcpClient 把 process.env
       // 铺在 options.env 之下，这里用 undefined 显式抹掉该键（Node 的 spawn
