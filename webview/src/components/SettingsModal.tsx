@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, Sparkles, Trash2 } from "lucide-react";
+import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, Sparkles, Trash2, Users } from "lucide-react";
 import type {
   AuthUiState,
   HostSettingsUi,
@@ -61,7 +61,7 @@ import { QqSettings } from "./QqSettings";
  * width — the old stacked wrap stole ~312px of height at 360px viewports),
  * via the @container on .auth-modal-wide) + scrolling content → fixed footer.
  */
-export type SettingsTab = "api" | "chat" | "appearance" | "mcp" | "memory" | "assets" | "qq" | "runtime";
+export type SettingsTab = "api" | "chat" | "appearance" | "mcp" | "memory" | "assets" | "super" | "qq" | "runtime";
 
 /** Editor-state header override a section reports to the shell (back arrow +
  * contextual title while a sub-editor is open). */
@@ -127,6 +127,7 @@ export function SettingsModal({
         { id: "mcp", icon: Server, label: t("MCP 与工具") },
         { id: "memory", icon: Brain, label: t("记忆与知识") },
         { id: "assets", icon: Sparkles, label: t("技能与命令") },
+        { id: "super", icon: Users, label: t("超流体") },
         { id: "qq", icon: Globe, label: t("QQ 机器人") },
       ],
     },
@@ -246,6 +247,7 @@ export function SettingsModal({
           {tab === "mcp" && <McpTab busy={busy} onHeader={setSectionHeader} />}
           {tab === "memory" && <MemorySection busy={busy} onHeader={setSectionHeader} />}
           {tab === "assets" && <AssetSection busy={busy} onHeader={setSectionHeader} />}
+          {tab === "super" && <SuperAgentSection />}
           {tab === "qq" && <QqSection />}
           {tab === "runtime" && <RuntimeSection />}
         </div>
@@ -751,11 +753,10 @@ const SUPER_MAX_ATTEMPTS_MIN = 1;
 const SUPER_MAX_ATTEMPTS_MAX = 5;
 const SUPER_DEPENDENCY_POLICY_DEFAULT: SuperDependencyPolicy = "block";
 
-/** Chat / turn-end behavior. 4.7: 自动生成标题 is a per-session action, not a
- * turn-end one — it moved to its own 会话 group so the group name stays
- * accurate. Descriptions are trimmed to one short line; the cost/threshold
- * caveats live in the ⓘ tooltip. */
-function ChatSection() {
+/** 超流体（Super Agent / 子会话）行为：并发、集成、重试、依赖策略、工作目录与
+ * 完全信任模式。原先挂在「对话」里，现在拆成独立分类，避免对话页被十余个
+ * 超流体控件淹没。 */
+function SuperAgentSection() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
   // Super Agent 的两个新设置：宿主把字段接进 HostSettingsUi 之前，用可选扩展
@@ -769,15 +770,6 @@ function ChatSection() {
   const updateSuper = (patch: SuperAgentRetryPatch) => update(patch);
   return (
     <div className="space-y-4">
-      <SettingsGroup title={t("会话")}>
-        <ToggleRow
-          label={t("自动生成标题")}
-          description={t("首轮对话结束后，自动给会话起一个简短标题。")}
-          detail={t("每个会话只生成一次，会额外消耗少量 token。")}
-          checked={settings.autoTitle}
-          onChange={(autoTitle) => update({ autoTitle })}
-        />
-      </SettingsGroup>
       <SettingsGroup title={t("超流体")}>
         <NumberRow
           label={t("并发上限")}
@@ -857,6 +849,29 @@ function ChatSection() {
             )}
           </p>
         </div>
+      </SettingsGroup>
+    </div>
+  );
+}
+
+/** Chat / turn-end behavior. 4.7: 自动生成标题 is a per-session action, not a
+ * turn-end one — it lives in its own 会话 group so the group name stays
+ * accurate. 超流体（Super Agent）设置已拆到独立的「超流体」分类。
+ * Descriptions are trimmed to one short line; the cost/threshold caveats live
+ * in the ⓘ tooltip. */
+function ChatSection() {
+  const settings = useChat((s) => s.hostSettings);
+  const update = useChat((s) => s.updateHostSetting);
+  return (
+    <div className="space-y-4">
+      <SettingsGroup title={t("会话")}>
+        <ToggleRow
+          label={t("自动生成标题")}
+          description={t("首轮对话结束后，自动给会话起一个简短标题。")}
+          detail={t("每个会话只生成一次，会额外消耗少量 token。")}
+          checked={settings.autoTitle}
+          onChange={(autoTitle) => update({ autoTitle })}
+        />
       </SettingsGroup>
       <SettingsGroup title={t("回合结束后")} hint={t("每轮结束可能多花一次模型调用")}>
         <div>

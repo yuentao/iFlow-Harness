@@ -112,11 +112,11 @@ const BASIC_AUTH = {
 let root: Root;
 let container: HTMLDivElement;
 
-function renderChatTab(): void {
+function renderSuperTab(): void {
   act(() =>
     root.render(
       createElement(SettingsModal, {
-        tab: "chat",
+        tab: "super",
         onTabChange: () => {},
         onDismiss: () => {},
         dismissible: true,
@@ -158,7 +158,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  renderChatTab();
+  renderSuperTab();
 });
 
 afterEach(() => {
@@ -252,7 +252,7 @@ describe("设置页 UI", () => {
   it("宿主已经下发取值时，设置页显示宿主的值而不是默认值", () => {
     hostSettings.superAgentMaxAttempts = 3;
     hostSettings.superAgentDependencyPolicy = "continue";
-    renderChatTab();
+    renderSuperTab();
     const input = container.querySelector<HTMLInputElement>('input[aria-label="最大尝试次数"]')!;
     expect(input.value).toBe("3");
     expect(radio("继续").getAttribute("aria-checked")).toBe("true");
@@ -279,7 +279,7 @@ describe("设置页 UI", () => {
 
   it("宿主已下发开启时，设置页显示为已开启", () => {
     hostSettings.superAgentFullTrust = true;
-    renderChatTab();
+    renderSuperTab();
     const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]')!;
     expect(toggle.getAttribute("aria-checked")).toBe("true");
   });

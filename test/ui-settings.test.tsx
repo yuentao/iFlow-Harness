@@ -177,7 +177,7 @@ it("exposes the redesigned top-level categories", () => {
   expect(container.textContent).toContain("运行与数据");
 });
 
-it("groups the eight tabs under four named sections", () => {
+it("groups the nine tabs under four named sections", () => {
   for (const group of ["账户", "工作方式", "扩展", "系统"]) {
     expect(container.textContent).toContain(group);
   }
@@ -185,7 +185,7 @@ it("groups the eight tabs under four named sections", () => {
   const tablist = container.querySelector('[role="tablist"]');
   expect(tablist).toBeTruthy();
   const tabs = container.querySelectorAll('[role="tab"]');
-  expect(tabs).toHaveLength(8);
+  expect(tabs).toHaveLength(9);
   expect([...tabs].filter((el) => el.getAttribute("tabindex") === "0")).toHaveLength(1);
 });
 
@@ -207,7 +207,7 @@ describe("窄屏设置导航（横向滚动 tab 条）", () => {
     expect(tokens).toContain("@min-[560px]:w-[172px]");
     // 每个 tab 不折行不收缩：超出容器宽度的部分横向滚动，而不是挤压换行。
     const tabs = nav.querySelectorAll("button");
-    expect(tabs).toHaveLength(8);
+    expect(tabs).toHaveLength(9);
     for (const tab of tabs) {
       expect(tab.className).toContain("shrink-0");
       expect(tab.className).not.toContain("basis-");
@@ -255,7 +255,7 @@ describe("窄屏设置导航（横向滚动 tab 条）", () => {
     expect(active.id).toBe("settings-tab-chat");
     const fire = (key: string) =>
       act(() => active.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })));
-    // 顺序：api → chat → appearance → mcp → memory → assets → qq → runtime。
+    // 顺序：api → chat → appearance → mcp → memory → assets → super → qq → runtime。
     fire("ArrowRight");
     expect(onTabChange).toHaveBeenLastCalledWith("appearance");
     expect(document.activeElement?.id).toBe("settings-tab-appearance");
@@ -333,7 +333,7 @@ it("toggles auto-title in the Conversation tab", () => {
  */
 it("keeps the full-trust switch off by default and says so on screen", () => {
   hostSettings.superAgentFullTrust = false;
-  renderTab("chat", BASIC_AUTH);
+  renderTab("super", BASIC_AUTH);
   const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
   expect(toggle).toBeTruthy();
   expect(toggle!.getAttribute("aria-checked")).toBe("false");
@@ -342,7 +342,7 @@ it("keeps the full-trust switch off by default and says so on screen", () => {
 
 it("writes the full-trust switch value back to host settings", () => {
   hostSettings.superAgentFullTrust = false;
-  renderTab("chat", BASIC_AUTH);
+  renderTab("super", BASIC_AUTH);
   const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]')!;
   act(() => toggle.click());
   expect(updateHostSetting).toHaveBeenCalledWith({ superAgentFullTrust: true });
@@ -351,7 +351,7 @@ it("writes the full-trust switch value back to host settings", () => {
 it("reads the full-trust value back from the host settings", () => {
   hostSettings.superAgentFullTrust = true;
   try {
-    renderTab("chat", BASIC_AUTH);
+    renderTab("super", BASIC_AUTH);
     const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
     expect(toggle).toBeTruthy();
     expect(toggle!.getAttribute("aria-checked")).toBe("true");

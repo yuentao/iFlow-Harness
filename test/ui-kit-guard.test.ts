@@ -313,7 +313,7 @@ describe("ui kit guard", () => {
   });
 
   it("keeps the settings nav rail scrollable", () => {
-    // The settings nav rail (4 groups / 8 tabs) used to be `shrink-0` +
+    // The settings nav rail (4 groups / 9 tabs) used to be `shrink-0` +
     // `overflow-visible`: on a short or narrow screen it was clipped by the
     // modal's own `overflow:hidden` and the bottom groups (e.g. 「运行与数据」)
     // were unreachable. It must stay shrinkable and scrollable vertically;
