@@ -1742,7 +1742,7 @@ export class SuperAgentHost {
         this.log.warn("super agent: no super session dispatched — the payload had no dispatchable task");
         this.store.sendToast(
           "warning",
-          vscode.l10n.t("超流体派发指令没有产生任何子会话，请检查任务内容"),
+          vscode.l10n.t("派发指令没有产生任何超流体，请检查任务内容"),
         );
       } else if (attempted > 0) {
         // 每个失败已各自 toast；这里补一条汇总，避免只剩零散错误。

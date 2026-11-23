@@ -2691,7 +2691,7 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
           kind: "subagent",
           agentId: `sidechain-${blocks.length}`,
           taskToolCallId: null,
-          title: l10n.t("子代理"),
+          title: l10n.t("进程内子代理"),
           status: "in_progress",
           agentType: null,
           entries: [],
@@ -2810,7 +2810,7 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
           // The SubAgent-spawning `task` call renders as a SubAgent card and
           // adopts the sidechain run that follows it, if any.
           if (block.name === "task") {
-            const desc = block.input?.description || block.name || l10n.t("子代理");
+            const desc = block.input?.description || block.name || l10n.t("进程内子代理");
             const nextSidechain: SubAgentBlock = {
               kind: "subagent",
               agentId: block.id,
