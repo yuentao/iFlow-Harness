@@ -143,7 +143,7 @@ describe("buildSuperReportPrompt · pendingCount 三支结尾语义不变", () =
   it("全部 dropped：不催继续，保留中断说明 + 仍在运行的说明", () => {
     const dropped = [
       {
-        session: child({ status: "cancelled", id: "x" }),
+        session: child({ status: "cancelled", id: "x", interruptedBy: "user" }),
         report: { state: "dropped" as const, summary: "用户中断", at: 2 },
       },
     ];
@@ -153,6 +153,20 @@ describe("buildSuperReportPrompt · pendingCount 三支结尾语义不变", () =
     expect(text).toContain("ask the user whether to continue");
     expect(text).toContain("1 other child session(s) are still running");
     expect(text).not.toContain("a new turn of the same task");
+  });
+
+  it("全部 dropped 且归因 agent：不再问用户是否继续", () => {
+    const dropped = [
+      {
+        session: child({ status: "cancelled", id: "x", interruptedBy: "agent" }),
+        report: { state: "dropped" as const, summary: "主会话取消", at: 2 },
+      },
+    ];
+    const text = buildSuperReportPrompt(dropped, { pendingCount: 1 });
+    expect(text).toContain("were **cancelled by you**");
+    expect(text).toContain("action receipt confirming the result");
+    expect(text).not.toContain("ask the user whether to continue");
+    expect(text).toContain("1 other child session(s) are still running");
   });
 
   it("finalOverride=true 时即便 pendingCount>0 也走最终汇报分支（QQ 补发）", () => {

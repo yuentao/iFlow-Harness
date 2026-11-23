@@ -1105,9 +1105,12 @@ describe("super agent · 汇报", () => {
     expect(text).toContain("do not merely suggest them");
   });
 
-  it("全部被中断的汇报不催主会话继续，而是先问用户", () => {
+  it("全部被中断的汇报不催主会话继续，而是先问用户（用户喊停）", () => {
     const text = buildSuperReportPrompt([
-      { session: session({ status: "cancelled" }), report: { state: "dropped", summary: "用户中断", at: 1 } },
+      {
+        session: session({ status: "cancelled", interruptedBy: "user" }),
+        report: { state: "dropped", summary: "用户中断", at: 1 },
+      },
     ]);
     expect(text).toContain("were **interrupted**");
     expect(text).toContain("Do not re-run them automatically");
@@ -1115,9 +1118,56 @@ describe("super agent · 汇报", () => {
     expect(text).not.toContain("do not stop and wait for the user to speak again");
   });
 
+  it("系统收口导致的全 dropped 汇报保留用户问询措辞", () => {
+    const text = buildSuperReportPrompt([
+      {
+        session: session({ status: "cancelled", interruptedBy: "system" }),
+        report: { state: "dropped", summary: "面板关闭", at: 1 },
+      },
+    ]);
+    expect(text).toContain("were **interrupted**");
+    expect(text).toContain("ask the user whether to continue");
+  });
+
+  it("智能体主动取消的全 dropped 汇报：只简短确认，不问是否继续、不重跑", () => {
+    const text = buildSuperReportPrompt([
+      {
+        session: session({ status: "cancelled", interruptedBy: "agent" }),
+        report: { state: "dropped", summary: "主会话取消", at: 1 },
+      },
+    ]);
+    expect(text).toContain("were **cancelled by you**");
+    expect(text).toContain("action receipt confirming the result");
+    expect(text).toContain("Do not re-run them");
+    expect(text).not.toContain("ask the user whether to continue");
+    expect(text).not.toContain("were **interrupted**");
+    expect(text).not.toContain("do not stop and wait for the user to speak again");
+  });
+
+  it("混合来源的 dropped 批次维持原有中断措辞（保守口径）", () => {
+    const text = buildSuperReportPrompt([
+      {
+        session: session({ id: "super-1", status: "cancelled", interruptedBy: "agent" }),
+        report: { state: "dropped", summary: "主会话取消", at: 1 },
+      },
+      {
+        session: session({ id: "super-2", status: "cancelled", interruptedBy: "user" }),
+        report: { state: "dropped", summary: "用户中断", at: 2 },
+      },
+    ]);
+    expect(text).toContain("were **interrupted**");
+    expect(text).toContain("ask the user whether to continue");
+    expect(text).not.toContain("were **cancelled by you**");
+  });
+
   it("全部被中断且还有超流体在跑：保留中断说明，并补上仍在运行的说明", () => {
     const text = buildSuperReportPrompt(
-      [{ session: session({ status: "cancelled" }), report: { state: "dropped", summary: "用户中断", at: 1 } }],
+      [
+        {
+          session: session({ status: "cancelled", interruptedBy: "user" }),
+          report: { state: "dropped", summary: "用户中断", at: 1 },
+        },
+      ],
       { pendingCount: 1 },
     );
     expect(text).toContain("were **interrupted**");
