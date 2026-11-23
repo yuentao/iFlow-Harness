@@ -546,3 +546,88 @@ it("ignores an already-defaultPrevented Escape on a question card", () => {
   keyAlreadyHandled("Escape");
   expect(send).not.toHaveBeenCalled();
 });
+
+/** Dispatch a key on whatever currently owns focus — a real keystroke always
+ * targets the focused element, which is what makes the autofocus race visible. */
+function keyAtFocus(keyValue: string) {
+  act(() => {
+    (document.activeElement ?? window).dispatchEvent(
+      new KeyboardEvent("keydown", { key: keyValue, bubbles: true, cancelable: true }),
+    );
+  });
+}
+
+/** IME keystrokes: the composition start/commit can carry keyCode 229 / key
+ * "Process" while isComposing is already false. */
+function imeKey(keyValue: string, keyCode?: number) {
+  act(() => {
+    const event = new KeyboardEvent("keydown", { key: keyValue, bubbles: true, cancelable: true });
+    if (keyCode !== undefined) Object.defineProperty(event, "keyCode", { value: keyCode });
+    window.dispatchEvent(event);
+  });
+}
+
+/**
+ * BUG regression: a card pushed while the user is typing used to autofocus a
+ * button on mount. Focus left the Composer textarea, so the user's next real
+ * keystroke targeted that BUTTON — no longer an editable target — and the
+ * window-level handler read it as Y/N/Esc, answering a card the user had not
+ * looked at yet. The card must keep the user's typing focus instead.
+ */
+it("弹审批卡时不抢走正在输入的 textarea 焦点，后续按键不误触 Y/N", () => {
+  const textarea = document.createElement("textarea");
+  document.body.append(textarea);
+  act(() => textarea.focus());
+  expect(document.activeElement).toBe(textarea);
+
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  // 焦点必须仍留在输入框，而不是被卡片按钮抢走。
+  expect(document.activeElement).toBe(textarea);
+
+  keyAtFocus("y");
+  keyAtFocus("n");
+  expect(send).not.toHaveBeenCalled();
+  textarea.remove();
+});
+
+it("弹问答卡时不抢走正在输入的 textarea 焦点，后续按键不误触 Esc", () => {
+  const textarea = document.createElement("textarea");
+  document.body.append(textarea);
+  act(() => textarea.focus());
+
+  act(() => root.render(<QuestionCard pending={QUESTIONS} />));
+  expect(document.activeElement).toBe(textarea);
+
+  keyAtFocus("Escape");
+  expect(send).not.toHaveBeenCalled();
+  textarea.remove();
+});
+
+it("审批卡忽略 IME 组合键（keyCode 229 / key Process），不误判为 Y", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  imeKey("y", 229);
+  imeKey("Process");
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("问答卡忽略 IME 组合键（keyCode 229），不误判为 Esc", () => {
+  act(() => root.render(<QuestionCard pending={QUESTIONS} />));
+  imeKey("Escape", 229);
+  expect(send).not.toHaveBeenCalled();
+});
+
+/**
+ * Normal path preserved: with focus genuinely on the card (no editor typing),
+ * the mount autofocus still lands on the safe option and the shortcuts fire.
+ */
+it("无输入焦点时卡片仍自动聚焦安全按钮，Y/N/Esc 快捷键照常生效", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  const pinned = container.querySelector<HTMLElement>("[data-autofocus]");
+  expect(document.activeElement).toBe(pinned);
+  keyAtFocus("y");
+  expect(send).toHaveBeenCalledWith({
+    type: "respondApproval",
+    id: "approval-1",
+    optionId: "allow-1",
+  });
+});
