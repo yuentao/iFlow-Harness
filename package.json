@@ -520,6 +520,13 @@
           "maximum": 50000,
           "description": "%iflow.configuration.memoryMaintenanceProjectTokenBudget.description%"
         },
+        "iflow.memoryMaintenanceTotalTokenBudget": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "maximum": 200000,
+          "description": "%iflow.configuration.memoryMaintenanceTotalTokenBudget.description%"
+        },
         "iflow.memoryMaintenanceStrategy": {
           "type": "string",
           "enum": ["report", "apply"],

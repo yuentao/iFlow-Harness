@@ -21,6 +21,7 @@ const hostSettings = vi.hoisted(() => ({
   memoryMaintenanceIdleMinutes: 15,
   memoryMaintenanceGlobalTokenBudget: 4000,
   memoryMaintenanceProjectTokenBudget: 2500,
+  memoryMaintenanceTotalTokenBudget: 12000,
   memoryMaintenanceStrategy: "report" as const,
   nextStepTimeoutSeconds: 25,
   compressTimeoutSeconds: 0,
@@ -849,6 +850,7 @@ describe("记忆整理设置", () => {
     hostSettings.memoryMaintenanceIdleMinutes = 15;
     hostSettings.memoryMaintenanceGlobalTokenBudget = 4000;
     hostSettings.memoryMaintenanceProjectTokenBudget = 2500;
+    hostSettings.memoryMaintenanceTotalTokenBudget = 12000;
     hostSettings.memoryMaintenanceStrategy = "report";
   });
 
@@ -874,6 +876,7 @@ describe("记忆整理设置", () => {
     expect(container.textContent).not.toContain("空闲阈值");
     expect(container.textContent).not.toContain("全局记忆预算");
     expect(container.textContent).not.toContain("项目记忆预算");
+    expect(container.textContent).not.toContain("总量预算");
   });
 
   it("打开后渲染策略分段控件并写回所选值", () => {
@@ -888,7 +891,7 @@ describe("记忆整理设置", () => {
     expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceStrategy: "apply" });
   });
 
-  it("渲染周期 / 阈值 / 两个预算的当前值", () => {
+  it("渲染周期 / 阈值 / 三个预算的当前值", () => {
     hostSettings.memoryMaintenanceEnabled = true;
     renderTab("chat", BASIC_AUTH);
     const number = (name: string) =>
@@ -897,6 +900,7 @@ describe("记忆整理设置", () => {
     expect(number(label("空闲阈值"))).toBe("15");
     expect(number(label("全局记忆预算"))).toBe("4000");
     expect(number(label("项目记忆预算"))).toBe("2500");
+    expect(number(label("总量预算"))).toBe("12000");
   });
 
   it("提交空闲阈值时写回宿主设置", () => {
@@ -913,6 +917,22 @@ describe("记忆整理设置", () => {
       input.blur();
     });
     expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceIdleMinutes: 30 });
+  });
+
+  it("提交总量预算时写回宿主设置", () => {
+    hostSettings.memoryMaintenanceEnabled = true;
+    renderTab("chat", BASIC_AUTH);
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="总量预算"]')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setter.call(input, "16000");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => {
+      input.focus();
+      input.blur();
+    });
+    expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceTotalTokenBudget: 16000 });
   });
 });
 

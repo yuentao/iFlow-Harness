@@ -896,6 +896,11 @@ const en: Record<string, string> = {
   "项目记忆预算": "Project memory budget",
   "每个项目记忆文件的 token 预算。":
     "Token budget for the managed section of each project memory file.",
+  "总量预算": "Total budget",
+  "所有记忆托管区块的 token 合计阈值，超出即整理。":
+    "Total token budget across all managed memory sections; exceeding it triggers curation.",
+  "超过它时即使未到整理周期也会触发整理；冷却期为 6 小时与周期的四分之一中较大者，冷却期内不重复触发。":
+    "When exceeded, curation runs even before the interval elapses; the cooldown is the longer of 6 hours or a quarter of the interval, during which it does not retrigger.",
   "天": "days",
   "分钟": "min",
   // F3 Phase 3: project knowledge

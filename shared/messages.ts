@@ -1934,6 +1934,9 @@ export interface HostSettingsUi {
   memoryMaintenanceGlobalTokenBudget: number;
   /** 项目记忆单文件的 token 预算（`iflow.memoryMaintenanceProjectTokenBudget`）。 */
   memoryMaintenanceProjectTokenBudget: number;
+  /** 所有记忆文件托管区块的 token 合计阈值（`iflow.memoryMaintenanceTotalTokenBudget`）。
+   * 超过它即使未到周期也触发整理（带冷却）。 */
+  memoryMaintenanceTotalTokenBudget: number;
   /** 整理策略：report = 只出报告不写盘；apply = 实际写回。 */
   memoryMaintenanceStrategy: "report" | "apply";
   /** Wall-clock ceiling (seconds) for the next-step prediction.
