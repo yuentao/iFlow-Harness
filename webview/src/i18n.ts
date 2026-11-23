@@ -897,6 +897,9 @@ const en: Record<string, string> = {
   "委派指令格式错误：{0}": "Malformed delegation directive: {0}",
   "未派发": "Not dispatched",
   "部分未派发": "Partly dispatched",
+  "参数冲突": "Parameter conflict",
+  "tasks 与 actions 不能同时传入，请拆成两次调用":
+    "tasks and actions cannot be sent in the same call — split them into two calls",
   "复制原始参数": "Copy raw arguments",
   "超流体操作": "Child session actions",
   "{0} 个动作": "{0} action(s)",

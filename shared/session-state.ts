@@ -260,6 +260,18 @@ interface SuperTaskParse {
   error?: string;
 }
 
+/**
+ * `tasks` 与 `actions` 同时非空时的诊断（与宿主同口径）。
+ *
+ * 派发与动作是两条互斥的执行通道：宿主 `parseSuperToolCall` 把它判成
+ * `"conflict"` 并按失败返回 —— 整份载荷一条都不执行（只留一条 warning）。
+ * 状态层不能把其中的 `tasks` 半边解析成 `superTasks`，否则转录卡会把一次
+ * 被宿主拒绝的调用画成「已派发」。这里写入带「参数冲突」字样的诊断，让块在
+ * 状态层即可辨认，渲染层据此显示错误态卡片。
+ */
+const SUPER_TOOL_CONFLICT_ERROR =
+  "参数冲突：tasks 与 actions 不能同时传入，请拆成两次调用";
+
 function superTaskParseForTool(
   toolName: string | undefined,
   args: unknown,
@@ -270,9 +282,12 @@ function superTaskParseForTool(
   // diagnostic on the card forever (the merge rule keeps the first non-null
   // error). Honest answer: nothing to parse yet.
   if (args === undefined || args === null) return undefined;
+  const resolution = resolveSuperToolCallKind("dispatch", args);
   // The `super-agent` tool schema also accepts `actions`; a pure actions
   // payload goes through the actions lane and is NOT a malformed delegation.
-  if (resolveSuperToolCallKind("dispatch", args) === "actions") return undefined;
+  if (resolution === "actions") return undefined;
+  // tasks 与 actions 并存：宿主整份拒绝，状态层绝不能只留下 tasks 半边。
+  if (resolution === "conflict") return { error: SUPER_TOOL_CONFLICT_ERROR };
   const parsed = parseSuperDelegationPayload(args);
   if (!parsed.ok) return { error: parsed.reason };
   const tasks: SuperDelegatedTaskUi[] = parsed.tasks.map((task) => ({
