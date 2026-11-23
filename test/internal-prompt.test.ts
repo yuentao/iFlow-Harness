@@ -168,6 +168,7 @@ type PanelInternals = {
   postToWebview: (message: unknown) => void;
   pendingEnhance: { requestId: number; cancel: () => void; sessionId: string | null } | null;
   store: { getState: () => { activeSessionId: string | null; sessionId: string | null } };
+  log: { lines: { level: string; message: string }[] };
 };
 
 const internals = (panel: ChatPanel) => panel as unknown as PanelInternals;
@@ -1169,13 +1170,14 @@ describe("ChatPanel L2 语义合并 (suggestMemoryMerges)", () => {
     expect(result.rejected).toHaveLength(0);
   });
 
-  it("某批模型调用抛错时整个调用抛出（上层降级为 L1，不产生半合并）", async () => {
-    // 如实记录当前实现：suggestMemoryMerges 的循环没有逐批 try/catch，
-    // 某一批的 completeInternalPrompt 抛错会中断整个调用；维护层
-    // planSemanticMerges 会捕获它并把该文件降级为 L1（不写半合并状态）。
+  it("某一批模型调用抛错时只丢该批，其它批建议仍生效（有意行为变更）", async () => {
+    // 有意行为变更：此前的实现没有逐批 try/catch，某批抛错会中断整个调用、
+    // 丢弃全部建议（维护层降级为 L1）。现在逐批隔离 —— 单批瞬时故障只丢该批。
     const facts = Array.from({ length: 100 }, (_, i) => `填充事实 ${i}`);
     facts[0] = "使用 pnpm 管理依赖";
     facts[1] = "依赖安装统一用 pnpm";
+    facts[80] = "回答使用中文";
+    facts[81] = "回复统一中文";
 
     queueSequence([
       mergeReply([
@@ -1186,10 +1188,77 @@ describe("ChatPanel L2 语义合并 (suggestMemoryMerges)", () => {
           reason: "同一约定",
         },
       ]),
-      () => Promise.reject(new Error("网关超时")),
-      mergeReply([]),
+      () => Promise.reject(new Error("网关超时")), // 批 2：抛错
+      mergeReply([
+        {
+          keep: "回答使用中文",
+          absorb: ["回复统一中文"],
+          merged: "统一用中文回答",
+          reason: "同一约定",
+        },
+      ]),
     ]);
 
-    await expect(internals(panel).suggestMemoryMerges(facts)).rejects.toThrow("网关超时");
+    const result = await internals(panel).suggestMemoryMerges(facts);
+
+    // 三批都发过请求；批 2 抛错不影响批 1、3。
+    expect(completionMock.state.calls).toHaveLength(3);
+    expect(result.suggestions.map((s) => s.keep).sort()).toEqual(
+      ["使用 pnpm 管理依赖", "回答使用中文"].sort(),
+    );
+    expect(result.rejected).toHaveLength(0);
+    // 失败批次有日志痕迹：点名第 2/3 批与错误摘要，并有一条汇总。
+    const warns = internals(panel).log.lines.filter((line) => line.level === "warn");
+    expect(
+      warns.some((line) => line.message.includes("第 2/3 批") && line.message.includes("网关超时")),
+    ).toBe(true);
+    expect(warns.some((line) => line.message.includes("1/3 批调用失败"))).toBe(true);
+  });
+
+  it("全部批次都抛错时返回空建议、不抛错（维护层降级为纯 L1）", async () => {
+    const facts = Array.from({ length: 100 }, (_, i) => `填充事实 ${i}`);
+    queueSequence([
+      () => Promise.reject(new Error("网关超时 A")),
+      () => Promise.reject(new Error("网关超时 B")),
+      () => Promise.reject(new Error("网关超时 C")),
+    ]);
+
+    const result = await internals(panel).suggestMemoryMerges(facts);
+
+    expect(completionMock.state.calls).toHaveLength(3);
+    expect(result.suggestions).toHaveLength(0);
+    expect(result.rejected).toHaveLength(0);
+    const warns = internals(panel).log.lines.filter((line) => line.level === "warn");
+    expect(warns.some((line) => line.message.includes("3/3 批调用失败"))).toBe(true);
+  });
+
+  it("空回包与抛错混合时：空回包跳过、抛错批次隔离，其余批建议保留", async () => {
+    // 100 条 → 三批（40 / 40 / 20）：批 1 抛错、批 2 空回包、批 3 有效建议。
+    const facts = Array.from({ length: 100 }, (_, i) => `填充事实 ${i}`);
+    facts[80] = "回答使用中文";
+    facts[81] = "回复统一中文";
+
+    queueSequence([
+      () => Promise.reject(new Error("网关超时")),
+      { text: "", reason: "failed" }, // 批 2：网关无回包（不是抛错）
+      mergeReply([
+        {
+          keep: "回答使用中文",
+          absorb: ["回复统一中文"],
+          merged: "统一用中文回答",
+          reason: "同一约定",
+        },
+      ]),
+    ]);
+
+    const result = await internals(panel).suggestMemoryMerges(facts);
+
+    expect(completionMock.state.calls).toHaveLength(3);
+    // 只有批 3 的建议存活；抛错与空回包都不产生建议，也不进 rejected。
+    expect(result.suggestions.map((s) => s.keep)).toEqual(["回答使用中文"]);
+    expect(result.rejected).toHaveLength(0);
+    const warns = internals(panel).log.lines.filter((line) => line.level === "warn");
+    expect(warns.some((line) => line.message.includes("第 1/3 批"))).toBe(true);
+    expect(warns.some((line) => line.message.includes("1/3 批调用失败"))).toBe(true);
   });
 });
