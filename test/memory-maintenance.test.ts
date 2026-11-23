@@ -66,6 +66,8 @@ interface FakeOptions {
   log?: (level: MaintenanceLogLevel, message: string, detail?: unknown) => void;
   measureTokens?: (markdown: string) => number;
   budgets?: { global?: number; project?: number };
+  suggestMerges?: MaintenanceDeps["suggestMerges"];
+  dryRun?: () => boolean;
 }
 
 function createDeps(options: FakeOptions): {
@@ -99,6 +101,8 @@ function createDeps(options: FakeOptions): {
     ...(options.log ? { log: options.log } : {}),
     ...(options.measureTokens ? { measureTokens: options.measureTokens } : {}),
     ...(options.budgets ? { budgets: options.budgets } : {}),
+    ...(options.suggestMerges ? { suggestMerges: options.suggestMerges } : {}),
+    ...(options.dryRun ? { dryRun: options.dryRun } : {}),
   };
   return { deps, store, writes };
 }
@@ -247,5 +251,245 @@ describe("runMaintenance: 审计日志", () => {
     expect(second.trigger).toBe("scheduled");
     expect(second.skipped).toBe(1);
     expect(second.applied).toBe(0);
+  });
+});
+
+// --- L2 语义合并 ---------------------------------------------------------------
+
+/**
+ * 两条语义重复但**文本不同**的事实：L1 的去重（按归一化指纹）不会动它们，
+ * 只有 L2 模型层能把它们合并。用于验证 merge 动作真的产生了。
+ */
+const SEMANTIC_FIXTURE = [
+  "# 记忆",
+  "",
+  "## iFlow Added Memories",
+  "",
+  "- 项目使用 pnpm 管理依赖",
+  "- 依赖安装统一用 pnpm",
+  "",
+].join("\n");
+
+/** L1 会去重掉第二条（"使用 pnpm。" 归一化后与 "使用 pnpm" 相同）。 */
+const DUP_PLUS_SEMANTIC = [
+  "# 记忆",
+  "",
+  "## iFlow Added Memories",
+  "",
+  "- 使用 pnpm",
+  "- 使用 pnpm。",
+  "- 回答使用中文",
+  "",
+].join("\n");
+
+describe("runMaintenance: L2 语义合并", () => {
+  it("未注入 suggestMerges 时行为与纯 L1 完全一致（不标注 l2）", async () => {
+    const home = tempHome();
+    const file = path.join(home, "AGENTS.md");
+    const { deps, writes } = createDeps({
+      home,
+      files: [{ path: file, scope: "global", content: SEMANTIC_FIXTURE }],
+    });
+
+    const report = await runMaintenance(deps, "manual");
+
+    const entry = report.files[0];
+    expect(entry?.status).toBe("skipped");
+    expect(entry?.reason).toBe("no-actions");
+    expect(entry?.l2).toBeUndefined();
+    expect(entry?.rejectedMerges).toBeUndefined();
+    expect(writes).toHaveLength(0);
+  });
+
+  it("返回有效建议时产生 merge 动作、token 下降并写回合并文本", async () => {
+    const home = tempHome();
+    const file = path.join(home, "AGENTS.md");
+    const calls: string[][] = [];
+    const { deps, store, writes } = createDeps({
+      home,
+      files: [{ path: file, scope: "global", content: SEMANTIC_FIXTURE }],
+      suggestMerges: async (facts) => {
+        calls.push(facts);
+        return {
+          suggestions: [
+            {
+              keep: "项目使用 pnpm 管理依赖",
+              absorb: ["依赖安装统一用 pnpm"],
+              merged: "依赖统一用 pnpm 管理",
+              reason: "同一约定",
+            },
+          ],
+          rejected: [],
+        };
+      },
+    });
+
+    const report = await runMaintenance(deps, "manual");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(["项目使用 pnpm 管理依赖", "依赖安装统一用 pnpm"]);
+    const entry = report.files[0];
+    expect(entry?.status).toBe("applied");
+    expect(entry?.l2).toBe("ran");
+    expect(entry?.merged).toBe(1);
+    expect(entry!.afterTokens).toBeLessThan(entry!.beforeTokens);
+    expect(report.savedTokens).toBeGreaterThan(0);
+    expect(writes).toHaveLength(1);
+
+    const stored = store.get(file) ?? "";
+    expect(stored).toContain("- 依赖统一用 pnpm 管理");
+    expect(stored).not.toContain("- 依赖安装统一用 pnpm");
+  });
+
+  it("keep/absorb 在事实中不存在时不产生动作并记入 rejected", async () => {
+    const home = tempHome();
+    const file = path.join(home, "AGENTS.md");
+    const { deps, store, writes } = createDeps({
+      home,
+      files: [{ path: file, scope: "global", content: SEMANTIC_FIXTURE }],
+      suggestMerges: async () => ({
+        suggestions: [
+          {
+            keep: "不存在的事实",
+            absorb: ["依赖安装统一用 pnpm"],
+            merged: "随便",
+            reason: "幻觉",
+          },
+        ],
+        rejected: [],
+      }),
+    });
+
+    const report = await runMaintenance(deps, "manual");
+
+    const entry = report.files[0];
+    expect(entry?.status).toBe("skipped");
+    expect(entry?.reason).toBe("no-actions");
+    expect(entry?.merged).toBe(0);
+    expect(entry?.rejectedMerges).toHaveLength(1);
+    expect(entry?.rejectedMerges?.[0]?.reason).toContain("无法在托管事实中定位");
+    expect(writes).toHaveLength(0);
+    expect(store.get(file)).toBe(SEMANTIC_FIXTURE);
+
+    // rejected 逐条落进 events.ndjson（字段 at / path / reason / suggestion）。
+    const eventsPath = path.join(home, "memory-maintenance", "events.ndjson");
+    const lines = readFileSync(eventsPath, "utf8").trimEnd().split("\n");
+    expect(lines).toHaveLength(2); // 汇总行 + 一条 rejected
+    const rejectedLine = JSON.parse(lines[1] ?? "") as Record<string, unknown>;
+    expect(rejectedLine.path).toBe(file);
+    expect(typeof rejectedLine.at).toBe("string");
+    expect(String(rejectedLine.reason)).toContain("无法在托管事实中定位");
+    expect(String(rejectedLine.suggestion)).toContain("不存在的事实");
+  });
+
+  it("merge 与 L1 动作抢同一行时被丢弃并记入 rejected", async () => {
+    const home = tempHome();
+    const file = path.join(home, "AGENTS.md");
+    const { deps, store } = createDeps({
+      home,
+      files: [{ path: file, scope: "global", content: DUP_PLUS_SEMANTIC }],
+      suggestMerges: async () => ({
+        suggestions: [
+          {
+            // absorb 指向 L1 dedupe 会删除的那一行（"使用 pnpm。"）。
+            keep: "回答使用中文",
+            absorb: ["使用 pnpm。"],
+            merged: "用中文回答，依赖用 pnpm",
+            reason: "跨行合并",
+          },
+        ],
+        rejected: [],
+      }),
+    });
+
+    const report = await runMaintenance(deps, "manual");
+
+    const entry = report.files[0];
+    // L1 去重仍然生效；L2 merge 被丢弃，不产生 merged 计数。
+    expect(entry?.status).toBe("applied");
+    expect(entry?.dropped).toBe(1);
+    expect(entry?.merged).toBe(0);
+    expect(entry?.rejectedMerges?.some((item) => item.reason.includes("冲突"))).toBe(true);
+
+    const stored = store.get(file) ?? "";
+    // L1 的保留项还在，L2 的合并文本没有写进去。
+    expect(stored).toContain("- 使用 pnpm");
+    expect(stored).not.toContain("用中文回答，依赖用 pnpm");
+  });
+
+  it("suggestMerges 抛错时该文件降级为 L1 并记警告，不影响其它文件", async () => {
+    const home = tempHome();
+    const failing = path.join(home, "AGENTS.md");
+    const healthy = path.join(home, "project.md");
+    const warnings: string[] = [];
+    const { deps, store } = createDeps({
+      home,
+      files: [
+        { path: failing, scope: "global", content: SEMANTIC_FIXTURE },
+        { path: healthy, scope: "project", content: DUP_FIXTURE },
+      ],
+      log: (level, message) => {
+        if (level === "warn") warnings.push(message);
+      },
+      suggestMerges: async (facts) => {
+        if (facts.some((fact) => fact.includes("pnpm 管理依赖"))) throw new Error("网关超时");
+        return { suggestions: [], rejected: [] };
+      },
+    });
+
+    const report = await runMaintenance(deps, "manual");
+
+    const failingEntry = report.files.find((f) => f.path === failing);
+    const healthyEntry = report.files.find((f) => f.path === healthy);
+    // 抛错的文件：L1 无动作 → skipped，但标注 L2 失败。
+    expect(failingEntry?.status).toBe("skipped");
+    expect(failingEntry?.l2).toBe("failed");
+    // 另一个文件照常走 L1 去重并写回。
+    expect(healthyEntry?.status).toBe("applied");
+    expect(healthyEntry?.dropped).toBe(1);
+    expect(store.get(failing)).toBe(SEMANTIC_FIXTURE);
+    expect(warnings.some((message) => message.includes("L2 语义合并失败"))).toBe(true);
+  });
+
+  it("report 模式下即使注入了 suggestMerges 也不调用，并标注已跳过", async () => {
+    const home = tempHome();
+    const file = path.join(home, "AGENTS.md");
+    let calls = 0;
+    const { deps } = createDeps({
+      home,
+      files: [{ path: file, scope: "global", content: SEMANTIC_FIXTURE }],
+      dryRun: () => true,
+      suggestMerges: async () => {
+        calls++;
+        return { suggestions: [], rejected: [] };
+      },
+    });
+
+    const report = await runMaintenance(deps, "manual");
+
+    expect(calls).toBe(0);
+    const entry = report.files[0];
+    expect(entry?.status).toBe("skipped");
+    expect(entry?.l2).toBe("skipped-report");
+  });
+
+  it("事实不足 2 条时不调用 suggestMerges", async () => {
+    const home = tempHome();
+    const file = path.join(home, "AGENTS.md");
+    const single = ["# 记忆", "", "## iFlow Added Memories", "", "- 回答使用中文", ""].join("\n");
+    let calls = 0;
+    const { deps } = createDeps({
+      home,
+      files: [{ path: file, scope: "global", content: single }],
+      suggestMerges: async () => {
+        calls++;
+        return { suggestions: [], rejected: [] };
+      },
+    });
+
+    const report = await runMaintenance(deps, "manual");
+
+    expect(calls).toBe(0);
+    expect(report.files[0]?.l2).toBeUndefined();
   });
 });

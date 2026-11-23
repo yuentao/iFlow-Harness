@@ -36,6 +36,7 @@ import followupNextSteps from "./followup-next-steps.md";
 import followupTitle from "./followup-title.md";
 import knowledge from "./knowledge.md";
 import knowledgeIncremental from "./knowledge-incremental.md";
+import memoryCurate from "./memory-curate.md";
 import modelMetadata from "./model-metadata.md";
 import superAgentTask from "./super-agent-task.md";
 import systemPrompt from "./system-prompt.md";
@@ -59,6 +60,7 @@ const templates: Record<string, string> = {
   "followup-title": normalize(followupTitle),
   knowledge: normalize(knowledge),
   "knowledge-incremental": normalize(knowledgeIncremental),
+  "memory-curate": normalize(memoryCurate),
   "model-metadata": normalize(modelMetadata),
   "super-agent-task": normalize(superAgentTask),
   "system-prompt": normalize(systemPrompt),

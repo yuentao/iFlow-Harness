@@ -138,6 +138,14 @@ import {
   type MaintenanceLogLevel,
 } from "../memory/maintenance.js";
 import { DEFAULT_TOTAL_TOKEN_BUDGET, MaintenanceScheduler } from "../memory/maintenance-scheduler.js";
+import {
+  MAX_MERGE_FACTS,
+  buildMergePrompt,
+  chunkFacts,
+  parseMergeResponse,
+  type MergeSuggestion,
+  type RejectedMerge,
+} from "../memory/curate-llm.js";
 import { discoverMemoryFiles } from "../memory/discovery.js";
 import { planCuration } from "../../shared/memory-curate.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
@@ -281,6 +289,10 @@ const INTERNAL_PROMPT_TIMEOUT_MS = 180_000;
  * from competing with the user's next turn on a slow gateway. */
 const MEMORY_EXTRACT_TIMEOUT_MS = 90_000;
 const MEMORY_EXTRACT_IDLE_MS = 45_000;
+/** L2 语义合并：一轮整理按 MAX_MERGE_FACTS 分批，每批一个直接网关补全。给足
+ * 模型时间，但仍有界，避免慢网关把整理拖成永不结束的后台任务。 */
+const MEMORY_CURATE_TIMEOUT_MS = 120_000;
+const MEMORY_CURATE_IDLE_MS = 60_000;
 /** Knowledge index generation summarizes a whole workspace; allow a longer
  * turn while still bounding a wedged gateway. */
 const KNOWLEDGE_PROMPT_TIMEOUT_MS = 180_000;
@@ -922,6 +934,14 @@ export interface MemoryMaintenanceDepsOptions {
   writeFile(file: string, content: string, expectedHash: string): Promise<void>;
   /** true = 只报告不写盘（strategy === "report"）。 */
   dryRun(): boolean;
+  /**
+   * L2 语义合并实现（可选）：分批 + 调模型 + 解析。核心编排只在 apply 策略下
+   * 调用它，并自行处理行冲突与被拒建议落盘。不传则整轮整理退化为纯 L1。
+   */
+  suggestMerges?(facts: string[]): Promise<{
+    suggestions: MergeSuggestion[];
+    rejected: RejectedMerge[];
+  }>;
   now?(): Date;
   log?(level: MaintenanceLogLevel, message: string, detail?: unknown): void;
   budgets?(): MaintenanceBudgets;
@@ -963,6 +983,9 @@ export function buildMemoryMaintenanceDeps(options: MemoryMaintenanceDepsOptions
     home: options.home,
     now: options.now ?? (() => new Date()),
     ...(options.log ? { log: options.log } : {}),
+    // 核心编排用 dryRun() 判定「report 模式跳过 L2」；与写盘空操作同源。
+    dryRun: options.dryRun,
+    ...(options.suggestMerges ? { suggestMerges: options.suggestMerges } : {}),
     get budgets(): MaintenanceBudgets {
       return options.budgets ? options.budgets() : {};
     },
@@ -1757,6 +1780,7 @@ export class ChatPanel implements vscode.Disposable {
       readFile: (file) => readIfExists(file),
       writeFile: (file, content, expectedHash) => this.writeMaintenanceFile(file, content, expectedHash),
       dryRun: () => this.maintenanceStrategy() === "report",
+      suggestMerges: (facts) => this.suggestMemoryMerges(facts),
       log: (level, message, detail) => this.logMaintenance(level, message, detail),
       budgets: () => this.maintenanceBudgets(),
     });
@@ -3590,6 +3614,72 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * L2 语义合并实现：把托管事实分批喂给模型，解析后把建议映射回**原始**事实文本。
+   *
+   * 纪律：
+   *  - 分批按 `MAX_MERGE_FACTS`，逐批「拼提示词 → 调模型 → 解析」，任一批失败
+   *    （网关无响应）只丢这一批，不影响其它批；
+   *  - 发送前用 `stripFileMentions` 去掉 `@` 标记（陷阱 #26：`@path` 会让思考模型
+   *    陷入「要不要先读文件」的推理死循环）；解析回来后把 keep/absorb 反查回原始
+   *    文本，`suggestionsToActions` 才能按文本定位行号；
+   *  - 跨批去重：同一条 keep 被多次建议时保留首个；
+   *  - 直接走 `completeInternalPrompt`（OpenAI 兼容端点），不消耗 CLI 会话。
+   */
+  private async suggestMemoryMerges(
+    facts: string[],
+  ): Promise<{ suggestions: MergeSuggestion[]; rejected: RejectedMerge[] }> {
+    const suggestions: MergeSuggestion[] = [];
+    const rejected: RejectedMerge[] = [];
+    const seenKeep = new Set<string>();
+    if (facts.length < 2) return { suggestions, rejected };
+
+    let template: string;
+    try {
+      template = loadPrompt("memory-curate");
+    } catch (error) {
+      this.log.warn(`L2 语义合并：提示词模板加载失败：${errorMessage(error)}`);
+      return { suggestions, rejected };
+    }
+
+    for (const chunk of chunkFacts(facts, MAX_MERGE_FACTS)) {
+      if (this.disposed) break;
+      // 去掉 @ 标记后发送；stripped → original 反查表（首个映射优先）。
+      const stripped = chunk.map((fact) => stripFileMentions(fact));
+      const originalByStripped = new Map<string, string>();
+      for (let i = 0; i < stripped.length; i++) {
+        const key = (stripped[i] ?? "").trim();
+        const original = chunk[i] ?? "";
+        if (key && !originalByStripped.has(key)) originalByStripped.set(key, original);
+      }
+      const prompt = buildMergePrompt(template, stripped);
+      const raw = await this.completeInternalPrompt(
+        prompt,
+        MEMORY_CURATE_TIMEOUT_MS,
+        MEMORY_CURATE_IDLE_MS,
+      );
+      if (!raw) continue; // 该批无回包：丢弃，继续下一批
+      const parsed = parseMergeResponse(raw, stripped);
+      rejected.push(...parsed.rejected);
+      for (const suggestion of parsed.suggestions) {
+        const keep = originalByStripped.get(suggestion.keep.trim()) ?? suggestion.keep;
+        if (seenKeep.has(keep)) continue;
+        const absorb = suggestion.absorb.map(
+          (item) => originalByStripped.get(item.trim()) ?? item,
+        );
+        // 反查后可能出现 keep==absorb 或重复项（两个不同 stripped 文本映射到同一
+        // 原文），这类建议已不可安全执行，丢弃。
+        if (absorb.some((item) => item === keep) || new Set(absorb).size !== absorb.length) {
+          rejected.push({ suggestion, reason: "反查原始事实后出现自吸收或重复项" });
+          continue;
+        }
+        seenKeep.add(keep);
+        suggestions.push({ keep, absorb, merged: suggestion.merged, reason: suggestion.reason });
+      }
+    }
+    return { suggestions, rejected };
+  }
+
+  /**
    * 手动触发一轮整理（命令面板 `iflow.curateMemory`）。绕过 enabled / 空闲 / 到期
    * 判定，但仍遵守「已在运行」与跨窗口锁；完成后用 toast 汇报应用/跳过/冲突条数
    * 与节省的 token。report 策略下 writeFile 是空操作，汇报为「预计应用」。
@@ -3616,6 +3706,7 @@ export class ChatPanel implements vscode.Disposable {
       else if (file.status === "conflict") conflict++;
       else failed++;
     }
+    const l2Skipped = report.files.some((file) => file.l2 === "skipped-report");
     const message = dryRun
       ? vscode.l10n.t(
           "记忆整理（仅报告）：预计应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 预计节省 {3} tokens",
@@ -3623,7 +3714,7 @@ export class ChatPanel implements vscode.Disposable {
           skipped,
           conflict,
           report.savedTokens,
-        )
+        ) + (l2Skipped ? vscode.l10n.t(" · L2 已跳过（report 模式）") : "")
       : vscode.l10n.t(
           "记忆整理完成：应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 节省 {3} tokens",
           applied,
