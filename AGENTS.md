@@ -229,6 +229,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - 当前 iFlowMods 同步决策：不做远程同步/PR，只保留本地改动（vendor/iflow-fork 产物快照）。
 - 用户决定 iFlowMods 相关改动只保留在本地，不做 GitHub 远程同步/PR；项目里说的“外部 fork”指本地定制 fork checkout，不是 GitHub 上的 iFlowMods 仓库。
 - vendor/iflow-fork 是本地外部 fork 的产物快照；改 vendor 快照后要同步本地 fork 源仓库，否则下次 npm run vendor:cli --from-dir 重生成会覆盖。
+- 影响 CLI 运行时行为的 mod 需要多场景冒烟测试后再确认完成：默认路径不变、标记开启、关闭开关、argv/ACP 门控、自定义规则路径、畸形输入、与子会话模板叠加、端到端连续会话，以及构建/typecheck/定向和全量测试。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 
