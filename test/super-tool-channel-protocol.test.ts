@@ -115,13 +115,13 @@ describe("super-agent-loader · 依赖字段透传", () => {
   });
 
   it.each([
-    ["id", { task: "x", id: 7 }, "id must be a string"],
-    ["dependsOn 非数组", { task: "x", dependsOn: 42 }, "dependsOn must be an array"],
-    ["dependsOn 元素非字符串", { task: "x", dependsOn: [1] }, "dependsOn[0] must be a string"],
-    ["batch 字符串", { task: "x", batch: "2" }, "batch must be a positive integer"],
-    ["batch 零", { task: "x", batch: 0 }, "batch must be a positive integer"],
-    ["maxAttempts 字符串", { task: "x", maxAttempts: "3" }, "maxAttempts must be a positive integer"],
-    ["maxAttempts 零", { task: "x", maxAttempts: 0 }, "maxAttempts must be a positive integer"],
+    ["id", { title: "x", task: "x", id: 7 }, "id must be a string"],
+    ["dependsOn 非数组", { title: "x", task: "x", dependsOn: 42 }, "dependsOn must be an array"],
+    ["dependsOn 元素非字符串", { title: "x", task: "x", dependsOn: [1] }, "dependsOn[0] must be a string"],
+    ["batch 字符串", { title: "x", task: "x", batch: "2" }, "batch must be a positive integer"],
+    ["batch 零", { title: "x", task: "x", batch: 0 }, "batch must be a positive integer"],
+    ["maxAttempts 字符串", { title: "x", task: "x", maxAttempts: "3" }, "maxAttempts must be a positive integer"],
+    ["maxAttempts 零", { title: "x", task: "x", maxAttempts: 0 }, "maxAttempts must be a positive integer"],
   ] as const)("类型写坏时当场报错：%s", (_name, task, expected) => {
     const message = makeTool().validateToolParams({ tasks: [task] });
     expect(message).not.toBeNull();
@@ -144,8 +144,39 @@ describe("super-agent-loader · 依赖字段透传", () => {
   it("loader 不重复实现跨任务语义校验（dependsOn+batch 可到共享层出 issue）", () => {
     // 共享层 planSuperWaves 才会把混用判成 issue；loader 只管逐字段类型。
     expect(
-      makeTool().validateToolParams({ tasks: [{ task: "x", dependsOn: ["B"], batch: 1 }] }),
+      makeTool().validateToolParams({ tasks: [{ title: "x", task: "x", dependsOn: ["B"], batch: 1 }] }),
     ).toBeNull();
+  });
+
+  it("schema 的 tasks.items.required 同时要求 task 与 title（与宿主 title 必填契约一致）", () => {
+    expect(makeTool().schema.parameters.properties.tasks.items.required).toEqual(["task", "title"]);
+  });
+
+  it("缺 title / title 为空白 → 当场拒绝（不回退到 task 首行）", () => {
+    expect(
+      makeTool().validateToolParams({ tasks: [{ task: "只读审查 src/panel/panel.ts" }] }),
+    ).toContain("title is required");
+    expect(
+      makeTool().validateToolParams({ tasks: [{ title: "  \t ", task: "做点事" }] }),
+    ).toContain("title is required");
+  });
+
+  it("tasks 与 actions 同时非空 → 报二选一错误，不静默选一个", () => {
+    const message = makeTool().validateToolParams({
+      tasks: [{ title: "甲", task: "做甲" }],
+      actions: [{ action: "cancel", sessionId: "super-x" }],
+    });
+    expect(message).toContain("mutually exclusive");
+    // 只给 actions 的纯管理调用照常通过。
+    expect(
+      makeTool().validateToolParams({ actions: [{ action: "cancel", sessionId: "super-x" }] }),
+    ).toBeNull();
+  });
+
+  it("流式截断哨兵 → 明确失败并要求重发完整载荷", () => {
+    expect(makeTool().validateToolParams({ __iflowStreamTruncated: true })).toContain(
+      "truncated in the stream",
+    );
   });
 });
 

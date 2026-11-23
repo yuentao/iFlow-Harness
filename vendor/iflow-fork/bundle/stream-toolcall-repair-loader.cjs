@@ -37,6 +37,11 @@
  *   4. Entries are completed as fragments arrive: late `id`/`name` updates
  *      the entry, and the partial functionCall card (args:undefined, used
  *      by TUI/ACP pending UI) is yielded exactly once per call.
+ *   5. Truncated `super-agent` payloads are NEVER salvaged locally: a repaired
+ *      payload would either drop the now-required `title` or ship a brief cut
+ *      mid-sentence. They are emitted as a sentinel object instead, so the
+ *      tool layer fails the call in the same turn and the model re-sends the
+ *      complete payload (see TRUNCATED_SUPER_AGENT_ARGS).
  *
  * Zero side effects when not streaming or when disabled: the delegation in
  * code.js catches every error and falls back to the builtin parser.
@@ -71,6 +76,24 @@ const DEFAULT_CONFIG = {
 
 /** Sentinel returned by parseToolArgs when a call must be skipped. */
 const SKIP = Symbol('stream-toolcall-repair.skip');
+
+/**
+ * Sentinel args for a truncated super-agent call. The super-agent tool's
+ * validateToolParams recognises `__iflowStreamTruncated` and fails the call
+ * with a "re-send the complete payload" message (cross-loader contract).
+ */
+const TRUNCATED_SUPER_AGENT_ARGS = { __iflowStreamTruncated: true };
+
+/**
+ * super-agent dispatch payloads carry a required `title` per task. Repairing a
+ * truncated payload would close the JSON and either drop that `title` or ship
+ * a brief cut mid-sentence, so those calls must fail instead of being salvaged.
+ * Accepts namespace prefixes (`iflow__super-agent`, `server.super-agent`).
+ */
+function isSuperAgentToolName(name) {
+  const normalized = String(name || '').toLowerCase();
+  return /(?:^|[._])super[-_]agent(?:[-_]?actions)?$/.test(normalized);
+}
 
 let cachedConfig = null;
 let cachedAt = 0;
@@ -229,6 +252,12 @@ function repairTruncatedJson(raw) {
  * Empty fragment stream ("") is a legal no-arg call → {} (unless configured
  * to drop those too). Unparseable payloads are repaired locally (optional),
  * then either dropped (default) or emitted as legacy {} (onParseError).
+ *
+ * Exception (fix ⑤): a super-agent payload is never repaired. Salvaging it
+ * would close the truncated JSON and dispatch a payload whose required `title`
+ * was dropped or whose brief was cut mid-sentence, so it is emitted as the
+ * TRUNCATED_SUPER_AGENT_ARGS sentinel — the tool layer then fails the call and
+ * the model re-sends the complete payload in the same turn.
  */
 function parseToolArgs(entry, config, model) {
   const raw = entry.args;
@@ -239,6 +268,14 @@ function parseToolArgs(entry, config, model) {
     return JSON.parse(raw);
   } catch {
     // fall through to repair/drop
+  }
+  if (isSuperAgentToolName(entry.name)) {
+    if (config.logDropped) {
+      console.warn(
+        `${LOG_PREFIX} truncated super-agent payload for "${entry.name}" (model: ${model || 'unknown'}) — failing the call instead of salvaging`
+      );
+    }
+    return { ...TRUNCATED_SUPER_AGENT_ARGS };
   }
   if (config.repairTruncatedJson) {
     try {
