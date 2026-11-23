@@ -259,10 +259,49 @@ describe("合并载荷纠偏 · super-agent 工具的 actions 参数", () => {
     expect(parseSuperToolCall("dispatch", { actions: [] }).ok).toBe(false);
   });
 
-  it("反向不改判：actions 工具带 tasks 仍按 actions 处理", () => {
+  it("反向不改判：actions 工具带纯 tasks 仍按 actions 处理（不误吞派发载荷）", () => {
     expect(resolveSuperToolCallKind("actions", { tasks: [{ title: "甲", task: "做事" }] })).toBe(
       "actions",
     );
+  });
+
+  it("actions 通道：tasks 与 actions 并存同样判 conflict（与工具名无关）", () => {
+    // 与 dispatch 侧同口径：并存是载荷结构错误，不能只执行 actions 把 tasks
+    // 静默丢弃。
+    const both = { tasks: [{ title: "甲", task: "做事" }], ...actionArgs };
+    expect(resolveSuperToolCallKind("actions", both)).toBe("conflict");
+    const parsed = parseSuperToolCall("actions", both);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.reason).toContain("both tasks and actions");
+    expect(parsed.issues[0]).toContain("tasks 与 actions");
+    expect(parsed.issues[0]).toContain("分开");
+  });
+
+  it("actions 通道：纯 actions 行为不变（仍解析出动作）", () => {
+    expect(resolveSuperToolCallKind("actions", actionArgs)).toBe("actions");
+    const parsed = parseSuperToolCall("actions", actionArgs);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.kind).toBe("actions");
+    expect(parsed.tasks).toEqual([]);
+    expect(parsed.actions).toEqual([{ action: "cancel", sessionId: "super-x" }]);
+  });
+
+  it("actions 通道：纯 tasks（无 actions）行为不变 —— 不误判 conflict，按 actions 解析为空载失败", () => {
+    const pureTasks = { tasks: [{ title: "甲", task: "做事" }] };
+    expect(resolveSuperToolCallKind("actions", pureTasks)).toBe("actions");
+    // 名字是 actions 却不带动作：明确失败，绝不静默成功或改判派发。
+    expect(parseSuperToolCall("actions", pureTasks).ok).toBe(false);
+  });
+
+  it("actions 通道：tasks / actions 都为空数组行为不变（不判 conflict，按空载失败）", () => {
+    const empty = { tasks: [], actions: [] };
+    expect(resolveSuperToolCallKind("actions", empty)).toBe("actions");
+    expect(parseSuperToolCall("actions", empty).ok).toBe(false);
+    // dispatch 侧同样保持：两者都空 → 仍按 dispatch，解析为空载失败。
+    expect(resolveSuperToolCallKind("dispatch", empty)).toBe("dispatch");
+    expect(parseSuperToolCall("dispatch", empty).ok).toBe(false);
   });
 });
 
