@@ -426,8 +426,9 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     expect(manager.spawn).not.toHaveBeenCalled();
     const warnings = toast.mock.calls.filter((call) => call[0] === "warning");
     expect(warnings).toHaveLength(1);
-    expect(String(warnings[0]?.[1])).toContain("super-agent");
-    expect(String(warnings[0]?.[1])).toContain("未派发任何超流体");
+    expect(String(warnings[0]?.[1])).toContain("派发指令没有送达");
+    expect(String(warnings[0]?.[1])).toContain("未派出任何新任务");
+    expect(String(warnings[0]?.[1])).not.toContain("super-agent");
     expect(p.log.lines.some((line) => line.level === "warn")).toBe(true);
 
     // 同一条工具帧的后续更新按 toolCallId 去重，不再重复弹提示。
@@ -453,9 +454,9 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     expect(manager.spawn).not.toHaveBeenCalled();
     const warnings = toast.mock.calls.filter((call) => call[0] === "warning");
     expect(warnings).toHaveLength(1);
-    expect(String(warnings[0]?.[1])).toContain("载荷不合法");
+    expect(String(warnings[0]?.[1])).toContain("派发指令格式有误");
     expect(String(warnings[0]?.[1])).toContain("task 必须是字符串");
-    expect(String(warnings[0]?.[1])).toContain("未派发超流体");
+    expect(String(warnings[0]?.[1])).toContain("未派出任何新任务");
   });
 
   it("pending 帧不带 args 时不误报「未派发」，随后 in_progress 照常派发一次", () => {
@@ -498,7 +499,7 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
     const warnings = toast.mock.calls.filter((call) => call[0] === "warning");
     expect(warnings).toHaveLength(1);
-    expect(String(warnings[0]?.[1])).toContain("未派发任何超流体");
+    expect(String(warnings[0]?.[1])).toContain("派发指令没有送达");
     expect(manager.spawn).not.toHaveBeenCalled();
     // 模型也要知道：一条 hidden 纠错提示送回主会话。
     await waitFor(() => correctionPrompts().length > 0);

@@ -484,7 +484,7 @@ export class SuperAgentHost {
     const requestId = `super-residue-${++this.superResidueConfirmSeq}`;
     const title = vscode.l10n.t("清空并新建会话？");
     const message = vscode.l10n.t(
-      "检测到 {0} 个历史超流体残留目录（worktree {1} 个 / 降级目录 {2} 个 / 附件 {3} 个）。继续将清空全部残留，包括未合并的 worktree——其中未提交/未合并的代码改动将永久丢失且不可恢复。请确认这些工作不再需要。",
+      "检测到 {0} 个历史超流体残留目录（Git 工作目录 {1} 个 / 降级目录 {2} 个 / 附件 {3} 个）。继续将清空全部残留，包括未合并的 Git 工作目录——其中未提交/未合并的代码改动将永久丢失且不可恢复。请确认这些工作不再需要。",
       count.total,
       count.worktrees,
       count.dirs,
@@ -1742,7 +1742,7 @@ export class SuperAgentHost {
         this.log.warn("super agent: no super session dispatched — the payload had no dispatchable task");
         this.store.sendToast(
           "warning",
-          vscode.l10n.t("超流体派发指令没有产生任何子会话，请检查任务载荷"),
+          vscode.l10n.t("超流体派发指令没有产生任何子会话，请检查任务内容"),
         );
       } else if (attempted > 0) {
         // 每个失败已各自 toast；这里补一条汇总，避免只剩零散错误。
@@ -1879,7 +1879,7 @@ export class SuperAgentHost {
     );
     this.store.sendToast(
       "warning",
-      vscode.l10n.t("super-agent 工具调用已完成，但宿主没有收到派发载荷，未派发任何超流体"),
+      vscode.l10n.t("派发指令没有送达，未派出任何新任务"),
     );
     this.queueSuperToolCallCorrection(
       "the tool call completed without a usable payload — no tasks/actions ever reached the host, so nothing was dispatched",
@@ -1978,7 +1978,7 @@ export class SuperAgentHost {
     );
     this.store.sendToast(
       "warning",
-      vscode.l10n.t("super-agent 调用载荷不合法（{0}），未派发超流体", reason),
+      vscode.l10n.t("派发指令格式有误（{0}），未派出任何新任务", reason),
     );
     // 宿主能看见「这次没派出去」，模型却只收到一个 failed 工具帧 —— 补一条
     // hidden prompt 把原因和正确格式送回主会话上下文，让它在同一轮里自行修正。
@@ -2223,7 +2223,7 @@ export class SuperAgentHost {
               this.store.sendToast(
                 "warning",
                 vscode.l10n.t(
-                  "中断失败：找不到超流体 {0}，可能已被清理或 id 有误",
+                  "中断失败：找不到超流体 {0}，可能已被清理或编号有误",
                   action.sessionId,
                 ),
               );

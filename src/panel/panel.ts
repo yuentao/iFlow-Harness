@@ -2833,7 +2833,7 @@ export class ChatPanel implements vscode.Disposable {
           // handleWebviewMessage is fire-and-forget — without this the
           // failed open was completely silent (the Windows bug report).
           void vscode.window.showWarningMessage(
-            vscode.l10n.t("无法打开 {0}: {1}", target, errorMessage(error)),
+            vscode.l10n.t("无法打开 {0}：{1}", target, errorMessage(error)),
           );
           return;
         }
@@ -5794,7 +5794,7 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file));
     } catch (error) {
       const message = errorMessage(error);
-      void vscode.window.showWarningMessage(vscode.l10n.t("打开图片失败: {0}", message));
+      void vscode.window.showWarningMessage(vscode.l10n.t("打开图片失败：{0}", message));
     }
   }
 
@@ -6018,7 +6018,7 @@ export class ChatPanel implements vscode.Disposable {
       await vscode.window.showTextDocument(doc, { preview: true });
     } catch (error) {
       void vscode.window.showErrorMessage(
-        vscode.l10n.t("导出工具输出失败: {0}", errorMessage(error)),
+        vscode.l10n.t("导出工具输出失败：{0}", errorMessage(error)),
       );
     }
   }
@@ -6542,7 +6542,7 @@ export class ChatPanel implements vscode.Disposable {
       Object.keys(readCliSettings()?.apiProfiles ?? {}).map((key) => key.trim()),
     );
     if (replaced && replaced !== name && (profiles[name] || kernelNames.has(name))) {
-      const error = vscode.l10n.t("已存在同名 API 配置: {0}，请换一个名称", name);
+      const error = vscode.l10n.t("已存在同名 API 配置：{0}，请换一个名称", name);
       void vscode.window.showWarningMessage(error);
       const auth = this.store.getState().auth;
       this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
@@ -6642,7 +6642,7 @@ export class ChatPanel implements vscode.Disposable {
     const kernelCreds = this.kernelProfileCredentials(name);
     const creds: OpenAiCompatCredentials | null = kernelCreds ?? (profiles[name] ? { ...profiles[name] } : null);
     if (!creds) {
-      vscode.window.showWarningMessage(vscode.l10n.t("未找到 API 配置: {0}", name));
+      vscode.window.showWarningMessage(vscode.l10n.t("未找到 API 配置：{0}", name));
       return;
     }
     // User directive (2026-10-06): a profile switch must not silently drop
@@ -6881,7 +6881,7 @@ export class ChatPanel implements vscode.Disposable {
             );
             void vscode.window.showInformationMessage(
               vscode.l10n.t(
-                "已切换 API 配置: {0}，当前对话已改用新配置",
+                "已切换 API 配置：{0}，当前对话已改用新配置",
                 (await this.workspaceActiveProfileName()) ?? "",
               ),
             );
@@ -6919,7 +6919,7 @@ export class ChatPanel implements vscode.Disposable {
           `profile switch finished in ${Date.now() - tHot}ms (hot re-auth, no CLI restart)`,
         );
         void vscode.window.showInformationMessage(
-          vscode.l10n.t("已切换 API 配置: {0}", (await this.workspaceActiveProfileName()) ?? ""),
+          vscode.l10n.t("已切换 API 配置：{0}", (await this.workspaceActiveProfileName()) ?? ""),
         );
         return;
       } catch (error) {
@@ -6978,10 +6978,10 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.window.showInformationMessage(
         coldKeeps
           ? vscode.l10n.t(
-              "已切换 API 配置: {0}，当前对话已改用新配置",
+              "已切换 API 配置：{0}，当前对话已改用新配置",
               (await this.workspaceActiveProfileName()) ?? "",
             )
-          : vscode.l10n.t("已切换 API 配置: {0}", (await this.workspaceActiveProfileName()) ?? ""),
+          : vscode.l10n.t("已切换 API 配置：{0}", (await this.workspaceActiveProfileName()) ?? ""),
       );
     } catch {
       // ensureClient already marked the error in the store; nothing to add.
@@ -9066,7 +9066,7 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       const message = errorMessage(error);
       this.log.warn(
-        vscode.l10n.t("模型列表查询失败（不回退内置目录）: {0}", message),
+        vscode.l10n.t("模型列表查询失败（不回退内置目录）：{0}", message),
       );
       return { ok: false, reason: "unreachable", message };
     }
@@ -9184,7 +9184,7 @@ export class ChatPanel implements vscode.Disposable {
       .catch((error: unknown) => {
         // queryLiveModels swallows endpoint errors into []; only unexpected
         // storage failures reject — never let them become unhandled.
-        this.log.warn(vscode.l10n.t("模型列表查询失败（不回退内置目录）: {0}", errorMessage(error)));
+        this.log.warn(vscode.l10n.t("模型列表查询失败（不回退内置目录）：{0}", errorMessage(error)));
       });
   }
 
@@ -10325,8 +10325,9 @@ export class ChatPanel implements vscode.Disposable {
 
   /**
    * M2 P0-3: a real turn failure halts auto-dispatch (roadmap: every queued
-   * message would hit the same broken endpoint — pause + warning, the queue
-   * strip offers 继续/清空). No-op when nothing is queued.
+   * message would hit the same broken endpoint — pause + warning asking the
+   * user to resend; the queue strip UI was removed). No-op when nothing is
+   * queued.
    */
   private pauseQueueOnError(): void {
     const state = this.store.getState();
@@ -10335,7 +10336,7 @@ export class ChatPanel implements vscode.Disposable {
     this.store.setQueue(queue, true);
     this.store.sendToast(
       "warning",
-      vscode.l10n.t("本轮失败，队列已暂停（{0} 条待发送），可在队列条继续或清空", queue.length),
+      vscode.l10n.t("本轮失败，已暂停发送（{0} 条待发），请重新发送", queue.length),
     );
   }
 
@@ -10667,7 +10668,7 @@ export class ChatPanel implements vscode.Disposable {
             "",
             "",
             vscode.l10n.t(
-              "终端输出捕获不可用：需要 VS Code ≥ 1.93 且启用终端 Shell Integration（terminal.integrated.shellIntegration.enabled）",
+              "终端输出捕获不可用：需要 VS Code 1.93 及以上，且启用终端 Shell Integration（terminal.integrated.shellIntegration.enabled）",
             ),
           );
           return;

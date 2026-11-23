@@ -79,13 +79,13 @@ export class StatusPresenter {
             ? `$(history) iFlow: ${vscode.l10n.t("已停止 · {0} 项待处理", pending)}${model}`
             : `$(history) iFlow: ${vscode.l10n.t("已停止")}${model}`;
         } else if (state.superWaiting) {
-          // 子会话确实还在跑 / 在等你回答：如实用「进行中 / 等待你处理」，
+          // 子会话确实还在跑 / 在等你回答：如实用「运行中 / 等你回答」，
           // 不能说「生成中」——那是主回合的语义，此刻主会话是 idle。
           const kids = state.superSessions ?? [];
           const awaiting = kids.some((session) => session.status === "awaiting_input");
           text = awaiting
-            ? `$(bell) iFlow: ${vscode.l10n.t("等待你处理")}${model}`
-            : `$(sync~spin) iFlow: ${vscode.l10n.t("超流体进行中")}${model}`;
+            ? `$(bell) iFlow: ${vscode.l10n.t("等你回答")}${model}`
+            : `$(sync~spin) iFlow: ${vscode.l10n.t("运行中")}${model}`;
         } else {
           text = `$(check) iFlow${mode}${model}`;
         }

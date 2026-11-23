@@ -407,7 +407,7 @@ export class CheckpointService {
     try {
       await this.checkpoints.restoreFiles(sessionId, entry.sha!);
     } catch (error) {
-      void vscode.window.showErrorMessage(vscode.l10n.t("工作区回滚失败: {0}", errorMessage(error)));
+      void vscode.window.showErrorMessage(vscode.l10n.t("工作区回滚失败：{0}", errorMessage(error)));
       return false;
     }
     // Reload the editors we just overwrote from disk so the restored content

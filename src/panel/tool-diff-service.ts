@@ -362,7 +362,7 @@ export class ToolDiffService {
       await vscode.workspace.fs.writeFile(tmpUri, Buffer.from(oldText, "utf8"));
     } catch (error) {
       void vscode.window.showErrorMessage(
-        vscode.l10n.t("打开 diff 失败: {0}", errorMessage(error)),
+        vscode.l10n.t("打开 diff 失败：{0}", errorMessage(error)),
       );
       return;
     }
@@ -387,11 +387,11 @@ export class ToolDiffService {
     const state = this.deps.getState();
     if (state.sessionId !== sessionId || !canReviewTurn(state, userBlockId)) return;
     if (!isLatestTurn(state.blocks, userBlockId)) {
-      void vscode.window.showWarningMessage(vscode.l10n.t("仅可撤销最近一轮的文件修改"));
+      void vscode.window.showWarningMessage(vscode.l10n.t("仅可回退最近一轮的文件修改"));
       return;
     }
     if (state.status === "streaming" || state.status === "connecting") {
-      void vscode.window.showWarningMessage(vscode.l10n.t("当前正在生成，无法撤销文件修改"));
+      void vscode.window.showWarningMessage(vscode.l10n.t("当前正在生成，无法回退文件修改"));
       return;
     }
     const edits = collectTurnToolBlocks(state.blocks, userBlockId)
@@ -405,7 +405,7 @@ export class ToolDiffService {
     const oldText = first.diff!.oldText;
     if (oldText === null) {
       void vscode.window.showWarningMessage(
-        vscode.l10n.t("无法撤销：该文件缺少编辑前内容（可能是本轮新建的文件）"),
+        vscode.l10n.t("无法回退：该文件缺少编辑前内容（可能是本轮新建的文件）"),
       );
       return;
     }
@@ -428,7 +428,7 @@ export class ToolDiffService {
     );
     if (openDoc?.isDirty) {
       void vscode.window.showWarningMessage(
-        vscode.l10n.t("该文件在编辑器中有未保存的修改，请先保存或还原后再撤销"),
+        vscode.l10n.t("该文件在编辑器中有未保存的修改，请先保存或还原后再回退"),
       );
       return;
     }
@@ -445,7 +445,7 @@ export class ToolDiffService {
 
     if (currentText === oldText) {
       markReverted();
-      void vscode.window.showInformationMessage(vscode.l10n.t("已是本轮开始前的内容，无需撤销: {0}", chosen));
+      void vscode.window.showInformationMessage(vscode.l10n.t("已是本轮开始前的内容，无需回退：{0}", chosen));
       this.deps.post({ type: "turnFileReverted", sessionId, userBlockId, key });
       return;
     }
@@ -453,15 +453,15 @@ export class ToolDiffService {
       index === 0 || edit.diff!.oldText === edits[index - 1]!.diff!.newText);
     if (edits.length > 1 && !chained && (currentText === null || currentText === lastNew)) {
       const pick = await vscode.window.showWarningMessage(
-        vscode.l10n.t("本轮对该文件有 {0} 次修改记录且内容不连续，撤销将恢复到本轮开始前的内容。继续？", edits.length),
+        vscode.l10n.t("本轮对该文件有 {0} 次修改记录且内容不连续，回退将恢复到本轮开始前的内容。继续？", edits.length),
         { modal: true },
-        vscode.l10n.t("仍然撤销"),
+        vscode.l10n.t("仍然回退"),
       );
-      if (pick !== vscode.l10n.t("仍然撤销")) return;
+      if (pick !== vscode.l10n.t("仍然回退")) return;
     }
     if (currentText === null && lastNew !== null) {
       const pick = await vscode.window.showWarningMessage(
-        vscode.l10n.t("该文件当前不存在，撤销将按本轮开始前的内容重建。继续？"),
+        vscode.l10n.t("该文件当前不存在，回退将按本轮开始前的内容重建。继续？"),
         { modal: true },
         vscode.l10n.t("重建文件"),
       );
@@ -471,9 +471,9 @@ export class ToolDiffService {
       const pick = await vscode.window.showWarningMessage(
         vscode.l10n.t("文件内容与记录不一致（可能已被继续修改）。仍恢复到本轮开始前的内容？"),
         { modal: true },
-        vscode.l10n.t("仍然撤销"),
+        vscode.l10n.t("仍然回退"),
       );
-      if (pick !== vscode.l10n.t("仍然撤销")) return;
+      if (pick !== vscode.l10n.t("仍然回退")) return;
     }
 
     // The dialogs (and locateDiffFile's picker) can wait indefinitely: abort
@@ -486,13 +486,13 @@ export class ToolDiffService {
       // Still missing.
     }
     if (latestText !== currentText) {
-      void vscode.window.showWarningMessage(vscode.l10n.t("文件在撤销确认期间被修改，请重试"));
+      void vscode.window.showWarningMessage(vscode.l10n.t("文件在回退确认期间被修改，请重试"));
       return;
     }
     const after = this.deps.getState();
     if (after.sessionId !== sessionId || after.status === "streaming" || after.status === "connecting" ||
         !isLatestTurn(after.blocks, userBlockId)) {
-      void vscode.window.showWarningMessage(vscode.l10n.t("会话状态已变化，撤销已取消"));
+      void vscode.window.showWarningMessage(vscode.l10n.t("会话状态已变化，回退已取消"));
       return;
     }
 
@@ -500,11 +500,11 @@ export class ToolDiffService {
       // Write through the VSCode file service so watchers stay consistent.
       await vscode.workspace.fs.writeFile(fileUri, Buffer.from(oldText, "utf8"));
       markReverted();
-      void vscode.window.showInformationMessage(vscode.l10n.t("已撤销本轮对该文件的全部修改: {0}", chosen));
+      void vscode.window.showInformationMessage(vscode.l10n.t("已回退本轮对该文件的全部修改：{0}", chosen));
       this.deps.post({ type: "turnFileReverted", sessionId, userBlockId, key });
     } catch (error) {
       vscode.window.showErrorMessage(
-        vscode.l10n.t("撤销文件修改失败: {0}", errorMessage(error)),
+        vscode.l10n.t("回退文件修改失败：{0}", errorMessage(error)),
       );
     }
   }
@@ -554,7 +554,7 @@ export class ToolDiffService {
       if (newText !== null && currentText === oldText) {
         // Already reverted (e.g. the CLI undid it, or a previous retry landed).
         this.deps.toolReverted(toolCallId);
-        void vscode.window.showInformationMessage(vscode.l10n.t("已是原始内容，无需回退: {0}", chosen));
+        void vscode.window.showInformationMessage(vscode.l10n.t("已是原始内容，无需回退：{0}", chosen));
         return;
       }
       if (newText !== null && currentText !== null && currentText !== newText) {
@@ -577,10 +577,10 @@ export class ToolDiffService {
         await vscode.commands.executeCommand("workbench.action.files.revert");
       }
       this.deps.toolReverted(toolCallId);
-      void vscode.window.showInformationMessage(vscode.l10n.t("已回退: {0}", chosen));
+      void vscode.window.showInformationMessage(vscode.l10n.t("已回退：{0}", chosen));
     } catch (error) {
       vscode.window.showErrorMessage(
-        vscode.l10n.t("回退失败: {0}", errorMessage(error)),
+        vscode.l10n.t("回退失败：{0}", errorMessage(error)),
       );
     }
   }
@@ -668,11 +668,11 @@ export class ToolDiffService {
       const revertedCount = keep.filter((k) => !k).length;
       this.deps.toolHunkDecisions(toolCallId, keep, true);
       void vscode.window.showInformationMessage(
-        vscode.l10n.t("已回退 {0} 处改动（保留 {1} 处）: {2}", revertedCount, keep.length - revertedCount, chosen),
+        vscode.l10n.t("已回退 {0} 处改动（保留 {1} 处）：{2}", revertedCount, keep.length - revertedCount, chosen),
       );
     } catch (error) {
       vscode.window.showErrorMessage(
-        vscode.l10n.t("逐块回退失败: {0}", errorMessage(error)),
+        vscode.l10n.t("逐块回退失败：{0}", errorMessage(error)),
       );
     }
   }
