@@ -755,7 +755,8 @@ const SUPER_DEPENDENCY_POLICY_DEFAULT: SuperDependencyPolicy = "block";
 
 /** 超流体（Super Agent / 子会话）行为：并发、集成、重试、依赖策略、工作目录与
  * 完全信任模式。原先挂在「对话」里，现在拆成独立分类，避免对话页被十余个
- * 超流体控件淹没。 */
+ * 超流体控件淹没；分类内再拆两组——「编排与并发」放调度类开关，「安全与信任」
+ * 只放完全信任模式及其风险提示，组标题因此不会与分类名（超流体）重复。 */
 function SuperAgentSection() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
@@ -770,7 +771,7 @@ function SuperAgentSection() {
   const updateSuper = (patch: SuperAgentRetryPatch) => update(patch);
   return (
     <div className="space-y-4">
-      <SettingsGroup title={t("超流体")}>
+      <SettingsGroup title={t("编排与并发")}>
         <NumberRow
           label={t("并发上限")}
           description={t("最多同时运行几个超流体。")}
@@ -831,6 +832,8 @@ function SuperAgentSection() {
           checked={settings.superAgentKeepWorktree}
           onChange={(superAgentKeepWorktree) => update({ superAgentKeepWorktree })}
         />
+      </SettingsGroup>
+      <SettingsGroup title={t("安全与信任")}>
         <div>
           <ToggleRow
             label={t("完全信任模式")}

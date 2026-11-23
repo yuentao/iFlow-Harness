@@ -6,7 +6,8 @@
  * 的三层一致性：
  *  1. manifest 声明（package.json 的 contributes.configuration）；
  *  2. 本地化占位（package.nls.json / package.nls.zh-cn.json，两个文件键集合必须一致）；
- *  3. 设置页 UI（webview 的「超流体」分组里真的渲染出这两个控件）。
+ *  3. 设置页 UI（webview 的超流体分类里真的渲染出这两个控件；分类已拆成
+ *     「编排与并发」与「安全与信任」两组）。
  *
  * 纪律（AGENTS.md 陷阱 #14）：新增设置项必须「声明 → 实现」对账，绝不能声明了
  * 却没人用；这里把三层的键名、默认值与取值范围都钉死，避免以后漂移。
@@ -148,6 +149,15 @@ function radio(label: string): HTMLButtonElement {
   return found!;
 }
 
+/** 按 SettingsGroup 的标题（h3）取出该分组 section，用于拆组后的归属断言。 */
+function group(title: string): HTMLElement {
+  const found = [...container.querySelectorAll<HTMLElement>("section")].find(
+    (el) => el.querySelector("h3")?.textContent === title,
+  );
+  expect(found, `找不到分组「${title}」`).toBeTruthy();
+  return found!;
+}
+
 beforeEach(() => {
   send.mockReset();
   updateHostSetting.mockReset();
@@ -214,9 +224,15 @@ describe("本地化占位", () => {
 });
 
 describe("设置页 UI", () => {
-  it("「超流体」分组渲染出最大尝试次数与依赖策略两个控件", () => {
-    expect(container.textContent).toContain("最大尝试次数");
-    expect(container.textContent).toContain("依赖策略");
+  it("超流体分类拆成「编排与并发」「安全与信任」两组，标题都在", () => {
+    expect(group("编排与并发")).toBeTruthy();
+    expect(group("安全与信任")).toBeTruthy();
+  });
+
+  it("「编排与并发」组渲染出最大尝试次数与依赖策略两个控件", () => {
+    const orchestration = group("编排与并发");
+    expect(orchestration.textContent).toContain("最大尝试次数");
+    expect(orchestration.textContent).toContain("依赖策略");
   });
 
   it("最大尝试次数是 kit 的整数输入，默认 2、范围 1–5", () => {
@@ -229,8 +245,8 @@ describe("设置页 UI", () => {
   });
 
   it("依赖策略是同屏二选一（radiogroup），默认选中「阻塞」", () => {
-    const group = container.querySelector<HTMLElement>('[role="radiogroup"][aria-label="依赖策略"]');
-    expect(group).toBeTruthy();
+    const radiogroup = container.querySelector<HTMLElement>('[role="radiogroup"][aria-label="依赖策略"]');
+    expect(radiogroup).toBeTruthy();
     expect(radio("阻塞").getAttribute("aria-checked")).toBe("true");
     expect(radio("继续").getAttribute("aria-checked")).toBe("false");
   });
@@ -258,15 +274,18 @@ describe("设置页 UI", () => {
     expect(radio("继续").getAttribute("aria-checked")).toBe("true");
   });
 
-  it("「超流体」分组渲染出完全信任模式开关，默认关闭", () => {
-    expect(container.textContent).toContain("完全信任模式");
-    const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
+  it("「安全与信任」组渲染出完全信任模式开关，默认关闭", () => {
+    const security = group("安全与信任");
+    expect(security.textContent).toContain("完全信任模式");
+    const toggle = security.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
     expect(toggle).toBeTruthy();
     expect(toggle!.getAttribute("aria-checked")).toBe("false");
   });
 
-  it("风险提示始终可见", () => {
-    expect(container.textContent).toContain(
+  it("风险提示与完全信任开关同组，且始终可见", () => {
+    const security = group("安全与信任");
+    expect(security.querySelector('button[role="switch"][aria-label="完全信任模式"]')).toBeTruthy();
+    expect(security.textContent).toContain(
       "开启后子会话无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。",
     );
   });
@@ -286,6 +305,8 @@ describe("设置页 UI", () => {
 
   it("英文词典里有对应的英文文案", () => {
     setLocale("en-US");
+    expect(t("编排与并发")).toBe("Orchestration & concurrency");
+    expect(t("安全与信任")).toBe("Security & trust");
     expect(t("最大尝试次数")).toBe("Max attempts");
     expect(t("依赖策略")).toBe("Dependency policy");
     expect(t("阻塞")).toBe("Block");

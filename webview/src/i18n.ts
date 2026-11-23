@@ -690,6 +690,8 @@ const en: Record<string, string> = {
   "设置分区": "Settings sections",
   "详细说明": "Details",
   "会话": "Session",
+  "编排与并发": "Orchestration & concurrency",
+  "安全与信任": "Security & trust",
   "并发上限": "Concurrency limit",
   "个": "sessions",
   "集成模式": "Integration mode",
