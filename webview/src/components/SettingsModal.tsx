@@ -851,7 +851,7 @@ function ChatSection() {
             checked={settings.superAgentFullTrust}
             onChange={(superAgentFullTrust) => update({ superAgentFullTrust })}
           />
-          <p className="mt-1 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
+          <p className="mt-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-ui-label leading-relaxed text-warning">
             {t(
               "开启后子会话无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。",
             )}
