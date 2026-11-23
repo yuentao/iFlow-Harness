@@ -22,7 +22,7 @@ webview/ (用户操作)   ──→ WebviewToHost 消息 ──→ src/panel/pan
 | `src/extension.ts` | 激活入口、命令注册、`@iflow` chat participant、编辑器选区入口（Ask iFlow / 加入上下文 / 记住选区）、`warmStart` 预热、终端命令捕获 |
 | `src/acp/client.ts` | spawn CLI + initialize 握手；实现 agent→client 的 `fs/read_text_file`、`fs/write_text_file`、`session/request_permission`、`_iflow/user/questions`、`_iflow/plan/exit`；`killTree` 进程树清理 |
 | `src/acp/jsonrpc.ts` / `protocol.ts` | NDJSON 分帧（8MB 帧上限）+ JSON-RPC 路由 + `errorMessage` / `isRateLimitError` / `isContextOverflowError`；ACP wire 类型，iFlow 扩展点用 `// iFlow extension` 标注。`jsonrpc.ts` **零 VSCode 依赖** |
-| `src/acp/cli-locator.ts` | `resolveVendoredEntry` 硬解析内置 `bundle/entry.js`（缺失即抛，无探测回退）；`locateNodeExecutable` 异步探测 Node（缓存 + 并发去重 + 跨窗口 globalState 持久化）；`seedDefaultRuleConfigs` 种默认规则；`buildAcpCommand` 拼 `--experimental-acp --stream`，额外根以 `--include-directories` 传入（与 fs 回调边界同源） |
+| `src/acp/cli-locator.ts` | `resolveVendoredEntry` 硬解析内置 `bundle/entry.js`（缺失即抛，无探测回退）；`locateNodeExecutable` 异步探测 Node（缓存 + 并发去重 + 跨窗口 globalState 持久化）；`ensureIflowDefaultConfigs` 把 `vendor/iflow-defaults/` 下的默认 `.json` 配置种到 `~/.iflow/`（只补缺失、永不覆盖）；`buildAcpCommand` 拼 `--experimental-acp --stream`，额外根以 `--include-directories` 传入（与 fs 回调边界同源） |
 | `src/acp/auth.ts` / `api-profiles.ts` | openai-compatible 凭据与命名 Profile（SecretStorage）、热重认证；内核 Profile 读写 |
 | `src/acp/models-query.ts` | 实时 `GET {baseUrl}/models`；读 CLI settings.json；归档过期 OAuth 缓存 |
 | `src/acp/complete.ts` | 直连 `POST {baseUrl}/chat/completions`（stream），供 enhance / AI 标题 / 记忆提取 / 模型元数据等内部纯文本任务使用（陷阱 #26） |
@@ -82,7 +82,7 @@ npm run package        # vendor:cli --force && build && vsce package --no-depend
 - **`--force` 不能省**：幂等检查只比 `package.json` version，同版本 ≠ 同内容（Mod 注入可以不 bump 版本）。
 - **注入本体在 `bundle/iflow.js` 与 `*-loader.cjs`**（含 `super-agent-loader.cjs`），不在 `bundle/entry.js`；锚点必须唯一 + round-trip 校验，换 CLI bundle 版本后锚点会漂移、硬失败。
 - **锚点来源**：外部 fork checkout 的 `reverse/` 分析工作区（可读化产物 + `ANALYSIS.md` 行号地图 + 指纹重扫脚本）。它不进仓库也不进 VSIX（`PRUNE_DIRS` 含 `reverse`）；单靠快照无法重做锚点定位，换版本前先在外部 fork 侧完成。
-- **默认规则双目录**：源在 `scripts/iflow-defaults/`（进 git），构建复制到 `vendor/iflow-defaults/`；连接前只把 `~/.iflow/` **缺失的**规则文件种过去（`seedDefaultRuleConfigs`），**永不覆盖**用户文件；`settings.json` / `iflow_accounts.json` / `oauth_creds*` 等携带凭据的文件固定不同步。
+- **默认规则双目录**：源在 `scripts/iflow-defaults/`（进 git），构建复制到 `vendor/iflow-defaults/`；连接前只把 `~/.iflow/` **缺失的**规则文件种过去（`ensureIflowDefaultConfigs`），**永不覆盖**用户文件；`settings.json` / `iflow_accounts.json` / `oauth_creds*` 等携带凭据的文件固定不同步。
 - **`.vscodeignore` 关键例外**：`node_modules/**` 被排除，但 `!vendor/iflow-cli/node_modules/**` 必须保留，否则 VSIX 安装后起不来（本地 dev 感知不到）。
 - **Windows**：npm 调用统一走 `runNpm()`——优先 `process.execPath` 直跑 npm 自带的 `npm-cli.js`（跨平台零 shell，避开 `.cmd` shim 与 shell 转义），fallback 才是 PATH 上的 npm。解压用系统自带 bsdtar。
 
