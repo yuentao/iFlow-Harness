@@ -370,15 +370,24 @@ export interface SuperTimelineGeometry {
  * 节点尺寸与连接段都是固定类名，真实 DOM 里也是等距的 —— 所以这个模型不是
  * 估算，而是同一份几何契约的解析式。组件优先用实测矩形（字体缩放 / 自定义
  * 密度可能改变实际像素），量不到（jsdom 全 0）时才退回这里。
+ *
+ * `padding` 是轨道内层为渐隐带预留的水平内边距（见
+ * {@link superTimelineTrackPadding}）：它是几何的一部分，节点中心整体右移
+ * `padding`，轨道宽两端各加 `padding`。组件必须把同一个值传给真实 DOM 的
+ * `padding-left/right`，否则实测几何与本模型不一致。
  */
-export function estimateSuperTimelineGeometry(count: number): SuperTimelineGeometry {
+export function estimateSuperTimelineGeometry(
+  count: number,
+  padding = 0,
+): SuperTimelineGeometry {
   if (count <= 0) return { centers: [], trackWidth: 0 };
+  const pad = Number.isFinite(padding) && padding > 0 ? padding : 0;
   return {
     centers: Array.from(
       { length: count },
-      (_, index) => index * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE / 2,
+      (_, index) => pad + index * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE / 2,
     ),
-    trackWidth: (count - 1) * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE,
+    trackWidth: (count - 1) * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE + pad * 2,
   };
 }
 
@@ -414,6 +423,21 @@ export function computeSuperTimelineTranslateX(params: {
   return Math.round(Math.min(0, Math.max(min, desired)));
 }
 
+/**
+ * 边缘提示里的一条节点标签。
+ *
+ * 关键节点目前都是**阶段**节点（等待回答 / 失败 / 合并冲突），标签是内置状态词，
+ * 英文界面必须过字典；但接口不假设这一点：`rawLabel` 为真的节点（子会话自己
+ * 写的 todolist 原文）必须原样渲染 —— 用户文本不得进翻译表，也不得被 `t()`
+ * 改写。组件按这个标记逐条决定是否翻译，不盲调 `t()`。
+ */
+export interface SuperTimelineEdgeHintLabel {
+  /** 标签原文（中文是源语言）。 */
+  label: string;
+  /** true = 子会话写入的动态原文，webview 必须原样渲染、不得过字典。 */
+  rawLabel?: boolean;
+}
+
 /** 视窗某一侧屏外关键节点的提示。 */
 export interface SuperTimelineEdgeHint {
   side: "left" | "right";
@@ -421,8 +445,10 @@ export interface SuperTimelineEdgeHint {
   count: number;
   /** 离视窗最近的那个关键节点索引 —— 点击后轨道平移到它。 */
   index: number;
-  /** 这些关键节点的标签（原始中文，webview 逐条过字典后拼进 title）。 */
-  labels: string[];
+  /**
+   * 这些关键节点的标签（带 `rawLabel` 标记，webview 据此逐条决定是否过字典）。
+   */
+  labels: SuperTimelineEdgeHintLabel[];
   /**
    * 色调：等待回答是「等你」，用警告色；失败 / 合并冲突用错误色。同一侧有多种
    * 关键节点时，靠近视窗的那个决定色调（用户最先要处理的就是它）。
@@ -436,6 +462,21 @@ export interface SuperTimelineEdgeHint {
  * 视窗内，实际已经淡到几乎看不见，按「不可见」处理。
  */
 export const SUPER_TIMELINE_FADE_RATIO = 0.15;
+
+/**
+ * 轨道内层为左右渐隐带预留的水平内边距（px）。
+ *
+ * 遮罩在视窗左右各 `SUPER_TIMELINE_FADE_RATIO` 的宽度上从透明渐变到不透明。
+ * 轨道不加内边距时，首 / 末节点 clamp 后中心距视窗边缘只有半个节点（11px），
+ * 正落在渐隐带里 —— 最该看清的那个节点反而发灰。给轨道内层垫上与渐隐带等宽
+ * 的内边距后，clamp 到首 / 末时节点中心距边缘 ≥ `padding + 11px`，稳稳落在
+ * 实心带内。这段 padding 是几何模型的一部分（`trackWidth` 与 `centers` 同步
+ * 偏移），组件按同一个函数取值，绝不自己另算一份。
+ */
+export function superTimelineTrackPadding(viewportWidth: number): number {
+  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) return 0;
+  return Math.round(viewportWidth * SUPER_TIMELINE_FADE_RATIO);
+}
 
 /**
  * 视窗外关键节点的边缘提示。
@@ -489,6 +530,10 @@ export function computeSuperTimelineEdgeHints(params: {
     tone: "danger",
   };
 
+  /** 关键节点的标签：带上 `rawLabel` 标记，交给 webview 决定是否过字典。 */
+  const labelOf = (node: SuperTimelineNode): SuperTimelineEdgeHintLabel =>
+    node.rawLabel ? { label: node.label, rawLabel: true } : { label: node.label };
+
   nodes.forEach((node, index) => {
     if (!isCriticalTimelineNode(node)) return;
     const center = centers[index];
@@ -498,7 +543,7 @@ export function computeSuperTimelineEdgeHints(params: {
       // 升序遍历：越靠后的索引越贴近视窗，最后一个就是最近的那个。
       left.index = index;
       left.tone = toneOf(node);
-      left.labels.push(node.label);
+      left.labels.push(labelOf(node));
     } else if (center > solidEnd) {
       right.count += 1;
       // 第一个（最靠左）就是右侧最近的那个 —— 只有它决定色调。
@@ -506,7 +551,7 @@ export function computeSuperTimelineEdgeHints(params: {
         right.index = index;
         right.tone = toneOf(node);
       }
-      right.labels.push(node.label);
+      right.labels.push(labelOf(node));
     }
   });
 

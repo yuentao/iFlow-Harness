@@ -1123,7 +1123,13 @@ textarea::selection {
    This element is NOT a scroll container: `overflow` stays `hidden` and the
    parent board already owns the vertical scroll (`max-h-[40vh]
    overflow-y-auto`). A nested horizontal scroller here would steal the wheel
-   depending on where the pointer sits. */
+   depending on where the pointer sits.
+
+   Padding contract: the inner track reserves inline padding equal to the fade
+   band (`superTimelineTrackPadding()` = 15% of the viewport width, matching
+   the stops below). Without it a clamped first/last node's center sits ~11px
+   from the edge — inside the gradient — so the one node the user cares about
+   most renders grey. Keep the padding helper and these stops in sync. */
 .timeline-viewport {
   -webkit-mask-image: linear-gradient(to right, transparent, #000 15%, #000 85%, transparent);
   mask-image: linear-gradient(to right, transparent, #000 15%, #000 85%, transparent);

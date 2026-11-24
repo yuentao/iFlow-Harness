@@ -16,6 +16,8 @@ import {
   isCriticalTimelineNode,
   layoutSuperTimelineFocus,
   summarizeSuperTimelineProgress,
+  superTimelineTrackPadding,
+  SUPER_TIMELINE_FADE_RATIO,
   SUPER_TIMELINE_NODE_PITCH,
   SUPER_TIMELINE_NODE_SIZE,
   SUPER_TODO_DETAIL_SEP,
@@ -317,6 +319,78 @@ describe("estimateSuperTimelineGeometry · 等距模型", () => {
   it("空序列给出空模型（组件据此渲染空轨，不除零）", () => {
     expect(estimateSuperTimelineGeometry(0)).toEqual({ centers: [], trackWidth: 0 });
   });
+
+  it("渐隐带内边距 = 视窗宽 × 渐隐占比（四舍五入）", () => {
+    expect(superTimelineTrackPadding(0)).toBe(0);
+    expect(superTimelineTrackPadding(300)).toBe(Math.round(300 * SUPER_TIMELINE_FADE_RATIO));
+    expect(superTimelineTrackPadding(420)).toBe(63);
+    // 脏数据不产生负 padding。
+    expect(superTimelineTrackPadding(-10)).toBe(0);
+  });
+
+  it("padding 计入几何模型：节点中心整体右移，轨道宽两端各加 padding", () => {
+    const plain = estimateSuperTimelineGeometry(3);
+    const padded = estimateSuperTimelineGeometry(3, 45);
+    expect(padded.centers).toEqual(plain.centers.map((center) => center + 45));
+    expect(padded.trackWidth).toBe(plain.trackWidth + 90);
+  });
+
+  /**
+   * 问题 1 的回归：轨道无内边距时，首 / 末节点 clamp 后中心距视窗边缘只有半个
+   * 节点（11px），落在 15% 渐隐带里 → 最该看清的节点发灰。加内边距后中心必须
+   * 落在实心带内。
+   */
+  it("加内边距后，首 / 末节点 clamp 时中心落在渐隐带之外（不再发灰）", () => {
+    for (const viewport of [300, 360, 420]) {
+      const padding = superTimelineTrackPadding(viewport);
+      const geometry = estimateSuperTimelineGeometry(15, padding);
+      const half = SUPER_TIMELINE_NODE_SIZE / 2;
+      const fade = viewport * SUPER_TIMELINE_FADE_RATIO;
+      // 与 computeSuperTimelineEdgeHints 一致的实心带边界。
+      const solidStart = Math.max(0, fade - half);
+      const solidEnd = viewport - Math.max(0, fade - half);
+
+      const first = computeSuperTimelineTranslateX({
+        focusCenter: geometry.centers[0]!,
+        trackWidth: geometry.trackWidth,
+        viewportWidth: viewport,
+      });
+      const last = computeSuperTimelineTranslateX({
+        focusCenter: geometry.centers.at(-1)!,
+        trackWidth: geometry.trackWidth,
+        viewportWidth: viewport,
+      });
+      const firstScreen = geometry.centers[0]! + first;
+      const lastScreen = geometry.centers.at(-1)! + last;
+      // 首节点：中心在实心带起点右侧；末节点：中心在实心带终点左侧。
+      expect(firstScreen).toBeGreaterThanOrEqual(solidStart);
+      expect(lastScreen).toBeLessThanOrEqual(solidEnd);
+      // 反证：没有内边距时首节点会落进渐隐带（说明这条断言真的在守东西）。
+      const bare = estimateSuperTimelineGeometry(15);
+      const bareFirst = bare.centers[0]! + computeSuperTimelineTranslateX({
+        focusCenter: bare.centers[0]!,
+        trackWidth: bare.trackWidth,
+        viewportWidth: viewport,
+      });
+      expect(bareFirst).toBeLessThan(solidStart);
+    }
+  });
+
+  it("短轨（3 步）加内边距后仍装得下并整条居中", () => {
+    const viewport = 420;
+    const padding = superTimelineTrackPadding(viewport);
+    const geometry = estimateSuperTimelineGeometry(3, padding);
+    // 3 步：3*22 + 2*8 = 82 的节点区，加两端 padding 126 → 208 < 420。
+    expect(geometry.trackWidth).toBeLessThanOrEqual(viewport);
+    const shift = computeSuperTimelineTranslateX({
+      focusCenter: geometry.centers[0]!,
+      trackWidth: geometry.trackWidth,
+      viewportWidth: viewport,
+    });
+    // 装得下 → 整条轨道居中：左右留白相等。
+    expect(shift).toBe(Math.round((viewport - geometry.trackWidth) / 2));
+    expect(geometry.trackWidth + shift + shift).toBe(viewport);
+  });
 });
 
 describe("computeSuperTimelineTranslateX · 当前节点居中", () => {
@@ -468,6 +542,30 @@ describe("computeSuperTimelineEdgeHints · 屏外关键节点提示", () => {
     expect(left!.index).toBe(4);
     expect(left!.tone).toBe("warning");
     expect(left!.labels).toHaveLength(2);
+    // 阶段节点（等待回答 / 失败）的标签是内置状态词，不带 rawLabel。
+    expect(left!.labels.every((label) => label.rawLabel !== true)).toBe(true);
+    // 测试辅助函数把 label 设为 kind 名，这里只验证顺序与结构（label 透传）。
+    expect(left!.labels.map((label) => label.label)).toEqual(["failed", "awaiting_input"]);
+  });
+
+  it("关键节点带 rawLabel 时，标签原样透传（webview 不得过字典）", () => {
+    // 关键节点目前都是阶段节点；这里直接构造一个带 rawLabel 的关键节点，钉住
+    // 接口契约：rawLabel 必须透传，否则组件会拿用户原文去查字典。
+    const nodes: SuperTimelineNode[] = [
+      node("todo", "done"),
+      { kind: "failed", tone: "failed", label: "用户原文：失败处理", rawLabel: true },
+      node("todo", "done"),
+    ];
+    const geometry = estimateSuperTimelineGeometry(nodes.length);
+    const hints = computeSuperTimelineEdgeHints({
+      nodes,
+      centers: geometry.centers,
+      translateX: 0,
+      viewportWidth: 40,
+    });
+    const right = hints.find((hint) => hint.side === "right");
+    expect(right).toBeTruthy();
+    expect(right!.labels[0]).toEqual({ label: "用户原文：失败处理", rawLabel: true });
   });
 
   it("还没布局时不给提示（避免首帧闪一下）", () => {

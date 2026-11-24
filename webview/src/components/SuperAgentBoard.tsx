@@ -64,6 +64,7 @@ import {
   isCriticalTimelineNode,
   layoutSuperTimelineFocus,
   summarizeSuperTimelineProgress,
+  superTimelineTrackPadding,
   SUPER_TODO_DETAIL_SEP,
   type SuperTimelineGeometry,
   type SuperTimelineNode,
@@ -680,10 +681,13 @@ function SuperTimeline({
   const viewportRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   // 首帧 / 无布局环境（jsdom）先吃等距模型；量到真实矩形后覆盖。
+  // 渐隐带内边距是几何的一部分（轨道两端各垫一段），量不到视窗宽时先按 0 算，
+  // 量到宽度后下面会再补一次量测（padding 变化 → 重新 measure）。
   const [geometry, setGeometry] = useState<SuperTimelineGeometry>(() =>
     estimateSuperTimelineGeometry(nodes.length),
   );
   const [viewportWidth, setViewportWidth] = useState(0);
+  const trackPadding = superTimelineTrackPadding(viewportWidth);
 
   const measure = useCallback(() => {
     const viewport = viewportRef.current;
@@ -712,7 +716,7 @@ function SuperTimeline({
         prev.centers.every((value, i) => Math.abs(value - (centers[i] ?? 0)) < 0.5);
       return same ? prev : { centers, trackWidth: trackRect.width };
     });
-  }, [nodes.length]);
+  }, [nodes.length, trackPadding]);
 
   useLayoutEffect(() => {
     measure();
@@ -736,7 +740,9 @@ function SuperTimeline({
   }, [measure]);
 
   const activeGeometry =
-    geometry.centers.length === nodes.length ? geometry : estimateSuperTimelineGeometry(nodes.length);
+    geometry.centers.length === nodes.length
+      ? geometry
+      : estimateSuperTimelineGeometry(nodes.length, trackPadding);
   // 平移量与边缘提示一起算：提示会在视窗边缘占一条沟槽，轨道要为它让位，
   // 否则提示会盖住最靠边的节点。
   const { translateX, hints: edgeHints } = useMemo(
@@ -774,18 +780,28 @@ function SuperTimeline({
             ref={trackRef}
             className="flex h-full w-max items-center"
             data-timeline-track="true"
-            style={{ transform: `translateX(${translateX}px)` }}
+            style={{
+              transform: `translateX(${translateX}px)`,
+              // 渐隐带内边距：与遮罩等宽，计入几何模型。clamp 到首/末时节点中心
+              // 因此落在实心带内，不再被渐隐遮罩淡成灰色。
+              paddingLeft: trackPadding,
+              paddingRight: trackPadding,
+            }}
           >
             {nodes.map((node, index) => {
               const critical = isCriticalTimelineNode(node);
-              const isCurrent = index === currentIndex;
+              // 居中锚点：终态轨没有 current 时回落到末节点（仅用于居中与文案）。
+              const isAnchor = index === currentIndex;
+              // a11y 状态只跟真实色调走：终态末节点虽被用作居中锚点，但它不是
+              // 「当前步骤」，不能带 aria-current="step"。
+              const isCurrentStep = isAnchor && node.tone === "current";
               // 强调不只靠颜色：关键节点（需用户介入）与当前步都加 ring 描边，
               // 灰度/色觉障碍下仍然可辨。关键节点的 ring 优先于当前步。
               const ring = critical
                 ? node.kind === "awaiting_input"
                   ? "ring-1 ring-warning/70"
                   : "ring-1 ring-destructive/70"
-                : isCurrent
+                : isAnchor
                   ? "ring-1 ring-primary/60"
                   : "";
               return (
@@ -801,12 +817,12 @@ function SuperTimeline({
                   <span
                     role="img"
                     aria-label={timelineNodeAria(node)}
-                    aria-current={isCurrent ? "step" : undefined}
+                    aria-current={isCurrentStep ? "step" : undefined}
                     title={timelineNodeLabel(node)}
                     data-timeline-icon="true"
                     data-timeline-index={index}
                     data-timeline-critical={critical ? "true" : undefined}
-                    data-timeline-current={isCurrent ? "true" : undefined}
+                    data-timeline-current={isAnchor ? "true" : undefined}
                     className={`flex shrink-0 items-center justify-center rounded-full p-1 ${ring} ${timelineText(node)}`}
                   >
                     {timelineIcon(node)}
@@ -824,7 +840,10 @@ function SuperTimeline({
       {edgeHints.length > 0 && (
         <div className="flex min-w-0 items-center justify-between gap-1.5">
           {edgeHints.map((hint) => {
-            const title = t("视窗外还有 {0} 个待处理步骤：{1}", hint.count, hint.labels.join("、"));
+            const labels = hint.labels
+              .map((label) => (label.rawLabel ? label.label : t(label.label)))
+              .join("、");
+            const title = t("视窗外还有 {0} 个待处理步骤：{1}", hint.count, labels);
             return (
               <Button
                 key={hint.side}

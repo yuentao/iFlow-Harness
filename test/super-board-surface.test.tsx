@@ -43,9 +43,22 @@ vi.mock("../webview/src/store", () => ({
   ),
 }));
 
+const translateState = vi.hoisted(() => ({
+  english: false,
+  // Only the built-in status words this file asserts on; a real dictionary ships
+  // in webview/src/i18n.ts.
+  en: {
+    失败: "Failed",
+    合并冲突: "Merge conflict",
+    在等你回答: "Waiting for you",
+    "视窗外还有 {0} 个待处理步骤：{1}": "{0} pending step(s) off-screen: {1}",
+  } as Record<string, string>,
+}));
+
 const translate = vi.hoisted(() =>
   vi.fn((s: string, ...args: Array<string | number>) => {
-    let out = s;
+    let out =
+      translateState.english ? (translateState.en[s] ?? s) : s;
     args.forEach((arg, i) => {
       out = out.replaceAll(`{${i}}`, String(arg));
     });
@@ -78,6 +91,7 @@ beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   send.mockReset();
   translate.mockClear();
+  translateState.english = false;
   class Observer {
     observe() {}
     unobserve() {}
@@ -587,17 +601,23 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
       const match = /translateX\((-?\d+(?:\.\d+)?)px\)/.exec(track?.style.transform ?? "");
       return match ? Number(match[1]) : 0;
     };
+    /** 轨道为渐隐带预留的内边距（组件写在内联 style 上）。 */
+    const padOf = (el: HTMLElement): number => {
+      const track = el.closest<HTMLElement>("[data-timeline-track]");
+      return Number.parseFloat(track?.style.paddingLeft ?? "0") || 0;
+    };
     const originalRect = HTMLElement.prototype.getBoundingClientRect;
     HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement): DOMRect {
       const el = this;
       if (el.dataset.timelineViewport) return makeRect(0, viewportWidth);
       if (el.dataset.timelineTrack) {
         const count = el.querySelectorAll("[data-timeline-icon]").length;
-        const width = count > 0 ? (count - 1) * pitch + size : 0;
+        const pad = padOf(el);
+        const width = count > 0 ? (count - 1) * pitch + size + pad * 2 : 0;
         return makeRect(shiftOf(el), width);
       }
       const index = el.dataset.timelineIndex;
-      if (index !== undefined) return makeRect(shiftOf(el) + Number(index) * pitch, size);
+      if (index !== undefined) return makeRect(shiftOf(el) + padOf(el) + Number(index) * pitch, size);
       return originalRect.call(el);
     };
     Object.defineProperty(HTMLElement.prototype, "clientWidth", {
@@ -664,16 +684,25 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     }
   });
 
-  it("首末节点 clamp：当前步在第 1 / 最后一条时不把轨道拉出空白", () => {
+  it("首末节点 clamp：当前步在第 1 / 最后一条时轨道不露白，且节点中心不在渐隐带里", () => {
+    const VIEWPORT = 300;
+    const PAD = Math.round(VIEWPORT * 0.15); // 45
+    const SPAN = 14 * 30 + 22; // 15 个节点的跨度
+    const TRACK = SPAN + PAD * 2; // 532
+    const HALF = 11;
+    const FADE = VIEWPORT * 0.15;
+    const solidStart = Math.max(0, FADE - HALF);
+    const solidEnd = VIEWPORT - Math.max(0, FADE - HALF);
+
     for (const [index, expected] of [
       [0, 0],
-      [14, 300 - (14 * 30 + 22)],
+      [14, VIEWPORT - TRACK],
     ] as const) {
       const todosAt = Array.from({ length: 15 }, (_, i) => ({
         content: `步骤 ${i + 1}`,
         status: i < index ? ("completed" as const) : i === index ? ("in_progress" as const) : ("pending" as const),
       }));
-      const restore = stubTimelineLayout(300);
+      const restore = stubTimelineLayout(VIEWPORT);
       try {
         render([session({ status: "running", startedAt: 2000, updatedAt: 3000, todos: todosAt })]);
         // 看板的展开状态跨 render 保留：第二次迭代时它已经是展开的，再点一次
@@ -682,12 +711,54 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
         if (!document.body.querySelector('[role="group"][aria-label^="阶段轨："]')) openTodoRow();
         remeasure();
         const track = rail().querySelector<HTMLElement>("[data-timeline-track]")!;
+        // 渐隐带内边距写在轨道内联样式上（与几何模型同源）。
+        expect(track.style.paddingLeft).toBe(`${PAD}px`);
+        expect(track.style.paddingRight).toBe(`${PAD}px`);
         // 平移量 clamp 到边界：首节点 0（左不露白），末节点 = 视窗宽 - 轨道宽。
         expect(track.style.transform).toBe(`translateX(${expected}px)`);
         // 视窗内不会出现轨道之外的空白：轨道左缘 ≤ 视窗左缘、右缘 ≥ 视窗右缘。
         const trackRect = track.getBoundingClientRect();
         expect(trackRect.left).toBeLessThanOrEqual(0);
-        expect(trackRect.right).toBeGreaterThanOrEqual(300);
+        expect(trackRect.right).toBeGreaterThanOrEqual(VIEWPORT);
+        // 问题 1 的核心回归：当前步在首 / 末时，节点中心必须落在实心带内，
+        // 否则会被 15% 渐隐遮罩淡成灰色。
+        const icons = [...track.querySelectorAll<HTMLElement>("[data-timeline-icon]")];
+        const current = icons[index]!;
+        const rect = current.getBoundingClientRect();
+        const center = rect.left + rect.width / 2;
+        expect(center).toBeGreaterThanOrEqual(solidStart);
+        expect(center).toBeLessThanOrEqual(solidEnd);
+      } finally {
+        restore();
+      }
+    }
+  });
+
+  it("终态轨：居中锚点落在末节点，但 done/failed 节点不带 aria-current", () => {
+    for (const status of ["completed", "failed"] as const) {
+      const restore = stubTimelineLayout(300);
+      try {
+        render([session({ status, startedAt: 2000, endedAt: 4000, error: "进程崩溃" })]);
+        if (!document.body.querySelector('[role="region"][aria-label="超流体"]')) expand();
+        const folded = document.body.querySelector<HTMLButtonElement>(
+          'button[aria-label="展开已完成的超流体"]',
+        );
+        if (folded) act(() => folded.click());
+        if (!document.body.querySelector('[role="group"][aria-label^="阶段轨："]')) {
+          const row = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+            (b.textContent ?? "").includes("修复登录跳转"),
+          );
+          expect(row).toBeTruthy();
+          act(() => row!.click());
+        }
+        remeasure();
+
+        const el = rail();
+        const icons = [...el.querySelectorAll<HTMLElement>("[data-timeline-icon]")];
+        // 终态没有 current 色调的节点 → 一个 aria-current 都不许有。
+        expect(icons.some((node) => node.getAttribute("aria-current") === "step")).toBe(false);
+        // 居中锚点仍回落到末节点（视觉居中语义不变），只是不带 a11y 状态。
+        expect(icons.at(-1)!.getAttribute("data-timeline-current")).toBe("true");
       } finally {
         restore();
       }
@@ -748,6 +819,54 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
       expect(after).not.toBe(before);
       expect(document.body.querySelector('[role="dialog"]')).toBeNull();
       expect(document.body.querySelector('[role="menu"]')).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it("屏外提示在英文界面下：内置状态词过字典，不出现中文", () => {
+    const restore = stubTimelineLayout(40);
+    translateState.english = true;
+    try {
+      render([
+        session({
+          status: "failed",
+          error: "进程崩溃",
+          startedAt: 2000,
+          endedAt: 4000,
+          pending: {
+            kind: "question",
+            requestId: "q-1",
+            questions: [],
+            deadline: 305_000,
+            timeoutMs: 300_000,
+          },
+          integration: { mode: "merge", state: "conflict", at: 5000, detail: "冲突" },
+        }),
+      ]);
+      expand();
+      const folded = document.body.querySelector<HTMLButtonElement>(
+        'button[aria-label="展开已完成的超流体"]',
+      );
+      if (folded) act(() => folded.click());
+      const row = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+        (b.textContent ?? "").includes("修复登录跳转"),
+      );
+      expect(row).toBeTruthy();
+      act(() => row!.click());
+      remeasure();
+
+      const hint = rail().querySelector<HTMLButtonElement>('[data-timeline-edge-hint="right"]');
+      expect(hint).toBeTruthy();
+      const title = hint!.getAttribute("title")!;
+      // 内置状态词走字典（失败 → Failed、合并冲突 → Merge conflict）。
+      expect(title).toContain("Failed");
+      expect(title).toContain("Merge conflict");
+      // 标题模板本身也是英文；中文状态词一个都不该漏出来。
+      expect(title).toContain("off-screen");
+      expect(title).not.toContain("失败");
+      expect(title).not.toContain("合并冲突");
+      expect(title).not.toContain("待处理步骤");
     } finally {
       restore();
     }
