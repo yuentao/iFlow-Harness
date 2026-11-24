@@ -127,7 +127,13 @@ export class CheckpointService {
     if (reason) {
       if (!this.checkpointWarnedSessions.has(sessionId)) {
         this.checkpointWarnedSessions.add(sessionId);
-        this.deps.sendToast("warning", vscode.l10n.t("本轮起工作区快照不可用（{0}），回滚将只处理对话。", reason));
+        this.deps.sendToast(
+          "warning",
+          vscode.l10n.t(
+            "从这一轮起无法保存文件快照（原因：{0}），之后的「回滚」只能撤销对话、不能恢复文件。如需恢复文件回滚，请确认工作区可写后重试。",
+            reason,
+          ),
+        );
       }
       return null;
     }

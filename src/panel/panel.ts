@@ -2516,7 +2516,9 @@ export class ChatPanel implements vscode.Disposable {
     if (!fact?.trim()) return;
     const result = await this.memory.appendFact({ scope, fact });
     if (!result.ok) {
-      void vscode.window.showWarningMessage(result.error ?? vscode.l10n.t("写入记忆失败"));
+      void vscode.window.showWarningMessage(
+        result.error ?? vscode.l10n.t("写入记忆失败，请检查目标记忆文件是否可写后重试。"),
+      );
       return;
     }
     const restart = vscode.l10n.t("立即重启内核");
@@ -3321,10 +3323,16 @@ export class ChatPanel implements vscode.Disposable {
           } else if (res?.reason === "not_found") {
             this.store.sendToast("info", vscode.l10n.t("该进程内子代理已结束"));
           } else {
-            this.store.sendToast("warning", vscode.l10n.t("停止进程内子代理失败"));
+            this.store.sendToast(
+              "warning",
+              vscode.l10n.t("停止进程内子代理失败（可能已经结束），请刷新会话后重试。"),
+            );
           }
         } catch {
-          this.store.sendToast("warning", vscode.l10n.t("停止进程内子代理失败"));
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("停止进程内子代理失败（可能已经结束），请刷新会话后重试。"),
+          );
         }
         break;
       }
@@ -6608,7 +6616,12 @@ export class ChatPanel implements vscode.Disposable {
     // SecretStorage for this window but will not survive a restart. Keep the
     // editor open with the concrete reason (inline, not just the toast) —
     // same contract deleteProfile uses via `ok: !kernelWriteFailed`.
-    const kernelError = kernelWritten ? undefined : vscode.l10n.t("无法写入内核配置 {0}", name);
+    const kernelError = kernelWritten
+      ? undefined
+      : vscode.l10n.t(
+          "无法保存到 iFlow 配置文件（{0}）。请检查 ~/.iflow/settings.json 是否可写，或改用面板里的设置。",
+          name,
+        );
     if (kernelError) void vscode.window.showWarningMessage(kernelError);
 
     // "Is this the row the panel is running on?" — by credential IDENTITY,
@@ -6807,7 +6820,13 @@ export class ChatPanel implements vscode.Disposable {
         // In-panel receipt: the profile is still in the kernel file, so the
         // row stays listed and the user must learn why (the old
         // showWarningMessage landed outside the panel's notification stack).
-        this.store.sendToast("warning", vscode.l10n.t("无法写入内核配置 {0}", trimmed));
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t(
+            "无法保存到 iFlow 配置文件（{0}）。请检查 ~/.iflow/settings.json 是否可写，或改用面板里的设置。",
+            trimmed,
+          ),
+        );
       }
     }
     // Drop the kernel's active pointer when it names the deleted row so the
@@ -8405,7 +8424,7 @@ export class ChatPanel implements vscode.Disposable {
               const message = errorMessage(error);
               this.log.error(`authenticate failed: ${message}`);
               this.store.setAuth(await this.buildAuthState(false, true));
-              this.store.markError(vscode.l10n.t("认证失败：{0}", message));
+              this.store.markError(vscode.l10n.t("认证失败：{0}。请检查 API Key 与端点后重试。", message));
               // Async failure — the user is likely in the editor; cue it.
               this.postSound("error");
               this.store.markConnected();
@@ -10833,7 +10852,12 @@ export class ChatPanel implements vscode.Disposable {
         reply(withScheme, host, body);
         return;
       }
-      reply("", "", "", vscode.l10n.t("不支持的上下文类型"));
+      reply(
+        "",
+        "",
+        "",
+        vscode.l10n.t("这类内容暂不支持加入上下文，请改用文件、选中代码或链接。"),
+      );
     } catch (error) {
       reply("", "", "", errorMessage(error));
     }

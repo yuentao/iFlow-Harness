@@ -646,7 +646,7 @@ export class MemoryService {
     }
     const content = await readBackup(backupPath);
     if (content === null) {
-      throw new Error(vscode.l10n.t("备份文件不存在或无法读取"));
+      throw new Error(vscode.l10n.t("备份文件不存在或无法读取，无法回退这次记忆改动。"));
     }
     return this.enqueue(async () => {
       const current = (await readIfExists(target.path)) ?? "";

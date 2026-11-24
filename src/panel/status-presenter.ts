@@ -115,7 +115,7 @@ export class StatusPresenter {
     // 死锁。它比用量信息更重要，所以即使没有用量也要出现在 tooltip 里。
     const heldTip = state.superHeld
       ? vscode.l10n.t(
-          "已停止：还有 {0} 项超流体结果待处理。发送下一条消息，或点提示条上的「继续处理」来收取汇报",
+          "已停止：还有 {0} 项超流体结果待处理。发送下一条消息，或点提示条上的「继续处理」查看结果",
           state.superPendingCount ?? 0,
         )
       : null;
