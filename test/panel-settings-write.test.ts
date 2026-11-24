@@ -334,6 +334,8 @@ describe("面板设置写入：效率档位 / 定期整理记忆", () => {
     await expect(p.writeUserSetting("efficiencyMode", "turbo", "效率模式")).resolves.toBe(false);
 
     expect(writes.values["iflow.efficiencyMode"]).toBeUndefined();
+    // 已注册键的真实写入失败不得落进「暂存」分支。
+    expect(ctx.globalState.get("iflow.pendingSettingsWrites") ?? {}).toEqual({});
     expect(toast).toHaveBeenCalledWith(
       "warning",
       "设置写入失败：效率模式（EPERM: operation not permitted, open 'settings.json'）",
@@ -459,5 +461,130 @@ describe("面板设置写入：效率档位 / 定期整理记忆", () => {
 
     expect(keys.size).toBeGreaterThan(20);
     expect([...keys].filter((key) => !(`iflow.${key}` in schema))).toEqual([]);
+  });
+
+/** 多轮多场景冒烟：锁住「就地升级后未注册键」与值域边界。复用上面的
+ * installConfig / setUnregisteredConfigKeys 桩，场景编号与冒烟轮次对应。 */
+describe("冒烟：未注册键暂存与值域边界", () => {
+  function postedHostSettings(): Record<string, unknown> | undefined {
+    const posted: Array<Record<string, unknown>> = [];
+    vi.spyOn(
+      panel as unknown as { postToWebview: (m: unknown) => void },
+      "postToWebview",
+    ).mockImplementation((message) => {
+      posted.push(message as Record<string, unknown>);
+    });
+    p.postHostSettings();
+    return posted.find((message) => message.type === "hostSettings");
+  }
+
+  it("第1轮①：四项未注册时全部暂存、无失败 toast，postHostSettings 立即读到新值（含 false/0/block）", async () => {
+    setUnregisteredConfigKeys([
+      "efficiencyMode",
+      "memoryMaintenanceEnabled",
+      "superAgent.maxAttempts",
+      "superAgent.dependencyPolicy",
+      "auroraIntensity",
+    ]);
+    const toast = vi.spyOn(p.store, "sendToast");
+
+    await p.handleWebviewMessage({
+      type: "setHostSettings",
+      efficiencyMode: "turbo",
+      memoryMaintenanceEnabled: false,
+      superAgentMaxAttempts: 0,
+      superAgentDependencyPolicy: "block",
+      auroraIntensity: 0,
+    });
+
+    expect(toast).not.toHaveBeenCalledWith("warning", expect.stringContaining("设置写入失败"));
+    expect(ctx.globalState.get("iflow.pendingSettingsWrites")).toEqual({
+      efficiencyMode: "turbo",
+      memoryMaintenanceEnabled: false,
+      // 0 在写盘前被夹到 1（不自动重试），暂存的是归一后的值。
+      "superAgent.maxAttempts": 1,
+      "superAgent.dependencyPolicy": "block",
+      auroraIntensity: 0,
+    });
+    // 未注册键一个都不该尝试 update。
+    expect(writes.attempts).toEqual([]);
+
+    expect(postedHostSettings()).toMatchObject({
+      efficiencyMode: "turbo",
+      memoryMaintenanceEnabled: false,
+      superAgentMaxAttempts: 1,
+      superAgentDependencyPolicy: "block",
+      auroraIntensity: 0,
+    });
+  });
+
+  it("第1轮②：连续切换 5 次（开→关→开→关→开）→ 最终暂存值与最后一次一致，无失败 toast", async () => {
+    setUnregisteredConfigKeys(["efficiencyMode"]);
+    const toast = vi.spyOn(p.store, "sendToast");
+
+    for (const mode of ["turbo", "steady", "turbo", "steady", "turbo"] as const) {
+      await p.handleWebviewMessage({ type: "setHostSettings", efficiencyMode: mode });
+    }
+
+    expect(ctx.globalState.get("iflow.pendingSettingsWrites")).toEqual({ efficiencyMode: "turbo" });
+    expect(writes.attempts).toEqual([]);
+    const failureToasts = toast.mock.calls.filter(([, message]) =>
+      String(message).includes("设置写入失败"),
+    );
+    expect(failureToasts).toEqual([]);
+    expect(postedHostSettings()?.efficiencyMode).toBe("turbo");
+  });
+
+  it("第1轮③：清空未注册状态后 applyPendingSettings 以 Global 落盘、清空暂存，二次调用幂等", async () => {
+    await ctx.globalState.update("iflow.pendingSettingsWrites", {
+      efficiencyMode: "turbo",
+      memoryMaintenanceEnabled: false,
+      "superAgent.maxAttempts": 1,
+      "superAgent.dependencyPolicy": "block",
+    });
+    setUnregisteredConfigKeys([]);
+
+    await p.applyPendingSettings();
+
+    expect(writes.values["iflow.efficiencyMode"]).toBe("turbo");
+    expect(writes.values["iflow.memoryMaintenanceEnabled"]).toBe(false);
+    expect(writes.values["iflow.superAgent.maxAttempts"]).toBe(1);
+    expect(writes.values["iflow.superAgent.dependencyPolicy"]).toBe("block");
+    for (const key of [
+      "iflow.efficiencyMode",
+      "iflow.memoryMaintenanceEnabled",
+      "iflow.superAgent.maxAttempts",
+      "iflow.superAgent.dependencyPolicy",
+    ]) {
+      expect(writes.targets[key]).toBe(vscode.ConfigurationTarget.Global);
+    }
+    expect(ctx.globalState.get("iflow.pendingSettingsWrites")).toEqual({});
+
+    const attemptsAfterFirst = [...writes.attempts];
+    await p.applyPendingSettings();
+    expect(writes.attempts).toEqual(attemptsAfterFirst);
+    expect(ctx.globalState.get("iflow.pendingSettingsWrites")).toEqual({});
+  });
+
+  it("第2轮④：maxAttempts 0→1、99→5；NaN / Infinity 不落盘且回读为默认 2", async () => {
+    await p.handleWebviewMessage({ type: "setHostSettings", superAgentMaxAttempts: 0 });
+    expect(writes.values["iflow.superAgent.maxAttempts"]).toBe(1);
+
+    await p.handleWebviewMessage({ type: "setHostSettings", superAgentMaxAttempts: 99 });
+    expect(writes.values["iflow.superAgent.maxAttempts"]).toBe(5);
+
+    const attemptsBeforeNonFinite = [...writes.attempts];
+    await p.handleWebviewMessage({ type: "setHostSettings", superAgentMaxAttempts: Number.NaN });
+    await p.handleWebviewMessage({ type: "setHostSettings", superAgentMaxAttempts: Number.POSITIVE_INFINITY });
+    // 非有限数不进入写盘队列：盘上保持上一个合法值 5。
+    expect(writes.attempts).toEqual(attemptsBeforeNonFinite);
+    expect(writes.values["iflow.superAgent.maxAttempts"]).toBe(5);
+
+    // 盘上被手改成脏值（NaN / Infinity）时，回读必须回落默认 2。
+    writes.values["iflow.superAgent.maxAttempts"] = Number.NaN;
+    expect(postedHostSettings()?.superAgentMaxAttempts).toBe(2);
+    writes.values["iflow.superAgent.maxAttempts"] = Number.POSITIVE_INFINITY;
+    expect(postedHostSettings()?.superAgentMaxAttempts).toBe(2);
+  });
   });
 });
