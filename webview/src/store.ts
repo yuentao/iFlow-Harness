@@ -116,6 +116,8 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   costTable: [],
   thinkingModelRules: [],
   superAgentMaxConcurrent: 5,
+  superAgentMaxAttempts: 2,
+  superAgentDependencyPolicy: "block",
   superAgentIntegration: "merge",
   superAgentMaxWorktrees: 10,
   superAgentKeepWorktree: false,

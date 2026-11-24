@@ -1370,6 +1370,10 @@ export class SuperAgentHost {
             .getConfiguration("iflow")
             .get<number>("superAgent.maxAttempts", DEFAULT_SUPER_MAX_ATTEMPTS),
         ),
+      // 上游失败时的下游策略：只有 `continue` 放行，脏值一律按 `block`
+      // （与 package.json 的 enum 一致）。实时读，改完对下一次失败判定生效。
+      dependencyPolicy: () =>
+        this.setting<string>("superAgent.dependencyPolicy", "block") === "continue" ? "continue" : "block",
       // 默认关闭 = 子会话正常完成后回收工作目录（分支一律保留）。失败/中断
       // 从不回收，重试要复用现场。每次实时读，改完对下一个结束的子会话生效。
       keepWorktree: () => this.setting<boolean>("superAgent.keepWorktree", false),

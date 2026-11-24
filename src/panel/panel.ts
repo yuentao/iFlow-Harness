@@ -86,8 +86,10 @@ import { SuperAgentHost } from "./super-agent-host.js";
 import {
   clampMaxConcurrentSuperSessions,
   clampMaxSuperWorktrees,
+  clampSuperMaxAttempts,
   DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   DEFAULT_MAX_SUPER_WORKTREES,
+  DEFAULT_SUPER_MAX_ATTEMPTS,
   hasActiveSuperSession,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
@@ -3105,6 +3107,17 @@ export class ChatPanel implements vscode.Disposable {
         if (msg.superAgentMaxConcurrent !== undefined && Number.isFinite(msg.superAgentMaxConcurrent)) {
           writes.push(["superAgent.maxConcurrent", clampMaxConcurrentSuperSessions(msg.superAgentMaxConcurrent)]);
         }
+        // 失败重试上限：与运行时同一个 clamp（1–5，非有限数回落默认 2）。
+        if (msg.superAgentMaxAttempts !== undefined && Number.isFinite(msg.superAgentMaxAttempts)) {
+          writes.push(["superAgent.maxAttempts", clampSuperMaxAttempts(msg.superAgentMaxAttempts)]);
+        }
+        // 依赖策略只有两个合法枚举值；`continue` 之外一律按 `block` 落盘。
+        if (msg.superAgentDependencyPolicy !== undefined) {
+          writes.push([
+            "superAgent.dependencyPolicy",
+            msg.superAgentDependencyPolicy === "continue" ? "continue" : "block",
+          ]);
+        }
         if (msg.superAgentIntegration !== undefined) {
           writes.push(["superAgent.integration", asSuperIntegrationMode(msg.superAgentIntegration)]);
         }
@@ -3974,6 +3987,12 @@ export class ChatPanel implements vscode.Disposable {
       superAgentMaxConcurrent: clampMaxConcurrentSuperSessions(
         this.readUserSetting<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
       ),
+      superAgentMaxAttempts: clampSuperMaxAttempts(
+        this.readUserSetting<number>("superAgent.maxAttempts", DEFAULT_SUPER_MAX_ATTEMPTS),
+      ),
+      superAgentDependencyPolicy: this.readUserSetting<string>("superAgent.dependencyPolicy", "block") === "continue"
+        ? "continue"
+        : "block",
       superAgentIntegration: asSuperIntegrationMode(
         this.readUserSetting<string>("superAgent.integration", "merge"),
       ),
@@ -6293,7 +6312,13 @@ export class ChatPanel implements vscode.Disposable {
   private cliSettingsSyncRun(): void {
     const patch: Partial<CliSettingsShape> = {};
     const language = this.readUserSetting<string>("language", "");
-    if (language) patch.language = language;
+    if (language) {
+      patch.language = language;
+    } else if (readCliSettings()?.language !== undefined) {
+      // 选回「跟随内核默认」= 空串：显式置 undefined，`updateCliSettings` 的
+      // JSON.stringify 会删掉该键（不写整个文件，仍然只走原子合并）。
+      patch.language = undefined;
+    }
     if (Object.keys(patch).length === 0) return;
     if (!updateCliSettings(patch)) {
       void vscode.window.showWarningMessage(

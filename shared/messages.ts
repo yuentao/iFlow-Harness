@@ -1974,6 +1974,12 @@ export interface HostSettingsUi {
   /** Simultaneously running child sessions (`iflow.superAgent.maxConcurrent`).
    * Extra dispatches queue in FIFO order instead of being rejected. */
   superAgentMaxConcurrent: number;
+  /** Total attempts for a failed child session, including the first
+   * (`iflow.superAgent.maxAttempts`); 1 = no automatic retry. */
+  superAgentMaxAttempts: number;
+  /** What happens to a child whose upstream task failed
+   * (`iflow.superAgent.dependencyPolicy`). */
+  superAgentDependencyPolicy: "block" | "continue";
   /** How a finished child session's branch is integrated
    * (`iflow.superAgent.integration`). */
   superAgentIntegration: SuperIntegrationMode;

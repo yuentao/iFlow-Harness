@@ -1,7 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ChatPanel } from "../src/panel/panel.js";
@@ -376,6 +376,79 @@ describe("面板设置写入：效率档位 / 定期整理记忆", () => {
     const hostSettings = posted.find((message) => message.type === "hostSettings");
     // 默认 35：truthy 写法（`stash[key] || fallback`）会把它弹回 35。
     expect(hostSettings?.auroraIntensity).toBe(0);
+  });
+
+  it("superAgent 重试策略：maxAttempts 越界被 clamp，dependencyPolicy 非法值归一为 block", async () => {
+    const toast = vi.spyOn(p.store, "sendToast");
+
+    await p.handleWebviewMessage({
+      type: "setHostSettings",
+      superAgentMaxAttempts: 99,
+      superAgentDependencyPolicy: "continue",
+    });
+
+    expect(writes.values["iflow.superAgent.maxAttempts"]).toBe(5);
+    expect(writes.values["iflow.superAgent.dependencyPolicy"]).toBe("continue");
+    expect(writes.targets["iflow.superAgent.maxAttempts"]).toBe(vscode.ConfigurationTarget.Global);
+    expect(writes.targets["iflow.superAgent.dependencyPolicy"]).toBe(vscode.ConfigurationTarget.Global);
+    expect(toast).not.toHaveBeenCalledWith("warning", expect.stringContaining("设置写入失败"));
+
+    await p.handleWebviewMessage({
+      type: "setHostSettings",
+      superAgentMaxAttempts: 0,
+      superAgentDependencyPolicy: "bogus",
+    });
+
+    // 0 被夹到 1（= 不自动重试），非法枚举一律按 block 落盘。
+    expect(writes.values["iflow.superAgent.maxAttempts"]).toBe(1);
+    expect(writes.values["iflow.superAgent.dependencyPolicy"]).toBe("block");
+  });
+
+  it("postHostSettings 回读 superAgent 重试策略（含越界 clamp 与非法枚举归一）", async () => {
+    writes.values["iflow.superAgent.maxAttempts"] = 42;
+    writes.values["iflow.superAgent.dependencyPolicy"] = "whatever";
+
+    const posted: Array<Record<string, unknown>> = [];
+    vi.spyOn(
+      panel as unknown as { postToWebview: (m: unknown) => void },
+      "postToWebview",
+    ).mockImplementation((message) => {
+      posted.push(message as Record<string, unknown>);
+    });
+    p.postHostSettings();
+
+    const hostSettings = posted.find((message) => message.type === "hostSettings");
+    expect(hostSettings?.superAgentMaxAttempts).toBe(5);
+    expect(hostSettings?.superAgentDependencyPolicy).toBe("block");
+  });
+
+  it("language 选回默认（空串）时删除 CLI settings 里的 language 键，其余键不动", async () => {
+    const file = path.join(iflowHome, "settings.json");
+    await writeFile(
+      file,
+      JSON.stringify({ language: "zh-CN", mcpServers: { keep: { command: "node" } } }, null, 2),
+      "utf8",
+    );
+    const info = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined);
+
+    (panel as unknown as { cliSettingsSyncRun: () => void }).cliSettingsSyncRun();
+
+    const after = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+    expect(after.language).toBeUndefined();
+    expect(after.mcpServers).toEqual({ keep: { command: "node" } });
+    expect(info).toHaveBeenCalledWith("已写入内核配置，重启内核后生效", "立即重启");
+  });
+
+  it("language 为空且 CLI 里本就没有该键：不写盘、不弹重启提示", async () => {
+    const file = path.join(iflowHome, "settings.json");
+    await writeFile(file, JSON.stringify({ mcpServers: {} }, null, 2), "utf8");
+    const info = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined);
+
+    (panel as unknown as { cliSettingsSyncRun: () => void }).cliSettingsSyncRun();
+
+    const after = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+    expect(after).toEqual({ mcpServers: {} });
+    expect(info).not.toHaveBeenCalled();
   });
 
   it("面板写出的每个设置键都在 manifest 声明（跨文件回归锁）", () => {
