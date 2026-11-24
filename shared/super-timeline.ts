@@ -345,14 +345,6 @@ export function summarizeSuperTimelineProgress(
 export const SUPER_TIMELINE_FOLD_MIN_NODES = 4;
 
 /**
- * 展开态超过这个节点数才给滚动容器（默认折叠态几乎不会触发）。
- *
- * 优先折叠、其次滚动：展开全部后若仍然过高，就限高 + 内部滚动，并由组件
- * 自动贴底，保证最新步骤可见。
- */
-export const SUPER_TIMELINE_SCROLL_THRESHOLD = 8;
-
-/**
  * 时间轴一行：真实节点，或一段被折叠起来的连续节点。
  *
  * 折叠组保留 `indices` 而不是只保留数量：webview 用它判断「这一组是不是全都

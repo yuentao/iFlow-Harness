@@ -62,7 +62,6 @@ import {
   layoutSuperTimeline,
   summarizeSuperTimelineProgress,
   SUPER_TIMELINE_FOLD_MIN_NODES,
-  SUPER_TIMELINE_SCROLL_THRESHOLD,
   SUPER_TODO_DETAIL_SEP,
   type SuperTimelineNode,
   type SuperTimelineTone,
@@ -577,8 +576,9 @@ function timelineText(node: SuperTimelineNode): string {
  *
  * 信息密度（方案 B）：顶部给进度计数；默认只展开「当前步 + 上一步」，其余按
  * 连续区间折成一行（`layoutSuperTimeline`，纯逻辑在 shared 侧）；失败 / 等待
- * 回答 / 合并冲突这类**需要用户介入**的节点永远展开并高亮。展开后仍过高就
- * 限高滚动并自动贴底，保证最新步骤可见。
+ * 回答 / 合并冲突这类**需要用户介入**的节点永远展开并高亮。高度只由折叠控制，
+ * 时间轴本身**不再**限高滚动 —— 看板外层已经是滚动容器，套一层会出现滚动套
+ * 滚动，滚轮落在哪一层全看指针位置。
  */
 function SuperTimeline({
   session,
@@ -591,14 +591,6 @@ function SuperTimeline({
   const [expanded, setExpanded] = useState(false);
   const progress = summarizeSuperTimelineProgress(nodes);
   const rows = layoutSuperTimeline(nodes, expanded);
-  const scrollable = nodes.length >= SUPER_TIMELINE_SCROLL_THRESHOLD;
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  // 最新步骤必须在视野里：展开 / 节点变化后贴到底部（未滚动时无副作用）。
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [nodes, expanded]);
 
   const hasTodos = nodes.some((node) => node.kind === "todo");
   // todolist 模式：节点只画步骤原文，派发 / 启动 / 集成等事实挪到 title 前缀，
@@ -649,10 +641,7 @@ function SuperTimeline({
         </span>
       </div>
 
-      <div
-        ref={scrollRef}
-        className={`relative flex min-w-0 flex-col gap-2 ${scrollable ? "max-h-48 overflow-y-auto" : ""}`}
-      >
+      <div className="relative flex min-w-0 flex-col gap-2">
         {/* 贯穿整列的 rail：一条竖线从第一个图标中心画到最后一个图标中心。
             逐行画线段永远拼不成连续的一条（行高只有 18px、图标占 12px，剩给
             线段的只有 4~6px，视觉上就是一串点），所以线画在列上、行内容画在它

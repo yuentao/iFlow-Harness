@@ -473,6 +473,11 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     expect(el.className).toContain("flex-col");
     expect(el.className).not.toContain("flex-wrap");
 
+    // 时间轴自身不再限高滚动：看板外层已经是滚动容器，内层再套一层会出现
+    // 滚动套滚动（滚轮落在哪层全看指针位置）。高度只由折叠控制。
+    expect(el.querySelector('[class*="max-h-"]')).toBeNull();
+    expect(el.querySelector(".overflow-y-auto")).toBeNull();
+
     // 4 条 todo 达到折叠阈值：默认露出 2 个节点（当前步 + 上一步）+ 1 个折叠行。
     const icons = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-icon]"));
     expect(icons).toHaveLength(2);
