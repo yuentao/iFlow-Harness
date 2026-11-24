@@ -256,6 +256,13 @@ export function MemorySection({
   const [knowledgeGenerating, setKnowledgeGenerating] = useState(false);
   const [knowledgeToggling, setKnowledgeToggling] = useState(false);
   const knowledgeBusy = knowledgeGenerating || knowledgeToggling;
+  // 「项目知识库」默认折叠（页面首屏只留块头），但生成进度与失败提示都渲染在
+  // 区块体内 —— 有任务在跑或失败时必须自动展开，否则用户点了「生成项目知识」
+  // 后看不到任何反馈。
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  useEffect(() => {
+    if (knowledgeGenerating || knowledgeError) setKnowledgeOpen(true);
+  }, [knowledgeGenerating, knowledgeError]);
   const knowledgeJobRef = useRef<string | null>(null);
   // 「整理记忆」手动触发：请求号自增，回包按 requestId 认领（迟到的旧回包
   // 不得结束新一轮的 loading）。
@@ -675,8 +682,9 @@ export function MemorySection({
       ) : (
         <>
           {/* 4.7: 文件列表 / 快速追加 / 知识库 三块用 disclosure 分开，
-              块头保留主操作，避免长列表把关键按钮埋到底部。 */}
-          <SettingsDisclosure title={t("记忆文件")} defaultOpen>
+              块头保留主操作，避免长列表把关键按钮埋到底部。文件与知识库
+              两块默认折叠：设置页首屏只留块头，用户按需展开。 */}
+          <SettingsDisclosure title={t("记忆文件")}>
             <section className="space-y-2 px-4 py-3">
               <div className="flex items-center gap-1.5">
                 <span className="text-ui-body font-semibold text-foreground">{t("全局记忆")}</span>
@@ -771,7 +779,8 @@ export function MemorySection({
 
           <SettingsDisclosure
             title={t("项目知识库")}
-            defaultOpen
+            open={knowledgeOpen}
+            onToggle={() => setKnowledgeOpen((v) => !v)}
             header={
               <>
                 {knowledge && knowledge.docs.length > 0 && (

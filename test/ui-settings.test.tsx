@@ -1319,3 +1319,113 @@ describe("记忆保存失败可见与状态播报", () => {
     expect(status!.textContent).toContain("已保存");
   });
 });
+
+/**
+ * 「记忆文件」「项目知识库」默认折叠：设置页首屏只留块头，长文件列表与知识
+ * 文档列表按需展开。区块体仍挂载（hidden），所以断言落在 aria-expanded 与
+ * 区块体的 hidden 类上，而不是「文本不在 DOM 里」。
+ *
+ * 例外：知识库生成进度与失败提示渲染在区块体内，有任务在跑或失败时必须自动
+ * 展开，否则点了「生成项目知识」看不到任何反馈。
+ */
+describe("记忆页：记忆文件与项目知识库默认折叠", () => {
+  const MEM_STATE = {
+    home: "/home/.iflow",
+    cwd: null,
+    workspaceRoots: [],
+    files: [{
+      path: "/home/.iflow/AGENTS.md",
+      displayPath: "~/.iflow/AGENTS.md",
+      scope: "global",
+      role: "primary",
+      exists: true,
+      editable: true,
+      injected: true,
+      bytes: 12,
+      tokens: 3,
+      updatedAt: null,
+      hash: "abc",
+    }],
+    globalPrimary: "/home/.iflow/AGENTS.md",
+    projectPrimary: null,
+  } as unknown as import("../shared/messages").MemoryStateUi;
+
+  function renderMemoryTab() {
+    act(() =>
+      root.render(
+        <SettingsModal
+          tab="memory"
+          onTabChange={() => {}}
+          onDismiss={() => {}}
+          dismissible
+          busy={false}
+          auth={BASIC_AUTH}
+        />,
+      ),
+    );
+  }
+
+  /** 折叠头是按标题文案找的按钮（chevron + h3 标题）。 */
+  function disclosureHeader(title: string): HTMLButtonElement {
+    const btn = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => b.textContent?.trim() === title,
+    );
+    expect(btn).toBeTruthy();
+    return btn!;
+  }
+
+  /** 区块体：头按钮 aria-controls 指向的 div。 */
+  function disclosureBody(title: string): HTMLElement {
+    const id = disclosureHeader(title).getAttribute("aria-controls")!;
+    const body = document.getElementById(id);
+    expect(body).toBeTruthy();
+    return body!;
+  }
+
+  function post(data: unknown) {
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", { data }));
+    });
+  }
+
+  it("两个区块默认闭合（aria-expanded=false，区块体 hidden）", () => {
+    renderMemoryTab();
+    post({ type: "memoryState", state: MEM_STATE });
+
+    for (const title of ["记忆文件", "项目知识库"]) {
+      expect(disclosureHeader(title).getAttribute("aria-expanded")).toBe("false");
+      expect(disclosureBody(title).className).toContain("hidden");
+    }
+  });
+
+  it("点击块头可展开，再次点击收起", () => {
+    renderMemoryTab();
+    post({ type: "memoryState", state: MEM_STATE });
+
+    for (const title of ["记忆文件", "项目知识库"]) {
+      const header = disclosureHeader(title);
+      act(() => header.click());
+      expect(disclosureHeader(title).getAttribute("aria-expanded")).toBe("true");
+      expect(disclosureBody(title).className).not.toContain("hidden");
+
+      act(() => disclosureHeader(title).click());
+      expect(disclosureHeader(title).getAttribute("aria-expanded")).toBe("false");
+      expect(disclosureBody(title).className).toContain("hidden");
+    }
+  });
+
+  it("知识库生成失败时自动展开，让区块体内的错误可见", () => {
+    renderMemoryTab();
+    post({ type: "memoryState", state: MEM_STATE });
+    // 前置：默认闭合。
+    expect(disclosureHeader("项目知识库").getAttribute("aria-expanded")).toBe("false");
+
+    post({ type: "knowledgeJob", stage: "error", message: "生成失败：工作区为空" });
+
+    expect(disclosureHeader("项目知识库").getAttribute("aria-expanded")).toBe("true");
+    expect(disclosureBody("项目知识库").className).not.toContain("hidden");
+    expect(disclosureBody("项目知识库").textContent).toContain("生成失败：工作区为空");
+    // 记忆文件不受影响，仍保持折叠。
+    expect(disclosureHeader("记忆文件").getAttribute("aria-expanded")).toBe("false");
+  });
+});
