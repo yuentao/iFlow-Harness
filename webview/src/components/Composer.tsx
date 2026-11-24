@@ -25,7 +25,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type ModelMetadataSource, type SkillInfo, type SlashCommand, type ThinkLevel, type UsageNumberSource } from "../../../shared/messages";
+import { collectUserPromptTexts, MEMORY_CURATE_COMPOSER_ID_BASE, type ContextRefUi, type FileHitUi, type ModelInfoUi, type ModelMetadataSource, type SkillInfo, type SlashCommand, type ThinkLevel, type UsageNumberSource } from "../../../shared/messages";
 import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
@@ -1063,8 +1063,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   // arrive after a cancel or a session switch.
   const [enhancing, setEnhancing] = useState(false);
   const enhanceSeq = useRef(0);
-  /** 面板本地指令（/memory-curate）的请求号；回包只用于宿主 toast，这里只需自增。 */
-  const curateSeq = useRef(0);
+  /** 面板本地指令（/memory-curate）的请求号：从保留的命名空间起自增，
+   * 与记忆页按钮的 0 起计数器不重叠（回包只用于宿主 toast）。 */
+  const curateSeq = useRef(MEMORY_CURATE_COMPOSER_ID_BASE);
   const enhancePending = useRef(false);
   const enhanceOriginal = useRef<string | null>(null);
   const enhanceSnapshot = useRef<string | null>(null);
@@ -1450,14 +1451,26 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     cancelInflightRef.current();
     // 面板本地指令：/memory-curate 直接触发宿主整理，绝不作为提示词发给模型
     // （CLI 会把未知 / 指令当成 unknown command，模型根本看不到正文）。
-    if (isMemoryCurateCommand(value) && images.length === 0 && attachments.length === 0 && contexts.length === 0) {
+    // 附件不参与这个指令：带图/带文件时也要拦截，否则字面指令会落到模型；
+    // 明确告知这些附件未被发送，并一并清掉，避免它们漂到下一条消息。
+    if (isMemoryCurateCommand(value)) {
       send({ type: "curateMemoryNow", requestId: ++curateSeq.current });
+      const hadPayload = images.length > 0 || attachments.length > 0 || contexts.length > 0;
       setText("");
+      setImages([]);
+      setAttachments([]);
+      setContexts([]);
+      setMentionQuery(null);
       setHistIndex(-1);
       histDraft.current = null;
       histEntryRef.current = null;
       editedRecall.current = false;
-      showNote(t("已触发记忆整理，完成后会提示结果"), "info");
+      showNote(
+        hadPayload
+          ? t("已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送")
+          : t("已触发记忆整理，完成后会提示结果"),
+        "info",
+      );
       return;
     }
     // 只发送真的带数据的图片；说明必须与之一一对应（占位槽没有 data，

@@ -217,8 +217,9 @@ function MemoryFileCard({
  * Timing contract (probed): the CLI assembles its system instruction at
  * `startChat`, i.e. on session/new and session/load. Saving a file therefore
  * takes effect on the NEXT new/restored session; the current chat keeps its
- * old instruction. The card offers 「新建会话」 and 「重启 CLI」 (restart restores
- * the current session, rebuilding the instruction).
+ * old instruction. The card has no session/restart buttons of its own — it
+ * only states that requirement in inline hints (both entries live in the top
+ * bar and the command palette).
  */
 export function MemorySection({
   busy,
@@ -261,6 +262,11 @@ export function MemorySection({
   const [curating, setCurating] = useState(false);
   const [curateError, setCurateError] = useState<string | null>(null);
   const [curateFlash, setCurateFlash] = useState<string | null>(null);
+  /** 本轮失败的文件数：>0 时结果条用 warning 色阶，而不是成功绿。 */
+  const [curateFailed, setCurateFailed] = useState(0);
+  // requestId 命名空间：本卡片从 0 起自增，Composer 的 `/memory-curate`
+  // 从 1_000_000 起自增 —— 两条入口共用同一个 wire 回包，号码必须不重叠，
+  // 否则 Composer 触发的回包会被同号的卡片实例认领（多一次假成功）。
   const curateSeq = useRef(0);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const curateFlashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -292,17 +298,24 @@ export function MemorySection({
         message?: string;
         jobId?: string;
         requestId?: number;
+        failed?: number;
       };
       if (msg?.type === "memoryCurated") {
         if (msg.requestId !== curateSeq.current) return;
         setCurating(false);
         if (msg.ok) {
+          const failed = msg.failed ?? 0;
           setCurateError(null);
-          setCurateFlash(msg.message ?? t("记忆整理完成"));
+          setCurateFailed(failed);
+          // 部分失败：宿主的 message 是基础摘要（共享 l10n 词典不归本改动），
+          // 失败数在这里用 webview 自己的词典补上，色阶随 failed 走 warning。
+          const base = msg.message ?? t("记忆整理完成");
+          setCurateFlash(failed > 0 ? `${base} · ${t("{0} 个文件失败", failed)}` : base);
           if (curateFlashTimer.current) clearTimeout(curateFlashTimer.current);
           curateFlashTimer.current = setTimeout(() => setCurateFlash(null), 6000);
         } else {
           setCurateFlash(null);
+          setCurateFailed(0);
           setCurateError(msg.message ?? t("记忆整理未能开始"));
         }
         return;
@@ -452,6 +465,7 @@ export function MemorySection({
     if (busy || saving || curating) return;
     setCurateError(null);
     setCurateFlash(null);
+    setCurateFailed(0);
     setCurating(true);
     const requestId = ++curateSeq.current;
     send({ type: "curateMemoryNow", requestId });
@@ -637,10 +651,17 @@ export function MemorySection({
         <span className="text-ui-caption text-muted-foreground">{t("按当前设置执行一次")}</span>
       </ActionRow>
       {curateFlash && (
-        <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-ui-label text-success">
-          <Check className="size-3 shrink-0" />
-          <span className="min-w-0 flex-1">{curateFlash}</span>
-        </div>
+        curateFailed > 0 ? (
+          <div role="status" aria-live="polite" className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-warning">
+            <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+            <span className="min-w-0 flex-1">{curateFlash}</span>
+          </div>
+        ) : (
+          <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-ui-label text-success">
+            <Check className="size-3 shrink-0" />
+            <span className="min-w-0 flex-1">{curateFlash}</span>
+          </div>
+        )
       )}
       {curateError && (
         <div role="alert" className="flex items-start gap-1.5 rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-destructive">

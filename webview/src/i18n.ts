@@ -913,6 +913,9 @@ const en: Record<string, string> = {
     "Memory curation started; the result will be reported when it finishes",
   "记忆整理完成": "Memory curation finished",
   "记忆整理未能开始": "Memory curation could not start",
+  "{0} 个文件失败": "{0} file(s) failed",
+  "已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送":
+    "Memory curation started; this command takes no attachments, so the attached images/files/contexts were not sent",
   // F3 Phase 3: project knowledge
   "项目知识库": "Project knowledge",
   "{0} 篇文档": "{0} doc(s)",

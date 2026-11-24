@@ -441,3 +441,93 @@ describe("记忆整理：token 计量口径", () => {
     expect(estimateMarkdownTokens(compact)).toBeLessThan(estimateMarkdownTokens(CONTENT));
   });
 });
+
+describe("记忆整理：手动触发回包的失败粒度", () => {
+  it("有文件 error 时仍 ok:true（流程跑通），failed 计数随回包，toast 降为 warning", async () => {
+    const { ChatPanel } = await import("../src/panel/panel.js");
+    const { setConfigOverrides } = await import("./vscode-stub.js");
+    setConfigOverrides({ checkpoints: false });
+    const storageDir = tempDir("iflow-curate-reply-storage-");
+    const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+    const store = new Map<string, unknown>();
+    const state = {
+      get: <T,>(key: string, fallback?: T): T => (store.has(key) ? (store.get(key) as T) : (fallback as T)),
+      update: () => Promise.resolve(),
+      keys: () => [...store.keys()],
+      delete: () => Promise.resolve(),
+    };
+    const noop = () => ({ dispose: () => {} });
+    const panel = new ChatPanel(
+      {
+        subscriptions: [],
+        secrets: { get: () => Promise.resolve(undefined), store: () => Promise.resolve(), delete: () => Promise.resolve() },
+        workspaceState: state,
+        globalState: state,
+        extensionUri: { fsPath: here },
+        extensionPath: here,
+        extensionMode: 3,
+        logPath: here,
+        storageUri: { fsPath: storageDir },
+        globalStorageUri: { fsPath: storageDir },
+        storagePath: storageDir,
+        globalStoragePath: storageDir,
+        asAbsolutePath: (p: string) => path.join(here, p),
+      } as never,
+      {
+        workspaceRoot: here,
+        watchers: [
+          { dispose: () => {}, onDidCreate: noop, onDidChange: noop, onDidDelete: noop },
+          { dispose: () => {}, onDidCreate: noop, onDidChange: noop, onDidDelete: noop },
+        ],
+      },
+    );
+    const internals = panel as unknown as {
+      maintenance: unknown;
+      editorPanel: unknown;
+      store: { sendToast: (level: string, message: string) => number };
+    };
+    const realMaintenance = internals.maintenance;
+    // 一份「一个 applied、一个 error」的报告：部分失败，但整轮确实跑起来了。
+    internals.maintenance = {
+      runNow: async () => ({
+        at: CLOCK,
+        trigger: "manual",
+        files: [
+          { path: "/m/AGENTS.md", scope: "global", beforeTokens: 10, afterTokens: 5, dropped: 1, merged: 0, archived: 0, status: "applied" },
+          { path: "/m/IFLOW.md", scope: "global", beforeTokens: 4, afterTokens: 4, dropped: 0, merged: 0, archived: 0, status: "error", reason: "boom" },
+        ],
+        totalBeforeTokens: 14,
+        totalAfterTokens: 9,
+        savedTokens: 5,
+        backupsCreated: 0,
+      }),
+    };
+    const posted: Array<Record<string, unknown>> = [];
+    internals.editorPanel = {
+      webview: { postMessage: (m: Record<string, unknown>) => { posted.push(m); return Promise.resolve(true); } },
+      dispose: () => {},
+      visible: true,
+    };
+    const toasts: Array<{ level: string; message: string }> = [];
+    internals.store.sendToast = ((level: string, message: string) => {
+      toasts.push({ level, message });
+      return 1;
+    }) as unknown as typeof internals.store.sendToast;
+
+    await panel.curateMemoryNow(42);
+
+    const reply = posted.find((m) => m.type === "memoryCurated")!;
+    expect(reply).toBeDefined();
+    expect(reply.requestId).toBe(42);
+    // 关键：部分失败不再被当成整体失败。
+    expect(reply.ok).toBe(true);
+    expect(reply.failed).toBe(1);
+    expect(String(reply.message)).toContain("应用 1 个文件");
+    // toast 也是 warning（与 webview 的 warning 色阶一致）。
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]!.level).toBe("warning");
+
+    internals.maintenance = realMaintenance;
+    await panel.dispose();
+  });
+});

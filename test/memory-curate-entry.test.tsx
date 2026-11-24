@@ -131,6 +131,22 @@ function pressKey(el: HTMLElement, key: string): void {
   act(() => el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key })));
 }
 
+function pasteFiles(files: File[]): void {
+  const textarea = container.querySelector("textarea")!;
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", { value: { files } });
+  act(() => {
+    textarea.dispatchEvent(event);
+  });
+}
+
+function curateIds(): number[] {
+  return mocked.send.mock.calls
+    .map((call) => call[0] as Record<string, unknown>)
+    .filter((msg) => msg.type === "curateMemoryNow")
+    .map((msg) => msg.requestId as number);
+}
+
 describe("记忆页：整理记忆按钮", () => {
   it("点击发送 curateMemoryNow（带 requestId），执行中显示 loading", () => {
     act(() => root.render(<MemorySection busy={false} onHeader={() => {}} />));
@@ -230,5 +246,77 @@ describe("Composer：/memory-curate 指令", () => {
     expect(textarea.value).toBe(`/${MEMORY_CURATE_COMMAND} `);
     // 补全不触发整理
     expect(sentOfType("curateMemoryNow")).toBeUndefined();
+  });
+
+  it("带附件时完整指令仍被拦截，且提示附件未发送", () => {
+    act(() => root.render(<Composer />));
+    // 先挂一张图（占位槽同步入队，images.length 立即 > 0）。
+    pasteFiles([new File(["x"], "shot.png", { type: "image/png" })]);
+    expect(mocked.notify).toHaveBeenCalledWith("已附加 1 张图片", "info");
+    const textarea = typeInComposer(`/${MEMORY_CURATE_COMMAND}`);
+    pressKey(textarea, "Enter");
+
+    // 指令被本地拦截：不发提示词，只触发 host 整理。
+    expect(sentOfType("sendPrompt")).toBeUndefined();
+    expect(sentOfType("curateMemoryNow")).toBeDefined();
+    // 明确告知附件不参与该指令。
+    expect(mocked.notify).toHaveBeenCalledWith(
+      expect.stringContaining("该指令不接受附件"),
+      "info",
+    );
+    expect(textarea.value).toBe("");
+  });
+});
+
+describe("requestId 命名空间：两个入口互不认领", () => {
+  it("记忆页从 0 起、Composer 从 1_000_000 起，回包只被各自认领", () => {
+    // 先取 Composer 的请求号（保留高段）。
+    act(() => root.render(<Composer />));
+    const ta = typeInComposer(`/${MEMORY_CURATE_COMMAND}`);
+    pressKey(ta, "Enter");
+    const composerId = curateIds().at(-1)!;
+    expect(composerId).toBeGreaterThanOrEqual(1_000_000);
+    act(() => root.unmount());
+
+    // 再取记忆页的请求号（低段），两段永不重叠。
+    container.innerHTML = "";
+    root = createRoot(container);
+    act(() => root.render(<MemorySection busy={false} onHeader={() => {}} />));
+    hostMessage({ type: "memoryState", state: MEM_STATE });
+    act(() => buttonByText("整理记忆").click());
+    const cardId = curateIds().at(-1)!;
+    expect(cardId).toBeLessThan(1_000_000);
+    expect(cardId).not.toBe(composerId);
+
+    // 卡片只认领自己的回包：拿 Composer 的号来冒充不回写。
+    hostMessage({ type: "memoryCurated", requestId: composerId, ok: true, message: "别人的结果" });
+    expect(buttonByText("整理中…")).toBeTruthy();
+    expect(container.textContent).not.toContain("别人的结果");
+
+    hostMessage({ type: "memoryCurated", requestId: cardId, ok: true, message: "应用 1 个文件" });
+    expect(buttonByText("整理记忆")).toBeTruthy();
+    expect(container.textContent).toContain("应用 1 个文件");
+  });
+
+  it("部分失败回包：仍算成功（ok），但结果条用 warning 色阶并写出失败数", () => {
+    act(() => root.render(<MemorySection busy={false} onHeader={() => {}} />));
+    hostMessage({ type: "memoryState", state: MEM_STATE });
+    act(() => buttonByText("整理记忆").click());
+    const requestId = sentOfType("curateMemoryNow")!.requestId as number;
+
+    hostMessage({
+      type: "memoryCurated",
+      requestId,
+      ok: true,
+      message: "记忆整理完成：应用 1 个文件 · 跳过 0 · 冲突 0 · 节省 10 tokens",
+      failed: 1,
+    });
+    // 不再停留在 loading（ok 表示流程跑通）。
+    expect(buttonByText("整理记忆")).toBeTruthy();
+    const status = container.querySelector('[role="status"][aria-live="polite"]')!;
+    expect(status.textContent).toContain("1 个文件失败");
+    // warning 色阶：没有成功绿的 success 类。
+    expect(status.className).toContain("warning");
+    expect(status.className).not.toContain("success");
   });
 });

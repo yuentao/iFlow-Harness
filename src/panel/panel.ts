@@ -3717,9 +3717,9 @@ export class ChatPanel implements vscode.Disposable {
    * loading 并就地显示失败；命令面板触发不传，行为与原先一致。
    */
   async curateMemoryNow(requestId?: number): Promise<void> {
-    const reply = (ok: boolean, message: string): void => {
+    const reply = (ok: boolean, message: string, failed = 0): void => {
       if (requestId === undefined) return;
-      this.postToWebview({ type: "memoryCurated", requestId, ok, message });
+      this.postToWebview({ type: "memoryCurated", requestId, ok, message, failed });
     };
     const scheduler = this.maintenance;
     if (!scheduler) {
@@ -3746,23 +3746,27 @@ export class ChatPanel implements vscode.Disposable {
       else failed++;
     }
     const l2Skipped = report.files.some((file) => file.l2 === "skipped-report");
-    const message = dryRun
-      ? vscode.l10n.t(
-          "记忆整理（仅报告）：预计应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 预计节省 {3} tokens",
-          applied,
-          skipped,
-          conflict,
-          report.savedTokens,
-        ) + (l2Skipped ? vscode.l10n.t(" · L2 已跳过（report 模式）") : "")
-      : vscode.l10n.t(
-          "记忆整理完成：应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 节省 {3} tokens",
-          applied,
-          skipped,
-          conflict,
-          report.savedTokens,
-        );
+    // 失败粒度：`ok` 只表达「这一轮是否真的跑起来了」（拿到 report 就是跑通了），
+    // 不再把「有文件 error」当成整体失败。失败数随 `failed` 回包，由 webview
+    // 追加到摘要并改用 warning 色阶 —— 部分失败不能被渲染成整片成功绿。
+    const message =
+      (dryRun
+        ? vscode.l10n.t(
+            "记忆整理（仅报告）：预计应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 预计节省 {3} tokens",
+            applied,
+            skipped,
+            conflict,
+            report.savedTokens,
+          ) + (l2Skipped ? vscode.l10n.t(" · L2 已跳过（report 模式）") : "")
+        : vscode.l10n.t(
+            "记忆整理完成：应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 节省 {3} tokens",
+            applied,
+            skipped,
+            conflict,
+            report.savedTokens,
+          ));
     this.store.sendToast(failed > 0 ? "warning" : "info", message);
-    reply(failed === 0, message);
+    reply(true, message, failed);
     // apply 之后刷新记忆卡片（saveFile 已逐条 post memorySaved，这里再拉一次全量状态）。
     if (!dryRun) void this.memory.sendState();
   }
