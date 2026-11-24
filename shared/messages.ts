@@ -1921,6 +1921,10 @@ export interface HostSettingsUi {
   autoCompressOnIdle: boolean;
   autoMemoryCapture: boolean;
   autoTitle: boolean;
+  /** 提示词档位（`iflow.efficiencyMode`）：`steady` 为默认、行为完全不变；
+   * `turbo` 额外注入「优先快速产出、减少探索」的规则。全局用户设置，
+   * 子会话跟随。注入逻辑在 host 侧按档位变化触发。 */
+  efficiencyMode: "steady" | "turbo";
   /** Wall-clock ceiling (seconds) for the turn-end memory extraction.
    * 0 = no limit. */
   memoryExtractTimeoutSeconds: number;

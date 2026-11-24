@@ -48,6 +48,7 @@ const ALL_KEYS: string[] = [
   "iflow.uiDensity",
   "iflow.restoreLastSession",
   "iflow.autoOpenPanel",
+  "iflow.efficiencyMode",
   "iflow.language",
   "iflow.superAgent.integration",
   "iflow.superAgent.maxConcurrent",

@@ -30,7 +30,7 @@ import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Button, CANVAS_CHIP, Chip, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, SearchInput, TextInput, ToggleChip, fuzzyScore } from "./ui";
+import { Button, CANVAS_CHIP, Chip, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, SearchInput, Segmented, TextInput, ToggleChip, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -466,6 +466,9 @@ export function Composer() {
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
   const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
   const thinkLevel = useChat((s) => s.state?.thinkLevel ?? "auto");
+  /** 提示词档位（效率开关）：全局用户设置，子会话跟随；缺省按默认「平稳」。 */
+  const efficiencyMode = useChat((s) => s.hostSettings?.efficiencyMode ?? "steady");
+  const updateHostSetting = useChat((s) => s.updateHostSetting);
   /** Turn-end model predictions; host metadata, cleared when a new turn starts. */
   const suggestions = useChat((s) => s.state?.nextStepSuggestions);
   /** The prediction call is running: render the pill in the chips' slot. */
@@ -2416,6 +2419,21 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               )}
             </Dropdown>
           )}
+
+          {/* 提示词档位（效率开关）：刻意放在 models.length > 0 之外 ——
+              没有模型时也要能切档。窄面板（<360px）下隐藏，避免把模型名挤到
+              静默裁切；档位在设置页与 settings.json 里仍可改。 */}
+          <div className="shrink-0 @max-[360px]:hidden">
+            <Segmented
+              ariaLabel={t("提示词档位")}
+              options={[
+                { value: "steady", label: t("平稳") },
+                { value: "turbo", label: t("速推") },
+              ]}
+              value={efficiencyMode}
+              onChange={(value) => updateHostSetting({ efficiencyMode: value })}
+            />
+          </div>
 
           </div>
 

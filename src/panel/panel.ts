@@ -732,6 +732,14 @@ function asUiTheme(value: unknown): (typeof UI_THEMES)[number] {
     : "auto";
 }
 
+/** `iflow.efficiencyMode` values — kept in sync with package.json / shared/messages.ts. */
+const EFFICIENCY_MODES = ["steady", "turbo"] as const;
+function asEfficiencyMode(value: unknown): (typeof EFFICIENCY_MODES)[number] {
+  return EFFICIENCY_MODES.includes(value as (typeof EFFICIENCY_MODES)[number])
+    ? (value as (typeof EFFICIENCY_MODES)[number])
+    : "steady";
+}
+
 /** `iflow.osNotifications` values. */
 const OS_NOTIFICATION_MODES = ["off", "approvals", "all"] as const;
 function asOsNotifications(value: unknown): (typeof OS_NOTIFICATION_MODES)[number] {
@@ -2950,6 +2958,10 @@ export class ChatPanel implements vscode.Disposable {
         if (typeof msg.autoCompressOnIdle === "boolean") writes.push(["autoCompressOnIdle", msg.autoCompressOnIdle]);
         if (typeof msg.autoMemoryCapture === "boolean") writes.push(["autoMemoryCapture", msg.autoMemoryCapture]);
         if (typeof msg.autoTitle === "boolean") writes.push(["autoTitle", msg.autoTitle]);
+        // 提示词档位：只接受两个合法枚举值，其余一律忽略（配置里手改的脏值不落盘）。
+        if (msg.efficiencyMode === "steady" || msg.efficiencyMode === "turbo") {
+          writes.push(["efficiencyMode", msg.efficiencyMode]);
+        }
         // Timeout ceilings in seconds; 0 = 「不限制」 for all three.
         if (msg.memoryExtractTimeoutSeconds !== undefined && Number.isFinite(msg.memoryExtractTimeoutSeconds)) {
           writes.push([
@@ -3786,6 +3798,7 @@ export class ChatPanel implements vscode.Disposable {
       autoCompressOnIdle: config.get<boolean>("autoCompressOnIdle", false),
       autoMemoryCapture: config.get<boolean>("autoMemoryCapture", true),
       autoTitle: config.get<boolean>("autoTitle", true),
+      efficiencyMode: asEfficiencyMode(config.get<string>("efficiencyMode", "steady")),
       memoryExtractTimeoutSeconds: this.timeoutSeconds(
         "memoryExtractTimeoutSeconds",
         MEMORY_EXTRACT_TIMEOUT_MS / 1000,

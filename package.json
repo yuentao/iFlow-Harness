@@ -184,6 +184,19 @@
           "default": false,
           "description": "%iflow.configuration.autoOpenPanel.description%"
         },
+        "iflow.efficiencyMode": {
+          "type": "string",
+          "enum": [
+            "steady",
+            "turbo"
+          ],
+          "enumDescriptions": [
+            "%iflow.configuration.efficiencyMode.steady%",
+            "%iflow.configuration.efficiencyMode.turbo%"
+          ],
+          "default": "steady",
+          "description": "%iflow.configuration.efficiencyMode.description%"
+        },
         "iflow.language": {
           "type": "string",
           "enum": [

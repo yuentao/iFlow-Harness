@@ -83,6 +83,7 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   autoCompressOnIdle: false,
   autoMemoryCapture: true,
   autoTitle: true,
+  efficiencyMode: "steady",
   memoryExtractTimeoutSeconds: 90,
   memoryMaintenanceEnabled: false,
   memoryMaintenanceIntervalDays: 7,

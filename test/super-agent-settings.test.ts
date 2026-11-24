@@ -55,6 +55,7 @@ const hostSettings = vi.hoisted(() =>
     autoCompressOnIdle: false,
     autoMemoryCapture: false,
     autoTitle: true,
+    efficiencyMode: "steady",
     memoryExtractTimeoutSeconds: 90,
     nextStepTimeoutSeconds: 25,
     compressTimeoutSeconds: 0,

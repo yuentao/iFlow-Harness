@@ -1494,6 +1494,10 @@ const en: Record<string, string> = {
     "After unbinding, QQ remote tasks and message access both stop; you must scan the QR code again to use them.",
   // 设置页：保存失败兜底提示
   "保存失败，请稍后重试": "Save failed — try again later",
+  // 效率开关（Composer 提示词档位）
+  "提示词档位": "Prompt mode",
+  "平稳": "Steady",
+  "速推": "Turbo",
   "审批/提问/计划阻塞时，或整轮完成时发送。":
     "Sent when an approval, question or plan blocks, or when a turn completes.",
 };
