@@ -30,7 +30,7 @@ import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Button, CANVAS_CHIP, Chip, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, SearchInput, Segmented, TextInput, ToggleChip, fuzzyScore } from "./ui";
+import { Button, CANVAS_CHIP, Chip, ConfirmDialog, Dropdown, HelpTip, ICON_INLINE, IconButton, SearchInput, Segmented, TextInput, ToggleChip, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -2423,16 +2423,28 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           {/* 提示词档位（效率开关）：刻意放在 models.length > 0 之外 ——
               没有模型时也要能切档。窄面板（<360px）下隐藏，避免把模型名挤到
               静默裁切；档位在设置页与 settings.json 里仍可改。 */}
-          <div className="shrink-0 @max-[360px]:hidden">
+          <div className="flex shrink-0 items-center gap-1 @max-[360px]:hidden">
             <Segmented
               ariaLabel={t("提示词档位")}
               options={[
-                { value: "steady", label: t("平稳") },
-                { value: "turbo", label: t("速推") },
+                {
+                  value: "steady",
+                  label: t("平稳"),
+                  title: t("平稳：使用默认规则，完整的探索与验证流程。"),
+                },
+                {
+                  value: "turbo",
+                  label: t("速推"),
+                  title: t("速推：优先快速产出，减少探索与反复确认，只跑相关验证。"),
+                },
               ]}
               value={efficiencyMode}
               onChange={(value) => updateHostSetting({ efficiencyMode: value })}
             />
+            <HelpTip label={t("档位说明")}>
+              <span className="block">{t("平稳：使用默认规则，完整的探索与验证流程。")}</span>
+              <span className="block">{t("速推：优先快速产出，减少探索与反复确认，只跑相关验证。")}</span>
+            </HelpTip>
           </div>
 
           </div>

@@ -1498,6 +1498,11 @@ const en: Record<string, string> = {
   "提示词档位": "Prompt mode",
   "平稳": "Steady",
   "速推": "Turbo",
+  "档位说明": "Mode details",
+  "平稳：使用默认规则，完整的探索与验证流程。":
+    "Steady: default rules, with the full exploration and verification flow.",
+  "速推：优先快速产出，减少探索与反复确认，只跑相关验证。":
+    "Turbo: prioritize quick output — less exploration and back-and-forth confirmation, and only the relevant checks are run.",
   "审批/提问/计划阻塞时，或整轮完成时发送。":
     "Sent when an approval, question or plan blocks, or when a turn completes.",
 };

@@ -136,4 +136,20 @@ describe("Composer · 提示词档位（效率开关）", () => {
     const wrapper = group().parentElement!;
     expect(wrapper.className).toContain("@max-[360px]:hidden");
   });
+
+  it("hover/聚焦档位说明入口时展示两档 tips，且每档 title 含关键词", () => {
+    render();
+    // 每档单独的 title：原生 hover 即可看到说明。
+    expect(option("平稳").getAttribute("title")).toContain("完整的探索与验证流程");
+    expect(option("速推").getAttribute("title")).toContain("优先快速产出");
+
+    // 总说明入口：可访问名 + 聚焦后 tooltip 可见。
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="档位说明"]');
+    expect(trigger).toBeTruthy();
+    act(() => trigger!.focus());
+    const tip = document.body.querySelector<HTMLElement>('[role="tooltip"]');
+    expect(tip).toBeTruthy();
+    expect(tip!.textContent).toContain("完整的探索与验证流程");
+    expect(tip!.textContent).toContain("优先快速产出");
+  });
 });
