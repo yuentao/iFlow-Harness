@@ -69,7 +69,8 @@ function installConfig(writes: WriteLog, forcedError?: Error): () => void {
         const full = `${prefix}${key}`;
         const declared = schema[full];
         if (!declared) {
-          // VSCode 的原话（ERROR_UNKNOWN_KEY）；面板按这句识别并提示重载窗口。
+          // VSCode 的原话（ERROR_UNKNOWN_KEY）。面板不做猜测，只把它原样带进
+          // 失败 toast，用户据此判断是「扩展版本旧」还是环境侧写入失败。
           throw new Error(`Unable to write to User Settings because ${full} is not a registered configuration.`);
         }
         if (declared.enum && !declared.enum.includes(value)) {
