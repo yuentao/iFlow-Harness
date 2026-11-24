@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Composer, isMemoryCurateCommand, MEMORY_CURATE_COMMAND } from "../webview/src/components/Composer";
+import { Composer, isMemoryCurateCommand, isMemoryCurateInvocation, MEMORY_CURATE_COMMAND } from "../webview/src/components/Composer";
 import { MemorySection } from "../webview/src/components/MemoryCard";
 import { initialSessionState, type MemoryStateUi, type SessionState } from "../shared/messages";
 
@@ -222,6 +222,55 @@ describe("Composer：/memory-curate 指令", () => {
     expect(isMemoryCurateCommand(`  /${MEMORY_CURATE_COMMAND}  `)).toBe(true);
     expect(isMemoryCurateCommand(`/${MEMORY_CURATE_COMMAND} extra`)).toBe(false);
     expect(isMemoryCurateCommand("/memory")).toBe(false);
+  });
+
+  it("调用判定把带参数也算命中，但不误伤同前缀词", () => {
+    expect(isMemoryCurateInvocation(`/${MEMORY_CURATE_COMMAND}`)).toBe(true);
+    expect(isMemoryCurateInvocation(`  /${MEMORY_CURATE_COMMAND}  `)).toBe(true);
+    expect(isMemoryCurateInvocation(`/${MEMORY_CURATE_COMMAND} 帮我看看`)).toBe(true);
+    expect(isMemoryCurateInvocation(`/${MEMORY_CURATE_COMMAND}\n帮我看看`)).toBe(true);
+    // 同前缀词不是该指令（否则会被静默吞掉）。
+    expect(isMemoryCurateInvocation("/memory-curated")).toBe(false);
+    expect(isMemoryCurateInvocation(`/${MEMORY_CURATE_COMMAND}x`)).toBe(false);
+    expect(isMemoryCurateInvocation("/memory")).toBe(false);
+  });
+
+  it("带参数也被拦截：只触发整理、提示不接受参数、清空输入", () => {
+    act(() => root.render(<Composer />));
+    const textarea = typeInComposer(`/${MEMORY_CURATE_COMMAND} 帮我看看`);
+    pressKey(textarea, "Enter");
+
+    expect(sentOfType("sendPrompt")).toBeUndefined();
+    expect(sentOfType("curateMemoryNow")).toBeDefined();
+    expect(mocked.notify).toHaveBeenCalledWith(expect.stringContaining("不接受参数"), "info");
+    expect(textarea.value).toBe("");
+  });
+
+  it("同前缀的 /memory-curated 不被拦截，正常作为提示词发送", () => {
+    act(() => root.render(<Composer />));
+    const textarea = typeInComposer("/memory-curated");
+    pressKey(textarea, "Enter");
+
+    expect(sentOfType("curateMemoryNow")).toBeUndefined();
+    const prompt = sentOfType("sendPrompt");
+    expect(prompt).toBeDefined();
+    expect(prompt!.text).toBe("/memory-curated");
+    expect(textarea.value).toBe("");
+  });
+
+  it("参数和附件同时出现时两条信息都要说到", () => {
+    act(() => root.render(<Composer />));
+    pasteFiles([new File(["x"], "shot.png", { type: "image/png" })]);
+    mocked.notify.mockClear();
+    const textarea = typeInComposer(`/${MEMORY_CURATE_COMMAND} 帮我看看`);
+    pressKey(textarea, "Enter");
+
+    expect(sentOfType("sendPrompt")).toBeUndefined();
+    expect(sentOfType("curateMemoryNow")).toBeDefined();
+    const note = mocked.notify.mock.calls.at(-1)?.[0] as string;
+    expect(note).toContain("不接受附件");
+    expect(note).toContain("不接受参数");
+    expect(textarea.value).toBe("");
   });
 
   it("输入完整指令按回车直接触发 host 整理，不发提示词", () => {

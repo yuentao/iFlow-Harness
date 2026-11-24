@@ -916,6 +916,10 @@ const en: Record<string, string> = {
   "{0} 个文件失败": "{0} file(s) failed",
   "已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送":
     "Memory curation started; this command takes no attachments, so the attached images/files/contexts were not sent",
+  "该指令不接受参数，已按整理记忆执行":
+    "This command takes no arguments; memory curation was run instead",
+  "已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送，也不接受参数":
+    "Memory curation started; this command takes no attachments or arguments, so the attached images/files/contexts and the arguments were not sent",
   // F3 Phase 3: project knowledge
   "项目知识库": "Project knowledge",
   "{0} 篇文档": "{0} doc(s)",

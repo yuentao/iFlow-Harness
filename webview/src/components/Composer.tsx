@@ -138,6 +138,29 @@ export function isMemoryCurateCommand(text: string): boolean {
 }
 
 /**
+ * 文本是否是该指令的调用——精确输入或带参数都算。
+ *
+ * 带参数也必须拦截：CLI 不认识 `/memory-curate`，字面指令会落到模型前的
+ * unknown command 上，模型看不到正文。只认「指令名 + 空白/结束」，避免把
+ * `/memory-curated` 之类同前缀的词误判成该指令。
+ */
+export function isMemoryCurateInvocation(text: string): boolean {
+  const value = text.trim().toLowerCase();
+  const prefix = `/${MEMORY_CURATE_COMMAND}`;
+  if (!value.startsWith(prefix)) return false;
+  const next = value.charAt(prefix.length);
+  return next === "" || /\s/.test(next);
+}
+
+/** 该指令后面的参数部分（无参数时为空串）。 */
+function memoryCurateArgs(text: string): string {
+  return text
+    .trim()
+    .slice(`/${MEMORY_CURATE_COMMAND}`.length)
+    .trim();
+}
+
+/**
  * Session token usage, read as PRIMITIVE selectors — postMessage re-clones the
  * usage object on every patch, so an object selector would re-render on every
  * blockPatch (up to 12.5/s while streaming); primitives only move when the
@@ -1451,11 +1474,13 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     cancelInflightRef.current();
     // 面板本地指令：/memory-curate 直接触发宿主整理，绝不作为提示词发给模型
     // （CLI 会把未知 / 指令当成 unknown command，模型根本看不到正文）。
+    // 带参数同样拦截：该指令不接受参数，正文无处可去，只能丢弃并说明。
     // 附件不参与这个指令：带图/带文件时也要拦截，否则字面指令会落到模型；
     // 明确告知这些附件未被发送，并一并清掉，避免它们漂到下一条消息。
-    if (isMemoryCurateCommand(value)) {
+    if (isMemoryCurateInvocation(value)) {
       send({ type: "curateMemoryNow", requestId: ++curateSeq.current });
       const hadPayload = images.length > 0 || attachments.length > 0 || contexts.length > 0;
+      const hadArgs = memoryCurateArgs(value) !== "";
       setText("");
       setImages([]);
       setAttachments([]);
@@ -1465,10 +1490,15 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       histDraft.current = null;
       histEntryRef.current = null;
       editedRecall.current = false;
+      // 提示按「附件优先，参数追加」合并：两样都有时两件事都要说到。
       showNote(
         hadPayload
-          ? t("已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送")
-          : t("已触发记忆整理，完成后会提示结果"),
+          ? hadArgs
+            ? t("已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送，也不接受参数")
+            : t("已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送")
+          : hadArgs
+            ? t("该指令不接受参数，已按整理记忆执行")
+            : t("已触发记忆整理，完成后会提示结果"),
         "info",
       );
       return;
