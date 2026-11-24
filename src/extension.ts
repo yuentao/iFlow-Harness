@@ -150,7 +150,10 @@ function warnAboutUnregisteredSettings(context: vscode.ExtensionContext): void {
   void context.globalState.update(UNREGISTERED_SETTINGS_WARNED_KEY, version);
   void vscode.window
     .showWarningMessage(
-      vscode.l10n.t("扩展已更新，重新加载窗口后新设置才能保存"),
+      vscode.l10n.t(
+        "设置「{0}」属于刚更新的扩展版本，本窗口还没加载它的定义，已暂存并立即生效；请重启 VS Code（先试重新加载窗口，仍无效则完全退出再启动）。",
+        missing[0] ?? "iflow.*",
+      ),
       vscode.l10n.t("重新加载窗口"),
     )
     .then((choice) => {

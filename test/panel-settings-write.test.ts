@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import * as vscode from "vscode";
+import { setUnregisteredConfigKeys, getUnregisteredConfigKeys } from "./vscode-stub.js";
 
 /**
  * 面板设置写入的回归锁：效率档位（`iflow.efficiencyMode`）与定期整理记忆
@@ -53,6 +54,16 @@ interface WriteLog {
  * `inspect().defaultValue` 里没有默认层，`update()` 同样被拒。返回还原函数。 */
 function installConfig(writes: WriteLog, forcedError?: Error, unregistered: string[] = []): () => void {
   const original = vscode.workspace.getConfiguration;
+  /** Old-manifest view: the explicit list of this fake plus whatever the test
+   * marked through `setUnregisteredConfigKeys` (short or `iflow.`-prefixed). */
+  const isUnregistered = (full: string): boolean => {
+    const shared = getUnregisteredConfigKeys();
+    return (
+      unregistered.includes(full)
+      || shared.includes(full)
+      || shared.includes(full.replace(/^iflow\./, ""))
+    );
+  };
   (vscode.workspace as unknown as { getConfiguration: unknown }).getConfiguration = (section?: string) => {
     const prefix = section ? `${section}.` : "";
     return {
@@ -67,7 +78,7 @@ function installConfig(writes: WriteLog, forcedError?: Error, unregistered: stri
         const full = `${prefix}${key}`;
         return {
           key: full,
-          defaultValue: unregistered.includes(full) ? undefined : schema[full]?.default,
+          defaultValue: isUnregistered(full) ? undefined : schema[full]?.default,
           globalValue: writes.values[full],
         };
       },
@@ -76,7 +87,7 @@ function installConfig(writes: WriteLog, forcedError?: Error, unregistered: stri
         writes.attempts.push(full);
         if (forcedError) throw forcedError;
         const declared = schema[full];
-        if (!declared || unregistered.includes(full)) {
+        if (!declared || isUnregistered(full)) {
           // VSCode 的原话（ERROR_UNKNOWN_KEY）。面板不做猜测，只把它原样带进
           // 失败 toast，用户据此判断是「扩展版本旧」还是环境侧写入失败。
           throw new Error(`Unable to write to User Settings because ${full} is not a registered configuration.`);
@@ -141,6 +152,7 @@ type PanelInternals = {
   store: { sendToast: (level: string, message: string) => number };
   writeUserSetting: (key: string, value: unknown, label?: string) => Promise<boolean>;
   applyPendingSettings: () => Promise<void>;
+  postHostSettings: () => void;
   handleWebviewMessage: (msg: unknown) => Promise<void>;
 };
 
@@ -154,6 +166,7 @@ describe("面板设置写入：效率档位 / 定期整理记忆", () => {
   let restoreConfig: () => void;
 
   beforeEach(async () => {
+    setUnregisteredConfigKeys([]);
     iflowHome = await mkdtemp(path.join(os.tmpdir(), "iflow-settings-write-"));
     process.env.IFLOW_HOME = iflowHome;
     storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-settings-write-storage-"));
@@ -166,6 +179,7 @@ describe("面板设置写入：效率档位 / 定期整理记忆", () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    setUnregisteredConfigKeys([]);
     restoreConfig();
     await panel.dispose();
     await rm(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -221,6 +235,60 @@ describe("面板设置写入：效率档位 / 定期整理记忆", () => {
     );
     expect(toast).not.toHaveBeenCalledWith("warning", expect.stringContaining("设置写入失败"));
     expect(ctx.globalState.get("iflow.pendingSettingsWrites")).toEqual({ efficiencyMode: "turbo" });
+  });
+
+  it("两个新键都未注册：setHostSettings 暂存两值，且不弹失败 toast", async () => {
+    setUnregisteredConfigKeys(["efficiencyMode", "memoryMaintenanceEnabled"]);
+    const toast = vi.spyOn(p.store, "sendToast");
+
+    await p.handleWebviewMessage({ type: "setHostSettings", efficiencyMode: "turbo", memoryMaintenanceEnabled: true });
+
+    expect(writes.values["iflow.efficiencyMode"]).toBeUndefined();
+    expect(writes.values["iflow.memoryMaintenanceEnabled"]).toBeUndefined();
+    expect(ctx.globalState.get("iflow.pendingSettingsWrites")).toEqual({
+      efficiencyMode: "turbo",
+      memoryMaintenanceEnabled: true,
+    });
+    expect(toast).not.toHaveBeenCalledWith("warning", expect.stringContaining("设置写入失败"));
+    expect(toast).toHaveBeenCalledWith(
+      "warning",
+      expect.stringContaining("已暂存并立即生效"),
+      expect.objectContaining({ action: { actionId: "reload-window", label: "重新加载窗口" } }),
+    );
+  });
+
+  it("postHostSettings 读到暂存值（未落盘也不弹回旧值）", async () => {
+    setUnregisteredConfigKeys(["efficiencyMode", "memoryMaintenanceEnabled"]);
+    await p.handleWebviewMessage({ type: "setHostSettings", efficiencyMode: "turbo", memoryMaintenanceEnabled: true });
+
+    const posted: Array<Record<string, unknown>> = [];
+    vi.spyOn(
+      panel as unknown as { postToWebview: (m: unknown) => void },
+      "postToWebview",
+    ).mockImplementation((message) => {
+      posted.push(message as Record<string, unknown>);
+    });
+    p.postHostSettings();
+
+    const hostSettings = posted.find((message) => message.type === "hostSettings");
+    expect(hostSettings?.efficiencyMode).toBe("turbo");
+    expect(hostSettings?.memoryMaintenanceEnabled).toBe(true);
+  });
+
+  it("重载窗口后（键重新注册）applyPendingSettings 以 Global 落盘并清空暂存", async () => {
+    await ctx.globalState.update("iflow.pendingSettingsWrites", {
+      efficiencyMode: "turbo",
+      memoryMaintenanceEnabled: true,
+    });
+    setUnregisteredConfigKeys([]);
+
+    await p.applyPendingSettings();
+
+    expect(writes.values["iflow.efficiencyMode"]).toBe("turbo");
+    expect(writes.values["iflow.memoryMaintenanceEnabled"]).toBe(true);
+    expect(writes.targets["iflow.efficiencyMode"]).toBe(vscode.ConfigurationTarget.Global);
+    expect(writes.targets["iflow.memoryMaintenanceEnabled"]).toBe(vscode.ConfigurationTarget.Global);
+    expect(ctx.globalState.get("iflow.pendingSettingsWrites")).toEqual({});
   });
 
   it("已注册且写入成功 → 清掉同名暂存，不弹失败 toast", async () => {

@@ -205,6 +205,11 @@ export interface SuperAgentHostCallbacks {
    * the same resolver with fewer key facts (the store's model) — never to
    * "push nothing". */
   tokensLimitEnv?: () => { IFLOW_TOKENS_LIMIT?: string };
+  /** Same read-through-stash channel as the panel's own settings reads (see
+   * ChatPanel.readUserSetting): a value stashed during an in-place upgrade
+   * must be visible here before the window reloads. Optional — a host built
+   * without the panel (tests) falls back to the raw configuration. */
+  readUserSetting?: <T>(key: string, fallback: T) => T;
   chunkText(content: unknown): string;
   sendPrompt(
     text: string,
@@ -1376,7 +1381,9 @@ export class SuperAgentHost {
       // 效率开关：turbo 时子会话任务书前置速推规则，与主会话同档。实时读，
       // 改完对下一次派发生效；未知值按 steady（不注入）。
       efficiencyMode: () => {
-        const mode = vscode.workspace.getConfiguration("iflow").get<string>("efficiencyMode");
+        const mode = this.deps.readUserSetting
+          ? this.deps.readUserSetting<string>("efficiencyMode", "steady")
+          : vscode.workspace.getConfiguration("iflow").get<string>("efficiencyMode");
         return mode === "turbo" ? "turbo" : "steady";
       },
       // 磁盘上最多保留多少个已结束子会话的工作目录（0 = 不限制）。

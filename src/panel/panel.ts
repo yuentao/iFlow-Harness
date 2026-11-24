@@ -1166,6 +1166,7 @@ export class ChatPanel implements vscode.Disposable {
       // Same effective context window as the main session — ONE computation
       // site (the panel owns the cold-start lookup-key fallbacks).
       tokensLimitEnv: () => this.tokensLimitEnv(),
+      readUserSetting: (key, fallback) => this.readUserSetting(key, fallback),
       chunkText: (content) => ChatPanel.chunkText(content),
       sendPrompt: (text, images, files, contexts, options) => this.sendPrompt(text, images, files, contexts, options),
     });
@@ -1819,8 +1820,7 @@ export class ChatPanel implements vscode.Disposable {
       // 周期 / 空闲阈值构造时取一次；设置页改动后由 updateConfig 热更新。
       intervalDays: this.maintenanceConfigNumber("memoryMaintenanceIntervalDays", 7, 1, 90),
       idleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
-      enabled: () =>
-        vscode.workspace.getConfiguration("iflow").get<boolean>("memoryMaintenanceEnabled", false),
+      enabled: () => this.readUserSetting<boolean>("memoryMaintenanceEnabled", false),
       isIdle: () => this.isMaintenanceIdle(),
       // 调度状态放扩展自己的 storage：P0 的 sidecar（meta.json）属于记忆 home 的
       // 事实统计，与 CLI 读写的记忆文件同源；「本窗口上次何时整理」是窗口级调度
@@ -3489,6 +3489,20 @@ export class ChatPanel implements vscode.Disposable {
     return { ...(this.context.globalState.get<Record<string, unknown>>(PENDING_SETTINGS_KEY) ?? {}) };
   }
 
+  /** Read one `iflow.*` setting with the stash as the top layer.
+   *
+   * A key this window does not register cannot be written (see
+   * `writeUserSetting`), so the stashed value is the only copy of the user's
+   * choice until the window reloads. Reading it back here keeps the UI from
+   * snapping to the old value and keeps the scheduler on the user's choice;
+   * once `applyPendingSettings` lands it on disk the stash is dropped and the
+   * configuration layer takes over. */
+  private readUserSetting<T>(key: string, fallback: T): T {
+    const pending = this.pendingSettingsWrites();
+    if (Object.prototype.hasOwnProperty.call(pending, key)) return pending[key] as T;
+    return vscode.workspace.getConfiguration("iflow").get<T>(key, fallback);
+  }
+
   /** Stash one write in globalState (never on disk): it is replayed by
    * `applyPendingSettings` once the key is registered again. */
   private async stashPendingSetting(key: string, value: unknown): Promise<void> {
@@ -3537,7 +3551,7 @@ export class ChatPanel implements vscode.Disposable {
       this.store.sendToast(
         "warning",
         vscode.l10n.t(
-          "设置「{0}」属于刚更新的扩展版本，当前窗口还没加载它的定义，已暂存；重新加载窗口后自动生效。",
+          "设置「{0}」属于刚更新的扩展版本，本窗口还没加载它的定义，已暂存并立即生效；请重启 VS Code（先试重新加载窗口，仍无效则完全退出再启动）。",
           label ?? key,
         ),
         {
@@ -3627,13 +3641,13 @@ export class ChatPanel implements vscode.Disposable {
 
   /** 整理策略：`report` 只出报告，`apply` 才真正写盘（默认 report）。 */
   private maintenanceStrategy(): "report" | "apply" {
-    const raw = vscode.workspace.getConfiguration("iflow").get<string>("memoryMaintenanceStrategy", "report");
+    const raw = this.readUserSetting<string>("memoryMaintenanceStrategy", "report");
     return raw === "apply" ? "apply" : "report";
   }
 
   /** 读一个记忆整理数值设置并夹到 [min, max]；非法值回落 fallback。 */
   private maintenanceConfigNumber(key: string, fallback: number, min: number, max: number): number {
-    const raw = vscode.workspace.getConfiguration("iflow").get<number>(key, fallback);
+    const raw = this.readUserSetting<number>(key, fallback);
     if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
     return Math.min(max, Math.max(min, Math.trunc(raw)));
   }
@@ -3899,13 +3913,13 @@ export class ChatPanel implements vscode.Disposable {
       autoCompressOnIdle: config.get<boolean>("autoCompressOnIdle", false),
       autoMemoryCapture: config.get<boolean>("autoMemoryCapture", true),
       autoTitle: config.get<boolean>("autoTitle", true),
-      efficiencyMode: asEfficiencyMode(config.get<string>("efficiencyMode", "steady")),
+      efficiencyMode: asEfficiencyMode(this.readUserSetting<string>("efficiencyMode", "steady")),
       memoryExtractTimeoutSeconds: this.timeoutSeconds(
         "memoryExtractTimeoutSeconds",
         MEMORY_EXTRACT_TIMEOUT_MS / 1000,
         600,
       ),
-      memoryMaintenanceEnabled: config.get<boolean>("memoryMaintenanceEnabled", false),
+      memoryMaintenanceEnabled: this.readUserSetting<boolean>("memoryMaintenanceEnabled", false),
       memoryMaintenanceIntervalDays: this.maintenanceConfigNumber("memoryMaintenanceIntervalDays", 7, 1, 90),
       memoryMaintenanceIdleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
       memoryMaintenanceGlobalTokenBudget: this.maintenanceConfigNumber(
@@ -8757,9 +8771,7 @@ export class ChatPanel implements vscode.Disposable {
    * 返回 true = 本轮追加了块（调用方据此知道这一轮带了档位规则）。
    */
   private appendEfficiencyBlock(prompt: ContentBlock[], sessionId: string): boolean {
-    const mode = asEfficiencyMode(
-      vscode.workspace.getConfiguration("iflow").get<string>("efficiencyMode", "steady"),
-    );
+    const mode = asEfficiencyMode(this.readUserSetting<string>("efficiencyMode", "steady"));
     const injected = this.injectedEfficiencyMode.get(sessionId) ?? "steady";
     if (injected === mode) return false;
     prompt.push({

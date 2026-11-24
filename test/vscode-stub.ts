@@ -171,6 +171,12 @@ export function setUnregisteredConfigKeys(keys: string[]): void {
   for (const key of keys) unregisteredConfigKeys.add(key);
 }
 
+/** Test hook: the keys currently marked unregistered, so a test-installed
+ * configuration fake can mirror the same "old manifest" view. */
+export function getUnregisteredConfigKeys(): string[] {
+  return [...unregisteredConfigKeys];
+}
+
 const configOverrides: Record<string, unknown> = {
   // Hermetic tests: panel integration tests drive real sendPrompt flows, and
   // the turn-end predictor is a direct gateway call. Keep it off unless a test
