@@ -63,6 +63,9 @@ export interface CheckpointServiceDeps {
   getStorageDir(): string;
   /** Conversation rollback reuses the panel's full delete-user-message chain. */
   deleteUserMessage(userBlockId: string, reason: "deleteMessage" | "rollback"): Promise<void>;
+  /** `iflow.*` read with the panel's pending-write stash on top (see
+   * ChatPanel.readUserSetting); absent in tests that drive the service alone. */
+  readUserSetting?: <T>(key: string, fallback: T) => T;
 }
 
 export class CheckpointService {
@@ -90,9 +93,16 @@ export class CheckpointService {
    * workspaces filled C:). Read fresh per call so the setting applies to the
    * next capture without a window reload.
    */
+  /** One `iflow.*` setting with the panel's pending-write stash on top. */
+  private setting<T>(key: string, fallback: T): T {
+    return this.deps.readUserSetting
+      ? this.deps.readUserSetting<T>(key, fallback)
+      : vscode.workspace.getConfiguration("iflow").get<T>(key, fallback);
+  }
+
   checkpointRoot(): string {
     const defaultRoot = path.join(this.deps.getStorageDir(), "checkpoints");
-    const custom = vscode.workspace.getConfiguration("iflow").get<string>("checkpointDir", "");
+    const custom = this.setting<string>("checkpointDir", "");
     return CheckpointManager.resolveCheckpointRoot(custom, this.deps.getSessionCwd(), defaultRoot);
   }
 
@@ -101,7 +111,7 @@ export class CheckpointService {
   }
 
   private checkpointSettingEnabled(): boolean {
-    return vscode.workspace.getConfiguration("iflow").get<boolean>("checkpoints", true);
+    return this.setting<boolean>("checkpoints", true);
   }
 
   /** Work tree the shadow repo mirrors = the session cwd (pitfall #8). */
@@ -119,9 +129,8 @@ export class CheckpointService {
    */
   async captureWorkspaceSnapshot(sessionId: string, text: string): Promise<string | null> {
     if (!this.checkpointSettingEnabled()) return null;
-    const cfg = vscode.workspace.getConfiguration("iflow");
-    this.checkpoints.setMaxFiles(cfg.get<number>("checkpointMaxFiles", 50_000));
-    const maxFileMB = cfg.get<number>("checkpointMaxFileMB", 300);
+    this.checkpoints.setMaxFiles(this.setting<number>("checkpointMaxFiles", 50_000));
+    const maxFileMB = this.setting<number>("checkpointMaxFileMB", 300);
     this.checkpoints.setMaxFileBytes(maxFileMB * 1024 * 1024);
     const reason = await this.checkpoints.ensureReady(sessionId, this.checkpointRoot(), this.checkpointCwd());
     if (reason) {
@@ -178,9 +187,8 @@ export class CheckpointService {
    */
   async enforceCheckpointRetention(sessionId: string): Promise<void> {
     if (this.deps.isDisposed()) return;
-    const cfg = vscode.workspace.getConfiguration("iflow");
-    const maxTurns = cfg.get<number>("checkpointMaxTurns", 0);
-    const maxSizeMB = cfg.get<number>("checkpointMaxSizeMB", 0);
+    const maxTurns = this.setting<number>("checkpointMaxTurns", 0);
+    const maxSizeMB = this.setting<number>("checkpointMaxSizeMB", 0);
     const state = this.deps.getState();
     const activeId = state.activeSessionId ?? state.sessionId;
 

@@ -340,6 +340,44 @@ describe("面板设置写入：效率档位 / 定期整理记忆", () => {
     );
   });
 
+  it("postHostSettings 读到暂存的 memoryMaintenanceEnabled: false（不弹回盘上的 true）", async () => {
+    setUnregisteredConfigKeys(["memoryMaintenanceEnabled"]);
+    // 盘上仍是上一次成功写入的 true —— 旧读法（裸 config.get）会让 UI 弹回 true。
+    writes.values["iflow.memoryMaintenanceEnabled"] = true;
+
+    await expect(p.writeUserSetting("memoryMaintenanceEnabled", false)).resolves.toBe(false);
+
+    const posted: Array<Record<string, unknown>> = [];
+    vi.spyOn(
+      panel as unknown as { postToWebview: (m: unknown) => void },
+      "postToWebview",
+    ).mockImplementation((message) => {
+      posted.push(message as Record<string, unknown>);
+    });
+    p.postHostSettings();
+
+    const hostSettings = posted.find((message) => message.type === "hostSettings");
+    expect(hostSettings?.memoryMaintenanceEnabled).toBe(false);
+  });
+
+  it("postHostSettings 正确回读暂存的 0（hasOwnProperty，不是 truthy）", async () => {
+    setUnregisteredConfigKeys(["auroraIntensity"]);
+    await expect(p.writeUserSetting("auroraIntensity", 0)).resolves.toBe(false);
+
+    const posted: Array<Record<string, unknown>> = [];
+    vi.spyOn(
+      panel as unknown as { postToWebview: (m: unknown) => void },
+      "postToWebview",
+    ).mockImplementation((message) => {
+      posted.push(message as Record<string, unknown>);
+    });
+    p.postHostSettings();
+
+    const hostSettings = posted.find((message) => message.type === "hostSettings");
+    // 默认 35：truthy 写法（`stash[key] || fallback`）会把它弹回 35。
+    expect(hostSettings?.auroraIntensity).toBe(0);
+  });
+
   it("面板写出的每个设置键都在 manifest 声明（跨文件回归锁）", () => {
     const source = readFileSync(path.join(root, "src", "panel", "panel.ts"), "utf8");
     const keys = new Set<string>();

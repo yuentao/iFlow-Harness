@@ -232,6 +232,13 @@ export interface SuperAgentHostCallbacks {
 export class SuperAgentHost {
   constructor(private readonly deps: SuperAgentHostCallbacks) {}
 
+  /** One `iflow.*` setting with the panel's pending-write stash on top. */
+  private setting<T>(key: string, fallback: T): T {
+    return this.deps.readUserSetting
+      ? this.deps.readUserSetting<T>(key, fallback)
+      : vscode.workspace.getConfiguration("iflow").get<T>(key, fallback);
+  }
+
   // --- Migrated state (整组迁移；panel 仅保留兼容访问器) -------------------
   superAgent: SuperAgentManager | null = null;
   mcpBroker: import("../acp/mcp-broker.js").McpBroker | null = null;
@@ -1005,9 +1012,7 @@ export class SuperAgentHost {
     const manager = this.deps.getSuperAgent();
     if (!manager) return;
     const maxKeep = clampMaxSuperWorktrees(
-      vscode.workspace
-        .getConfiguration("iflow")
-        .get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
+      this.setting<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
     );
     // 同步占位：延时窗口内反复恢复 / 新建会话也只排一份 sweep。manager 的
     // 同步抛错仍在调用点按原语义冒泡（由上层 catch 兜住），不推迟到定时器里。
@@ -1237,15 +1242,14 @@ export class SuperAgentHost {
       childMcpServers: () => this.mcpBroker?.sessionServers() ?? [],
       // 完全信任模式：实时读，开启后子会话直接跑在主仓工作区、不收窄工具/MCP、
       // 任务书允许 push/PR/合并。缺省 false 保持既有行为逐字节不变。
-      fullTrust: () =>
-        vscode.workspace.getConfiguration("iflow").get<boolean>("superAgent.fullTrust", false),
+      fullTrust: () => this.setting<boolean>("superAgent.fullTrust", false),
       // 子会话工具白名单：实时读配置，缺省两个数组都是 [] → 纯函数返回
       // undefined → newSession 不带 settings（既有行为逐字节不变）。MCP
       // 白名单也传进去（它的收窄在 spawn 层完成，settings 里不会多出键）。
       // 完全信任时纯函数直接返回 undefined，忽略用户配置的白名单。
       childSessionSettings: () =>
         buildChildSessionSettingsForTrust(
-          vscode.workspace.getConfiguration("iflow").get<boolean>("superAgent.fullTrust", false),
+          this.setting<boolean>("superAgent.fullTrust", false),
           vscode.workspace.getConfiguration("iflow").get<string[]>("superAgent.childToolAllowlist", []),
           vscode.workspace.getConfiguration("iflow").get<string[]>("superAgent.childMcpServerAllowlist", []),
         ),
@@ -1330,9 +1334,7 @@ export class SuperAgentHost {
       setTokensLimit: async (client, sessionId, modelId) => {
         const resolved = resolveCliTokensLimit({
           modelId,
-          overrides: parseContextWindowOverrides(
-            vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
-          ),
+          overrides: parseContextWindowOverrides(this.setting<string[]>("contextWindowOverrides", [])),
         });
         if (resolved.limit !== undefined) {
           await client.setTokensLimit(sessionId, resolved.limit);
@@ -1344,21 +1346,17 @@ export class SuperAgentHost {
       // exact same price resolution (`iflow.costTable` overrides → curated
       // table → null) so the two surfaces can never disagree.
       priceFor: (modelId) =>
-        resolveCost(modelId, parseCostTable(vscode.workspace.getConfiguration("iflow").get<string[]>("costTable", []))),
+        resolveCost(modelId, parseCostTable(this.setting<string[]>("costTable", []))),
       // Read on every integration, so flipping the setting applies to the
       // next finished child without a restart.
       integrationMode: () => {
-        const mode = vscode.workspace
-          .getConfiguration("iflow")
-          .get<string>("superAgent.integration");
+        const mode = this.setting<string>("superAgent.integration", "merge");
         return mode === "pr" || mode === "manual" ? mode : "merge";
       },
       // 同样实时读：pump 每次都取当前值，设置页改完不需要重启面板。
       maxConcurrentSessions: () =>
         clampMaxConcurrentSuperSessions(
-          vscode.workspace
-            .getConfiguration("iflow")
-            .get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
+          this.setting<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
         ),
       // 子会话的总尝试次数上限（含首次）—— `iflow.superAgent.maxAttempts`。
       //
@@ -1374,24 +1372,17 @@ export class SuperAgentHost {
         ),
       // 默认关闭 = 子会话正常完成后回收工作目录（分支一律保留）。失败/中断
       // 从不回收，重试要复用现场。每次实时读，改完对下一个结束的子会话生效。
-      keepWorktree: () =>
-        vscode.workspace
-          .getConfiguration("iflow")
-          .get<boolean>("superAgent.keepWorktree", false),
+      keepWorktree: () => this.setting<boolean>("superAgent.keepWorktree", false),
       // 效率开关：turbo 时子会话任务书前置速推规则，与主会话同档。实时读，
       // 改完对下一次派发生效；未知值按 steady（不注入）。
       efficiencyMode: () => {
-        const mode = this.deps.readUserSetting
-          ? this.deps.readUserSetting<string>("efficiencyMode", "steady")
-          : vscode.workspace.getConfiguration("iflow").get<string>("efficiencyMode");
+        const mode = this.setting<string>("efficiencyMode", "steady");
         return mode === "turbo" ? "turbo" : "steady";
       },
       // 磁盘上最多保留多少个已结束子会话的工作目录（0 = 不限制）。
       maxWorktrees: () =>
         clampMaxSuperWorktrees(
-          vscode.workspace
-            .getConfiguration("iflow")
-            .get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
+          this.setting<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
         ),
       log: this.log,
     });
@@ -1467,7 +1458,7 @@ export class SuperAgentHost {
     callbacks: AcpClientCallbacks;
   }): Promise<AcpClient> {
     const entry = this.resolveEntry();
-    const nodePathConfigured = vscode.workspace.getConfiguration("iflow").get<string>("nodePath");
+    const nodePathConfigured = this.setting<string>("nodePath", "");
     const locatedNode = nodePathConfigured ? null : await locateNodeExecutable();
     const node = nodePathConfigured || locatedNode || process.execPath;
     const runtime = await concealNodeExecutable(node, this.context.globalStorageUri.fsPath);
@@ -1485,9 +1476,7 @@ export class SuperAgentHost {
     // 与启动失败时的 toast 一起如实暴露，绝不伪造共享。
     const broker = await this.ensureMcpBroker();
     const brokerNames = broker?.names() ?? [];
-    const fullTrust = vscode.workspace
-      .getConfiguration("iflow")
-      .get<boolean>("superAgent.fullTrust", false);
+    const fullTrust = this.setting<boolean>("superAgent.fullTrust", false);
     const mcpAllowlist = vscode.workspace
       .getConfiguration("iflow")
       .get<string[]>("superAgent.childMcpServerAllowlist", []);
@@ -1516,9 +1505,7 @@ export class SuperAgentHost {
       this.deps.tokensLimitEnv?.() ??
       tokensLimitEnvFromSettings({
         modelId: this.store.getState().currentModelId,
-        overrides: parseContextWindowOverrides(
-          vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
-        ),
+        overrides: parseContextWindowOverrides(this.setting<string[]>("contextWindowOverrides", [])),
       });
     const systemPromptFile = await this.materializeSystemPrompt("child");
     const spawnEnv: NodeJS.ProcessEnv = {
@@ -1768,9 +1755,7 @@ export class SuperAgentHost {
     }
     // 提示里报实际生效的上限（设置页可调），而不是写死的常量。
     const concurrency = clampMaxConcurrentSuperSessions(
-      vscode.workspace
-        .getConfiguration("iflow")
-        .get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
+      this.setting<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
     );
     this.store.sendToast(
       "info",

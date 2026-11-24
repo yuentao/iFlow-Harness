@@ -31,7 +31,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // iflow.autoOpenPanel: open the chat tab on window start. The connect
   // inside openEditorTab is idempotent with warmStart's in-flight ensureClient.
-  if (vscode.workspace.getConfiguration("iflow").get<boolean>("autoOpenPanel", false)) {
+  if (chatPanel.readHostSetting<boolean>("autoOpenPanel", false)) {
     chatPanel.openEditorTab();
   }
 
