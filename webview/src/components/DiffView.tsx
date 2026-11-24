@@ -484,7 +484,7 @@ export function DiffView({
               title={t("把标记为回退的改动恢复成修改前的内容，其余改动保留")}
               onClick={() => hunkActions?.onApply([...keep])}
             >
-              {t("应用（保留 {0} · 回退 {1}）", keepCount, revertCount)}
+              {t("应用标记：保留 {0} 处，回退 {1} 处", keepCount, revertCount)}
             </Button>
           ) : (
             <button
@@ -493,7 +493,7 @@ export function DiffView({
               title={t("把标记为回退的改动恢复成修改前的内容，其余改动保留")}
               onClick={() => hunkActions?.onApply([...keep])}
             >
-              <Check className="size-3" /> {t("应用（保留 {0} · 回退 {1}）", keepCount, revertCount)}
+              <Check className="size-3" /> {t("应用标记：保留 {0} 处，回退 {1} 处", keepCount, revertCount)}
             </button>
           )}
           {dirty && (

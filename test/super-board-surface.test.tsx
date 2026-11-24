@@ -52,7 +52,7 @@ const translateState = vi.hoisted(() => ({
     失败: "Failed",
     合并冲突: "Merge conflict",
     在等你回答: "Waiting for you",
-    "视窗外还有 {0} 个待处理步骤：{1}": "{0} pending step(s) off-screen: {1}",
+    "下面还有 {0} 个步骤没显示：{1}": "{0} step(s) below are not shown: {1}",
   } as Record<string, string>,
 }));
 
@@ -269,7 +269,7 @@ describe("Super Agent 看板表面材质", () => {
   });
 });
 
-describe("Super Agent 看板阶段轨", () => {
+describe("Super Agent 看板当前阶段", () => {
   /** 行触发器（状态 + 标题 + 耗时那一行）。 */
   function rowButton(title = "修复登录跳转"): HTMLButtonElement {
     const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
@@ -279,16 +279,16 @@ describe("Super Agent 看板阶段轨", () => {
     return el!;
   }
 
-  /** 展开某一行（阶段轨只在行展开后出现）。 */
+  /** 展开某一行（当前阶段只在行展开后出现）。 */
   function openRow(title = "修复登录跳转"): void {
     act(() => rowButton(title).click());
   }
 
   function rails(): NodeListOf<HTMLElement> {
-    return document.body.querySelectorAll<HTMLElement>('[role="group"][aria-label^="阶段轨："]');
+    return document.body.querySelectorAll<HTMLElement>('[role="group"][aria-label^="当前阶段："]');
   }
 
-  /** 阶段轨元素：只在展开后出现，且恰好一个。 */
+  /** 当前阶段元素：只在展开后出现，且恰好一个。 */
   function rail(): HTMLElement {
     const all = rails();
     expect(all).toHaveLength(1);
@@ -305,16 +305,16 @@ describe("Super Agent 看板阶段轨", () => {
     return Array.from(rail().querySelectorAll<HTMLElement>("[data-timeline-label]"));
   }
 
-  it("折叠行只报状态，阶段轨只在展开后出现一次", () => {
+  it("折叠行只报状态，当前阶段只在展开后出现一次", () => {
     render([session({ startedAt: 2000, updatedAt: 3000 })]);
     expand();
 
-    // 折叠：单行只有状态 + 标题 + 耗时，没有任何阶段轨。
+    // 折叠：单行只有状态 + 标题 + 耗时，没有任何当前阶段。
     expect(rails()).toHaveLength(0);
     expect(rowButton().textContent).toContain("运行中");
 
     openRow();
-    // 展开：阶段轨恰好一条（不再渲染两条，也不重复状态 chip）。
+    // 展开：当前阶段恰好一条（不再渲染两条，也不重复状态 chip）。
     expect(rails()).toHaveLength(1);
     expect(rowButton().textContent).toContain("运行中");
   });
@@ -324,7 +324,7 @@ describe("Super Agent 看板阶段轨", () => {
     expand();
     openRow();
 
-    const rail = document.body.querySelector<HTMLElement>('[role="group"][aria-label^="阶段轨："]');
+    const rail = document.body.querySelector<HTMLElement>('[role="group"][aria-label^="当前阶段："]');
     expect(rail).toBeTruthy();
     // 派发（createdAt 恒有）+ 启动（startedAt 存在）——没有「收尾」「完成」这种
     // 尚未发生的占位节点。
@@ -373,7 +373,7 @@ describe("Super Agent 看板阶段轨", () => {
       }),
     ]);
     // 有子会话在等应答时看板会自行展开（宿主 useEffect），但行详情仍需手动打开
-    // ——阶段轨只在展开行里出现。
+    // ——当前阶段只在展开行里出现。
     openRow();
 
     const described = rail().getAttribute("aria-label")!;
@@ -465,7 +465,7 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
   ];
 
   function rail(): HTMLElement {
-    const all = document.body.querySelectorAll<HTMLElement>('[role="group"][aria-label^="阶段轨："]');
+    const all = document.body.querySelectorAll<HTMLElement>('[role="group"][aria-label^="当前阶段："]');
     expect(all).toHaveLength(1);
     return all[0]!;
   }
@@ -732,7 +732,7 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
         // 看板的展开状态跨 render 保留：第二次迭代时它已经是展开的，再点一次
         // 会把它折回去。
         if (!document.body.querySelector('[role="region"][aria-label="超流体"]')) expand();
-        if (!document.body.querySelector('[role="group"][aria-label^="阶段轨："]')) openTodoRow();
+        if (!document.body.querySelector('[role="group"][aria-label^="当前阶段："]')) openTodoRow();
         remeasure();
         const track = rail().querySelector<HTMLElement>("[data-timeline-track]")!;
         // 渐隐带内边距写在轨道内联样式上（与几何模型同源）。
@@ -768,7 +768,7 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
           'button[aria-label="展开已完成的超流体"]',
         );
         if (folded) act(() => folded.click());
-        if (!document.body.querySelector('[role="group"][aria-label^="阶段轨："]')) {
+        if (!document.body.querySelector('[role="group"][aria-label^="当前阶段："]')) {
           const row = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
             (b.textContent ?? "").includes("修复登录跳转"),
           );
@@ -832,8 +832,8 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
       expect(hint).toBeTruthy();
       // 提示可辨识：警告形状图标 + 数量 + title 说明「还有 N 个待处理步骤」。
       expect(hint!.querySelector("svg")).toBeTruthy();
-      expect(hint!.getAttribute("title")).toContain("待处理步骤");
-      expect(hint!.getAttribute("aria-label")).toContain("待处理步骤");
+      expect(hint!.getAttribute("title")).toContain("个步骤没显示");
+      expect(hint!.getAttribute("aria-label")).toContain("个步骤没显示");
       expect(Number(hint!.textContent)).toBeGreaterThanOrEqual(1);
 
       // 点击只做平移：轨道位移发生变化，且没有新增弹窗 / 菜单。
@@ -887,10 +887,10 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
       expect(title).toContain("Failed");
       expect(title).toContain("Merge conflict");
       // 标题模板本身也是英文；中文状态词一个都不该漏出来。
-      expect(title).toContain("off-screen");
+      expect(title).toContain("below are not shown");
       expect(title).not.toContain("失败");
       expect(title).not.toContain("合并冲突");
-      expect(title).not.toContain("待处理步骤");
+      expect(title).not.toContain("个步骤没显示");
     } finally {
       restore();
     }
@@ -1784,7 +1784,7 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
     // 状态 chip 已经写着「排队中」，再叠一个警告色降级 chip 只会误读成
     // 「独立工作目录创建失败」——占位态不得出现。
     expect(document.body.textContent).toContain("排队中");
-    expect(document.body.textContent).not.toContain("只隔离了目录");
+    expect(document.body.textContent).not.toContain("只隔离了文件目录（改动直接落在当前分支）");
     // 隔离行不能渲染空字符串：宿主给的中文占位说明要能看到。
     expect(document.body.textContent).toContain("正在准备隔离环境");
   });
@@ -1802,7 +1802,7 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
     expand();
     act(() => rowTrigger().click());
 
-    expect(document.body.textContent).toContain("只隔离了目录");
+    expect(document.body.textContent).toContain("只隔离了文件目录（改动直接落在当前分支）");
     // 真降级时定位文本仍是那个目录，而不是 note。
     expect(document.body.textContent).toContain("/tmp/fallback");
   });

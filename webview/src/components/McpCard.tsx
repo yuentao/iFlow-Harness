@@ -705,7 +705,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                                           const dotTitle =
                                             view === undefined
                                               ? status === null
-                                                ? t("无法获取连接状态（内核未连接，或没有开启状态上报）")
+                                                ? t("暂时读不到连接状态：后台服务未连接，或该功能未开启。点「刷新」重试。")
                                                 : t("连接状态读取中…")
                                               : statusLabel(view, discovering) + (view.error ? ` — ${view.error}` : "");                return (
                   <div key={i} className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card">
@@ -820,8 +820,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                   "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后重启内核，新建的超流体会通过共享代理使用这些 server。",
                 )
               : t(
-                  "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的超流体会通过共享代理使用这些 server。",
-                )}
+                                        "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的超流体会通过宿主代理（broker）使用这些 server。",                )}
           </Hint>
         </>
       )}
@@ -981,7 +980,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                               </pre>
                             )}
                             {tool.schemaOmitted && (
-                              <div className="mt-1 text-ui-caption text-muted-foreground/80">{t("参数结构太大，已省略")}</div>
+                              <div className="mt-1 text-ui-caption text-muted-foreground/80">{t("这个工具的参数字段太多，界面已省略显示（不影响模型调用）")}</div>
                             )}
                           </div>
                         ))}

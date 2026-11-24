@@ -250,7 +250,7 @@ function usageNumberLabel(src: UsageNumberSource | null): string {
     case "transcript-estimate":
       return t("转录估算");
     case "lower-bound":
-      return t("下界");
+      return t("最低估算");
     default:
       return t("来源未知");
   }
@@ -323,7 +323,7 @@ function usageTooltip(u: Usage): string {
   const breakdownLine =
     u.bdPrefill > 0
       ? t(
-          "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3} · 固定开销 {4}",
+          "用户 {0} tokens，助手 {1} tokens，工具 {2} tokens，思考 {3} tokens，固定开销 {4} tokens",
           u.bdUser.toLocaleString(),
           u.bdAssistant.toLocaleString(),
           u.bdTool.toLocaleString(),
@@ -331,7 +331,7 @@ function usageTooltip(u: Usage): string {
           u.bdPrefill.toLocaleString(),
         )
       : t(
-          "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}",
+          "用户 {0} tokens，助手 {1} tokens，工具 {2} tokens，思考 {3} tokens",
           u.bdUser.toLocaleString(),
           u.bdAssistant.toLocaleString(),
           u.bdTool.toLocaleString(),
@@ -342,7 +342,7 @@ function usageTooltip(u: Usage): string {
   // T-4：ACP wire 不带输入/输出拆分，拆分永远是转录估算；按 sources.split
   // 如实标注，缺失就标「来源未知」而不是冒称权威。
   const splitLine = t(
-    "输入 {0}{1} tokens · 输出 {2}{3} tokens（拆分来源：{4}）",
+    "输入 {0}{1} tokens，输出 {2}{3} tokens（拆分来源：{4}）",
     usageNumberPrefix(u.sourceSplit),
     u.inputTokens.toLocaleString(),
     usageNumberPrefix(u.sourceSplit),
@@ -352,7 +352,7 @@ function usageTooltip(u: Usage): string {
   // T-2：一行说清 token 从哪来、单价从哪来、什么时候采集、引用了哪个链接。
   // 每个分量独立处理缺失，绝不拼出一个「看起来很准」的假来源。
   const provenanceLine = t(
-    "数据出处：token {0} · 单价 {1} · 采集 {2} · {3}",
+    "数据出处：token 来自{0}，单价来自{1}，采集时间 {2}，{3}",
     usageNumberLabel(u.sourceContextUsed),
     modelMetadataLabel(u.sourceCost),
     capturedAtLabel(u.capturedAt),
@@ -996,7 +996,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   );
   const allCommands = useMemo(
     () => [
-      { name: MEMORY_CURATE_COMMAND, description: t("立即整理记忆：去重、合并、归档低价值条目") },
+      { name: MEMORY_CURATE_COMMAND, description: t("立即整理记忆：去重、合并，把用处不大的内容移出常用记忆（不再每轮发送）") },
       ...commands,
       ...skillCommands,
     ],

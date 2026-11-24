@@ -61,13 +61,13 @@ describe("ErrorBoundary", () => {
   it("renders children normally when nothing throws", () => {
     render(<Flaky boom={false} resetKey={1} />);
     expect(container.textContent).toContain("ok");
-    expect(container.textContent).not.toContain("消息区渲染异常");
+    expect(container.textContent).not.toContain("这段内容显示不出来");
   });
 
   it("catches a render-phase throw and shows the fallback instead of unmounting", () => {
     render(<Flaky boom={true} resetKey={1} />);
     // Fallback is mounted in place of the throwing subtree…
-    expect(container.textContent).toContain("消息区渲染异常");
+    expect(container.textContent).toContain("这段内容显示不出来");
     expect(container.textContent).not.toContain("ok");
     // …and the stack is logged for root-cause follow-up (webview devtools).
     const logged = consoleError.mock.calls.map((c) => String(c[0]));
@@ -80,17 +80,17 @@ describe("ErrorBoundary", () => {
         <ThrowsOnce />
       </ErrorBoundary>,
     );
-    expect(container.textContent).toContain("界面渲染异常");
+    expect(container.textContent).toContain("界面出错了");
   });
 
   it("recovers via the 重试 button once the child stops throwing", () => {
     render(<Flaky boom={true} resetKey={1} />);
-    expect(container.textContent).toContain("消息区渲染异常");
+    expect(container.textContent).toContain("这段内容显示不出来");
 
     // Host pushes a new snapshot: the throwing chunk is gone (boom=false).
     // The boundary still shows the fallback until retried.
     render(<Flaky boom={false} resetKey={1} />);
-    expect(container.textContent).toContain("消息区渲染异常");
+    expect(container.textContent).toContain("这段内容显示不出来");
 
     const retry = [...container.querySelectorAll("button")].find((b) =>
       b.textContent?.includes("重试"),
@@ -98,7 +98,7 @@ describe("ErrorBoundary", () => {
     expect(retry).toBeDefined();
     act(() => retry!.click());
     expect(container.textContent).toContain("ok");
-    expect(container.textContent).not.toContain("消息区渲染异常");
+    expect(container.textContent).not.toContain("这段内容显示不出来");
   });
 
   it("wears the surface tone on the retry button", () => {
@@ -126,22 +126,22 @@ describe("ErrorBoundary", () => {
 
   it("auto-retries when resetKey changes (streaming self-heal)", () => {
     render(<Flaky boom={true} resetKey={1} />);
-    expect(container.textContent).toContain("消息区渲染异常");
+    expect(container.textContent).toContain("这段内容显示不出来");
 
     // Next blockPatch: new state reference (resetKey bumps) AND the bad chunk
     // is gone — componentDidUpdate must clear the error and re-render children.
     render(<Flaky boom={false} resetKey={2} />);
     expect(container.textContent).toContain("ok");
-    expect(container.textContent).not.toContain("消息区渲染异常");
+    expect(container.textContent).not.toContain("这段内容显示不出来");
   });
 
   it("re-catches when the retry still throws (no crash loop past the boundary)", () => {
     render(<Flaky boom={true} resetKey={1} />);
-    expect(container.textContent).toContain("消息区渲染异常");
+    expect(container.textContent).toContain("这段内容显示不出来");
 
     // resetKey bumps but the content still throws → fallback stays mounted.
     render(<Flaky boom={true} resetKey={2} />);
-    expect(container.textContent).toContain("消息区渲染异常");
+    expect(container.textContent).toContain("这段内容显示不出来");
   });
 
   it("a state update inside a healthy subtree is unaffected by the boundary", () => {

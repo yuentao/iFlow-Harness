@@ -430,7 +430,7 @@ function renderApiTab() {
 it("shows model metadata groups in the account tab", () => {
   renderApiTab();
   expect(container.textContent).toContain("模型元数据");
-  expect(container.textContent).toContain("上下文窗口覆写");
+  expect(container.textContent).toContain("自定义上下文窗口");
   expect(container.textContent).toContain("思考模型规则");
 });
 

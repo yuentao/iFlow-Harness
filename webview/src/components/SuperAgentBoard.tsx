@@ -766,7 +766,7 @@ function SuperTimeline({
   return (
     <div
       role="group"
-      aria-label={t("阶段轨：{0}", described)}
+      aria-label={t("当前阶段：{0}", described)}
       title={described}
       className={`flex min-w-0 flex-col gap-0.5 ${className}`}
     >
@@ -875,7 +875,7 @@ function SuperTimeline({
             const labels = hint.labels
               .map((label) => (label.rawLabel ? label.label : t(label.label)))
               .join("、");
-            const title = t("视窗外还有 {0} 个待处理步骤：{1}", hint.count, labels);
+            const title = t("下面还有 {0} 个步骤没显示：{1}", hint.count, labels);
             return (
               <Button
                 key={hint.side}
@@ -2038,7 +2038,7 @@ export function SuperAgentBoard({
                 >
                   <span className="font-medium text-foreground">{t("超流体合计开销")}</span>
                   <span className="tabular-nums">
-                    {t("输入 {0} · 输出 {1}", formatTokens(totals.input), formatTokens(totals.output))}
+                    {t("输入 {0} tokens · 输出 {1} tokens", formatTokens(totals.input), formatTokens(totals.output))}
                   </span>
                   {totals.estimatedCost !== null && (
                     <span className="tabular-nums">{formatCostPrecise(totals.estimatedCost)}</span>
@@ -2839,7 +2839,7 @@ function SuperSessionRow({
                 an actual fallback directory earns the chip. */}
             {session.isolation.kind === "directory" && session.isolation.path !== "" && (
               <Chip tone="warning" title={session.isolation.note}>
-                {t("只隔离了目录")}
+                {t("只隔离了文件目录（改动直接落在当前分支）")}
               </Chip>
             )}
             {/* A merge child runs in the MAIN workspace: no worktree, no

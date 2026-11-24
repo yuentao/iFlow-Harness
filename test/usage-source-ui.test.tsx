@@ -134,12 +134,12 @@ describe("成本来源前缀（T-2）", () => {
 describe("输入/输出拆分来源（T-4）", () => {
   it("split=transcript-estimate → 两项都标 ≈ 且注明来源", () => {
     render(withSources({ split: "transcript-estimate" }));
-    expect(chipTitle()).toContain(`输入 ≈${INPUT} tokens · 输出 ≈${OUTPUT} tokens（拆分来源：转录估算）`);
+    expect(chipTitle()).toContain(`输入 ≈${INPUT} tokens，输出 ≈${OUTPUT} tokens（拆分来源：转录估算）`);
   });
 
   it("split 缺失 → 标 ? 且注明来源未知", () => {
     render(usage());
-    expect(chipTitle()).toContain(`输入 ?${INPUT} tokens · 输出 ?${OUTPUT} tokens（拆分来源：来源未知）`);
+    expect(chipTitle()).toContain(`输入 ?${INPUT} tokens，输出 ?${OUTPUT} tokens（拆分来源：来源未知）`);
   });
 });
 
@@ -152,7 +152,7 @@ describe("tooltip 数据出处行（T-2 + 来源缺失纪律）", () => {
         { capturedAt: at, sourceUrl: url },
       ),
     );
-    expect(chipTitle()).toContain("数据出处：token 内核上报 · 单价 AI 补充 · 采集 ");
+    expect(chipTitle()).toContain("数据出处：token 来自内核上报，单价来自AI 补充，采集时间 ");
     expect(chipTitle()).toContain(`来源链接：${url}`);
     expect(chipTitle()).not.toContain("来源未知");
     expect(chipTitle()).not.toContain("无来源链接");
@@ -161,7 +161,7 @@ describe("tooltip 数据出处行（T-2 + 来源缺失纪律）", () => {
 
   it("sources、capturedAt、sourceUrl 全缺 → 各项如实显示「来源未知 / 无来源链接」", () => {
     render(usage());
-    expect(chipTitle()).toContain("数据出处：token 来源未知 · 单价 来源未知 · 采集 来源未知 · 无来源链接");
+    expect(chipTitle()).toContain("数据出处：token 来自来源未知，单价来自来源未知，采集时间 来源未知，无来源链接");
     expect(chipTitle()).toContain("拆分来源：来源未知");
     expect(chipTitle()).toContain("窗口来源：来源未知");
     // 绝不出现任何「权威 / 内核上报」字样，更没有重新推算的时间戳。
@@ -171,15 +171,15 @@ describe("tooltip 数据出处行（T-2 + 来源缺失纪律）", () => {
 
   it("单个来源缺失不污染其它已填来源", () => {
     render(withSources({ contextUsed: "lower-bound" }, { capturedAt: at }));
-    expect(chipTitle()).toContain("数据出处：token 下界 · 单价 来源未知 · 采集 ");
-    expect(chipTitle()).not.toContain("数据出处：token 来源未知");
+    expect(chipTitle()).toContain("数据出处：token 来自最低估算，单价来自来源未知，采集时间 ");
+    expect(chipTitle()).not.toContain("数据出处：token 来自来源未知");
     expect(chipTitle()).toContain("无来源链接");
   });
 
   it("capturedAt 缺失但 sourceUrl 存在 → 采集说来源未知、链接照常展示", () => {
     const url = "https://example.com/price";
     render(withSources({ cost: "user" }, { sourceUrl: url }));
-    expect(chipTitle()).toContain("采集 来源未知");
+    expect(chipTitle()).toContain("采集时间 来源未知");
     expect(chipTitle()).toContain(`来源链接：${url}`);
   });
 });
@@ -187,7 +187,7 @@ describe("tooltip 数据出处行（T-2 + 来源缺失纪律）", () => {
 describe("无占用窗口的旧宿主形态", () => {
   it("contextWindow=null 时仍显示来源行，不因缺窗口冒称权威", () => {
     render(withSources(undefined, { contextWindow: null }));
-    expect(chipTitle()).toContain("数据出处：token 来源未知");
+    expect(chipTitle()).toContain("数据出处：token 来自来源未知");
     expect(chipTitle()).toContain("拆分来源：来源未知");
     // 百分比不渲染，但成本前缀与来源披露依旧在。
     expect(chipText()).not.toContain("44%");

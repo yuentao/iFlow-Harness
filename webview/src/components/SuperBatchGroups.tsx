@@ -87,7 +87,7 @@ function UsageSummary({
   return (
     <span
       className={`shrink-0 text-ui-caption tabular-nums text-muted-foreground${className ? ` ${className}` : ""}`}
-      title={t("输入 {0} · 输出 {1}", formatBoardTokens(usage.input), formatBoardTokens(usage.output))}
+      title={t("输入 {0} tokens · 输出 {1} tokens", formatBoardTokens(usage.input), formatBoardTokens(usage.output))}
     >
       ↑{formatBoardTokens(usage.input)} ↓{formatBoardTokens(usage.output)}
       {usage.estimatedCost !== null && (

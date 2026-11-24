@@ -68,7 +68,7 @@ export class ErrorBoundary extends Component<Props, State> {
       return (
         <div className="flex h-screen flex-col items-center justify-center gap-3 px-6 text-center">
           <AlertTriangle className="size-7 text-warning" />
-          <div className="text-ui-title font-semibold text-foreground">{t("界面渲染异常")}</div>
+          <div className="text-ui-title font-semibold text-foreground">{t("界面出错了")}</div>
           <p className="max-w-[320px] text-ui-caption leading-relaxed text-muted-foreground">
             {t("重新载入面板即可恢复；也可以直接重试。")}
           </p>
@@ -80,7 +80,7 @@ export class ErrorBoundary extends Component<Props, State> {
       <div className="relative min-h-0 flex-1">
         <div className="stream-in mx-auto mt-6 flex max-w-[420px] flex-col items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-5 text-center">
           <AlertTriangle className={`${ICON_DISPLAY} text-warning`} />
-          <div className="text-ui-body font-semibold text-foreground">{t("消息区渲染异常")}</div>
+          <div className="text-ui-body font-semibold text-foreground">{t("这段内容显示不出来")}</div>
           <p className="text-ui-caption leading-relaxed text-muted-foreground">
             {t("这段内容没能显示出来，下次更新时会自动重试。")}
           </p>

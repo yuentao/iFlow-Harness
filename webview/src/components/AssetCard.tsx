@@ -692,7 +692,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
           {editLoading !== null ? (
             <div className="py-3 text-center text-ui-label text-muted-foreground">{t("读取中…")}</div>
           ) : (
-            <Field label={t("文件内容（Markdown 正文与头部配置）")}>
+            <Field label={t("文件内容（Markdown 正文 + 开头的配置区）")}>
               <TextArea
                 mono
                 className="min-h-40 text-ui-label leading-relaxed"

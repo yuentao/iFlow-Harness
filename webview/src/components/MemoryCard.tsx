@@ -202,7 +202,7 @@ function MemoryFileCard({
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption text-muted-foreground">
         <span>{file.exists ? t("{0} 字节", file.bytes) : t("还没有创建")}</span>
         {file.updatedAt && <span>{t("更新于 {0}", formatTime(file.updatedAt))}</span>}
-        <span title={t("约 {0} tokens（BPE 估算）", file.tokens)}>≈{fmtTokens(file.tokens)} tokens</span>
+        <span title={t("约 {0} tokens（按文本长度估算，仅供参考）", file.tokens)}>≈{fmtTokens(file.tokens)} tokens</span>
       </div>
       {factsSection}
     </div>
@@ -650,7 +650,7 @@ export function MemorySection({
           variant="secondary"
           icon={curating ? <Loader2 className={`${ICON_INLINE} animate-spin`} /> : <Sparkles className={ICON_INLINE} />}
           disabled={busy || saving || curating}
-          title={t("立即对记忆托管区块去重、合并、归档低价值条目")}
+          title={t("立即整理自动维护的记忆内容：去重、合并，把用处不大的内容移出常用记忆（不再每轮发送）")}
           onClick={curateNow}
         >
           {curating ? t("整理中…") : t("整理记忆")}
@@ -872,7 +872,7 @@ export function MemorySection({
                       </Chip>
                       <span
                         className="shrink-0 font-mono text-ui-caption text-muted-foreground"
-                        title={t("约 {0} tokens（BPE 估算）", doc.tokens)}
+                        title={t("约 {0} tokens（按文本长度估算，仅供参考）", doc.tokens)}
                       >
                         ≈{fmtTokens(doc.tokens)} tokens
                       </span>
