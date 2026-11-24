@@ -2490,16 +2490,24 @@ export class QqHost {
     const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
     await io.deleteSecret(QQBOT_APP_ID_SECRET_KEY);
     await io.deleteSecret(QQ_SECRET_KEYS.appSecret);
+    let writeError: string | null = null;
     try {
       await applyQqSettingsPatch(io, { allowedUsers: [], enabled: false });
     } catch (error) {
-      // writeAll 走 Workspace 作用域：没打开工作区时会抛错。凭据已经删除，
-      // 这里只记日志 —— 不谎报设置已落盘。
-      this.log.warn(`QQ 设置写入失败：${errorMessage(error)}`);
+      // 凭据已经删除，但设置没落盘就必须如实告诉用户（调用方按 ok=false
+      // 弹 warning toast）——只记日志会让用户以为解绑已完全生效。
+      writeError = errorMessage(error);
+      this.log.warn(`QQ 设置写入失败：${writeError}`);
     }
     if (this.qq) this.qq.config.allowedUsers = [];
     await this.stopQq();
     await this.deps.pushQqSettings();
+    if (writeError !== null) {
+      return {
+        ok: false,
+        message: vscode.l10n.t("已解除绑定，但设置写入失败：{0}（{1}）", "QQ 设置", writeError),
+      };
+    }
     return { ok: true, message: "已解除绑定并清除本地授权" };
   }
 
@@ -2517,13 +2525,13 @@ export class QqHost {
     try {
       result = await applyQqSettingsPatch(io, patch);
     } catch (error) {
-      // writeAll 走 Workspace 作用域：没打开工作区时会抛错。与
-      // unbindQqAccount 一致如实提示，绝不让它冒泡出 handleWebviewMessage
-      // 变成一次静默失败（用户以为设置生效了，实际一个字都没落盘）。
+      // 写入目标是 Global，没打开工作区也能落盘；这里只剩真实的环境侧失败
+      // （settings.json 只读 / JSON 损坏 / Settings Sync 冲突）。与 unbind
+      // 路径同一风格，把真实错误带给用户，绝不让它变成一次静默失败。
       this.log.warn(`QQ 设置写入失败：${errorMessage(error)}`);
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("无法写入 QQ 设置：{0}（请在已打开的工作区中设置）", errorMessage(error)),
+        vscode.l10n.t("设置写入失败：{0}（{1}）", "QQ 设置", errorMessage(error)),
       );
       return;
     }

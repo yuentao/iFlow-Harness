@@ -32,11 +32,16 @@ export interface ContextWindowOverridesHost {
   postToWebview(message: unknown): void;
   /** 当前会话模型 id；没有模型时返回 null。 */
   currentModelId(): string | null;
+  /** 读一条面板设置（带暂存覆盖层，见 ChatPanel.readUserSetting）；
+   * 缺省时退回配置直读（独立构造 host 的测试）。 */
+  readUserSetting?: <T>(key: string, fallback: T) => T;
 }
 
 /** 读当前覆写表（原始行文本，顺序即用户看到的顺序）。 */
-function readContextWindowOverrides(): string[] {
-  const raw = vscode.workspace.getConfiguration("iflow").get<unknown>(CONTEXT_WINDOW_OVERRIDES_KEY, []);
+function readContextWindowOverrides(host: ContextWindowOverridesHost): string[] {
+  const raw = host.readUserSetting
+    ? host.readUserSetting<unknown>(CONTEXT_WINDOW_OVERRIDES_KEY, [])
+    : vscode.workspace.getConfiguration("iflow").get<unknown>(CONTEXT_WINDOW_OVERRIDES_KEY, []);
   return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
 }
 
@@ -61,11 +66,14 @@ function builtinWindowFor(modelId: string | null | undefined): number | undefine
 }
 
 /** 组装要发给 webview 的载荷。 */
-function buildContextWindowOverridesUi(currentModelId?: string | null): ContextWindowOverridesUi {
+function buildContextWindowOverridesUi(
+  host: ContextWindowOverridesHost,
+  currentModelId?: string | null,
+): ContextWindowOverridesUi {
   const id = currentModelId ?? undefined;
   const builtinWindow = builtinWindowFor(id);
   return {
-    overrides: readContextWindowOverrides(),
+    overrides: readContextWindowOverrides(host),
     ...(id ? { currentModelId: id } : {}),
     ...(builtinWindow !== undefined ? { builtinWindow } : {}),
   };
@@ -75,7 +83,7 @@ function buildContextWindowOverridesUi(currentModelId?: string | null): ContextW
 export function postContextWindowOverrides(host: ContextWindowOverridesHost): void {
   host.postToWebview({
     type: "contextWindowOverrides",
-    ...buildContextWindowOverridesUi(host.currentModelId()),
+    ...buildContextWindowOverridesUi(host, host.currentModelId()),
   });
 }
 

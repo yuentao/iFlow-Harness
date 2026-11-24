@@ -86,8 +86,10 @@ import { SuperAgentHost } from "./super-agent-host.js";
 import {
   clampMaxConcurrentSuperSessions,
   clampMaxSuperWorktrees,
+  clampSuperMaxAttempts,
   DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   DEFAULT_MAX_SUPER_WORKTREES,
+  DEFAULT_SUPER_MAX_ATTEMPTS,
   hasActiveSuperSession,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
@@ -711,6 +713,11 @@ const ONBOARDING_DISMISSED_KEY = "iflow.onboardingDismissed";
 /** globalState key: cross-window cache of the resolved node runtime
  * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
+/** globalState key: user-settings writes stashed because this window's
+ * configuration registry has not loaded their declaration yet (an in-place
+ * extension upgrade keeps the renderer on the previous manifest). Replayed by
+ * `applyPendingSettings` once the reloaded window knows the key again. */
+const PENDING_SETTINGS_KEY = "iflow.pendingSettingsWrites";
 /** `iflow.uiFontSize` presets — kept in sync with shared/messages.ts. */
 const UI_FONT_SIZES = ["compact", "standard", "large"] as const;
 /** `iflow.uiDensity` presets — kept in sync with shared/messages.ts. */
@@ -1161,6 +1168,7 @@ export class ChatPanel implements vscode.Disposable {
       // Same effective context window as the main session — ONE computation
       // site (the panel owns the cold-start lookup-key fallbacks).
       tokensLimitEnv: () => this.tokensLimitEnv(),
+      readUserSetting: (key, fallback) => this.readUserSetting(key, fallback),
       chunkText: (content) => ChatPanel.chunkText(content),
       sendPrompt: (text, images, files, contexts, options) => this.sendPrompt(text, images, files, contexts, options),
     });
@@ -1775,8 +1783,7 @@ export class ChatPanel implements vscode.Disposable {
       getWorkspaceRoots: () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
       getContextFileName: () =>
         readCliSettings(path.join(os.homedir(), ".iflow", "settings.json"))?.contextFileName ?? null,
-      isAutoCaptureEnabled: () =>
-        vscode.workspace.getConfiguration("iflow").get<boolean>("autoMemoryCapture", true),
+      isAutoCaptureEnabled: () => this.readUserSetting<boolean>("autoMemoryCapture", true),
       getSessionId: () => this.store.getState().sessionId,
       scanWorkspace: () => this.scanKnowledgeWorkspace(),
       readWorkspaceFile: (file) => this.readKnowledgeFile(file),
@@ -1814,8 +1821,7 @@ export class ChatPanel implements vscode.Disposable {
       // 周期 / 空闲阈值构造时取一次；设置页改动后由 updateConfig 热更新。
       intervalDays: this.maintenanceConfigNumber("memoryMaintenanceIntervalDays", 7, 1, 90),
       idleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
-      enabled: () =>
-        vscode.workspace.getConfiguration("iflow").get<boolean>("memoryMaintenanceEnabled", false),
+      enabled: () => this.readUserSetting<boolean>("memoryMaintenanceEnabled", false),
       isIdle: () => this.isMaintenanceIdle(),
       // 调度状态放扩展自己的 storage：P0 的 sidecar（meta.json）属于记忆 home 的
       // 事实统计，与 CLI 读写的记忆文件同源；「本窗口上次何时整理」是窗口级调度
@@ -1934,6 +1940,7 @@ export class ChatPanel implements vscode.Disposable {
       getExtensionPath: () => this.context.extensionUri.fsPath,
       getStorageDir: () => (this.context.storageUri ?? this.context.globalStorageUri).fsPath,
       deleteUserMessage: (id, reason) => this.deleteUserMessage(id, reason),
+      readUserSetting: (key, fallback) => this.readUserSetting(key, fallback),
     });
     this.sessionRestoreService = new SessionRestoreService({
       log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m), error: (m) => this.log.error(m) },
@@ -2112,6 +2119,9 @@ export class ChatPanel implements vscode.Disposable {
     void this.startQqIfEnabled();
     // Status bar entry is the always-visible launcher (no sidebar view anymore).
     this.statusBar.show();
+    // A window reload (the action offered by the "setting stashed" toast) makes
+    // the new declarations visible again — replay whatever is still waiting.
+    void this.applyPendingSettings();
   }
 
   /** Thin delegate (阶段 2): all status-bar rendering lives in StatusPresenter.
@@ -2283,7 +2293,7 @@ export class ChatPanel implements vscode.Disposable {
    * Failures land in the log and store; the panel shows them when opened.
    */
   warmStart(): void {
-    const enabled = vscode.workspace.getConfiguration("iflow").get<boolean>("warmStart", true);
+    const enabled = this.readUserSetting<boolean>("warmStart", true);
     if (!enabled) return;
     void this.ensureClient().catch((error) => {
       this.log.error("warm start failed", errorMessage(error));
@@ -3097,6 +3107,17 @@ export class ChatPanel implements vscode.Disposable {
         if (msg.superAgentMaxConcurrent !== undefined && Number.isFinite(msg.superAgentMaxConcurrent)) {
           writes.push(["superAgent.maxConcurrent", clampMaxConcurrentSuperSessions(msg.superAgentMaxConcurrent)]);
         }
+        // 失败重试上限：与运行时同一个 clamp（1–5，非有限数回落默认 2）。
+        if (msg.superAgentMaxAttempts !== undefined && Number.isFinite(msg.superAgentMaxAttempts)) {
+          writes.push(["superAgent.maxAttempts", clampSuperMaxAttempts(msg.superAgentMaxAttempts)]);
+        }
+        // 依赖策略只有两个合法枚举值；`continue` 之外一律按 `block` 落盘。
+        if (msg.superAgentDependencyPolicy !== undefined) {
+          writes.push([
+            "superAgent.dependencyPolicy",
+            msg.superAgentDependencyPolicy === "continue" ? "continue" : "block",
+          ]);
+        }
         if (msg.superAgentIntegration !== undefined) {
           writes.push(["superAgent.integration", asSuperIntegrationMode(msg.superAgentIntegration)]);
         }
@@ -3460,8 +3481,77 @@ export class ChatPanel implements vscode.Disposable {
   private postTheme(): void {
     const kind = vscode.window.activeColorTheme.kind;
     const light = kind === vscode.ColorThemeKind.Light || kind === vscode.ColorThemeKind.HighContrastLight;
-    const auroraIntensity = vscode.workspace.getConfiguration("iflow").get<number>("auroraIntensity", 35);
+    const auroraIntensity = this.readUserSetting<number>("auroraIntensity", 35);
     this.postToWebview({ type: "theme", kind: light ? "light" : "dark", auroraIntensity });
+  }
+
+  /** True when the running window's configuration registry knows this key's
+   * default layer. `get()` is NOT a valid probe — it also reads the user's
+   * settings.json; `inspect().defaultValue` comes from the registry only.
+   * Every `iflow.*` declares a default (locked by settings-declared.test), so
+   * an undefined defaultValue means the declaration is missing from this
+   * window (in-place extension upgrade: the renderer keeps the old manifest
+   * until the window reloads). */
+  private isUserSettingRegistered(key: string): boolean {
+    const info = vscode.workspace.getConfiguration("iflow").inspect(key);
+    return info !== undefined && info.defaultValue !== undefined;
+  }
+
+  /** Current stash of settings writes waiting for their declaration. */
+  private pendingSettingsWrites(): Record<string, unknown> {
+    return { ...(this.context.globalState.get<Record<string, unknown>>(PENDING_SETTINGS_KEY) ?? {}) };
+  }
+
+  /** Read one `iflow.*` setting with the stash as the top layer.
+   *
+   * A key this window does not register cannot be written (see
+   * `writeUserSetting`), so the stashed value is the only copy of the user's
+   * choice until the window reloads. Reading it back here keeps the UI from
+   * snapping to the old value and keeps the scheduler on the user's choice;
+   * once `applyPendingSettings` lands it on disk the stash is dropped and the
+   * configuration layer takes over. */
+  private readUserSetting<T>(key: string, fallback: T): T {
+    const pending = this.pendingSettingsWrites();
+    if (Object.prototype.hasOwnProperty.call(pending, key)) return pending[key] as T;
+    return vscode.workspace.getConfiguration("iflow").get<T>(key, fallback);
+  }
+
+  /** Same read for activation-time callers outside the panel (extension.ts):
+   * the stash is the only copy of a just-stashed choice until the reload. */
+  readHostSetting<T>(key: string, fallback: T): T {
+    return this.readUserSetting(key, fallback);
+  }
+
+  /** Stash one write in globalState (never on disk): it is replayed by
+   * `applyPendingSettings` once the key is registered again. */
+  private async stashPendingSetting(key: string, value: unknown): Promise<void> {
+    const pending = this.pendingSettingsWrites();
+    pending[key] = value;
+    await this.context.globalState.update(PENDING_SETTINGS_KEY, pending);
+  }
+
+  /** Drop one stashed write (it landed, or a fresh write superseded it). */
+  private async dropPendingSetting(key: string): Promise<void> {
+    const pending = this.pendingSettingsWrites();
+    if (!(key in pending)) return;
+    delete pending[key];
+    await this.context.globalState.update(PENDING_SETTINGS_KEY, pending);
+  }
+
+  /** Replay stashed writes whose declarations this window registers now (i.e.
+   * after the reload the stashing toast asked for). Keys still unregistered
+   * stay stashed for the next attempt. */
+  private async applyPendingSettings(): Promise<void> {
+    for (const [key, value] of Object.entries(this.pendingSettingsWrites())) {
+      if (!this.isUserSettingRegistered(key)) continue;
+      try {
+        await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
+        await this.dropPendingSetting(key);
+      } catch (error) {
+        // Keep the stash: the next window may be able to write it.
+        this.log.warn(`failed to apply stashed setting ${key}: ${errorMessage(error)}`);
+      }
+    }
   }
 
   /** Write one panel-owned setting to USER settings (the scope VSCode
@@ -3472,16 +3562,38 @@ export class ChatPanel implements vscode.Disposable {
    * (a caller that has to react to a failed write uses the return value —
    * the toast is emitted here, so nobody double-toasts). */
   private async writeUserSetting(key: string, value: unknown, label?: string): Promise<boolean> {
+    if (!this.isUserSettingRegistered(key)) {
+      // An in-place upgrade leaves this window on the previous manifest, so
+      // VSCode rejects the write with "not a registered configuration". Stash
+      // it and tell the user the one action that makes it land.
+      await this.stashPendingSetting(key, value);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t(
+          "设置「{0}」属于刚更新的扩展版本，本窗口还没加载它的定义，已暂存并立即生效；请重启 VS Code（先试重新加载窗口，仍无效则完全退出再启动）。",
+          label ?? key,
+        ),
+        {
+          sticky: true,
+          action: { actionId: "reload-window", label: vscode.l10n.t("重新加载窗口") },
+        },
+      );
+      return false;
+    }
     try {
       await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
+      await this.dropPendingSetting(key);
       return true;
     } catch (error) {
       const detail = errorMessage(error);
       this.log.warn(`failed to update ${key}: ${detail}`);
       // A silent failure made the control look like it "snapped back" on its
       // own — say which setting could not be written (the value the user sees
-      // is the one VSCode still has on disk).
-      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}", label ?? key));
+      // is the one VSCode still has on disk). The rejection reason is the only
+      // clue the user has (read-only settings.json, invalid JSON, schema
+      // rejection, unknown key), so it rides along in the toast instead of
+      // staying in the Output log.
+      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}（{1}）", label ?? key, detail));
       return false;
     }
   }
@@ -3494,6 +3606,7 @@ export class ChatPanel implements vscode.Disposable {
       writeUserSetting: (key, value, label) => this.writeUserSetting(key, value, label),
       postToWebview: (message) => this.postToWebview(message),
       currentModelId: () => this.store.getState().currentModelId ?? null,
+      readUserSetting: (key, fallback) => this.readUserSetting(key, fallback),
     };
   }
 
@@ -3506,7 +3619,7 @@ export class ChatPanel implements vscode.Disposable {
    * returned as-is: it is the 「不限制」 value of every ceiling here.
    */
   private timeoutSeconds(key: string, fallbackSeconds: number, maxSeconds: number): number {
-    const raw = vscode.workspace.getConfiguration("iflow").get<number>(key, fallbackSeconds);
+    const raw = this.readUserSetting<number>(key, fallbackSeconds);
     if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return fallbackSeconds;
     return Math.min(maxSeconds, Math.trunc(raw));
   }
@@ -3536,7 +3649,7 @@ export class ChatPanel implements vscode.Disposable {
    * here. The band starts at 50%: below that the panel would compress a
    * healthy session on nearly every turn. */
   private autoCompressThresholdRatio(): number {
-    const raw = vscode.workspace.getConfiguration("iflow").get<number>(
+    const raw = this.readUserSetting<number>(
       "autoCompressThresholdPercent",
       Math.round(CONTEXT_AUTOCOMPRESS_RATIO * 100),
     );
@@ -3548,13 +3661,13 @@ export class ChatPanel implements vscode.Disposable {
 
   /** 整理策略：`report` 只出报告，`apply` 才真正写盘（默认 report）。 */
   private maintenanceStrategy(): "report" | "apply" {
-    const raw = vscode.workspace.getConfiguration("iflow").get<string>("memoryMaintenanceStrategy", "report");
+    const raw = this.readUserSetting<string>("memoryMaintenanceStrategy", "report");
     return raw === "apply" ? "apply" : "report";
   }
 
   /** 读一个记忆整理数值设置并夹到 [min, max]；非法值回落 fallback。 */
   private maintenanceConfigNumber(key: string, fallback: number, min: number, max: number): number {
-    const raw = vscode.workspace.getConfiguration("iflow").get<number>(key, fallback);
+    const raw = this.readUserSetting<number>(key, fallback);
     if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
     return Math.min(max, Math.max(min, Math.trunc(raw)));
   }
@@ -3809,24 +3922,23 @@ export class ChatPanel implements vscode.Disposable {
    * configuration stays authoritative; a direct edit in VSCode re-pushes via
    * the onDidChangeConfiguration listener. */
   private postHostSettings(): void {
-    const config = vscode.workspace.getConfiguration("iflow");
     const stringList = (key: string): string[] => {
-      const raw = config.get<unknown>(key, []);
+      const raw = this.readUserSetting<unknown>(key, []);
       return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
     };
     this.postToWebview({
       type: "hostSettings",
-      nextStepSuggestions: config.get<boolean>("nextStepSuggestions", true),
-      autoCompressOnIdle: config.get<boolean>("autoCompressOnIdle", false),
-      autoMemoryCapture: config.get<boolean>("autoMemoryCapture", true),
-      autoTitle: config.get<boolean>("autoTitle", true),
-      efficiencyMode: asEfficiencyMode(config.get<string>("efficiencyMode", "steady")),
+      nextStepSuggestions: this.readUserSetting<boolean>("nextStepSuggestions", true),
+      autoCompressOnIdle: this.readUserSetting<boolean>("autoCompressOnIdle", false),
+      autoMemoryCapture: this.readUserSetting<boolean>("autoMemoryCapture", true),
+      autoTitle: this.readUserSetting<boolean>("autoTitle", true),
+      efficiencyMode: asEfficiencyMode(this.readUserSetting<string>("efficiencyMode", "steady")),
       memoryExtractTimeoutSeconds: this.timeoutSeconds(
         "memoryExtractTimeoutSeconds",
         MEMORY_EXTRACT_TIMEOUT_MS / 1000,
         600,
       ),
-      memoryMaintenanceEnabled: config.get<boolean>("memoryMaintenanceEnabled", false),
+      memoryMaintenanceEnabled: this.readUserSetting<boolean>("memoryMaintenanceEnabled", false),
       memoryMaintenanceIntervalDays: this.maintenanceConfigNumber("memoryMaintenanceIntervalDays", 7, 1, 90),
       memoryMaintenanceIdleMinutes: this.maintenanceConfigNumber("memoryMaintenanceIdleMinutes", 15, 1, 240),
       memoryMaintenanceGlobalTokenBudget: this.maintenanceConfigNumber(
@@ -3851,36 +3963,44 @@ export class ChatPanel implements vscode.Disposable {
       nextStepTimeoutSeconds: this.timeoutSeconds("nextStepTimeoutSeconds", NEXT_STEP_TIMEOUT_MS / 1000, 300),
       compressTimeoutSeconds: this.timeoutSeconds("compressTimeoutSeconds", 0, 600),
       autoCompressThresholdPercent: Math.round(this.autoCompressThresholdRatio() * 100),
-      restoreLastSession: config.get<boolean>("restoreLastSession", false),
-      autoOpenPanel: config.get<boolean>("autoOpenPanel", false),
-      warmStart: config.get<boolean>("warmStart", true),
-      soundFeedback: config.get<boolean>("soundFeedback", true),
-      osNotifications: asOsNotifications(config.get<string>("osNotifications", "approvals")),
-      language: asCliLanguage(config.get<string>("language", "")),
-      theme: asUiTheme(config.get<string>("theme", "auto")),
-      auroraIntensity: Math.min(100, Math.max(0, config.get<number>("auroraIntensity", 35))),
-      uiFontSize: asUiFontSize(config.get<string>("uiFontSize", "standard")),
-      uiDensity: asUiDensity(config.get<string>("uiDensity", "standard")),
-      nodePath: config.get<string>("nodePath", ""),
-      checkpoints: config.get<boolean>("checkpoints", true),
-      checkpointMaxFiles: config.get<number>("checkpointMaxFiles", 50_000),
-      checkpointMaxFileMB: config.get<number>("checkpointMaxFileMB", 300),
-      checkpointDir: config.get<string>("checkpointDir", ""),
-      checkpointMaxTurns: config.get<number>("checkpointMaxTurns", 0),
-      checkpointMaxSizeMB: config.get<number>("checkpointMaxSizeMB", 0),
+      restoreLastSession: this.readUserSetting<boolean>("restoreLastSession", false),
+      autoOpenPanel: this.readUserSetting<boolean>("autoOpenPanel", false),
+      warmStart: this.readUserSetting<boolean>("warmStart", true),
+      soundFeedback: this.readUserSetting<boolean>("soundFeedback", true),
+      osNotifications: asOsNotifications(this.readUserSetting<string>("osNotifications", "approvals")),
+      language: asCliLanguage(this.readUserSetting<string>("language", "")),
+      theme: asUiTheme(this.readUserSetting<string>("theme", "auto")),
+      auroraIntensity: Math.min(100, Math.max(0, this.readUserSetting<number>("auroraIntensity", 35))),
+      uiFontSize: asUiFontSize(this.readUserSetting<string>("uiFontSize", "standard")),
+      uiDensity: asUiDensity(this.readUserSetting<string>("uiDensity", "standard")),
+      nodePath: this.readUserSetting<string>("nodePath", ""),
+      checkpoints: this.readUserSetting<boolean>("checkpoints", true),
+      checkpointMaxFiles: this.readUserSetting<number>("checkpointMaxFiles", 50_000),
+      checkpointMaxFileMB: this.readUserSetting<number>("checkpointMaxFileMB", 300),
+      checkpointDir: this.readUserSetting<string>("checkpointDir", ""),
+      checkpointMaxTurns: this.readUserSetting<number>("checkpointMaxTurns", 0),
+      checkpointMaxSizeMB: this.readUserSetting<number>("checkpointMaxSizeMB", 0),
       contextWindowOverrides: stringList("contextWindowOverrides"),
       costTable: stringList("costTable"),
-      thinkingModelRules: sanitizeThinkingRules(config.get<unknown>("thinkingModelRules", [])),
+      thinkingModelRules: sanitizeThinkingRules(this.readUserSetting<unknown>("thinkingModelRules", [])),
       // 子会话并发上限：手改 settings.json 可能留下 0 / Infinity，归一化后再给 UI。
       superAgentMaxConcurrent: clampMaxConcurrentSuperSessions(
-        config.get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
+        this.readUserSetting<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
       ),
-      superAgentIntegration: asSuperIntegrationMode(config.get<string>("superAgent.integration", "merge")),
+      superAgentMaxAttempts: clampSuperMaxAttempts(
+        this.readUserSetting<number>("superAgent.maxAttempts", DEFAULT_SUPER_MAX_ATTEMPTS),
+      ),
+      superAgentDependencyPolicy: this.readUserSetting<string>("superAgent.dependencyPolicy", "block") === "continue"
+        ? "continue"
+        : "block",
+      superAgentIntegration: asSuperIntegrationMode(
+        this.readUserSetting<string>("superAgent.integration", "merge"),
+      ),
       superAgentMaxWorktrees: clampMaxSuperWorktrees(
-        config.get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
+        this.readUserSetting<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
       ),
-      superAgentKeepWorktree: config.get<boolean>("superAgent.keepWorktree", false),
-      superAgentFullTrust: config.get<boolean>("superAgent.fullTrust", false),
+      superAgentKeepWorktree: this.readUserSetting<boolean>("superAgent.keepWorktree", false),
+      superAgentFullTrust: this.readUserSetting<boolean>("superAgent.fullTrust", false),
     });
   }
 
@@ -3904,8 +4024,7 @@ export class ChatPanel implements vscode.Disposable {
    * by ear — a child finishing is progress, not the main session finishing.
    */
   private postSound(kind: "done" | "error" | "child"): void {
-    const cfg = vscode.workspace.getConfiguration("iflow");
-    if (cfg.get<boolean>("soundFeedback", true) === false) return;
+    if (this.readUserSetting<boolean>("soundFeedback", true) === false) return;
     this.postToWebview({ type: "playSound", kind });
   }
 
@@ -3934,7 +4053,7 @@ export class ChatPanel implements vscode.Disposable {
    * content cooldown) carries no new information at all.
    */
   private notifyOsDecision(event: OsNotifyEvent, text: string): OsNotifyDecision {
-    const setting = vscode.workspace.getConfiguration("iflow").get<string>("osNotifications", "approvals");
+    const setting = this.readUserSetting<string>("osNotifications", "approvals");
     const decision = this.evaluateOsNotification(event, text, setting);
     if (!decision.fire) return decision;
     void this.deliverOsNotification(text);
@@ -4536,11 +4655,10 @@ export class ChatPanel implements vscode.Disposable {
         this.store.sendToast("error", reasonText);
         return;
       }
-      const cfg = vscode.workspace.getConfiguration("iflow");
-      const existingRules = sanitizeThinkingRules(cfg.get<unknown>("thinkingModelRules", []));
+      const existingRules = sanitizeThinkingRules(this.readUserSetting<unknown>("thinkingModelRules", []));
       const additions = planMetadataAdditions(entries, {
-        contextWindowOverrides: cfg.get<string[]>("contextWindowOverrides", []),
-        costTable: cfg.get<string[]>("costTable", []),
+        contextWindowOverrides: this.readUserSetting<string[]>("contextWindowOverrides", []),
+        costTable: this.readUserSetting<string[]>("costTable", []),
         thinkingModelRules: existingRules,
       });
       if (additions.total > 0) {
@@ -4552,8 +4670,14 @@ export class ChatPanel implements vscode.Disposable {
         // requires a matching, winning `user` override value. Values / settings
         // bytes are untouched — this is in-memory provenance only.
         this.recordAiMetadataStamp(entries, sources, additions);
-        await this.writeUserSetting("contextWindowOverrides", [...cfg.get<string[]>("contextWindowOverrides", []), ...additions.windows]);
-        await this.writeUserSetting("costTable", [...cfg.get<string[]>("costTable", []), ...additions.costs]);
+        await this.writeUserSetting("contextWindowOverrides", [
+          ...this.readUserSetting<string[]>("contextWindowOverrides", []),
+          ...additions.windows,
+        ]);
+        await this.writeUserSetting("costTable", [
+          ...this.readUserSetting<string[]>("costTable", []),
+          ...additions.costs,
+        ]);
         await this.writeUserSetting("thinkingModelRules", [...existingRules, ...additions.rules]);
         // The thinkingModelRules write triggers the config listener, which
         // re-merges ~/.iflow/thinking-models.json and toasts the sync result.
@@ -4860,7 +4984,7 @@ export class ChatPanel implements vscode.Disposable {
   private titleTaskFor(
     sessionId: string,
   ): { request: string; mechanicalLabel: string; legacyMechanical: string } | null {
-    if (vscode.workspace.getConfiguration("iflow").get<boolean>("autoTitle", true) === false) return null;
+    if (this.readUserSetting<boolean>("autoTitle", true) === false) return null;
     if (this.titledSessionIds.has(sessionId)) return null;
     const state = this.store.getState();
     if (state.sessionId !== sessionId && state.activeSessionId !== sessionId) return null;
@@ -4896,7 +5020,7 @@ export class ChatPanel implements vscode.Disposable {
     anchorUserBlock: Block;
     anchorBlockCount: number;
   } | null {
-    if (vscode.workspace.getConfiguration("iflow").get<boolean>("nextStepSuggestions", true) === false) return null;
+    if (this.readUserSetting<boolean>("nextStepSuggestions", true) === false) return null;
     const state = this.store.getState();
     if (state.sessionId !== sessionId) return null;
     const blocks = state.blocks;
@@ -4982,7 +5106,7 @@ export class ChatPanel implements vscode.Disposable {
     if (currentLastUser !== prediction.anchorUserBlock) return;
     if (current.blocks.length !== prediction.anchorBlockCount || current.status !== "idle") return;
     // The user may have turned the feature off while the call was in flight.
-    if (vscode.workspace.getConfiguration("iflow").get<boolean>("nextStepSuggestions", true) === false) return;
+    if (this.readUserSetting<boolean>("nextStepSuggestions", true) === false) return;
     this.store.suggestNextSteps(suggestions);
   }
 
@@ -5114,12 +5238,11 @@ export class ChatPanel implements vscode.Disposable {
    * 数，不给出一个与 CLI 不同的猜测值（旧的 32,768 兜底估算正是「一个模型
    * 两个窗口」的残留）。 */
   private resolveUsageContext(): UsageContext {
-    const cfg = vscode.workspace.getConfiguration("iflow");
     let cached = this.usageOverridesCache;
     if (!cached) {
       cached = {
-        overrides: parseContextWindowOverrides(cfg.get<string[]>("contextWindowOverrides", [])),
-        cost: parseCostTable(cfg.get<string[]>("costTable", [])),
+        overrides: parseContextWindowOverrides(this.readUserSetting<string[]>("contextWindowOverrides", [])),
+        cost: parseCostTable(this.readUserSetting<string[]>("costTable", [])),
       };
       this.usageOverridesCache = cached;
     }
@@ -5283,6 +5406,13 @@ export class ChatPanel implements vscode.Disposable {
       }
       return;
     }
+    if (actionId === "reload-window") {
+      // 「设置已暂存」提示的动作：重载窗口让新版本的配置声明生效，
+      // 面板构造时的 applyPendingSettings 随后把暂存值写回去。
+      if (typeof toastId === "number") this.store.dismissToast(toastId);
+      void vscode.commands.executeCommand("workbench.action.reloadWindow");
+      return;
+    }
     if (typeof toastId === "number") this.store.dismissToast(toastId);
   }
 
@@ -5364,7 +5494,7 @@ export class ChatPanel implements vscode.Disposable {
     // rewrites the model's context, so the user must enable it explicitly in
     // the settings panel. The reactive overflow path in promptWithRetry is
     // unaffected — it only fires when the gateway rejects a turn.
-    if (vscode.workspace.getConfiguration("iflow").get<boolean>("autoCompressOnIdle", false) === false) return false;
+    if (this.readUserSetting<boolean>("autoCompressOnIdle", false) === false) return false;
     const state = this.store.getState();
     if (state.sessionId !== sessionId) return false;
     if (state.initializing || state.replaying || state.status !== "idle") return false;
@@ -6180,10 +6310,15 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private cliSettingsSyncRun(): void {
-    const cfg = vscode.workspace.getConfiguration("iflow");
     const patch: Partial<CliSettingsShape> = {};
-    const language = cfg.get<string>("language", "");
-    if (language) patch.language = language;
+    const language = this.readUserSetting<string>("language", "");
+    if (language) {
+      patch.language = language;
+    } else if (readCliSettings()?.language !== undefined) {
+      // 选回「跟随内核默认」= 空串：显式置 undefined，`updateCliSettings` 的
+      // JSON.stringify 会删掉该键（不写整个文件，仍然只走原子合并）。
+      patch.language = undefined;
+    }
     if (Object.keys(patch).length === 0) return;
     if (!updateCliSettings(patch)) {
       void vscode.window.showWarningMessage(
@@ -8123,9 +8258,7 @@ export class ChatPanel implements vscode.Disposable {
       modelId: this.store.getState().currentModelId,
       pendingSwitchModel: this.pendingSwitchModel,
       workspaceModelId: this.workspaceModelId(),
-      overrides: parseContextWindowOverrides(
-        vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
-      ),
+      overrides: parseContextWindowOverrides(this.readUserSetting<string[]>("contextWindowOverrides", [])),
     });
   }
 
@@ -8150,7 +8283,7 @@ export class ChatPanel implements vscode.Disposable {
       const generation = this.connectGeneration;
       // The entry resolves synchronously (vendored fork, no probe). The node
       // probe still shells out (where.exe / node --version) and is cached.
-      const nodePathConfigured = vscode.workspace.getConfiguration("iflow").get<string>("nodePath");
+      const nodePathConfigured = this.readUserSetting<string>("nodePath", "");
       let entry: string;
       let locatedNode: string | null;
       try {
@@ -8465,7 +8598,7 @@ export class ChatPanel implements vscode.Disposable {
         if (
           !restoreTarget &&
           !explicitSwitch &&
-          vscode.workspace.getConfiguration("iflow").get<boolean>("restoreLastSession", false)
+          this.readUserSetting<boolean>("restoreLastSession", false)
         ) {
           // The active slot is overwritten by EVERY startNewSession — including
           // the panel-open auto session that never received a prompt (its
@@ -8594,7 +8727,7 @@ export class ChatPanel implements vscode.Disposable {
    */
   private applyThinkingModelRules(): void {
     try {
-      const raw = vscode.workspace.getConfiguration("iflow").get<Array<unknown>>("thinkingModelRules", []);
+      const raw = this.readUserSetting<Array<unknown>>("thinkingModelRules", []);
       const rules = sanitizeThinkingRules(raw);
       if (rules.length === 0) return;
       const result = applyThinkingRules(rules);
@@ -8671,9 +8804,7 @@ export class ChatPanel implements vscode.Disposable {
    * 返回 true = 本轮追加了块（调用方据此知道这一轮带了档位规则）。
    */
   private appendEfficiencyBlock(prompt: ContentBlock[], sessionId: string): boolean {
-    const mode = asEfficiencyMode(
-      vscode.workspace.getConfiguration("iflow").get<string>("efficiencyMode", "steady"),
-    );
+    const mode = asEfficiencyMode(this.readUserSetting<string>("efficiencyMode", "steady"));
     const injected = this.injectedEfficiencyMode.get(sessionId) ?? "steady";
     if (injected === mode) return false;
     prompt.push({
@@ -8708,9 +8839,7 @@ export class ChatPanel implements vscode.Disposable {
         // 门控在 sessionMeta 刷新快照后即释放，真正的护栏是这里的串行等待）。
         const switchedWindow = resolveCliTokensLimit({
           modelId: resp.currentModelId,
-          overrides: parseContextWindowOverrides(
-            vscode.workspace.getConfiguration("iflow").get<string[]>("contextWindowOverrides", []),
-          ),
+          overrides: parseContextWindowOverrides(this.readUserSetting<string[]>("contextWindowOverrides", [])),
         });
         if (switchedWindow.limit !== undefined) {
           try {

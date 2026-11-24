@@ -552,6 +552,42 @@ describe("QQ 通道 · 面板侧接线", () => {
     expect(p.qq).toBeUndefined();
   });
 
+  it("解绑时设置写入失败：返回 ok=false 且带真实错误，入口以 warning toast 展示", async () => {
+    const io: QqSettingsIo = {
+      readAll: () => ({ enabled: true }),
+      writeAll: async () => {
+        throw new Error("EPERM: settings.json 只读");
+      },
+      getSecret: async () => undefined,
+      setSecret: async () => undefined,
+      deleteSecret: async () => undefined,
+    };
+    const fakeQq = {
+      service: { listTasks: () => [], handleTaskAction: async () => undefined, stop: async () => undefined },
+      store: {},
+      ipc: { port: 0, close: async () => undefined },
+      qqbot: { adapter: { close: async () => undefined } },
+      config: makeConfig({ allowedUsers: ["10001"] }),
+      io,
+      restartCount: 0,
+    };
+    p.qq = fakeQq;
+    const toast = vi.spyOn(p.store, "sendToast").mockImplementation(() => 0);
+
+    const result = await p.unbindQqAccount();
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("EPERM");
+    // 凭据删除与停服照常完成，只是设置没落盘 —— 必须如实告知。
+    expect((fakeQq.config as QqConfig).allowedUsers).toEqual([]);
+    expect(p.qq).toBeUndefined();
+
+    p.qq = fakeQq;
+    await p.handleQqConfigAction("unbind");
+    expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("EPERM"));
+
+    toast.mockRestore();
+  });
+
   it("入站消息收敛：坏帧丢弃、合法帧逐字段兜底", () => {
     expect(p.coerceQqInboundMessage(null)).toBeNull();
     expect(p.coerceQqInboundMessage({ chatType: "channel", chatId: "1" })).toBeNull();
@@ -869,7 +905,8 @@ describe("QQ 设置写入失败（F9）", () => {
     const toast = vi.spyOn(p.store, "sendToast").mockImplementation(() => 0);
     try {
       await expect(p.handleQqSettingsPatch({ enabled: true })).resolves.toBeUndefined();
-      expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("工作区"));
+      expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("设置写入失败：QQ 设置"));
+      expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("no workspace folder"));
     } finally {
       toast.mockRestore();
       await panel.dispose();

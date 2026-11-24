@@ -131,6 +131,16 @@ export class FileSystemWatcher {
   dispose(): void {}
 }
 
+/** Write target for `WorkspaceConfiguration.update()`; values mirror VSCode's
+ * public enum so `ConfigurationTarget.Global` is usable from the panel. The
+ * stub configuration itself still has no `update()`, so a write throws unless
+ * a test installs its own configuration object. */
+export enum ConfigurationTarget {
+  Global = 1,
+  Workspace = 2,
+  WorkspaceFolder = 3,
+}
+
 /** Configuration stub: `get()` returns the override or the default. Tests
  * inject overrides via `setConfigOverrides` (e.g. the osNotifications tier). */
 class WorkspaceConfiguration {
@@ -138,6 +148,33 @@ class WorkspaceConfiguration {
   get<T>(key: string, defaultValue?: T): T {
     return (key in this.overrides ? this.overrides[key] : defaultValue) as T;
   }
+  /** Registry probe used by the panel's `isUserSettingRegistered`: the stub has
+   * no manifest to consult, so every key reports a defaultValue (non-undefined
+   * = "declared") unless the test marked it unregistered. */
+  inspect(key: string): { key: string; defaultValue: unknown; globalValue: unknown } {
+    const short = key.startsWith("iflow.") ? key.slice("iflow.".length) : key;
+    const unregistered = unregisteredConfigKeys.has(key) || unregisteredConfigKeys.has(short);
+    return {
+      key: `iflow.${short}`,
+      defaultValue: unregistered ? undefined : (short in this.overrides ? this.overrides[short] : true),
+      globalValue: this.overrides[short],
+    };
+  }
+}
+
+/** Test hook: `iflow.*` keys whose declaration is NOT in this window's
+ * configuration registry (an in-place extension upgrade leaves the renderer
+ * on the previous manifest). Pass an empty array to clear. */
+const unregisteredConfigKeys = new Set<string>();
+export function setUnregisteredConfigKeys(keys: string[]): void {
+  unregisteredConfigKeys.clear();
+  for (const key of keys) unregisteredConfigKeys.add(key);
+}
+
+/** Test hook: the keys currently marked unregistered, so a test-installed
+ * configuration fake can mirror the same "old manifest" view. */
+export function getUnregisteredConfigKeys(): string[] {
+  return [...unregisteredConfigKeys];
 }
 
 const configOverrides: Record<string, unknown> = {

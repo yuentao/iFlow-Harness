@@ -329,7 +329,8 @@ export async function ensureBridgeSecrets(
  * 用真实 VSCode 配置区与扩展传入的 SecretStorage 构造 IO。
  *
  * `secrets` 由扩展在激活时传入（`context.secrets`），**不要**在这里自己取
- * 扩展上下文。写入目标是 Workspace 作用域（QQ 通道是工作区级能力）。
+ * 扩展上下文。写入目标是 Global 作用域（与面板其余设置一致；QQ 是机器级
+ * 能力），写入后顺手清掉同键的存量 Workspace 覆盖，避免旧值压过 Global。
  */
 export function createVscodeQqSettingsIo(secrets: QqSecretStorageLike): QqSettingsIo {
   return {
@@ -344,7 +345,15 @@ export function createVscodeQqSettingsIo(secrets: QqSecretStorageLike): QqSettin
     async writeAll(patch: Record<string, unknown>): Promise<void> {
       const section = vscode.workspace.getConfiguration("iflow.qq");
       for (const [key, value] of Object.entries(patch)) {
-        await section.update(key, value, vscode.ConfigurationTarget.Workspace);
+        // 与面板其余 41 个设置同一落点：Global（QQ 是机器级能力，Settings
+        // Sync 可携带）。Workspace 作用域在没打开工作区时会直接抛错，且会被
+        // 工作区旧值压过 Global。
+        await section.update(key, value, vscode.ConfigurationTarget.Global);
+        // 存量工作区覆盖优先级高于 Global：写 Global 后必须单键清掉它，否则
+        // 工作区旧值继续胜出，UI 显示与实际生效分裂。单键 update，不碰整文件。
+        if (section.inspect(key)?.workspaceValue !== undefined) {
+          await section.update(key, undefined, vscode.ConfigurationTarget.Workspace);
+        }
       }
     },
     async getSecret(key: string): Promise<string | undefined> {
