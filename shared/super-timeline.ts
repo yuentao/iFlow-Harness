@@ -295,18 +295,20 @@ export function describeSuperTimelineFacts(session: SuperSessionUi): string {
 }
 
 /* ------------------------------------------------------------------------- *
- * 布局：横向单行轨道的窗口化（纯逻辑，webview 只负责画）
+ * 布局：当前节点居中的聚焦视窗（纯逻辑，webview 只负责画）
  *
- * 2026-11-24：时间轴从「单列纵向 rail + 折叠」改成**横向单行轨道**。折叠交互
- * 随之删除（一行放不下时不再折成「已完成 N 步」，而是压缩），但两条语义必须
- * 保留：
+ * 2026-11-24：时间轴从「横向单行 + 窗口化压缩」改成**当前节点居中**的聚焦
+ * 视图：外层视窗 `overflow-hidden`，内层轨道用 `transform: translateX()` 平移，
+ * 让当前节点落在视窗正中，左右各露出上一步 / 下一步并渐隐。窗口化（上限 N 个
+ * 节点 + 「…」省略段）随之删除 —— 所有节点都还在轨道上，靠平移展示。
  *
- *  1. 关键节点（等待回答 / 失败 / 合并冲突）**始终在轨道上可见**；
- *  2. 当前步**始终在轨道上可见**。
+ * 两条语义必须保留：
  *
- * 步骤一多（面板只有约 400px 宽），节点不可能全画：这里把「必须可见」的节点
- * 钉住，再以当前步为中心向外补足到 {@link SUPER_TIMELINE_MAX_VISIBLE_NODES}，
- * 其余连续节点压缩成省略段。规则收在这里，单测直接跑，组件不复制第二套判定。
+ *  1. 当前步**落在视窗中央**（首末节点时 clamp，宁可偏一点也不拉出空白）；
+ *  2. 关键节点（等待回答 / 失败 / 合并冲突）**不能被平移到视窗外而彻底消失**：
+ *     落在视窗外的关键节点由边缘提示兜底，点击即平移过去（只平移，不弹窗）。
+ *
+ * 平移量与边缘提示都收在这里，单测直接跑，组件不复制第二套判定。
  * ------------------------------------------------------------------------- */
 
 /**
@@ -343,85 +345,210 @@ export function summarizeSuperTimelineProgress(
 }
 
 /**
- * 横向轨道上最多画多少个真实节点。
+ * 轨道上单个节点的占位尺寸（px）。
  *
- * 面板约 400px 宽（内容行实测约 354px）。左侧「进度 8/15」占约 51px，每个节点
- * （14px 字形 + 2px 内边距）连同 4px 连接段约 20px。实测 10 个节点时右侧「当前
- * 步骤」只剩约 79px（≈5 个中文字，读不出是哪一步），收到 8 个后仍有约 115px
- * （≈9 个中文字）。再多就必须压缩（见 {@link layoutSuperTimelineRail}）——
- * 横向轨道不能出现滚动条，也不能把图标挤成重叠的一团。
+ * 节点是 `p-1` 包裹的 `ICON_INLINE`（14px）圆点 → 14 + 4×2 = 22px。这个数字是
+ * 纯逻辑与组件共用的**几何契约**：居中平移要算节点中心，首帧 / jsdom 没有布局
+ * 时也要给出可用的等距模型。改节点内边距时必须同步这里，否则平移会偏。
  */
-export const SUPER_TIMELINE_MAX_VISIBLE_NODES = 8;
+export const SUPER_TIMELINE_NODE_SIZE = 22;
+
+/** 相邻节点的中心间距（px）：节点 22 + 连接段 8（`w-2`）。 */
+export const SUPER_TIMELINE_NODE_PITCH = 30;
+
+/** 轨道几何：节点中心的轨道内坐标 + 轨道总宽（px）。 */
+export interface SuperTimelineGeometry {
+  /** 每个节点中心在轨道坐标系里的 x 偏移，按时间顺序。 */
+  centers: number[];
+  /** 轨道总宽（px）。 */
+  trackWidth: number;
+}
 
 /**
- * 横向轨道的一段：一个真实节点，或一段被压缩的连续节点（省略段）。
+ * 等距模型（无布局环境 / 首帧兜底）。
  *
- * 省略段带 `from` / `to`（闭区间），组件据此报「省略 N 步」并保留原始位置，
- * 不做「藏起来就看不见」的黑箱。
+ * 节点尺寸与连接段都是固定类名，真实 DOM 里也是等距的 —— 所以这个模型不是
+ * 估算，而是同一份几何契约的解析式。组件优先用实测矩形（字体缩放 / 自定义
+ * 密度可能改变实际像素），量不到（jsdom 全 0）时才退回这里。
  */
-export type SuperTimelineRailSegment =
-  | { type: "node"; index: number }
-  | { type: "gap"; from: number; to: number };
+export function estimateSuperTimelineGeometry(count: number): SuperTimelineGeometry {
+  if (count <= 0) return { centers: [], trackWidth: 0 };
+  return {
+    centers: Array.from(
+      { length: count },
+      (_, index) => index * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE / 2,
+    ),
+    trackWidth: (count - 1) * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE,
+  };
+}
 
 /**
- * 把节点序列压成横向轨道可渲染的段序列。
+ * 让 `focusCenter` 落在视窗水平中央所需的 `translateX`（px，负值 = 轨道左移）。
  *
- * 策略（**压缩而非折叠**）：轨道是单行、无滚动、无展开交互，因此不能像旧纵向
- * rail 那样把一段藏进可点击的折叠行。规则：
+ * 两条分支，取舍写在代码里而不是靠肉眼调：
  *
- *  1. 节点数 ≤ {@link SUPER_TIMELINE_MAX_VISIBLE_NODES}：全部原样渲染，无省略段。
- *  2. 超出时先**钉住**必须可见的节点 —— 全部 {@link isCriticalTimelineNode}
- *     关键节点，加锚点（最后一个 `current` 节点；终态轨没有 current 则取最后
- *     一个节点）。
- *  3. 钉住数仍不足上限时，以锚点为中心**由近及远**补齐（同距离先左后右，让
- *     用户看到「刚走过的几步」和「马上要做的几步」）。
- *  4. 其余未选中的连续节点合成 `gap` 段，插回原本位置。
- *
- * 保证：关键节点与当前步**永不被压缩**；段序列保持原始时间顺序；`gap` 段之间
- * 不连续（相邻的未选中区间会被拆成两段，中间隔着被选中的节点）。
+ *  1. **整条轨装得下**（`trackWidth ≤ viewportWidth`）：把**整条轨道**居中。
+ *     逐节点居中在短轨上会把一大块空白全推到一侧（3 个节点、当前在首时左侧
+ *     要空出 140px），看起来像布局坏了；轨道居中把空白均分到两侧，奇数节点、
+ *     当前步在正中时仍然精确居中。
+ *  2. **装不下**：按焦点节点居中算，再 clamp 到 `[viewportWidth - trackWidth, 0]`
+ *     —— 上界 0 保证左侧不露白，下界保证右侧不露白。当前步在首 / 末时因此
+ *     **不会**严格居中（宁可偏一点，也不拉出大块空白）。
  */
-export function layoutSuperTimelineRail(
-  nodes: readonly SuperTimelineNode[],
-): SuperTimelineRailSegment[] {
-  const total = nodes.length;
-  if (total <= SUPER_TIMELINE_MAX_VISIBLE_NODES) {
-    return nodes.map((_, index): SuperTimelineRailSegment => ({ type: "node", index }));
+export function computeSuperTimelineTranslateX(params: {
+  /** 要居中的节点中心（轨道内坐标，px）。 */
+  focusCenter: number;
+  /** 轨道总宽（px）。 */
+  trackWidth: number;
+  /** 视窗宽度（px）；0 / 负数表示还没有布局。 */
+  viewportWidth: number;
+}): number {
+  const { focusCenter, trackWidth, viewportWidth } = params;
+  if (!Number.isFinite(focusCenter) || !Number.isFinite(trackWidth) || !Number.isFinite(viewportWidth)) {
+    return 0;
   }
+  if (viewportWidth <= 0 || trackWidth <= 0) return 0;
+  if (trackWidth <= viewportWidth) return Math.round((viewportWidth - trackWidth) / 2);
+  const desired = viewportWidth / 2 - focusCenter;
+  const min = viewportWidth - trackWidth;
+  return Math.round(Math.min(0, Math.max(min, desired)));
+}
 
-  const pinned = new Set<number>();
-  let anchor = -1;
+/** 视窗某一侧屏外关键节点的提示。 */
+export interface SuperTimelineEdgeHint {
+  side: "left" | "right";
+  /** 该侧**完全落在视窗外**的关键节点数。 */
+  count: number;
+  /** 离视窗最近的那个关键节点索引 —— 点击后轨道平移到它。 */
+  index: number;
+  /** 这些关键节点的标签（原始中文，webview 逐条过字典后拼进 title）。 */
+  labels: string[];
+  /**
+   * 色调：等待回答是「等你」，用警告色；失败 / 合并冲突用错误色。同一侧有多种
+   * 关键节点时，靠近视窗的那个决定色调（用户最先要处理的就是它）。
+   */
+  tone: "warning" | "danger";
+}
+
+/**
+ * 视窗两侧渐隐带的宽度占比 —— 必须与 `styles.css` 里 `.timeline-viewport` 的
+ * `mask-image` 断点（15% / 85%）保持一致。落在渐隐带里的节点虽然几何上还在
+ * 视窗内，实际已经淡到几乎看不见，按「不可见」处理。
+ */
+export const SUPER_TIMELINE_FADE_RATIO = 0.15;
+
+/**
+ * 视窗外关键节点的边缘提示。
+ *
+ * 居中当前步的代价是：别的步骤会被平移到视窗外。普通节点消失无所谓（轨道
+ * 本身就是「聚焦当前」），但**关键节点代表需要用户介入**，不能因为居中当前步
+ * 就看不见。这里按侧汇总「看不见」的关键节点，给出数量与最近的一个 —— 组件
+ * 据此渲染一个可点的提示，点它只做平移（把那个关键节点移到视窗中央）。
+ *
+ * 「看不见」的判定**包含渐隐带**：节点中心落在
+ * `[visibleStart + fade, visibleEnd - fade]` 之外就算。只按「完全出界」判定会
+ * 漏掉半截卡在 15% 渐隐带里的节点 —— 那种节点几何上还在视窗内，但已经被遮罩
+ * 淡到读不出来，用户同样会以为它消失了。
+ */
+export function computeSuperTimelineEdgeHints(params: {
+  nodes: readonly SuperTimelineNode[];
+  centers: readonly number[];
+  translateX: number;
+  viewportWidth: number;
+  /** 节点占位尺寸（px），默认 {@link SUPER_TIMELINE_NODE_SIZE}。 */
+  nodeSize?: number;
+}): SuperTimelineEdgeHint[] {
+  const { nodes, centers, translateX, viewportWidth } = params;
+  const nodeSize = params.nodeSize ?? SUPER_TIMELINE_NODE_SIZE;
+  if (viewportWidth <= 0 || nodes.length === 0) return [];
+
+  const visibleStart = -translateX;
+  const visibleEnd = visibleStart + viewportWidth;
+  const half = nodeSize / 2;
+  // 渐隐带宽度；节点半宽也算进去，避免「中心刚过线、半截还亮着」来回跳。
+  const fade = Math.max(0, viewportWidth * SUPER_TIMELINE_FADE_RATIO);
+  const solidStart = visibleStart + Math.max(0, fade - half);
+  const solidEnd = visibleEnd - Math.max(0, fade - half);
+
+  /** 关键节点的色调（等回答=警告，其余=错误）。 */
+  const toneOf = (node: SuperTimelineNode): "warning" | "danger" =>
+    node.kind === "awaiting_input" ? "warning" : "danger";
+
+  const left: SuperTimelineEdgeHint = {
+    side: "left",
+    count: 0,
+    index: -1,
+    labels: [],
+    tone: "danger",
+  };
+  const right: SuperTimelineEdgeHint = {
+    side: "right",
+    count: 0,
+    index: -1,
+    labels: [],
+    tone: "danger",
+  };
+
   nodes.forEach((node, index) => {
-    if (node.tone === "current") anchor = index;
-  });
-  if (anchor < 0) anchor = total - 1;
-  pinned.add(anchor);
-  nodes.forEach((node, index) => {
-    if (isCriticalTimelineNode(node)) pinned.add(index);
-  });
-
-  // 由近及远补齐：距离 1、2、3… 交替取锚点左右两侧。
-  let distance = 1;
-  while (pinned.size < SUPER_TIMELINE_MAX_VISIBLE_NODES && distance < total) {
-    const left = anchor - distance;
-    const right = anchor + distance;
-    if (left >= 0 && pinned.size < SUPER_TIMELINE_MAX_VISIBLE_NODES) pinned.add(left);
-    if (right < total && pinned.size < SUPER_TIMELINE_MAX_VISIBLE_NODES) pinned.add(right);
-    distance += 1;
-  }
-
-  const segments: SuperTimelineRailSegment[] = [];
-  let gapStart = -1;
-  for (let index = 0; index < total; index += 1) {
-    if (pinned.has(index)) {
-      if (gapStart >= 0) {
-        segments.push({ type: "gap", from: gapStart, to: index - 1 });
-        gapStart = -1;
+    if (!isCriticalTimelineNode(node)) return;
+    const center = centers[index];
+    if (center === undefined || !Number.isFinite(center)) return;
+    if (center < solidStart) {
+      left.count += 1;
+      // 升序遍历：越靠后的索引越贴近视窗，最后一个就是最近的那个。
+      left.index = index;
+      left.tone = toneOf(node);
+      left.labels.push(node.label);
+    } else if (center > solidEnd) {
+      right.count += 1;
+      // 第一个（最靠左）就是右侧最近的那个 —— 只有它决定色调。
+      if (right.index < 0) {
+        right.index = index;
+        right.tone = toneOf(node);
       }
-      segments.push({ type: "node", index });
-    } else if (gapStart < 0) {
-      gapStart = index;
+      right.labels.push(node.label);
     }
-  }
-  if (gapStart >= 0) segments.push({ type: "gap", from: gapStart, to: total - 1 });
-  return segments;
+  });
+
+  const hints: SuperTimelineEdgeHint[] = [];
+  if (left.count > 0) hints.push(left);
+  if (right.count > 0) hints.push(right);
+  return hints;
+}
+
+/** 聚焦视图的完整布局结果。 */
+export interface SuperTimelineFocusLayout {
+  /** 轨道平移量（px）。 */
+  translateX: number;
+  /** 屏外关键节点的边缘提示。 */
+  hints: SuperTimelineEdgeHint[];
+}
+
+/**
+ * 一次算出「平移量 + 边缘提示」。
+ *
+ * 两者同源（同一份节点中心 + 同一个视窗宽度），但**互不干扰**：提示按钮渲染在
+ * 轨道下方单独一行（见组件），不浮在轨道上，所以不需要为它预留沟槽，平移量
+ * 也不必为提示让步。这比「按提示收窄居中窗口」的不动点迭代稳得多 —— 收窄会
+ * 把节点推得更靠外，进而改变提示集合，来回振荡。
+ */
+export function layoutSuperTimelineFocus(params: {
+  nodes: readonly SuperTimelineNode[];
+  centers: readonly number[];
+  trackWidth: number;
+  viewportWidth: number;
+  /** 要居中的节点索引。 */
+  focusIndex: number;
+}): SuperTimelineFocusLayout {
+  const { nodes, centers, trackWidth, viewportWidth, focusIndex } = params;
+  const focusCenter = centers[focusIndex] ?? 0;
+  const translateX = computeSuperTimelineTranslateX({
+    focusCenter,
+    trackWidth,
+    viewportWidth,
+  });
+  return {
+    translateX,
+    hints: computeSuperTimelineEdgeHints({ nodes, centers, translateX, viewportWidth }),
+  };
 }

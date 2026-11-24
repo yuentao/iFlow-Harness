@@ -393,7 +393,7 @@
   "超流体记录恢复失败（不影响会话）：{0}": "Failed to restore Superfluid records (the session is unaffected): {0}",
   "运行中": "Running",
   "进度 {0}/{1}": "Progress {0}/{1}",
-  "省略 {0} 步": "{0} step(s) omitted",
+  "视窗外还有 {0} 个待处理步骤：{1}": "{0} pending step(s) off-screen: {1}",
   "这个超流体已经结束了，无需判定卡死": "This Superfluid has already finished — nothing to judge as stuck",
   "远程接管中，本机的超流体操作已冻结": "Remote takeover is in progress; local Superfluid actions are frozen",
   "逐块回退失败：{0}": "Per-hunk revert failed: {0}",

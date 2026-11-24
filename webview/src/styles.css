@@ -1108,6 +1108,27 @@ textarea::selection {
   animation: super-board-received 0.48s var(--ease-spring) both;
 }
 
+/* --- Super Agent timeline: centered focus viewport ----------------------
+   The timeline keeps ONE node horizontally centered and slides the track
+   under it with a transform (never scrollLeft). This mask fades both edges
+   so the previous / next steps dissolve instead of being sheared off at a
+   hard clip — the reading is "the track continues past here", not "the row
+   was cut".
+
+   Both spellings are emitted on purpose: Chromium honours either, so an
+   esbuild CSS fold (trap #22) can't silently drop the effect the way a
+   prefixed-only declaration once did. `to right` is explicit so the mask
+   axis can never be flipped by a logical-property rewrite.
+
+   This element is NOT a scroll container: `overflow` stays `hidden` and the
+   parent board already owns the vertical scroll (`max-h-[40vh]
+   overflow-y-auto`). A nested horizontal scroller here would steal the wheel
+   depending on where the pointer sits. */
+.timeline-viewport {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 15%, #000 85%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 15%, #000 85%, transparent);
+}
+
 @media (prefers-reduced-motion: reduce) {
   /* JS 已经直接跳过飞入；CSS 这层兜住用户中途改系统设置的竞态。 */
   .super-delegation-fly {
