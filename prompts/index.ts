@@ -28,6 +28,8 @@ import askSelection from "./ask-selection.md";
 import assetGen from "./asset-gen.md";
 import assetGenContracts from "./asset-gen-contracts.md";
 import assetGenNouns from "./asset-gen-nouns.md";
+import efficiencySteady from "./efficiency-steady.md";
+import efficiencyTurbo from "./efficiency-turbo.md";
 import enhance from "./enhance.md";
 import followup from "./followup.md";
 import followupKeys from "./followup-keys.md";
@@ -52,6 +54,8 @@ const templates: Record<string, string> = {
   "asset-gen": normalize(assetGen),
   "asset-gen-contracts": normalize(assetGenContracts),
   "asset-gen-nouns": normalize(assetGenNouns),
+  "efficiency-steady": normalize(efficiencySteady),
+  "efficiency-turbo": normalize(efficiencyTurbo),
   enhance: normalize(enhance),
   followup: normalize(followup),
   "followup-keys": normalize(followupKeys),
@@ -73,6 +77,17 @@ export function loadPrompt(name: string): string {
   if (template === undefined) throw new Error(`prompt template "${name}" is not registered in prompts/index.ts`);
   return template;
 }
+
+/**
+ * 效率开关（`iflow.efficiencyMode`）注入的两段档位块。
+ *
+ * 生产方（宿主把块追加到 prompt 末尾 / 前置到子会话任务书）与消费方
+ * （`shared/session-state.ts` 的 `findCliHistoryCut` 在比对 CLI 历史时从末尾
+ * 剥除）必须用同一份字面量：一旦分叉，带档位块的轮次就再也对不上 CLI 里
+ * 记录的原文，「删除用户消息 / 编辑重发」会静默退化成只删转录。
+ */
+export const EFFICIENCY_TURBO_PROMPT = templates["efficiency-turbo"]!;
+export const EFFICIENCY_STEADY_PROMPT = templates["efficiency-steady"]!;
 
 /**
  * Fill `{{placeholder}}` tokens in ONE pass, so a value that itself contains

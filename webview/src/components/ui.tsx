@@ -1422,6 +1422,8 @@ export function SettingsDisclosure({
   header,
   children,
   defaultOpen = false,
+  open: controlledOpen,
+  onToggle,
 }: {
   title: string;
   hint?: string;
@@ -1430,8 +1432,18 @@ export function SettingsDisclosure({
   children: ReactNode;
   /** Open on first render (used for blocks that hold the primary action). */
   defaultOpen?: boolean;
+  /**
+   * Controlled open state. Pass `open` together with `onToggle` when the block
+   * has to expand for a reason other than the header click (e.g. a job whose
+   * progress and errors render inside the body). Omitting both keeps the block
+   * self-managed, so every existing call site behaves exactly as before.
+   */
+  open?: boolean;
+  onToggle?: () => void;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [selfOpen, setSelfOpen] = useState(defaultOpen);
+  const controlled = controlledOpen !== undefined;
+  const open = controlled ? controlledOpen : selfOpen;
   const bodyId = useId();
   return (
     <section className="overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
@@ -1440,7 +1452,7 @@ export function SettingsDisclosure({
           type="button"
           aria-expanded={open}
           aria-controls={bodyId}
-          onClick={() => setOpen((v) => !v)}
+          onClick={() => (controlled ? onToggle?.() : setSelfOpen((v) => !v))}
           className="press flex min-w-0 flex-1 items-center gap-2 text-left"
         >
           <ChevronRight

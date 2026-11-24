@@ -1921,6 +1921,10 @@ export interface HostSettingsUi {
   autoCompressOnIdle: boolean;
   autoMemoryCapture: boolean;
   autoTitle: boolean;
+  /** 提示词档位（`iflow.efficiencyMode`）：`steady` 为默认、行为完全不变；
+   * `turbo` 额外注入「优先快速产出、减少探索」的规则。全局用户设置，
+   * 子会话跟随。注入逻辑在 host 侧按档位变化触发。 */
+  efficiencyMode: "steady" | "turbo";
   /** Wall-clock ceiling (seconds) for the turn-end memory extraction.
    * 0 = no limit. */
   memoryExtractTimeoutSeconds: number;
@@ -2166,6 +2170,16 @@ export function pickQqSettingsUi(
   };
 }
 
+/**
+ * `/memory-curate` 的 requestId 命名空间。
+ *
+ * 记忆页按钮与 Composer 指令共用同一条 host 通道与同一个 `memoryCurated`
+ * 回包，但它们是两个独立组件、各有自己的计数器。若都从 0 起自增，一次
+ * Composer 触发的回包会被同号的记忆页实例认领（多一次假成功 flash）。
+ * 约定：记忆页从 0 起自增，Composer 从本常量起自增，两者永不重叠。
+ */
+export const MEMORY_CURATE_COMPOSER_ID_BASE = 1_000_000;
+
 export type HostToWebview =
   | { type: "turnChanges"; sessionId: string; userBlockId: string; requestId: string; records: TurnChangeUi[]; unavailable: boolean }
   /** A single file's turn changes were reverted; refetch the turn records. */
@@ -2338,6 +2352,13 @@ export type HostToWebview =
   /** Auto-extraction produced candidates and the user asked to review them
    * (toast action). Nothing has been written yet. */
   | { type: "memoryCandidates"; sessionId: string | null; candidates: MemoryCandidateUi[] }
+  /** Reply to `curateMemoryNow` (memory card button / `/memory-curate`): one
+   * manual curation round finished. `ok:false` means it could not start
+   * (already running, or another window holds the lock) — a round that RAN is
+   * always `ok:true`, even when some files failed; `failed` carries that count
+   * so the UI can pick a warning tone instead of a green success. `message` is
+   * the user-facing summary either way. */
+  | { type: "memoryCurated"; requestId: number; ok: boolean; message: string; failed?: number }
   /** Project-knowledge generation progress (fast path, no agent tools). */
   | {
       type: "knowledgeJob";
@@ -2768,6 +2789,11 @@ export type WebviewToHost =
   | { type: "applyMemoryCandidates"; sessionId: string | null; candidates: MemoryCandidateUi[] }
   /** Drop pending candidates without writing. */
   | { type: "dismissMemoryCandidates"; sessionId: string | null }
+  /** Manually run one memory curation round now (memory card button and the
+   * `/memory-curate` slash command). Bypasses the enabled / idle / interval
+   * gates but still respects "already running" and the cross-window lock.
+   * Reply: `memoryCurated` with the same requestId. */
+  | { type: "curateMemoryNow"; requestId: number }
   /** Generate/refresh the project knowledge index. `jobId` correlates the
    * `knowledgeJob` stage updates so a stale job cannot unlock the UI.
    * `mode: "incremental"` (default) reuses the previous index + source diff

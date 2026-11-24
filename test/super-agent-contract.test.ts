@@ -141,6 +141,29 @@ describe("super agent · 提交契约三处对齐（SA-3）", () => {
   });
 });
 
+describe("子会话任务书 · 效率开关同档（turbo 前置速推规则）", () => {
+  it("turbo 时把速推模板原样前置，且用空行与任务书分隔", () => {
+    const plain = buildTaskPrompt("改登录", "干活", { kind: "directory", path: "/tmp/dir" });
+    const turbo = buildTaskPrompt(
+      "改登录",
+      "干活",
+      { kind: "directory", path: "/tmp/dir" },
+      undefined,
+      undefined,
+      "turbo",
+    );
+    expect(turbo.startsWith(loadPrompt("efficiency-turbo") + "\n\n")).toBe(true);
+    expect(turbo).toBe(loadPrompt("efficiency-turbo") + "\n\n" + plain);
+    expect(turbo).toContain("优先快速产出可运行的结果");
+  });
+
+  it("steady 或缺省时任务书逐字节不变", () => {
+    const plain = buildTaskPrompt("改登录", "干活", { kind: "directory", path: "/tmp/dir" });
+    expect(buildTaskPrompt("改登录", "干活", { kind: "directory", path: "/tmp/dir" }, undefined, undefined, "steady")).toBe(plain);
+    expect(plain).not.toContain("速推模式");
+  });
+});
+
 describe("子会话任务书 · 附件说明（多模态方案 C）", () => {
   it("附件清单带上用户说明，无说明时不追加破折号", () => {
     const brief = buildTaskPrompt("看图", "干活", { kind: "directory", path: "/tmp/dir" }, {

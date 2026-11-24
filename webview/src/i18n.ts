@@ -68,9 +68,11 @@ const en: Record<string, string> = {
   "已启动": "Started",
   "在等你回答": "Waiting for you",
   "第 {0} 次": "Attempt {0}",
-  "阶段轨：{0}": "Timeline: {0}",
+  "当前阶段：{0}": "Current stage: {0}",
   // 超流体 todolist 时间轴：状态 / 优先级是静态词（todo 原文是动态文本，不进字典）
   "待办": "To do",
+  "进度 {0}/{1}": "Progress {0}/{1}",
+  "下面还有 {0} 个步骤没显示：{1}": "{0} step(s) below are not shown: {1}",
   "高优先级": "High priority",
   "中优先级": "Medium priority",
   "低优先级": "Low priority",
@@ -102,7 +104,8 @@ const en: Record<string, string> = {
     "Retry this Superfluid: reuses its working directory and creates no new commit, but clears the previous integration result and re-runs the whole task (spending tokens again)",
   "第 {0} 次尝试": "Attempt {0}",
   "独立工作目录": "Its own working directory",
-  "只隔离了目录": "Directory only — no branch isolation",
+  "只隔离了文件目录（改动直接落在当前分支）":
+    "Only the file directory is isolated (changes land directly on the current branch)",
   "直接在主工作区（无隔离）": "Runs directly in the main workspace (no isolation)",
   "分支 {0}": "Branch {0}",
   "目录 {0}": "Directory {0}",
@@ -127,7 +130,6 @@ const en: Record<string, string> = {
   "超流体需要你回答": "The Superfluid needs an answer",
   "提交回答": "Send answer",
   "超流体合计开销": "Total Superfluid usage",
-  "输入 {0} · 输出 {1}": "Input {0} · Output {1}",
   "按公开单价估算，仅供参考": "Estimated at published prices; indicative only",
   "输入是上一次请求实际携带的上下文；输出按超流体的文字估算":
     "Input is the context the last request actually carried; output is estimated from the Superfluid's text",
@@ -227,7 +229,7 @@ const en: Record<string, string> = {
   "保留": "Keep",
   "回退": "Revert",
   "第 {0}/{1} 处改动": "Change {0} of {1}",
-  "应用（保留 {0} · 回退 {1}）": "Apply (keep {0} · revert {1})",
+  "应用标记：保留 {0} 处，回退 {1} 处": "Apply marks: keep {0}, revert {1}",
   "全部保留": "Keep all",
   "保留此改动": "Keep this change",
   "回退此改动（恢复为编辑前内容）": "Revert this change (restore pre-edit content)",
@@ -263,7 +265,8 @@ const en: Record<string, string> = {
   "已停止": "Stopped",
   "耗时": "Duration",
   "查看完整记录": "View full log",
-  "token 数为按对话估算，包含进程内子代理": "Token count is estimated from the conversation and includes in-process sub-agents",
+  "token 数是按当前对话估算的，包含会话内子代理的用量":
+    "Token count is estimated from the current conversation and includes in-session sub-agents",
   "启动进程内子代理 {0}：{1}": "Launch in-process sub-agent {0}: {1}",
   "读取 {0}": "Reading {0}",
   "运行：{0}": "Running: {0}",
@@ -429,8 +432,8 @@ const en: Record<string, string> = {
   "项目级覆盖全局": "Project scope (overrides global)",
   "项目级和全局有同名服务器时，内核会用项目级那份整体替换全局的（不会合并字段）":
     "When a server name exists in both scopes, the Core replaces the global entry with the project one wholesale (fields are not merged)",
-  "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的超流体会通过共享代理使用这些 server。":
-    "This edits the global configuration (~/.iflow/settings.json). Restart the Core after saving — new Superfluids use these servers through the shared proxy.",
+  "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的超流体会通过宿主代理（broker）使用这些 server。":
+    "This edits the global configuration (~/.iflow/settings.json). Restart the Core after saving — new Superfluids use these servers through the host proxy (broker).",
   "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后重启内核，新建的超流体会通过共享代理使用这些 server。":
     "This edits the project configuration (<workspace>/.iflow/settings.json). For a name that also exists globally, the Core replaces the global entry with the project one wholesale (fields are not merged). Restart the Core after saving — new Superfluids use these servers through the shared proxy.",
   "这些 MCP server 仅供超流体使用，主会话不加载 MCP。":
@@ -446,8 +449,8 @@ const en: Record<string, string> = {
   "连接中…": "Connecting…",
   "未连接": "Not connected",
   "状态不可获取": "Status unavailable",
-  "无法获取连接状态（内核未连接，或没有开启状态上报）":
-    "Cannot read the connection status (Core not connected, or status reporting not enabled)",
+  "暂时读不到连接状态：后台服务未连接，或该功能未开启。点「刷新」重试。":
+    "Connection status is unavailable right now: the background service is not connected, or status reporting is turned off. Click Refresh to retry.",
   "连接状态读取中…": "Reading connection status…",
   "详情": "Details",
   "MCP 服务器详情": "MCP server details",
@@ -475,7 +478,8 @@ const en: Record<string, string> = {
   "复制原始 TOML": "Copy the raw TOML",
   "复制原始文件内容": "Copy the raw file content",
   "参数结构": "Parameter structure",
-  "参数结构太大，已省略": "The parameter structure is too large and was omitted",
+  "这个工具的参数字段太多，界面已省略显示（不影响模型调用）":
+    "This tool has too many parameter fields, so the UI omits them (model calls are unaffected)",
   // profile-switch choice dialog
   "取消切换": "Cancel the switch",
   "停留在当前会话": "Stay in the current session",
@@ -614,10 +618,10 @@ const en: Record<string, string> = {
   "预览": "Preview",
   // render-error fallback (ErrorBoundary)
   "重试": "Retry",
-  "界面渲染异常": "Interface rendering error",
+  "界面出错了": "Something went wrong in the interface",
   "重新载入面板即可恢复；也可以直接重试。":
     "Reload the panel to recover, or just retry.",
-  "消息区渲染异常": "Message area rendering error",
+  "这段内容显示不出来": "This content can't be displayed",
   "这段内容没能显示出来，下次更新时会自动重试。":
     "This content could not be displayed; it will retry automatically on the next update.",
   // M1: Focus view, context occupancy, cost, prompt enhancement
@@ -628,9 +632,10 @@ const en: Record<string, string> = {
   "上下文占用 {0} / {1}（{2}%{3}{4}）": "Context {0} / {1} ({2}%{3}{4})",
   "，上限为估算值": ", limit is an estimate",
   "，占用为内核上报值": ", occupancy reported by the Core",
-  "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}": "User {0} · assistant {1} · tools {2} · thoughts {3}",
-  "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3} · 固定开销 {4}":
-    "User {0} · assistant {1} · tools {2} · thoughts {3} · fixed overhead {4}",
+  "用户 {0} tokens，助手 {1} tokens，工具 {2} tokens，思考 {3} tokens":
+    "User {0} tokens, assistant {1} tokens, tools {2} tokens, thoughts {3} tokens",
+  "用户 {0} tokens，助手 {1} tokens，工具 {2} tokens，思考 {3} tokens，固定开销 {4} tokens":
+    "User {0} tokens, assistant {1} tokens, tools {2} tokens, thoughts {3} tokens, fixed overhead {4} tokens",
   "固定开销 = 系统提示词、记忆和工具说明，每次请求都要带上":
     "Fixed overhead = system prompt, memory and tool descriptions — carried on every request",
   "估算没有算上内核内置的工具说明和目录清单":
@@ -641,7 +646,7 @@ const en: Record<string, string> = {
   // T-2/3/4 用量来源展示（中文为源语言）
   "内核上报": "Reported by Core",
   "转录估算": "Transcript estimate",
-  "下界": "Lower bound",
+  "最低估算": "Lowest estimate",
   "来源未知": "Source unknown",
   "用户配置": "User configured",
   "内置表": "Built-in table",
@@ -651,8 +656,10 @@ const en: Record<string, string> = {
   "内核配置": "Kernel settings",
   "无来源链接": "No source link",
   "来源链接：{0}": "Source link: {0}",
-  "数据出处：token {0} · 单价 {1} · 采集 {2} · {3}": "Provenance: tokens {0} · price {1} · captured {2} · {3}",
-  "输入 {0}{1} tokens · 输出 {2}{3} tokens（拆分来源：{4}）": "Input {0}{1} tokens · output {2}{3} tokens (split source: {4})",
+  "数据出处：token 来自{0}，单价来自{1}，采集时间 {2}，{3}":
+    "Provenance: tokens from {0}, price from {1}, captured {2}, {3}",
+  "输入 {0}{1} tokens，输出 {2}{3} tokens（拆分来源：{4}）":
+    "Input {0}{1} tokens, output {2}{3} tokens (split source: {4})",
   "窗口来源：{0}": "Window source: {0}",
   "展开全部 {0} 张上下文卡": "Show all {0} context cards",
   "建议": "Suggested",
@@ -690,11 +697,11 @@ const en: Record<string, string> = {
   "设置分区": "Settings sections",
   "详细说明": "Details",
   "会话": "Sessions",
-  "编排与并发": "Orchestration & concurrency",
+  "后台任务与并发": "Background tasks & concurrency",
   "安全与信任": "Security & trust",
   "并发上限": "Concurrency limit",
   "个": "sessions",
-  "集成模式": "Integration mode",
+  "完成后如何合并": "How to merge when done",
   "超流体完成后，把它的改动并回当前分支的方式。": "How a finished Superfluid's changes are merged back into the current branch.",
   "自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的超流体生效。":
     "Auto-merge: merge into the current branch (conflicts are previewed first and your uncommitted changes are protected); Open PR: push the branch and open a pull request (needs the gh CLI); Manual: just keep the branch for you to merge from the board. Takes effect on the next Superfluid that finishes.",
@@ -723,7 +730,7 @@ const en: Record<string, string> = {
   "超流体直接在主仓工作区运行，不做 Git 工作目录隔离。默认关闭：开启后不再向超流体施加工具白名单与 MCP 服务器白名单限制。":
     "Superfluids run directly in the main repository workspace, with no Git worktree isolation. Off by default: when on, the tool allowlist and MCP server allowlist are no longer applied to Superfluids.",
   "开启后超流体保留全部内置工具与共享代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。":
-    "When on, Superfluids keep all built-in tools and every broker-proxied MCP server, may read/write the main repository workspace and run commands, and may push, open pull requests and merge in the main repository. Takes effect on the next dispatched Superfluid.",
+    "When on, Superfluids keep all built-in tools and every MCP server provided by the host proxy (broker), may read/write the main repository workspace and run commands, and may push, open pull requests and merge in the main repository. Takes effect on the next dispatched Superfluid.",
   "开启后超流体无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。":
     "In full trust mode Superfluids can modify main-repository files, run arbitrary commands and push/open PRs without approval — only enable it for tasks you fully trust.",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
@@ -778,7 +785,7 @@ const en: Record<string, string> = {
   "所有会话快照的总磁盘上限；0 表示不限制。": "Total on-disk cap for all session snapshots; 0 means unlimited.",
   "存储目录": "Storage directory",
   "模型元数据": "Model metadata",
-  "上下文窗口覆写": "Context window overrides",
+  "自定义上下文窗口": "Custom context windows",
   "成本单价": "Unit prices",
   "思考模型规则": "Thinking model rules",
   "联网补充模型数据": "Fetch model data online",
@@ -797,7 +804,8 @@ const en: Record<string, string> = {
   "旧版本文件": "Legacy file",
   "已加载": "Loaded",
   "未加载": "Not loaded",
-  "约 {0} tokens（BPE 估算）": "About {0} tokens (BPE estimate)",
+  "约 {0} tokens（按文本长度估算，仅供参考）":
+    "About {0} tokens (estimated from text length; indicative only)",
   "打开文件": "Open file",
   "编辑记忆": "Edit memory",
   "还没有创建": "Not created yet",
@@ -831,10 +839,6 @@ const en: Record<string, string> = {
   "保存后要新建会话或重启内核才生效": "Takes effect after a new session or a Core restart",
   "请先创建项目记忆文件": "Create a project memory file first",
   "新建会话": "New session",
-  "重启内核使记忆生效": "Restart Core to apply memory",
-  "重启内核并恢复当前会话，使记忆立即生效":
-    "Restart the Core and restore the current session so memory applies immediately",
-  "改动不会影响正在进行的会话。": "Changes do not affect an ongoing session.",
   "文件已在磁盘上发生变化，请重新加载后再保存":
     "The file changed on disk — reload before saving",
   "保存失败": "Save failed",
@@ -870,37 +874,56 @@ const en: Record<string, string> = {
   "自动提取记忆": "Auto-extract memories",
   // --- 记忆整理（P1） ---
   "记忆整理": "Memory curation",
-  "只在面板空闲时运行，默认只出报告":
-    "Runs only while the panel is idle; reports by default",
+  "只在面板空闲时运行；默认只预览，不改动文件":
+    "Runs only while the panel is idle; previews by default without touching files",
   "定期整理记忆": "Curate memories on a schedule",
-  "空闲时清理记忆托管区块：去重、合并、归档低价值条目。":
-    "Tidy the managed memory sections while idle: dedupe, merge and archive low-value facts.",
+  "空闲时整理记忆文件里由 iFlow 自动维护的那一段：去重、合并，把用处不大的内容移出常用记忆（不再每轮发送）。":
+    "While idle, tidy the part of the memory file that iFlow maintains automatically: dedupe, merge, and move low-value content out of the per-turn memory.",
   "只在没有进行中的回合、没有待处理的审批或提问、没有运行中的超流体，且空闲达到阈值时运行。默认关闭。":
     "Runs only when no turn is streaming, no approval or question is pending, no Superfluid is running, and the panel has been idle for the threshold. Off by default.",
   "整理策略": "Curation strategy",
-  "报告只汇总改动，应用才真正改写记忆文件。":
-    "Report only summarises the changes; apply actually rewrites the memory files.",
+  "「只预览」只统计会改动哪些文件，「执行」才真正改写记忆文件。":
+    "Preview only counts what would change; Apply actually rewrites the memory files.",
   "应用策略下每个文件先备份；若期间被其它程序改动则跳过该文件，绝不覆盖。":
-    "In apply mode each file is backed up first; a file changed by another program in the meantime is skipped, never overwritten.",
-  "仅报告": "Report only",
-  "直接应用": "Apply",
+    "When applying, each file is backed up first; a file changed by another program in the meantime is skipped, never overwritten.",
+  "只预览（不改文件）": "Preview only (no changes)",
+  "执行并改写文件": "Apply and rewrite files",
   "整理周期": "Curation interval",
   "每隔多少天自动整理一次。": "How often automatic curation runs, in days.",
   "空闲阈值": "Idle threshold",
   "面板空闲多少分钟后才整理。": "Only curate after the panel has been idle this many minutes.",
   "全局记忆预算": "Global memory budget",
-  "全局记忆托管区块的 token 预算，超出后优先归档。":
-    "Token budget for the managed global memory section; low-value facts are archived when exceeded.",
+  "全局记忆里由 iFlow 自动维护的那一段的 token 预算，超出后优先把用处不大的内容移出常用记忆（不再每轮发送）。":
+    "Token budget for the part of global memory that iFlow maintains automatically; when exceeded, low-value content is moved out of the per-turn memory first.",
   "项目记忆预算": "Project memory budget",
   "每个项目记忆文件的 token 预算。":
-    "Token budget for the managed section of each project memory file.",
+    "Token budget for the auto-maintained part of each project memory file.",
   "总量预算": "Total budget",
-  "所有记忆托管区块的 token 合计阈值，超出即整理。":
-    "Total token budget across all managed memory sections; exceeding it triggers curation.",
+  "所有自动维护的记忆内容合计的 token 阈值，超出就触发整理。":
+    "Total token threshold across all auto-maintained memory; exceeding it triggers curation.",
   "超过它时即使未到整理周期也会触发整理；冷却期为 6 小时与周期的四分之一中较大者，冷却期内不重复触发。":
     "When exceeded, curation runs even before the interval elapses; the cooldown is the longer of 6 hours or a quarter of the interval, during which it does not retrigger.",
   "天": "days",
   "分钟": "min",
+  // 记忆整理：手动触发入口（记忆页按钮 + /memory-curate）
+  "整理记忆": "Curate memories",
+  "整理中…": "Curating…",
+  "按当前设置立即整理一次": "Runs one round now with the current settings",
+  "立即整理自动维护的记忆内容：去重、合并，把用处不大的内容移出常用记忆（不再每轮发送）":
+    "Tidy the auto-maintained memory now: dedupe, merge, and move low-value content out of the per-turn memory",
+  "立即整理记忆：去重、合并，把用处不大的内容移出常用记忆（不再每轮发送）":
+    "Curate memories now: dedupe, merge, and move low-value content out of the per-turn memory",
+  "已触发记忆整理，完成后会提示结果":
+    "Memory curation started; the result will be reported when it finishes",
+  "记忆整理完成": "Memory curation finished",
+  "记忆整理未能开始": "Memory curation could not start",
+  "另有 {0} 个文件处理失败": "{0} more file(s) failed to process",
+  "已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送":
+    "Memory curation started; this command takes no attachments, so the attached images/files/contexts were not sent",
+  "该指令不接受参数，已按整理记忆执行":
+    "This command takes no arguments; memory curation was run instead",
+  "已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送，也不接受参数":
+    "Memory curation started; this command takes no attachments or arguments, so the attached images/files/contexts and the arguments were not sent",
   // F3 Phase 3: project knowledge
   "项目知识库": "Project knowledge",
   "{0} 篇文档": "{0} doc(s)",
@@ -1009,8 +1032,8 @@ const en: Record<string, string> = {
   "记忆提取最多等多久。": "How long to wait for memory extraction.",
   "保存在 VSCode 用户设置里，可随 VSCode 设置同步。":
     "Stored in your VSCode user settings and carried by VSCode Settings Sync.",
-  "以标准为基准：紧凑约 0.92 倍，大约 1.1 倍。":
-    "Standard is the baseline: compact ≈0.92×, large ≈1.1×.",
+  "以「标准」为基准：紧凑约 0.92 倍字号，大号约 1.1 倍。":
+    "With Standard as the baseline: compact is ≈0.92× the text size, large ≈1.1×.",
   "调整控件之间的间距，不改字号。": "Adjusts spacing between controls; text size stays the same.",
   "以标准为基准：紧凑约 0.92 倍，宽松约 1.12 倍。":
     "Standard is the baseline: compact ≈0.92×, comfortable ≈1.12×.",
@@ -1123,7 +1146,8 @@ const en: Record<string, string> = {
   "有同名全局版本，实际用的是它": "A global version with the same name exists and is the one actually used",
   "这里的列表直接来自磁盘：全局的在 ~/.iflow 下，项目的在工作区的 .iflow 下。改完的文件要等新建会话或重启内核后才生效。": "This list comes straight from disk: global assets live under ~/.iflow, project assets under .iflow in the workspace. Edited files take effect only after you start a new session or restart the core.",
   "文件内容": "File content",
-  "文件内容（Markdown 正文与头部配置）": "File content (Markdown body and front matter)",
+  "文件内容（Markdown 正文 + 开头的配置区）":
+    "File content (Markdown body + front-matter block at the top)",
   "保存前会核对文件是否被改动；如果磁盘上的内容已经变了，会提示你刷新，而不是覆盖它。": "Before saving, the file is checked for outside changes; if it changed on disk you are asked to refresh instead of overwriting it.",
   "保存位置": "Save location",
   "如 fix-tests": "e.g. fix-tests",
@@ -1477,8 +1501,20 @@ const en: Record<string, string> = {
     "After unbinding, QQ remote tasks and message access both stop; you must scan the QR code again to use them.",
   // 设置页：保存失败兜底提示
   "保存失败，请稍后重试": "Save failed — try again later",
+  // 效率开关（Composer 提示词档位）
+  "提示词档位": "Prompt mode",
+  "平稳": "Steady",
+  "速推": "Turbo",
+  "档位说明": "Mode details",
+  "平稳：使用默认规则，完整的探索与验证流程。":
+    "Steady: default rules, with the full exploration and verification flow.",
+  "速推：优先快速产出，减少探索与反复确认，只跑相关验证。":
+    "Turbo: prioritize quick output — less exploration and back-and-forth confirmation, and only the relevant checks are run.",
   "审批/提问/计划阻塞时，或整轮完成时发送。":
     "Sent when an approval, question or plan blocks, or when a turn completes.",
+  // 设置页「系统」分组顶部：用白话解释「内核」是什么
+  "内核：在后台运行的 iFlow 服务进程；重启后会重新加载记忆、技能与 MCP 服务器。":
+    "Core: the iFlow service process running in the background; restarting it reloads memory, skills and MCP servers.",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

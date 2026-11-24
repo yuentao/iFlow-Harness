@@ -451,7 +451,7 @@ export class SuperAgentHost {
     this.clearDeferredAutoTurnsToast();
     this.deferredAutoTurnsToastId = this.store.sendToast(
       "info",
-      vscode.l10n.t("已停止；还有 {0} 项超流体结果待处理。发送下一条消息，或点「继续处理」来收取汇报", pending),
+      vscode.l10n.t("已停止；还有 {0} 项超流体结果待处理。发送下一条消息，或点「继续处理」查看结果", pending),
       {
         persistent: true,
         action: { actionId: "resume-super-turns", label: vscode.l10n.t("继续处理") },
@@ -748,7 +748,7 @@ export class SuperAgentHost {
     if (!manager || typeof manager.judgeStuck !== "function") return;
     const outcome = await manager.judgeStuck(sessionId);
     if (outcome.reason === "cancelled") {
-      this.store.sendToast("info", vscode.l10n.t("已按「判定卡死」中断超流体，并在诊断中记录原因"));
+      this.store.sendToast("info", vscode.l10n.t("已按你的判断中止超流体（判定为卡住），原因已记入诊断。"));
     } else if (outcome.reason === "already-terminal") {
       this.store.sendToast("info", vscode.l10n.t("这个超流体已经结束了，无需判定卡死"));
     } else {
@@ -1373,6 +1373,12 @@ export class SuperAgentHost {
         vscode.workspace
           .getConfiguration("iflow")
           .get<boolean>("superAgent.keepWorktree", false),
+      // 效率开关：turbo 时子会话任务书前置速推规则，与主会话同档。实时读，
+      // 改完对下一次派发生效；未知值按 steady（不注入）。
+      efficiencyMode: () => {
+        const mode = vscode.workspace.getConfiguration("iflow").get<string>("efficiencyMode");
+        return mode === "turbo" ? "turbo" : "steady";
+      },
       // 磁盘上最多保留多少个已结束子会话的工作目录（0 = 不限制）。
       maxWorktrees: () =>
         clampMaxSuperWorktrees(
@@ -3679,7 +3685,10 @@ export class SuperAgentHost {
         if (ok) {
           this.store.sendToast("info", vscode.l10n.t("已重新派发超流体（沿用原工作目录）"));
         } else {
-          this.store.sendToast("warning", vscode.l10n.t("该超流体当前无法重试"));
+          this.store.sendToast(
+          "warning",
+          vscode.l10n.t("该超流体现在无法重试（可能已完成或已被清理），请刷新看板后重试。"),
+        );
         }
         break;
       }

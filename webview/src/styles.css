@@ -1108,6 +1108,38 @@ textarea::selection {
   animation: super-board-received 0.48s var(--ease-spring) both;
 }
 
+/* --- Super Agent timeline: centered focus viewport ----------------------
+   The timeline keeps ONE node horizontally centered and slides the track
+   under it with a transform (never scrollLeft). Each node is a fixed-width
+   column (SUPER_TIMELINE_NODE_PITCH = 88px: truncated label above, icon and
+   half-connectors below). This mask fades both edges so the previous / next
+   steps dissolve instead of being sheared off at a hard clip — the reading
+   is "the track continues past here", not "the row was cut".
+
+   The mask is ALWAYS on, never gated on "does the track overflow": a stepper
+   whose edges only fade sometimes reads as two different components. Left =
+   transparent → opaque, right = opaque → transparent.
+
+   Both spellings are emitted on purpose: Chromium honours either, so an
+   esbuild CSS fold (trap #22) can't silently drop the effect the way a
+   prefixed-only declaration once did. `to right` is explicit so the mask
+   axis can never be flipped by a logical-property rewrite.
+
+   This element is NOT a scroll container: `overflow` stays `hidden` and the
+   parent board already owns the vertical scroll (`max-h-[40vh]
+   overflow-y-auto`). A nested horizontal scroller here would steal the wheel
+   depending on where the pointer sits.
+
+   Padding contract: the inner track reserves inline padding equal to the fade
+   band (`superTimelineTrackPadding()` = 15% of the viewport width, matching
+   the stops below). Without it a clamped first/last node's center sits ~11px
+   from the edge — inside the gradient — so the one node the user cares about
+   most renders grey. Keep the padding helper and these stops in sync. */
+.timeline-viewport {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 15%, #000 85%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 15%, #000 85%, transparent);
+}
+
 @media (prefers-reduced-motion: reduce) {
   /* JS 已经直接跳过飞入；CSS 这层兜住用户中途改系统设置的竞态。 */
   .super-delegation-fly {

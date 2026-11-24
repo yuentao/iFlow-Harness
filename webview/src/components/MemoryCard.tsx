@@ -5,10 +5,12 @@ import {
   ChevronRight,
   ExternalLink,
   FileText,
+  Loader2,
   Pencil,
   Plus,
   RefreshCw,
   Save,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import type { KnowledgeDocUi, MemoryFactUi, MemoryFileUi, MemoryScope, MemoryStateUi, WebviewToHost } from "../../../shared/messages";
@@ -200,7 +202,7 @@ function MemoryFileCard({
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption text-muted-foreground">
         <span>{file.exists ? t("{0} 字节", file.bytes) : t("还没有创建")}</span>
         {file.updatedAt && <span>{t("更新于 {0}", formatTime(file.updatedAt))}</span>}
-        <span title={t("约 {0} tokens（BPE 估算）", file.tokens)}>≈{fmtTokens(file.tokens)} tokens</span>
+        <span title={t("约 {0} tokens（按文本长度估算，仅供参考）", file.tokens)}>≈{fmtTokens(file.tokens)} tokens</span>
       </div>
       {factsSection}
     </div>
@@ -215,8 +217,9 @@ function MemoryFileCard({
  * Timing contract (probed): the CLI assembles its system instruction at
  * `startChat`, i.e. on session/new and session/load. Saving a file therefore
  * takes effect on the NEXT new/restored session; the current chat keeps its
- * old instruction. The card offers 「新建会话」 and 「重启 CLI」 (restart restores
- * the current session, rebuilding the instruction).
+ * old instruction. The card has no session/restart buttons of its own — it
+ * only states that requirement in inline hints (both entries live in the top
+ * bar and the command palette).
  */
 export function MemorySection({
   busy,
@@ -253,8 +256,27 @@ export function MemorySection({
   const [knowledgeGenerating, setKnowledgeGenerating] = useState(false);
   const [knowledgeToggling, setKnowledgeToggling] = useState(false);
   const knowledgeBusy = knowledgeGenerating || knowledgeToggling;
+  // 「项目知识库」默认折叠（页面首屏只留块头），但生成进度与失败提示都渲染在
+  // 区块体内 —— 有任务在跑或失败时必须自动展开，否则用户点了「生成项目知识」
+  // 后看不到任何反馈。
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  useEffect(() => {
+    if (knowledgeGenerating || knowledgeError) setKnowledgeOpen(true);
+  }, [knowledgeGenerating, knowledgeError]);
   const knowledgeJobRef = useRef<string | null>(null);
+  // 「整理记忆」手动触发：请求号自增，回包按 requestId 认领（迟到的旧回包
+  // 不得结束新一轮的 loading）。
+  const [curating, setCurating] = useState(false);
+  const [curateError, setCurateError] = useState<string | null>(null);
+  const [curateFlash, setCurateFlash] = useState<string | null>(null);
+  /** 本轮失败的文件数：>0 时结果条用 warning 色阶，而不是成功绿。 */
+  const [curateFailed, setCurateFailed] = useState(0);
+  // requestId 命名空间：本卡片从 0 起自增，Composer 的 `/memory-curate`
+  // 从 1_000_000 起自增 —— 两条入口共用同一个 wire 回包，号码必须不重叠，
+  // 否则 Composer 触发的回包会被同号的卡片实例认领（多一次假成功）。
+  const curateSeq = useRef(0);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const curateFlashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pendingPath = useRef<string | null>(null);
   // The last write request, kept so an inline "重试" can resend it verbatim
   // (append / delete / save all carry different payloads).
@@ -282,7 +304,29 @@ export function MemorySection({
         stage?: string;
         message?: string;
         jobId?: string;
+        requestId?: number;
+        failed?: number;
       };
+      if (msg?.type === "memoryCurated") {
+        if (msg.requestId !== curateSeq.current) return;
+        setCurating(false);
+        if (msg.ok) {
+          const failed = msg.failed ?? 0;
+          setCurateError(null);
+          setCurateFailed(failed);
+          // 部分失败：宿主的 message 是基础摘要（共享 l10n 词典不归本改动），
+          // 失败数在这里用 webview 自己的词典补上，色阶随 failed 走 warning。
+          const base = msg.message ?? t("记忆整理完成");
+          setCurateFlash(failed > 0 ? `${base}；${t("另有 {0} 个文件处理失败", failed)}` : base);
+          if (curateFlashTimer.current) clearTimeout(curateFlashTimer.current);
+          curateFlashTimer.current = setTimeout(() => setCurateFlash(null), 6000);
+        } else {
+          setCurateFlash(null);
+          setCurateFailed(0);
+          setCurateError(msg.message ?? t("记忆整理未能开始"));
+        }
+        return;
+      }
       if (msg?.type === "knowledgeJob") {
         if (knowledgeJobRef.current && msg.jobId && msg.jobId !== knowledgeJobRef.current) return;
         const stage = msg.stage ?? null;
@@ -354,6 +398,7 @@ export function MemorySection({
     return () => {
       window.removeEventListener("message", handler);
       if (flashTimer.current) clearTimeout(flashTimer.current);
+      if (curateFlashTimer.current) clearTimeout(curateFlashTimer.current);
     };
   }, [send]);
 
@@ -420,6 +465,17 @@ export function MemorySection({
 
   function open(file: MemoryFileUi) {
     send({ type: "openMemoryFile", path: file.path });
+  }
+
+  /** 手动触发一轮记忆整理（与 `/memory-curate` 指令走同一个 host 入口）。 */
+  function curateNow() {
+    if (busy || saving || curating) return;
+    setCurateError(null);
+    setCurateFlash(null);
+    setCurateFailed(0);
+    setCurating(true);
+    const requestId = ++curateSeq.current;
+    send({ type: "curateMemoryNow", requestId });
   }
 
   function generateKnowledge(mode: "incremental" | "full") {
@@ -589,13 +645,46 @@ export function MemorySection({
         {t("这些记忆文件会在每次请求时自动带给模型。它们会随请求一起发送，请不要写入密钥。")}
       </div>
 
+      <ActionRow>
+        <Button
+          variant="secondary"
+          icon={curating ? <Loader2 className={`${ICON_INLINE} animate-spin`} /> : <Sparkles className={ICON_INLINE} />}
+          disabled={busy || saving || curating}
+          title={t("立即整理自动维护的记忆内容：去重、合并，把用处不大的内容移出常用记忆（不再每轮发送）")}
+          onClick={curateNow}
+        >
+          {curating ? t("整理中…") : t("整理记忆")}
+        </Button>
+        <span className="text-ui-caption text-muted-foreground">{t("按当前设置立即整理一次")}</span>
+      </ActionRow>
+      {curateFlash && (
+        curateFailed > 0 ? (
+          <div role="status" aria-live="polite" className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-warning">
+            <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+            <span className="min-w-0 flex-1">{curateFlash}</span>
+          </div>
+        ) : (
+          <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-ui-label text-success">
+            <Check className="size-3 shrink-0" />
+            <span className="min-w-0 flex-1">{curateFlash}</span>
+          </div>
+        )
+      )}
+      {curateError && (
+        <div role="alert" className="flex items-start gap-1.5 rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-destructive">
+          <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+          <span className="min-w-0 flex-1">{curateError}</span>
+        </div>
+      )}
+
       {state === null ? (
         <div className="py-4 text-center text-ui-body text-muted-foreground">{t("读取中…")}</div>
       ) : (
         <>
           {/* 4.7: 文件列表 / 快速追加 / 知识库 三块用 disclosure 分开，
-              块头保留主操作，避免长列表把关键按钮埋到底部。 */}
-          <SettingsDisclosure title={t("记忆文件")} defaultOpen>
+              块头保留主操作，避免长列表把关键按钮埋到底部。文件与知识库
+              两块默认折叠：设置页首屏只留块头，用户按需展开。 */}
+          <SettingsDisclosure title={t("记忆文件")}>
             <section className="space-y-2 px-4 py-3">
               <div className="flex items-center gap-1.5">
                 <span className="text-ui-body font-semibold text-foreground">{t("全局记忆")}</span>
@@ -690,7 +779,8 @@ export function MemorySection({
 
           <SettingsDisclosure
             title={t("项目知识库")}
-            defaultOpen
+            open={knowledgeOpen}
+            onToggle={() => setKnowledgeOpen((v) => !v)}
             header={
               <>
                 {knowledge && knowledge.docs.length > 0 && (
@@ -782,7 +872,7 @@ export function MemorySection({
                       </Chip>
                       <span
                         className="shrink-0 font-mono text-ui-caption text-muted-foreground"
-                        title={t("约 {0} tokens（BPE 估算）", doc.tokens)}
+                        title={t("约 {0} tokens（按文本长度估算，仅供参考）", doc.tokens)}
                       >
                         ≈{fmtTokens(doc.tokens)} tokens
                       </span>
@@ -870,22 +960,6 @@ export function MemorySection({
               </div>
             </div>
           </SettingsDisclosure>
-
-          <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2">
-            <Button variant="secondary" disabled={busy} onClick={() => send({ type: "newSession" })}>
-              {t("新建会话")}
-            </Button>
-            <Button
-              variant="secondary"
-              icon={<RefreshCw className={ICON_INLINE} />}
-              disabled={busy}
-              title={t("重启内核并恢复当前会话，使记忆立即生效")}
-              onClick={() => send({ type: "restartCli" })}
-            >
-              {t("重启内核使记忆生效")}
-            </Button>
-            <span className="text-ui-caption text-muted-foreground">{t("改动不会影响正在进行的会话。")}</span>
-          </div>
         </>
       )}
       {footer}

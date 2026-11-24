@@ -55,6 +55,7 @@ const hostSettings = vi.hoisted(() =>
     autoCompressOnIdle: false,
     autoMemoryCapture: false,
     autoTitle: true,
+    efficiencyMode: "steady",
     memoryExtractTimeoutSeconds: 90,
     nextStepTimeoutSeconds: 25,
     compressTimeoutSeconds: 0,
@@ -224,13 +225,13 @@ describe("本地化占位", () => {
 });
 
 describe("设置页 UI", () => {
-  it("超流体分类拆成「编排与并发」「安全与信任」两组，标题都在", () => {
-    expect(group("编排与并发")).toBeTruthy();
+  it("超流体分类拆成「后台任务与并发」「安全与信任」两组，标题都在", () => {
+    expect(group("后台任务与并发")).toBeTruthy();
     expect(group("安全与信任")).toBeTruthy();
   });
 
-  it("「编排与并发」组渲染出最大尝试次数与依赖策略两个控件", () => {
-    const orchestration = group("编排与并发");
+  it("「后台任务与并发」组渲染出最大尝试次数与依赖策略两个控件", () => {
+    const orchestration = group("后台任务与并发");
     expect(orchestration.textContent).toContain("最大尝试次数");
     expect(orchestration.textContent).toContain("依赖策略");
   });
@@ -306,7 +307,7 @@ describe("设置页 UI", () => {
   it("英文词典里有对应的英文文案", () => {
     setLocale("en-US");
     expect(t("超流体")).toBe("Superfluid");
-    expect(t("编排与并发")).toBe("Orchestration & concurrency");
+    expect(t("后台任务与并发")).toBe("Background tasks & concurrency");
     expect(t("安全与信任")).toBe("Security & trust");
     expect(t("最大尝试次数")).toBe("Max attempts");
     expect(t("依赖策略")).toBe("Dependency policy");

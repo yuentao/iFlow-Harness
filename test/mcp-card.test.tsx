@@ -326,8 +326,7 @@ it("parks an unsaved draft per scope so a switch round trip does not lose it", (
 it("explains these servers are used by child sessions, not the main session", () => {
   reply({ a: { command: "node" } });
   expect(container.textContent).toContain("这些 MCP server 仅供超流体使用，主会话不加载 MCP。");
-  expect(container.textContent).toContain("新建的超流体会通过共享代理使用这些 server");
-});
+      expect(container.textContent).toContain("新建的超流体会通过宿主代理（broker）使用这些 server");});
 
 it("does not read a main-session-blocked server as a failure without broker data", () => {
   reply({ a: { command: "node" } });

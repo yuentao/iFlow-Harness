@@ -83,6 +83,7 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   autoCompressOnIdle: false,
   autoMemoryCapture: true,
   autoTitle: true,
+  efficiencyMode: "steady",
   memoryExtractTimeoutSeconds: 90,
   memoryMaintenanceEnabled: false,
   memoryMaintenanceIntervalDays: 7,
@@ -3221,6 +3222,7 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "memorySaved" ||
       msg.type === "memoryFileContent" ||
       msg.type === "memoryCandidates" ||
+      msg.type === "memoryCurated" ||
       msg.type === "knowledgeJob" ||
       msg.type === "profileDeleteResult" ||
       msg.type === "saveAuthResult" ||

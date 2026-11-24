@@ -532,8 +532,7 @@ function ContextWindowOverridesGroup({
 
   return (
     <div className="px-4 py-4">
-      <div className="text-ui-body font-medium leading-snug text-foreground">{t("上下文窗口覆写")}</div>
-      <Hint className="mt-1">
+                <div className="text-ui-body font-medium leading-snug text-foreground">{t("自定义上下文窗口")}</div>      <Hint className="mt-1">
         {t("按模型指定上下文窗口（token）。没列出的模型用内建表里的值；模型名精确匹配，不支持通配。")}
       </Hint>
       {rows.length > 0 && (
@@ -773,7 +772,7 @@ function SuperAgentSection() {
   const updateSuper = (patch: SuperAgentRetryPatch) => update(patch);
   return (
     <div className="space-y-4">
-      <SettingsGroup title={t("编排与并发")}>
+      <SettingsGroup title={t("后台任务与并发")}>
         <NumberRow
           label={t("并发上限")}
           description={t("最多同时运行几个超流体。")}
@@ -785,7 +784,7 @@ function SuperAgentSection() {
           onCommit={(superAgentMaxConcurrent) => update({ superAgentMaxConcurrent })}
         />
         <ChoiceRow
-          label={t("集成模式")}
+          label={t("完成后如何合并")}
           description={t("超流体完成后，把它的改动并回当前分支的方式。")}
           detail={t("自动合并：并入当前分支（先预演冲突，避开你未提交的改动）；创建 PR：推送分支并开 PR（需要 gh 命令）；手动：只保留分支，自己在看板里合并。改完对下一个完成的超流体生效。")}
           value={settings.superAgentIntegration}
@@ -988,11 +987,11 @@ function MemoryMaintenanceGroup() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
   return (
-    <SettingsGroup title={t("记忆整理")} hint={t("只在面板空闲时运行，默认只出报告")}>
+    <SettingsGroup title={t("记忆整理")} hint={t("只在面板空闲时运行；默认只预览，不改动文件")}>
       <div>
         <ToggleRow
           label={t("定期整理记忆")}
-          description={t("空闲时清理记忆托管区块：去重、合并、归档低价值条目。")}
+          description={t("空闲时整理记忆文件里由 iFlow 自动维护的那一段：去重、合并，把用处不大的内容移出常用记忆（不再每轮发送）。")}
           detail={t(
             "只在没有进行中的回合、没有待处理的审批或提问、没有运行中的超流体，且空闲达到阈值时运行。默认关闭。",
           )}
@@ -1003,14 +1002,14 @@ function MemoryMaintenanceGroup() {
           <DependentRow>
             <ChoiceRow
               label={t("整理策略")}
-              description={t("报告只汇总改动，应用才真正改写记忆文件。")}
+              description={t("「只预览」只统计会改动哪些文件，「执行」才真正改写记忆文件。")}
               detail={t(
                 "应用策略下每个文件先备份；若期间被其它程序改动则跳过该文件，绝不覆盖。",
               )}
               value={settings.memoryMaintenanceStrategy}
               options={[
-                { value: "report", label: t("仅报告") },
-                { value: "apply", label: t("直接应用") },
+                { value: "report", label: t("只预览（不改文件）") },
+                { value: "apply", label: t("执行并改写文件") },
               ]}
               onChange={(memoryMaintenanceStrategy) => update({ memoryMaintenanceStrategy })}
             />
@@ -1034,7 +1033,7 @@ function MemoryMaintenanceGroup() {
             />
             <NumberRow
               label={t("全局记忆预算")}
-              description={t("全局记忆托管区块的 token 预算，超出后优先归档。")}
+              description={t("全局记忆里由 iFlow 自动维护的那一段的 token 预算，超出后优先把用处不大的内容移出常用记忆（不再每轮发送）。")}
               value={settings.memoryMaintenanceGlobalTokenBudget}
               min={500}
               max={50000}
@@ -1052,7 +1051,7 @@ function MemoryMaintenanceGroup() {
             />
             <NumberRow
               label={t("总量预算")}
-              description={t("所有记忆托管区块的 token 合计阈值，超出即整理。")}
+              description={t("所有自动维护的记忆内容合计的 token 阈值，超出就触发整理。")}
               detail={t(
                 "超过它时即使未到整理周期也会触发整理；冷却期为 6 小时与周期的四分之一中较大者，冷却期内不重复触发。",
               )}
@@ -1097,7 +1096,7 @@ function AppearanceSection() {
         <ChoiceRow
           label={t("字号")}
           description={t("调整面板整体字号")}
-          detail={t("以标准为基准：紧凑约 0.92 倍，大约 1.1 倍。")}
+          detail={t("以「标准」为基准：紧凑约 0.92 倍字号，大号约 1.1 倍。")}
           value={settings.uiFontSize}
           options={[
             { value: "compact", label: t("紧凑") },
@@ -1168,6 +1167,9 @@ function RuntimeSection() {
   ];
   return (
     <div className="space-y-4">
+      <Hint className="px-1">
+        {t("内核：在后台运行的 iFlow 服务进程；重启后会重新加载记忆、技能与 MCP 服务器。")}
+      </Hint>
       <SettingsGroup title={t("启动与会话")}>
         <ToggleRow
           label={t("后台预热内核")}

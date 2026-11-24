@@ -5,7 +5,7 @@
  * SuperSessionLive 把 superTranscripts 原样喂给 BlockView。正常实时流由 reducer
  * 产出字段完整，但历史转录快照（readSuperTranscriptSnapshot 只校验外层数组）或
  * 旧版 wire 可能带缺字段的畸形块。缺 text 的 text/user/thought 块、缺 entries
- * 的 plan 块会在渲染期抛错，冒泡成 page 级 ErrorBoundary（「界面渲染异常」白屏）。
+ * 的 plan 块会在渲染期抛错，冒泡成 page 级 ErrorBoundary（「界面出错了」白屏）。
  *
  * 修复在 webview store 的 superTranscript 入站处统一做块级规范化
  * （sanitizeTranscriptBlocks，shared/messages.ts）。这里既测纯函数的修补/丢弃
@@ -165,7 +165,7 @@ it.each([
 
   const renderErrors = captured.filter(a => String(a[0]).includes("render error"));
   expect(renderErrors).toHaveLength(0);
-  expect(document.body.textContent).not.toContain("界面渲染异常");
+  expect(document.body.textContent).not.toContain("界面出错了");
   // 弹窗正常打开（aria-label 来自 SuperSessionLive 的 ModalShell）。
   expect(document.querySelector('[role="dialog"][aria-label="超流体实时进度"]')).toBeTruthy();
 });

@@ -69,7 +69,7 @@ import {
   pickChildPermissionOption,
   type ChildShellGuardContext,
 } from "../../shared/super-agent-guard.js";
-import { renderPrompt } from "../../prompts/index.js";
+import { EFFICIENCY_TURBO_PROMPT, renderPrompt } from "../../prompts/index.js";
 import { estimateCost } from "../../shared/context-window.js";
 import {
   EVICT_KEEP_BLOCKS,
@@ -852,6 +852,12 @@ export interface SuperAgentDeps {
    * 现场）。可选是为了让单测与 fixture 不必逐个补齐。
    */
   keepWorktree?: () => boolean;
+  /**
+   * 效率开关档位（`iflow.efficiencyMode`，每次实时读）。`turbo` 时子会话任务书
+   * 会前置同一段速推规则，与主会话同档；缺省/`steady` 时任务书逐字节不变。
+   * 可选是为了让单测与 fixture 不必逐个补齐。
+   */
+  efficiencyMode?: () => "steady" | "turbo";
   /**
    * 磁盘上最多保留多少个已结束子会话的工作目录
    * （`iflow.superAgent.maxWorktrees`，每次实时读；0 = 不限制）。
@@ -2926,6 +2932,7 @@ export class SuperAgentManager {
         isolation,
         staged,
         retry ? { attempt: retry.attempt, error: retry.error, summary: retry.summary } : undefined,
+        this.deps.efficiencyMode?.() ?? "steady",
       );
       this.promptTokens.set(id, estimateTokens(taskPrompt));
       // The delegation prompt is deliberately NOT written into the child's
@@ -5210,8 +5217,14 @@ export function buildTaskPrompt(
   isolation: SuperSessionUi["isolation"],
   attachments?: StagedSuperAttachments,
   retry?: SuperRetryContext,
+  /**
+   * 效率开关档位（`iflow.efficiencyMode`）。`turbo` 时把速推规则前置到任务书
+   * 之前（空行分隔），让子会话与主会话同档；缺省/`steady` 时任务书逐字节
+   * 不变。
+   */
+  efficiencyMode?: "steady" | "turbo",
 ): string {
-  return renderPrompt("super-agent-task", {
+  const brief = renderPrompt("super-agent-task", {
     title,
     task: task.trim(),
     attachments: describeAttachments(attachments),
@@ -5220,6 +5233,7 @@ export function buildTaskPrompt(
     retry: retry ? describeRetry(retry) : "",
     submission: describeSubmission(isolation),
   });
+  return efficiencyMode === "turbo" ? `${EFFICIENCY_TURBO_PROMPT}\n\n${brief}` : brief;
 }
 
 /** 附件段落（无附件时返回空串，模板行整行折叠）。 */

@@ -16,6 +16,7 @@ import {
   SUPER_TEXT_MAX_CHARS,
 } from "../src/panel/super-agent.js";
 import { externalSuperWorktreeRoot, superWorktreeRoot } from "../src/panel/worktree.js";
+import { loadPrompt } from "../prompts/index.js";
 import type { AcpClient, AcpClientCallbacks } from "../src/acp/client.js";
 import type { ContentBlock, McpServer, UserQuestion } from "../src/acp/protocol.js";
 import {
@@ -283,6 +284,8 @@ function makeManager(
     childMcpServers?: () => McpServer[];
     /** 建好后、交给管理器之前配置 FakeClient（如注入 mcpStatus 返回序列）。 */
     configureClient?: (client: FakeClient) => void;
+    /** 效率开关档位（缺省 steady，任务书逐字节不变）。 */
+    efficiencyMode?: "steady" | "turbo";
   } = {},
 ): Harness {
   const clients: FakeClient[] = [];
@@ -333,6 +336,7 @@ function makeManager(
     maxConcurrentSessions: () => maxConcurrent,
     keepWorktree: () => options.keepWorktree ?? false,
     maxWorktrees: () => options.maxWorktrees ?? 10,
+    efficiencyMode: () => options.efficiencyMode ?? "steady",
     log: { info: () => {}, warn: (msg) => warns.push(msg), error: () => {} },
   });
   return { manager, clients, sessions, reports, transcripts, needMerges, mergeResults, needInputs, warns };
@@ -1509,6 +1513,40 @@ describe("super agent · 任务提示词", () => {
     const text = buildTaskPrompt("改登录", "干活", { kind: "directory", path: "/tmp/dir" });
     expect(text).not.toContain("This is a retry");
   });
+});
+
+describe("super agent · 效率开关随主会话同档", () => {
+  it("turbo 时子会话首轮 prompt 前置速推规则；steady 时逐字节不变", async () => {
+    const turboRepo = makeRepo();
+    const turboHarness = makeManager(
+      turboRepo,
+      "complete",
+      "manual",
+      "main-1",
+      DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+      { keepWorktree: true, efficiencyMode: "turbo" },
+    );
+    turboHarness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => turboHarness.sessions[0]?.status === "completed");
+    const turboPrompt = turboHarness.clients[0]?.prompts[0] ?? "";
+    expect(turboPrompt.startsWith(loadPrompt("efficiency-turbo") + "\n\n")).toBe(true);
+    expect(turboPrompt).toContain("优先快速产出可运行的结果");
+
+    const steadyRepo = makeRepo();
+    const steadyHarness = makeManager(
+      steadyRepo,
+      "complete",
+      "manual",
+      "main-1",
+      DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+      { keepWorktree: true, efficiencyMode: "steady" },
+    );
+    steadyHarness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => steadyHarness.sessions[0]?.status === "completed");
+    const steadyPrompt = steadyHarness.clients[0]?.prompts[0] ?? "";
+    expect(steadyPrompt).not.toContain("速推模式");
+    expect(steadyPrompt.startsWith("You are a child session")).toBe(true);
+  }, 30000);
 });
 
 describe("super agent · 意外中断后重试", () => {

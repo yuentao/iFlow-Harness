@@ -8,10 +8,21 @@
 import { describe, expect, it } from "vitest";
 import type { SuperSessionUi, SuperTodoUi } from "../shared/super-agent.js";
 import {
+  computeSuperTimelineEdgeHints,
+  computeSuperTimelineTranslateX,
   deriveSuperTimeline,
   describeSuperTimelineFacts,
+  estimateSuperTimelineGeometry,
+  isCriticalTimelineNode,
+  layoutSuperTimelineFocus,
+  summarizeSuperTimelineProgress,
+  superTimelineTrackPadding,
+  SUPER_TIMELINE_FADE_RATIO,
+  SUPER_TIMELINE_NODE_PITCH,
+  SUPER_TIMELINE_NODE_SIZE,
   SUPER_TODO_DETAIL_SEP,
   type SuperTimelineKind,
+  type SuperTimelineNode,
 } from "../shared/super-timeline.js";
 
 function session(overrides: Partial<SuperSessionUi> = {}): SuperSessionUi {
@@ -250,5 +261,379 @@ describe("deriveSuperTimeline · 只用 todolist 节点", () => {
     expect(describeSuperTimelineFacts(session({ todos, startedAt: 2000 }))).toBe(
       "已派出 → 已启动",
     );
+  });
+});
+
+/** 造节点的小工具：只关心 kind / tone。 */
+function node(kind: SuperTimelineKind, tone: SuperTimelineNode["tone"]): SuperTimelineNode {
+  return { kind, tone, label: kind };
+}
+
+describe("isCriticalTimelineNode · 需要用户介入的节点", () => {
+  it("等待回答 / 失败 / 合并失败是关键节点", () => {
+    expect(isCriticalTimelineNode(node("awaiting_input", "current"))).toBe(true);
+    expect(isCriticalTimelineNode(node("failed", "failed"))).toBe(true);
+    expect(isCriticalTimelineNode(node("integration", "failed"))).toBe(true);
+  });
+
+  it("已完成 / 已中断 / 跳过的集成 / 普通 todo 不是关键节点", () => {
+    expect(isCriticalTimelineNode(node("completed", "done"))).toBe(false);
+    // 已中断不需要用户动手 —— 折起来不丢可操作信息。
+    expect(isCriticalTimelineNode(node("cancelled", "failed"))).toBe(false);
+    // 跳过 / 无需合并是静音事实，不是冲突。
+    expect(isCriticalTimelineNode(node("integration", "idle"))).toBe(false);
+    expect(isCriticalTimelineNode(node("integration", "done"))).toBe(false);
+    expect(isCriticalTimelineNode(node("todo", "current"))).toBe(false);
+    expect(isCriticalTimelineNode(node("dispatched", "done"))).toBe(false);
+  });
+});
+
+describe("summarizeSuperTimelineProgress · 顶部进度计数", () => {
+  it("done = tone 为 done 的节点数，total = 全部节点", () => {
+    const nodes = [
+      node("dispatched", "done"),
+      node("started", "done"),
+      node("completed", "done"),
+      node("integration", "idle"),
+      node("todo", "current"),
+    ];
+    expect(summarizeSuperTimelineProgress(nodes)).toEqual({ done: 3, total: 5 });
+  });
+
+  it("空节点序列给出 0/0（组件据此避免除零）", () => {
+    expect(summarizeSuperTimelineProgress([])).toEqual({ done: 0, total: 0 });
+  });
+});
+
+describe("estimateSuperTimelineGeometry · 等距模型", () => {
+  it("每个节点占一整列：中心 = 列中心，轨道宽 = 列数 × 列宽", () => {
+    const { centers, trackWidth } = estimateSuperTimelineGeometry(3);
+    expect(centers).toEqual([
+      SUPER_TIMELINE_NODE_PITCH / 2,
+      SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_PITCH / 2,
+      2 * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_PITCH / 2,
+    ]);
+    expect(trackWidth).toBe(3 * SUPER_TIMELINE_NODE_PITCH);
+  });
+
+  it("空序列给出空模型（组件据此渲染空轨，不除零）", () => {
+    expect(estimateSuperTimelineGeometry(0)).toEqual({ centers: [], trackWidth: 0 });
+  });
+
+  it("渐隐带内边距 = 视窗宽 × 渐隐占比（四舍五入）", () => {
+    expect(superTimelineTrackPadding(0)).toBe(0);
+    expect(superTimelineTrackPadding(300)).toBe(Math.round(300 * SUPER_TIMELINE_FADE_RATIO));
+    expect(superTimelineTrackPadding(420)).toBe(63);
+    // 脏数据不产生负 padding。
+    expect(superTimelineTrackPadding(-10)).toBe(0);
+  });
+
+  it("padding 计入几何模型：节点中心整体右移，轨道宽两端各加 padding", () => {
+    const plain = estimateSuperTimelineGeometry(3);
+    const padded = estimateSuperTimelineGeometry(3, 45);
+    expect(padded.centers).toEqual(plain.centers.map((center) => center + 45));
+    expect(padded.trackWidth).toBe(plain.trackWidth + 90);
+  });
+
+  /**
+   * 问题 1 的回归：轨道无内边距时，首 / 末节点 clamp 后中心距视窗边缘只有半个
+   * 节点（11px），落在 15% 渐隐带里 → 最该看清的节点发灰。加内边距后中心必须
+   * 落在实心带内。
+   */
+  it("加内边距后，首 / 末节点 clamp 时中心落在渐隐带之外（不再发灰）", () => {
+    for (const viewport of [300, 360, 420]) {
+      const padding = superTimelineTrackPadding(viewport);
+      const geometry = estimateSuperTimelineGeometry(15, padding);
+      const half = SUPER_TIMELINE_NODE_SIZE / 2;
+      const fade = viewport * SUPER_TIMELINE_FADE_RATIO;
+      // 与 computeSuperTimelineEdgeHints 一致的实心带边界。
+      const solidStart = Math.max(0, fade - half);
+      const solidEnd = viewport - Math.max(0, fade - half);
+
+      const first = computeSuperTimelineTranslateX({
+        focusCenter: geometry.centers[0]!,
+        trackWidth: geometry.trackWidth,
+        viewportWidth: viewport,
+      });
+      const last = computeSuperTimelineTranslateX({
+        focusCenter: geometry.centers.at(-1)!,
+        trackWidth: geometry.trackWidth,
+        viewportWidth: viewport,
+      });
+      const firstScreen = geometry.centers[0]! + first;
+      const lastScreen = geometry.centers.at(-1)! + last;
+      // 首节点：中心在实心带起点右侧；末节点：中心在实心带终点左侧。
+      expect(firstScreen).toBeGreaterThanOrEqual(solidStart);
+      expect(lastScreen).toBeLessThanOrEqual(solidEnd);
+      // 反证（420px 面板）：没有内边距时，首列中心落在 15% 渐隐带内 —— 说明这条
+      // 断言真的在守东西。列宽变大后 300/360 视窗下裸首列中心已越过敏化带，
+      // 因此反证只在真实面板宽度上做。
+      if (viewport === 420) {
+        const bare = estimateSuperTimelineGeometry(15);
+        const bareFirst = bare.centers[0]! + computeSuperTimelineTranslateX({
+          focusCenter: bare.centers[0]!,
+          trackWidth: bare.trackWidth,
+          viewportWidth: viewport,
+        });
+        expect(bareFirst).toBeLessThan(solidStart);
+      }
+    }
+  });
+
+  it("短轨（3 步）加内边距后仍装得下并整条居中", () => {
+    const viewport = 420;
+    const padding = superTimelineTrackPadding(viewport);
+    const geometry = estimateSuperTimelineGeometry(3, padding);
+    // 3 步：3 列 × 88 = 264，加两端 padding 126 → 390 < 420。
+    expect(geometry.trackWidth).toBeLessThanOrEqual(viewport);
+    const shift = computeSuperTimelineTranslateX({
+      focusCenter: geometry.centers[0]!,
+      trackWidth: geometry.trackWidth,
+      viewportWidth: viewport,
+    });
+    // 装得下 → 整条轨道居中：左右留白相等。
+    expect(shift).toBe(Math.round((viewport - geometry.trackWidth) / 2));
+    expect(geometry.trackWidth + shift + shift).toBe(viewport);
+  });
+});
+
+describe("computeSuperTimelineTranslateX · 当前节点居中", () => {
+  const VIEWPORT = 200;
+  const geometry = estimateSuperTimelineGeometry(15);
+
+  it("轨道装得下时整条轨道居中（空白均分两侧），奇数轨的中间节点正好在正中", () => {
+    const viewport = 500;
+    const small = estimateSuperTimelineGeometry(5);
+    const shift = computeSuperTimelineTranslateX({
+      focusCenter: small.centers[2]!,
+      trackWidth: small.trackWidth,
+      viewportWidth: viewport,
+    });
+    expect(shift).toBe(Math.round((viewport - small.trackWidth) / 2));
+    // 中间节点精确居中；首末节点按规格豁免（宁可偏一点也不把空白全推一侧）。
+    expect(Math.abs(small.centers[2]! + shift - viewport / 2)).toBeLessThanOrEqual(1);
+    // 空白均分：两侧留白相等。
+    expect(shift).toBe(viewport - small.trackWidth - shift);
+  });
+
+  it("装不下时把当前节点放在视窗正中", () => {
+    const focusCenter = geometry.centers[7]!;
+    const shift = computeSuperTimelineTranslateX({
+      focusCenter,
+      trackWidth: geometry.trackWidth,
+      viewportWidth: VIEWPORT,
+    });
+    // 节点中心的屏幕位置 = 轨道内坐标 + 平移量，应等于视窗中点。
+    expect(Math.abs(focusCenter + shift - VIEWPORT / 2)).toBeLessThanOrEqual(1);
+  });
+
+  it("首节点 clamp 到 0：左侧绝不拉出空白", () => {
+    const shift = computeSuperTimelineTranslateX({
+      focusCenter: geometry.centers[0]!,
+      trackWidth: geometry.trackWidth,
+      viewportWidth: VIEWPORT,
+    });
+    expect(shift).toBe(0);
+  });
+
+  it("末节点 clamp 到 viewportWidth - trackWidth：右侧绝不拉出空白", () => {
+    const shift = computeSuperTimelineTranslateX({
+      focusCenter: geometry.centers.at(-1)!,
+      trackWidth: geometry.trackWidth,
+      viewportWidth: VIEWPORT,
+    });
+    expect(shift).toBe(VIEWPORT - geometry.trackWidth);
+    // 平移量永远 ≤ 0（轨道只左移，不会右移出左侧空白）。
+    expect(shift).toBeLessThanOrEqual(0);
+  });
+
+  it("还没布局（视窗宽 0）时平移量为 0", () => {
+    expect(
+      computeSuperTimelineTranslateX({ focusCenter: 100, trackWidth: 400, viewportWidth: 0 }),
+    ).toBe(0);
+  });
+});
+
+describe("computeSuperTimelineEdgeHints · 屏外关键节点提示", () => {
+  const VIEWPORT = 200;
+
+  /** n 条 todo 节点，只有 `criticalAt` 那条是失败（关键）节点。 */
+  function withCritical(n: number, criticalAt: number): SuperTimelineNode[] {
+    return Array.from({ length: n }, (_, index) =>
+      index === criticalAt ? node("failed", "failed") : node("todo", "done"),
+    );
+  }
+
+  it("关键节点落在左侧视窗外：给出左侧提示并指向它", () => {
+    const nodes = withCritical(15, 1);
+    const geometry = estimateSuperTimelineGeometry(nodes.length);
+    const shift = computeSuperTimelineTranslateX({
+      focusCenter: geometry.centers[10]!,
+      trackWidth: geometry.trackWidth,
+      viewportWidth: VIEWPORT,
+    });
+    const hints = computeSuperTimelineEdgeHints({
+      nodes,
+      centers: geometry.centers,
+      translateX: shift,
+      viewportWidth: VIEWPORT,
+    });
+    expect(hints).toHaveLength(1);
+    expect(hints[0]!.side).toBe("left");
+    expect(hints[0]!.index).toBe(1);
+    expect(hints[0]!.count).toBe(1);
+    expect(hints[0]!.tone).toBe("danger");
+  });
+
+  it("关键节点落在右侧视窗外：给出右侧提示，色调跟随节点种类", () => {
+    const nodes = Array.from({ length: 15 }, (_, index) =>
+      index === 13 ? node("awaiting_input", "current") : node("todo", "done"),
+    );
+    const geometry = estimateSuperTimelineGeometry(nodes.length);
+    const shift = computeSuperTimelineTranslateX({
+      focusCenter: geometry.centers[1]!,
+      trackWidth: geometry.trackWidth,
+      viewportWidth: VIEWPORT,
+    });
+    const hints = computeSuperTimelineEdgeHints({
+      nodes,
+      centers: geometry.centers,
+      translateX: shift,
+      viewportWidth: VIEWPORT,
+    });
+    const right = hints.find((hint) => hint.side === "right");
+    expect(right).toBeTruthy();
+    expect(right!.index).toBe(13);
+    expect(right!.tone).toBe("warning");
+  });
+
+  it("关键节点就在视窗内：不产生任何边缘提示", () => {
+    const nodes = withCritical(2, 1);
+    const geometry = estimateSuperTimelineGeometry(nodes.length);
+    // 2 列 × 88 = 176 装得下 200px 视窗 → 整条轨居中，全部可见。
+    const shift = computeSuperTimelineTranslateX({
+      focusCenter: geometry.centers[1]!,
+      trackWidth: geometry.trackWidth,
+      viewportWidth: VIEWPORT,
+    });
+    expect(
+      computeSuperTimelineEdgeHints({
+        nodes,
+        centers: geometry.centers,
+        translateX: shift,
+        viewportWidth: VIEWPORT,
+      }),
+    ).toEqual([]);
+  });
+
+  it("同一侧多个关键节点：数量如实累计，最近的那个决定索引与色调", () => {
+    const nodes = Array.from({ length: 15 }, (_, index) =>
+      index === 1 ? node("failed", "failed") : index === 4 ? node("awaiting_input", "current") : node("todo", "done"),
+    );
+    const geometry = estimateSuperTimelineGeometry(nodes.length);
+    const shift = computeSuperTimelineTranslateX({
+      focusCenter: geometry.centers[12]!,
+      trackWidth: geometry.trackWidth,
+      viewportWidth: VIEWPORT,
+    });
+    const left = computeSuperTimelineEdgeHints({
+      nodes,
+      centers: geometry.centers,
+      translateX: shift,
+      viewportWidth: VIEWPORT,
+    }).find((hint) => hint.side === "left");
+    expect(left).toBeTruthy();
+    expect(left!.count).toBe(2);
+    expect(left!.index).toBe(4);
+    expect(left!.tone).toBe("warning");
+    expect(left!.labels).toHaveLength(2);
+    // 阶段节点（等待回答 / 失败）的标签是内置状态词，不带 rawLabel。
+    expect(left!.labels.every((label) => label.rawLabel !== true)).toBe(true);
+    // 测试辅助函数把 label 设为 kind 名，这里只验证顺序与结构（label 透传）。
+    expect(left!.labels.map((label) => label.label)).toEqual(["failed", "awaiting_input"]);
+  });
+
+  it("关键节点带 rawLabel 时，标签原样透传（webview 不得过字典）", () => {
+    // 关键节点目前都是阶段节点；这里直接构造一个带 rawLabel 的关键节点，钉住
+    // 接口契约：rawLabel 必须透传，否则组件会拿用户原文去查字典。
+    const nodes: SuperTimelineNode[] = [
+      node("todo", "done"),
+      { kind: "failed", tone: "failed", label: "用户原文：失败处理", rawLabel: true },
+      node("todo", "done"),
+    ];
+    const geometry = estimateSuperTimelineGeometry(nodes.length);
+    const hints = computeSuperTimelineEdgeHints({
+      nodes,
+      centers: geometry.centers,
+      translateX: 0,
+      viewportWidth: 40,
+    });
+    const right = hints.find((hint) => hint.side === "right");
+    expect(right).toBeTruthy();
+    expect(right!.labels[0]).toEqual({ label: "用户原文：失败处理", rawLabel: true });
+  });
+
+  it("还没布局时不给提示（避免首帧闪一下）", () => {
+    expect(
+      computeSuperTimelineEdgeHints({
+        nodes: withCritical(5, 0),
+        centers: estimateSuperTimelineGeometry(5).centers,
+        translateX: 0,
+        viewportWidth: 0,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("layoutSuperTimelineFocus · 平移 + 边缘提示一起算", () => {
+  const VIEWPORT = 160;
+
+  it("屏外关键节点：给出提示，同时当前步仍精确居中（提示不占用轨道宽度）", () => {
+    // 8 个节点（轨道 232px）塞进 160px 视窗：当前步在第 5 个，
+    // 失败 / 合并冲突落在右侧视窗外。
+    const nodes: SuperTimelineNode[] = [
+      node("todo", "done"),
+      node("todo", "done"),
+      node("todo", "done"),
+      node("awaiting_input", "current"),
+      node("todo", "done"),
+      node("todo", "done"),
+      node("failed", "failed"),
+      node("integration", "failed"),
+    ];
+    const geometry = estimateSuperTimelineGeometry(nodes.length);
+    const layout = layoutSuperTimelineFocus({
+      nodes,
+      centers: geometry.centers,
+      trackWidth: geometry.trackWidth,
+      viewportWidth: VIEWPORT,
+      focusIndex: 3,
+    });
+    const right = layout.hints.find((hint) => hint.side === "right");
+    expect(right).toBeTruthy();
+    expect(right!.count).toBeGreaterThanOrEqual(1);
+    // 提示渲染在轨道下方单独一行，不挤占轨道：当前步仍精确居中。
+    const screenCenter = geometry.centers[3]! + layout.translateX;
+    expect(Math.abs(screenCenter - VIEWPORT / 2)).toBeLessThanOrEqual(1);
+  });
+
+  it("关键节点全在视窗内：不给提示，轨道整体居中", () => {
+    const nodes = [
+      node("dispatched", "done"),
+      node("failed", "failed"),
+      node("awaiting_input", "current"),
+    ];
+    const geometry = estimateSuperTimelineGeometry(nodes.length);
+    const viewportWidth = 400;
+    const layout = layoutSuperTimelineFocus({
+      nodes,
+      centers: geometry.centers,
+      trackWidth: geometry.trackWidth,
+      viewportWidth,
+      focusIndex: 2,
+    });
+    expect(layout.hints).toEqual([]);
+    // 3 列 × 88 = 264 装得下 400px → 整条轨居中。
+    expect(layout.translateX).toBe(Math.round((viewportWidth - geometry.trackWidth) / 2));
   });
 });

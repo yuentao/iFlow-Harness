@@ -25,12 +25,12 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type ModelMetadataSource, type SkillInfo, type SlashCommand, type ThinkLevel, type UsageNumberSource } from "../../../shared/messages";
+import { collectUserPromptTexts, MEMORY_CURATE_COMPOSER_ID_BASE, type ContextRefUi, type FileHitUi, type ModelInfoUi, type ModelMetadataSource, type SkillInfo, type SlashCommand, type ThinkLevel, type UsageNumberSource } from "../../../shared/messages";
 import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Button, CANVAS_CHIP, Chip, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, SearchInput, TextInput, ToggleChip, fuzzyScore } from "./ui";
+import { Button, CANVAS_CHIP, Chip, ConfirmDialog, Dropdown, HelpTip, ICON_INLINE, IconButton, SearchInput, Segmented, TextInput, ToggleChip, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -124,6 +124,43 @@ const EMPTY_SKILLS: SkillInfo[] = [];
 const EMPTY_MODELS: ModelInfoUi[] = [];
 
 /**
+ * 面板本地 slash 指令：`/memory-curate` 立即跑一轮记忆整理。
+ *
+ * 它不是 CLI 指令（CLI 不认识，会被当成 unknown command 而模型看不到），
+ * 也不该走模型：与记忆页的「整理记忆」按钮一样直接调用宿主
+ * `curateMemoryNow`（同一条 MaintenanceScheduler 通道）。
+ */
+export const MEMORY_CURATE_COMMAND = "memory-curate";
+
+/** 文本是否恰好是该指令（允许前后空白；带参数时按普通提示词处理）。 */
+export function isMemoryCurateCommand(text: string): boolean {
+  return text.trim().toLowerCase() === `/${MEMORY_CURATE_COMMAND}`;
+}
+
+/**
+ * 文本是否是该指令的调用——精确输入或带参数都算。
+ *
+ * 带参数也必须拦截：CLI 不认识 `/memory-curate`，字面指令会落到模型前的
+ * unknown command 上，模型看不到正文。只认「指令名 + 空白/结束」，避免把
+ * `/memory-curated` 之类同前缀的词误判成该指令。
+ */
+export function isMemoryCurateInvocation(text: string): boolean {
+  const value = text.trim().toLowerCase();
+  const prefix = `/${MEMORY_CURATE_COMMAND}`;
+  if (!value.startsWith(prefix)) return false;
+  const next = value.charAt(prefix.length);
+  return next === "" || /\s/.test(next);
+}
+
+/** 该指令后面的参数部分（无参数时为空串）。 */
+function memoryCurateArgs(text: string): string {
+  return text
+    .trim()
+    .slice(`/${MEMORY_CURATE_COMMAND}`.length)
+    .trim();
+}
+
+/**
  * Session token usage, read as PRIMITIVE selectors — postMessage re-clones the
  * usage object on every patch, so an object selector would re-render on every
  * blockPatch (up to 12.5/s while streaming); primitives only move when the
@@ -213,7 +250,7 @@ function usageNumberLabel(src: UsageNumberSource | null): string {
     case "transcript-estimate":
       return t("转录估算");
     case "lower-bound":
-      return t("下界");
+      return t("最低估算");
     default:
       return t("来源未知");
   }
@@ -286,7 +323,7 @@ function usageTooltip(u: Usage): string {
   const breakdownLine =
     u.bdPrefill > 0
       ? t(
-          "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3} · 固定开销 {4}",
+          "用户 {0} tokens，助手 {1} tokens，工具 {2} tokens，思考 {3} tokens，固定开销 {4} tokens",
           u.bdUser.toLocaleString(),
           u.bdAssistant.toLocaleString(),
           u.bdTool.toLocaleString(),
@@ -294,7 +331,7 @@ function usageTooltip(u: Usage): string {
           u.bdPrefill.toLocaleString(),
         )
       : t(
-          "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}",
+          "用户 {0} tokens，助手 {1} tokens，工具 {2} tokens，思考 {3} tokens",
           u.bdUser.toLocaleString(),
           u.bdAssistant.toLocaleString(),
           u.bdTool.toLocaleString(),
@@ -305,7 +342,7 @@ function usageTooltip(u: Usage): string {
   // T-4：ACP wire 不带输入/输出拆分，拆分永远是转录估算；按 sources.split
   // 如实标注，缺失就标「来源未知」而不是冒称权威。
   const splitLine = t(
-    "输入 {0}{1} tokens · 输出 {2}{3} tokens（拆分来源：{4}）",
+    "输入 {0}{1} tokens，输出 {2}{3} tokens（拆分来源：{4}）",
     usageNumberPrefix(u.sourceSplit),
     u.inputTokens.toLocaleString(),
     usageNumberPrefix(u.sourceSplit),
@@ -315,7 +352,7 @@ function usageTooltip(u: Usage): string {
   // T-2：一行说清 token 从哪来、单价从哪来、什么时候采集、引用了哪个链接。
   // 每个分量独立处理缺失，绝不拼出一个「看起来很准」的假来源。
   const provenanceLine = t(
-    "数据出处：token {0} · 单价 {1} · 采集 {2} · {3}",
+    "数据出处：token 来自{0}，单价来自{1}，采集时间 {2}，{3}",
     usageNumberLabel(u.sourceContextUsed),
     modelMetadataLabel(u.sourceCost),
     capturedAtLabel(u.capturedAt),
@@ -429,6 +466,9 @@ export function Composer() {
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
   const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
   const thinkLevel = useChat((s) => s.state?.thinkLevel ?? "auto");
+  /** 提示词档位（效率开关）：全局用户设置，子会话跟随；缺省按默认「平稳」。 */
+  const efficiencyMode = useChat((s) => s.hostSettings?.efficiencyMode ?? "steady");
+  const updateHostSetting = useChat((s) => s.updateHostSetting);
   /** Turn-end model predictions; host metadata, cleared when a new turn starts. */
   const suggestions = useChat((s) => s.state?.nextStepSuggestions);
   /** The prediction call is running: render the pill in the chips' slot. */
@@ -954,7 +994,14 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       })),
     [skills],
   );
-  const allCommands = useMemo(() => [...commands, ...skillCommands], [commands, skillCommands]);
+  const allCommands = useMemo(
+    () => [
+      { name: MEMORY_CURATE_COMMAND, description: t("立即整理记忆：去重、合并，把用处不大的内容移出常用记忆（不再每轮发送）") },
+      ...commands,
+      ...skillCommands,
+    ],
+    [commands, skillCommands],
+  );
   const cmdMatches = useMemo(() => {
     if (!text.startsWith("/") || text.includes(" ")) return [];
     const input = text.slice(1).toLowerCase();
@@ -1042,6 +1089,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   // arrive after a cancel or a session switch.
   const [enhancing, setEnhancing] = useState(false);
   const enhanceSeq = useRef(0);
+  /** 面板本地指令（/memory-curate）的请求号：从保留的命名空间起自增，
+   * 与记忆页按钮的 0 起计数器不重叠（回包只用于宿主 toast）。 */
+  const curateSeq = useRef(MEMORY_CURATE_COMPOSER_ID_BASE);
   const enhancePending = useRef(false);
   const enhanceOriginal = useRef<string | null>(null);
   const enhanceSnapshot = useRef<string | null>(null);
@@ -1425,6 +1475,37 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     // The draft is gone once sent — a rewrite still in flight would
     // ghost-fill the cleared composer, so cancel it first.
     cancelInflightRef.current();
+    // 面板本地指令：/memory-curate 直接触发宿主整理，绝不作为提示词发给模型
+    // （CLI 会把未知 / 指令当成 unknown command，模型根本看不到正文）。
+    // 带参数同样拦截：该指令不接受参数，正文无处可去，只能丢弃并说明。
+    // 附件不参与这个指令：带图/带文件时也要拦截，否则字面指令会落到模型；
+    // 明确告知这些附件未被发送，并一并清掉，避免它们漂到下一条消息。
+    if (isMemoryCurateInvocation(value)) {
+      send({ type: "curateMemoryNow", requestId: ++curateSeq.current });
+      const hadPayload = images.length > 0 || attachments.length > 0 || contexts.length > 0;
+      const hadArgs = memoryCurateArgs(value) !== "";
+      setText("");
+      setImages([]);
+      setAttachments([]);
+      setContexts([]);
+      setMentionQuery(null);
+      setHistIndex(-1);
+      histDraft.current = null;
+      histEntryRef.current = null;
+      editedRecall.current = false;
+      // 提示按「附件优先，参数追加」合并：两样都有时两件事都要说到。
+      showNote(
+        hadPayload
+          ? hadArgs
+            ? t("已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送，也不接受参数")
+            : t("已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送")
+          : hadArgs
+            ? t("该指令不接受参数，已按整理记忆执行")
+            : t("已触发记忆整理，完成后会提示结果"),
+        "info",
+      );
+      return;
+    }
     // 只发送真的带数据的图片；说明必须与之一一对应（占位槽没有 data，
     // 不能把它的说明错位给下一张）。
     const sentImages = images.filter((img) => img.data);
@@ -2050,6 +2131,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               }
               if (e.key === "Enter" || e.key === "Tab") {
                 e.preventDefault();
+                // 完整输入了面板本地指令时直接执行；其余情况仍是补全。
+                if (e.key === "Enter" && isMemoryCurateCommand(text)) {
+                  submit();
+                  return;
+                }
                 setText(`/${cmdMatches[cmdIndex]!.name} `);
                 return;
               }
@@ -2333,6 +2419,33 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               )}
             </Dropdown>
           )}
+
+          {/* 提示词档位（效率开关）：刻意放在 models.length > 0 之外 ——
+              没有模型时也要能切档。窄面板（<360px）下隐藏，避免把模型名挤到
+              静默裁切；档位在设置页与 settings.json 里仍可改。 */}
+          <div className="flex shrink-0 items-center gap-1 @max-[360px]:hidden">
+            <Segmented
+              ariaLabel={t("提示词档位")}
+              options={[
+                {
+                  value: "steady",
+                  label: t("平稳"),
+                  title: t("平稳：使用默认规则，完整的探索与验证流程。"),
+                },
+                {
+                  value: "turbo",
+                  label: t("速推"),
+                  title: t("速推：优先快速产出，减少探索与反复确认，只跑相关验证。"),
+                },
+              ]}
+              value={efficiencyMode}
+              onChange={(value) => updateHostSetting({ efficiencyMode: value })}
+            />
+            <HelpTip label={t("档位说明")}>
+              <span className="block">{t("平稳：使用默认规则，完整的探索与验证流程。")}</span>
+              <span className="block">{t("速推：优先快速产出，减少探索与反复确认，只跑相关验证。")}</span>
+            </HelpTip>
+          </div>
 
           </div>
 

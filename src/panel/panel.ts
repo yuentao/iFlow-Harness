@@ -56,7 +56,12 @@ import type {
 import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
 import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
-import { loadPrompt, renderPrompt } from "../../prompts/index.js";
+import {
+  EFFICIENCY_STEADY_PROMPT,
+  EFFICIENCY_TURBO_PROMPT,
+  loadPrompt,
+  renderPrompt,
+} from "../../prompts/index.js";
 import { canReviewTurn, collectTurnChanges } from "../../shared/turn-changes.js";
 import {
   clearQueue as clearQueueUi,
@@ -730,6 +735,14 @@ function asUiTheme(value: unknown): (typeof UI_THEMES)[number] {
   return UI_THEMES.includes(value as (typeof UI_THEMES)[number])
     ? (value as (typeof UI_THEMES)[number])
     : "auto";
+}
+
+/** `iflow.efficiencyMode` values — kept in sync with package.json / shared/messages.ts. */
+const EFFICIENCY_MODES = ["steady", "turbo"] as const;
+function asEfficiencyMode(value: unknown): (typeof EFFICIENCY_MODES)[number] {
+  return EFFICIENCY_MODES.includes(value as (typeof EFFICIENCY_MODES)[number])
+    ? (value as (typeof EFFICIENCY_MODES)[number])
+    : "steady";
 }
 
 /** `iflow.osNotifications` values. */
@@ -1590,6 +1603,15 @@ export class ChatPanel implements vscode.Disposable {
   private promptRequestSessionId: string | null = null;
   /** 本轮在飞请求是否已经发过一次 `session/cancel`（同一回合内不重复发）。 */
   private cancelSentForPrompt = false;
+  /**
+   * 每会话「已注入的档位」（`iflow.efficiencyMode`）：键是 CLI 会话 id。
+   *
+   * 注入策略是**仅档位变化时注入一次**：同一会话连续多轮只带一次速推规则，
+   * 否则每一轮都往 prompt 末尾塞同一段文字（纯浪费 token，且会重复进 CLI
+   * 历史）。基线是 CLI 固有默认 `steady` —— turbo 的新会话首轮就注入速推
+   * 块，steady 的新会话首轮不注入。条目随会话切换/重建清理，避免无限增长。
+   */
+  private injectedEfficiencyMode = new Map<string, "steady" | "turbo">();
   /**
    * 用户按过停止的**主会话** id（null = 没有压住）。
    *
@@ -2494,7 +2516,9 @@ export class ChatPanel implements vscode.Disposable {
     if (!fact?.trim()) return;
     const result = await this.memory.appendFact({ scope, fact });
     if (!result.ok) {
-      void vscode.window.showWarningMessage(result.error ?? vscode.l10n.t("写入记忆失败"));
+      void vscode.window.showWarningMessage(
+        result.error ?? vscode.l10n.t("写入记忆失败，请检查目标记忆文件是否可写后重试。"),
+      );
       return;
     }
     const restart = vscode.l10n.t("立即重启内核");
@@ -2692,6 +2716,7 @@ export class ChatPanel implements vscode.Disposable {
       case "createProjectMemory":
       case "applyMemoryCandidates":
       case "dismissMemoryCandidates":
+      case "curateMemoryNow":
       case "openMemoryFile":
       case "generateKnowledge":
       case "setKnowledgeInjection":
@@ -2949,6 +2974,10 @@ export class ChatPanel implements vscode.Disposable {
         if (typeof msg.autoCompressOnIdle === "boolean") writes.push(["autoCompressOnIdle", msg.autoCompressOnIdle]);
         if (typeof msg.autoMemoryCapture === "boolean") writes.push(["autoMemoryCapture", msg.autoMemoryCapture]);
         if (typeof msg.autoTitle === "boolean") writes.push(["autoTitle", msg.autoTitle]);
+        // 提示词档位：只接受两个合法枚举值，其余一律忽略（配置里手改的脏值不落盘）。
+        if (msg.efficiencyMode === "steady" || msg.efficiencyMode === "turbo") {
+          writes.push(["efficiencyMode", msg.efficiencyMode]);
+        }
         // Timeout ceilings in seconds; 0 = 「不限制」 for all three.
         if (msg.memoryExtractTimeoutSeconds !== undefined && Number.isFinite(msg.memoryExtractTimeoutSeconds)) {
           writes.push([
@@ -3193,6 +3222,9 @@ export class ChatPanel implements vscode.Disposable {
       case "dismissMemoryCandidates":
         this.memory.dismissCandidates(msg.sessionId);
         break;
+      case "curateMemoryNow":
+        void this.curateMemoryNow(msg.requestId);
+        break;
       case "openMemoryFile":
         void this.memory.openFile(msg.path);
         break;
@@ -3291,10 +3323,16 @@ export class ChatPanel implements vscode.Disposable {
           } else if (res?.reason === "not_found") {
             this.store.sendToast("info", vscode.l10n.t("该进程内子代理已结束"));
           } else {
-            this.store.sendToast("warning", vscode.l10n.t("停止进程内子代理失败"));
+            this.store.sendToast(
+              "warning",
+              vscode.l10n.t("停止进程内子代理失败（可能已经结束），请刷新会话后重试。"),
+            );
           }
         } catch {
-          this.store.sendToast("warning", vscode.l10n.t("停止进程内子代理失败"));
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("停止进程内子代理失败（可能已经结束），请刷新会话后重试。"),
+          );
         }
         break;
       }
@@ -3704,20 +3742,31 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 手动触发一轮整理（命令面板 `iflow.curateMemory`）。绕过 enabled / 空闲 / 到期
-   * 判定，但仍遵守「已在运行」与跨窗口锁；完成后用 toast 汇报应用/跳过/冲突条数
-   * 与节省的 token。report 策略下 writeFile 是空操作，汇报为「预计应用」。
+   * 手动触发一轮整理（命令面板 `iflow.curateMemory`、记忆页按钮与
+   * `/memory-curate` 指令）。绕过 enabled / 空闲 / 到期判定，但仍遵守
+   * 「已在运行」与跨窗口锁；完成后用 toast 汇报应用/跳过/冲突条数
+   * 与节省的 token。report 策略下 writeFile 是空操作，汇报为「将更新」。
+   *
+   * `requestId` 只在 webview 触发时传入：回包 `memoryCurated` 让按钮结束
+   * loading 并就地显示失败；命令面板触发不传，行为与原先一致。
    */
-  async curateMemoryNow(): Promise<void> {
+  async curateMemoryNow(requestId?: number): Promise<void> {
+    const reply = (ok: boolean, message: string, failed = 0): void => {
+      if (requestId === undefined) return;
+      this.postToWebview({ type: "memoryCurated", requestId, ok, message, failed });
+    };
     const scheduler = this.maintenance;
-    if (!scheduler) return;
+    if (!scheduler) {
+      const message = vscode.l10n.t("记忆整理未能开始：可能已在运行，或另一个窗口正在整理。");
+      reply(false, message);
+      return;
+    }
     const dryRun = this.maintenanceStrategy() === "report";
     const report = await scheduler.runNow("manual");
     if (!report) {
-      this.store.sendToast(
-        "warning",
-        vscode.l10n.t("记忆整理未能开始：可能已在运行，或另一个窗口正在整理。"),
-      );
+      const message = vscode.l10n.t("记忆整理未能开始：可能已在运行，或另一个窗口正在整理。");
+      this.store.sendToast("warning", message);
+      reply(false, message);
       return;
     }
     let applied = 0;
@@ -3731,22 +3780,27 @@ export class ChatPanel implements vscode.Disposable {
       else failed++;
     }
     const l2Skipped = report.files.some((file) => file.l2 === "skipped-report");
-    const message = dryRun
-      ? vscode.l10n.t(
-          "记忆整理（仅报告）：预计应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 预计节省 {3} tokens",
-          applied,
-          skipped,
-          conflict,
-          report.savedTokens,
-        ) + (l2Skipped ? vscode.l10n.t(" · L2 已跳过（report 模式）") : "")
-      : vscode.l10n.t(
-          "记忆整理完成：应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 节省 {3} tokens",
-          applied,
-          skipped,
-          conflict,
-          report.savedTokens,
-        );
+    // 失败粒度：`ok` 只表达「这一轮是否真的跑起来了」（拿到 report 就是跑通了），
+    // 不再把「有文件 error」当成整体失败。失败数随 `failed` 回包，由 webview
+    // 追加到摘要并改用 warning 色阶 —— 部分失败不能被渲染成整片成功绿。
+    const message =
+      (dryRun
+        ? vscode.l10n.t(
+            "记忆整理预览（不会修改文件）：将更新 {0} 个记忆文件，{1} 个文件保持原样（无需改动或整理后没更省），{2} 个文件因被其它程序改动而跳过，预计可省 {3} tokens",
+            applied,
+            skipped,
+            conflict,
+            report.savedTokens,
+          ) + (l2Skipped ? vscode.l10n.t("；预览模式不调用模型，智能合并已跳过") : "")
+        : vscode.l10n.t(
+            "记忆整理完成：已更新 {0} 个记忆文件，{1} 个文件保持原样（无需改动或整理后没更省），{2} 个文件因被其它程序改动而跳过，共省下 {3} tokens",
+            applied,
+            skipped,
+            conflict,
+            report.savedTokens,
+          ));
     this.store.sendToast(failed > 0 ? "warning" : "info", message);
+    reply(true, message, failed);
     // apply 之后刷新记忆卡片（saveFile 已逐条 post memorySaved，这里再拉一次全量状态）。
     if (!dryRun) void this.memory.sendState();
   }
@@ -3766,6 +3820,7 @@ export class ChatPanel implements vscode.Disposable {
       autoCompressOnIdle: config.get<boolean>("autoCompressOnIdle", false),
       autoMemoryCapture: config.get<boolean>("autoMemoryCapture", true),
       autoTitle: config.get<boolean>("autoTitle", true),
+      efficiencyMode: asEfficiencyMode(config.get<string>("efficiencyMode", "steady")),
       memoryExtractTimeoutSeconds: this.timeoutSeconds(
         "memoryExtractTimeoutSeconds",
         MEMORY_EXTRACT_TIMEOUT_MS / 1000,
@@ -6561,7 +6616,12 @@ export class ChatPanel implements vscode.Disposable {
     // SecretStorage for this window but will not survive a restart. Keep the
     // editor open with the concrete reason (inline, not just the toast) —
     // same contract deleteProfile uses via `ok: !kernelWriteFailed`.
-    const kernelError = kernelWritten ? undefined : vscode.l10n.t("无法写入内核配置 {0}", name);
+    const kernelError = kernelWritten
+      ? undefined
+      : vscode.l10n.t(
+          "无法保存到 iFlow 配置文件（{0}）。请检查 ~/.iflow/settings.json 是否可写，或改用面板里的设置。",
+          name,
+        );
     if (kernelError) void vscode.window.showWarningMessage(kernelError);
 
     // "Is this the row the panel is running on?" — by credential IDENTITY,
@@ -6760,7 +6820,13 @@ export class ChatPanel implements vscode.Disposable {
         // In-panel receipt: the profile is still in the kernel file, so the
         // row stays listed and the user must learn why (the old
         // showWarningMessage landed outside the panel's notification stack).
-        this.store.sendToast("warning", vscode.l10n.t("无法写入内核配置 {0}", trimmed));
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t(
+            "无法保存到 iFlow 配置文件（{0}）。请检查 ~/.iflow/settings.json 是否可写，或改用面板里的设置。",
+            trimmed,
+          ),
+        );
       }
     }
     // Drop the kernel's active pointer when it names the deleted row so the
@@ -8358,7 +8424,7 @@ export class ChatPanel implements vscode.Disposable {
               const message = errorMessage(error);
               this.log.error(`authenticate failed: ${message}`);
               this.store.setAuth(await this.buildAuthState(false, true));
-              this.store.markError(vscode.l10n.t("认证失败：{0}", message));
+              this.store.markError(vscode.l10n.t("认证失败：{0}。请检查 API Key 与端点后重试。", message));
               // Async failure — the user is likely in the editor; cue it.
               this.postSound("error");
               this.store.markConnected();
@@ -8592,6 +8658,30 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       this.log.warn(`mode re-assert failed (${MAIN_SESSION_MODE}): ${errorMessage(error)}`);
     }
+  }
+
+  /**
+   * 效率开关：档位变化时，把对应的一段档位块追加到本轮 prompt 末尾。
+   *
+   * 只注入一次（不是每轮）：同一会话连续多轮只带一次速推规则，切回 steady
+   * 时再带一次「已退出速推」的恢复块。新会话（Map 里没有记录）按 `steady`
+   * 基线处理 —— 这正是 CLI 默认就在跑的规则，因此 steady 会话首轮不注入
+   * （行为与开关上线前逐字节一致），turbo 会话首轮就会注入速推块。
+   *
+   * 返回 true = 本轮追加了块（调用方据此知道这一轮带了档位规则）。
+   */
+  private appendEfficiencyBlock(prompt: ContentBlock[], sessionId: string): boolean {
+    const mode = asEfficiencyMode(
+      vscode.workspace.getConfiguration("iflow").get<string>("efficiencyMode", "steady"),
+    );
+    const injected = this.injectedEfficiencyMode.get(sessionId) ?? "steady";
+    if (injected === mode) return false;
+    prompt.push({
+      type: "text",
+      text: mode === "turbo" ? EFFICIENCY_TURBO_PROMPT : EFFICIENCY_STEADY_PROMPT,
+    });
+    this.injectedEfficiencyMode.set(sessionId, mode);
+    return true;
   }
 
   private async setModel(modelId: string): Promise<void> {
@@ -9460,6 +9550,12 @@ export class ChatPanel implements vscode.Disposable {
       skills: meta?.availableSkills ?? [],
       currentModelId,
     });
+    // 效率开关：新会话的「已注入档位」基线是 CLI 固有默认 `steady`（不是当前
+    // 设置值）—— 这样 turbo 的新会话首轮就注入速推块，steady 的新会话首轮
+    // 不注入（与开关上线前逐字节一致）。同时清掉旧会话的记录，避免 Map 随
+    // 会话切换无限增长。
+    this.injectedEfficiencyMode.clear();
+    this.injectedEfficiencyMode.set(session.sessionId, "steady");
     this.applyLiveModels(modelsPromise, client, session.sessionId, cliModelId);
     // 多仓库协作：本次会话的 CLI 实际可见根 = 选中的根（add_dirs 为 null 时
     // 是全量根）。投影给 webview 做「已生效 / 对新会话生效」提示。
@@ -9895,6 +9991,14 @@ export class ChatPanel implements vscode.Disposable {
       for (const img of images ?? []) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
+      // 效率开关：档位变化时在本轮末尾追加一段档位块（仅真实用户回合）。
+      // CLI 只按 `prompt[0]` 判定 slash 指令，末尾追加文本块不影响命令识别。
+      // 宿主驱动的回合（internal 家务 / hidden 汇报回灌）不消耗档位变化：
+      // 否则用户的下一条真实消息反而拿不到规则，而一次汇报轮把它带走了。
+      // `/compress` 同理 —— promptWithRetry 会把整份 prompt 换成 `/compress`。
+      if (!internal && !hidden && !isCompressTurn) {
+        this.appendEfficiencyBlock(prompt, promptSessionId);
+      }
       // 最终汇报轮的 assistant 文本锚点：与 injectQqMainTurn 同口径（可见
       // text 块、排除 system），轮末只取基线之后的文本，避免把上一轮内容
       // 当成本轮结论回给 QQ。除了 id 还要记下锚块**当前文本长度**：hidden
@@ -10234,6 +10338,19 @@ export class ChatPanel implements vscode.Disposable {
       ];
       for (const img of regenImages) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
+      }
+      // 效率开关：与 sendPrompt 同一注入语义 —— 重生成也是真实用户回合，
+      // 用户切到速推后直接点重生成，这一轮同样要带上档位块。
+      //
+      // 守卫对齐 sendPrompt 的 `!internal && !hidden && !isCompressTurn`：
+      // hidden 宿主回合根本不写 user 块（重生成取不到它），唯一的 internal
+      // 宿主驱动 user 块是 QQ 注入轮（块上带 `origin: "qq"`），所以
+      // `origin !== "qq"` 正是这里 `!internal && !hidden` 的等价写法 —— 否则
+      // 重生成一条 QQ 注入轮会把档位变化消耗掉，用户下一条真实消息反而拿不到
+      // 规则。`/compress` 守卫同样保留：promptWithRetry 会把整份 prompt 换成
+      // `/compress`。
+      if (!isCompressTurn && lastUserBlock?.origin !== "qq") {
+        this.appendEfficiencyBlock(prompt, promptSessionId);
       }
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
       // Session replaced mid-flight: the completion must not settle the NEW
@@ -10735,7 +10852,12 @@ export class ChatPanel implements vscode.Disposable {
         reply(withScheme, host, body);
         return;
       }
-      reply("", "", "", vscode.l10n.t("不支持的上下文类型"));
+      reply(
+        "",
+        "",
+        "",
+        vscode.l10n.t("这类内容暂不支持加入上下文，请改用文件、选中代码或链接。"),
+      );
     } catch (error) {
       reply("", "", "", errorMessage(error));
     }

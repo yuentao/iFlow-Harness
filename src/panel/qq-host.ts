@@ -2445,7 +2445,10 @@ export class QqHost {
     if (this.disposed) return;
     const id = typeof openid === "string" ? openid.trim() : "";
     if (id.length === 0) {
-      this.store.sendToast("warning", vscode.l10n.t("待审核记录缺少用户标识"));
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("这条待处理记录缺少用户标识，已跳过；请检查 QQ 白名单配置。"),
+      );
       return;
     }
     const pending = this.qqPendingStore();

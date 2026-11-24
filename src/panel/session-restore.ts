@@ -224,7 +224,7 @@ export class SessionRestoreService {
     if (init && !init.agentCapabilities.loadSession) {
       this.deps.log.warn("loadSession capability not declared by CLI");
       void vscode.window.showWarningMessage(
-        vscode.l10n.t("当前内核不支持恢复历史会话"),
+        vscode.l10n.t("当前后台服务版本太旧，无法恢复历史会话。升级 iFlow 扩展后重试。"),
       );
       return false;
     }
@@ -448,7 +448,7 @@ export class SessionRestoreService {
       const message = errorMessage(error);
       endReplay(this.deps.getState());
       this.deps.log.error(`session restore failed: ${message} (after ${Date.now() - tRestore}ms)`);
-      this.deps.markError(vscode.l10n.t("会话恢复失败：{0}", message));
+      this.deps.markError(vscode.l10n.t("会话恢复失败：{0}。请重试，或新建一个会话。", message));
       // Async failure — the user is likely in the editor; cue it.
       this.deps.postSound("error");
       // Do NOT forget the session here: the transcript file still exists and

@@ -854,7 +854,7 @@ const SubAgentCard = memo(function SubAgentCard({ block, chrome = "card" }: { bl
         )}
       </div>
       <div className={`flex flex-wrap gap-3 font-mono text-ui-caption text-muted-foreground ${flat ? "px-2 pb-1" : "px-3 pb-2"}`}>
-        <span title={t("token 数为按对话估算，包含进程内子代理")}>
+        <span title={t("token 数是按当前对话估算的，包含会话内子代理的用量")}>
           {block.tokens === undefined ? "—" : `≈ ${block.tokens.toLocaleString()} tokens`}
         </span>
         <span>{t("耗时")} {duration}</span>

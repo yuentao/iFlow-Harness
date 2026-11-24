@@ -18,6 +18,7 @@ import type {
 import { l10n } from "vscode";
 import { countTokens as gptCountTokens } from "gpt-tokenizer";
 import { estimateCost } from "./context-window.js";
+import { EFFICIENCY_STEADY_PROMPT, EFFICIENCY_TURBO_PROMPT } from "../prompts/index.js";
 import {
   emptySessionUsage,
   initialSessionState,
@@ -3079,7 +3080,30 @@ function cliEntryUserText(entry: unknown): string | null {
     if (trimmed.startsWith("<system-reminder>") && trimmed.endsWith("</system-reminder>")) continue;
     text += part.text;
   }
-  return text.replace(/\u200B/g, "").trim() || null;
+  return stripEfficiencyBlock(text).replace(/\u200B/g, "").trim() || null;
+}
+
+/**
+ * 从 CLI 记录的 user 轮末尾剥掉效率开关注入的档位块。
+ *
+ * 宿主在「档位变化」时往 prompt 末尾追加一段 turbo/steady 模板（见
+ * `ChatPanel.appendEfficiencyBlock`），CLI 会把整段逐字记进 chatHistory。
+ * 转录里的用户气泡不含这段（它只是给模型的指令），因此比对前必须剥除，
+ * 否则带档位块的轮次永远对不上，「删除消息 / 编辑重发」会静默退化成只删
+ * 转录、模型上下文里那条消息还在。
+ *
+ * 只剥末尾：档位块永远是 prompt 数组的最后一个 text 块（附件块在它之前），
+ * 只认末尾才不会误伤正文里恰好出现的同名字样。
+ */
+function stripEfficiencyBlock(text: string): string {
+  let out = text.trimEnd();
+  for (const block of [EFFICIENCY_TURBO_PROMPT, EFFICIENCY_STEADY_PROMPT]) {
+    if (out.endsWith(block)) {
+      out = out.slice(0, out.length - block.length).trimEnd();
+      break;
+    }
+  }
+  return out;
 }
 
 /** A CLI user turn matches a transcript prompt on exact text, or on the prompt
