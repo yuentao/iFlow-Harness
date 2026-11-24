@@ -131,6 +131,16 @@ export class FileSystemWatcher {
   dispose(): void {}
 }
 
+/** Write target for `WorkspaceConfiguration.update()`; values mirror VSCode's
+ * public enum so `ConfigurationTarget.Global` is usable from the panel. The
+ * stub configuration itself still has no `update()`, so a write throws unless
+ * a test installs its own configuration object. */
+export enum ConfigurationTarget {
+  Global = 1,
+  Workspace = 2,
+  WorkspaceFolder = 3,
+}
+
 /** Configuration stub: `get()` returns the override or the default. Tests
  * inject overrides via `setConfigOverrides` (e.g. the osNotifications tier). */
 class WorkspaceConfiguration {

@@ -117,7 +117,9 @@ describe("ChatPanel async busy states and failure receipts", () => {
     // The vscode stub's WorkspaceConfiguration has no update() — calling it
     // throws, which is exactly the "write rejected" path under test.
     await p.writeUserSetting("autoTitle", true);
-    expect(toast).toHaveBeenCalledWith("warning", "设置写入失败：autoTitle");
+    // The toast now also carries the rejection reason (TypeError here), so only
+    // the setting name is pinned.
+    expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("设置写入失败：autoTitle"));
   });
 
   it("webview 消息路由的 rejection 变成 error toast", async () => {

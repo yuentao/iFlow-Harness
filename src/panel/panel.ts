@@ -3480,8 +3480,11 @@ export class ChatPanel implements vscode.Disposable {
       this.log.warn(`failed to update ${key}: ${detail}`);
       // A silent failure made the control look like it "snapped back" on its
       // own — say which setting could not be written (the value the user sees
-      // is the one VSCode still has on disk).
-      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}", label ?? key));
+      // is the one VSCode still has on disk). The rejection reason is the only
+      // clue the user has (read-only settings.json, invalid JSON, schema
+      // rejection, unknown key), so it rides along in the toast instead of
+      // staying in the Output log.
+      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}（{1}）", label ?? key, detail));
       return false;
     }
   }

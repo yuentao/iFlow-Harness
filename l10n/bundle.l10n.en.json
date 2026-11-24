@@ -45,7 +45,7 @@
   "该文件在编辑器中有未保存的修改。逐块回退将从磁盘重新加载并丢弃这些修改。": "This file has unsaved changes in the editor. Per-hunk revert will reload it from disk and discard them.",
   "无法保存到 iFlow 配置文件（{0}）。请检查 ~/.iflow/settings.json 是否可写，或改用面板里的设置。": "Could not save to the iFlow config file ({0}). Check that ~/.iflow/settings.json is writable, or change it from the panel instead.",
   "操作失败：{0}": "The operation failed: {0}",
-  "设置写入失败：{0}": "Failed to write the setting: {0}",
+  "设置写入失败：{0}（{1}）": "Failed to write the setting: {0} ({1})",
   "上下文窗口覆写": "Context-window overrides",
   "模型列表刷新失败，仍显示上次结果": "Failed to refresh the model list — still showing the previous result",
   "端点未返回任何模型，仍显示上次结果": "The endpoint returned no models — still showing the previous result",
