@@ -711,6 +711,11 @@ const ONBOARDING_DISMISSED_KEY = "iflow.onboardingDismissed";
 /** globalState key: cross-window cache of the resolved node runtime
  * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
+/** globalState key: user-settings writes stashed because this window's
+ * configuration registry has not loaded their declaration yet (an in-place
+ * extension upgrade keeps the renderer on the previous manifest). Replayed by
+ * `applyPendingSettings` once the reloaded window knows the key again. */
+const PENDING_SETTINGS_KEY = "iflow.pendingSettingsWrites";
 /** `iflow.uiFontSize` presets — kept in sync with shared/messages.ts. */
 const UI_FONT_SIZES = ["compact", "standard", "large"] as const;
 /** `iflow.uiDensity` presets — kept in sync with shared/messages.ts. */
@@ -2112,6 +2117,9 @@ export class ChatPanel implements vscode.Disposable {
     void this.startQqIfEnabled();
     // Status bar entry is the always-visible launcher (no sidebar view anymore).
     this.statusBar.show();
+    // A window reload (the action offered by the "setting stashed" toast) makes
+    // the new declarations visible again — replay whatever is still waiting.
+    void this.applyPendingSettings();
   }
 
   /** Thin delegate (阶段 2): all status-bar rendering lives in StatusPresenter.
@@ -3464,6 +3472,55 @@ export class ChatPanel implements vscode.Disposable {
     this.postToWebview({ type: "theme", kind: light ? "light" : "dark", auroraIntensity });
   }
 
+  /** True when the running window's configuration registry knows this key's
+   * default layer. `get()` is NOT a valid probe — it also reads the user's
+   * settings.json; `inspect().defaultValue` comes from the registry only.
+   * Every `iflow.*` declares a default (locked by settings-declared.test), so
+   * an undefined defaultValue means the declaration is missing from this
+   * window (in-place extension upgrade: the renderer keeps the old manifest
+   * until the window reloads). */
+  private isUserSettingRegistered(key: string): boolean {
+    const info = vscode.workspace.getConfiguration("iflow").inspect(key);
+    return info !== undefined && info.defaultValue !== undefined;
+  }
+
+  /** Current stash of settings writes waiting for their declaration. */
+  private pendingSettingsWrites(): Record<string, unknown> {
+    return { ...(this.context.globalState.get<Record<string, unknown>>(PENDING_SETTINGS_KEY) ?? {}) };
+  }
+
+  /** Stash one write in globalState (never on disk): it is replayed by
+   * `applyPendingSettings` once the key is registered again. */
+  private async stashPendingSetting(key: string, value: unknown): Promise<void> {
+    const pending = this.pendingSettingsWrites();
+    pending[key] = value;
+    await this.context.globalState.update(PENDING_SETTINGS_KEY, pending);
+  }
+
+  /** Drop one stashed write (it landed, or a fresh write superseded it). */
+  private async dropPendingSetting(key: string): Promise<void> {
+    const pending = this.pendingSettingsWrites();
+    if (!(key in pending)) return;
+    delete pending[key];
+    await this.context.globalState.update(PENDING_SETTINGS_KEY, pending);
+  }
+
+  /** Replay stashed writes whose declarations this window registers now (i.e.
+   * after the reload the stashing toast asked for). Keys still unregistered
+   * stay stashed for the next attempt. */
+  private async applyPendingSettings(): Promise<void> {
+    for (const [key, value] of Object.entries(this.pendingSettingsWrites())) {
+      if (!this.isUserSettingRegistered(key)) continue;
+      try {
+        await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
+        await this.dropPendingSetting(key);
+      } catch (error) {
+        // Keep the stash: the next window may be able to write it.
+        this.log.warn(`failed to apply stashed setting ${key}: ${errorMessage(error)}`);
+      }
+    }
+  }
+
   /** Write one panel-owned setting to USER settings (the scope VSCode
    * Settings Sync carries). Validation happens at the call site.
    *
@@ -3472,8 +3529,27 @@ export class ChatPanel implements vscode.Disposable {
    * (a caller that has to react to a failed write uses the return value —
    * the toast is emitted here, so nobody double-toasts). */
   private async writeUserSetting(key: string, value: unknown, label?: string): Promise<boolean> {
+    if (!this.isUserSettingRegistered(key)) {
+      // An in-place upgrade leaves this window on the previous manifest, so
+      // VSCode rejects the write with "not a registered configuration". Stash
+      // it and tell the user the one action that makes it land.
+      await this.stashPendingSetting(key, value);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t(
+          "设置「{0}」属于刚更新的扩展版本，当前窗口还没加载它的定义，已暂存；重新加载窗口后自动生效。",
+          label ?? key,
+        ),
+        {
+          sticky: true,
+          action: { actionId: "reload-window", label: vscode.l10n.t("重新加载窗口") },
+        },
+      );
+      return false;
+    }
     try {
       await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
+      await this.dropPendingSetting(key);
       return true;
     } catch (error) {
       const detail = errorMessage(error);
@@ -5284,6 +5360,13 @@ export class ChatPanel implements vscode.Disposable {
         this.syncSuperWaitingState();
         void this.drainSuperAutoTurns();
       }
+      return;
+    }
+    if (actionId === "reload-window") {
+      // 「设置已暂存」提示的动作：重载窗口让新版本的配置声明生效，
+      // 面板构造时的 applyPendingSettings 随后把暂存值写回去。
+      if (typeof toastId === "number") this.store.dismissToast(toastId);
+      void vscode.commands.executeCommand("workbench.action.reloadWindow");
       return;
     }
     if (typeof toastId === "number") this.store.dismissToast(toastId);

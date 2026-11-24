@@ -11,6 +11,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const chatPanel = new ChatPanel(context);
   panel = chatPanel;
   context.subscriptions.push(chatPanel);
+  warnAboutUnregisteredSettings(context);
 
   // Terminal command capture for @terminal must not depend on the chat panel
   // being opened — attach the recorder at activation (no-op on VS Code < 1.93
@@ -108,6 +109,53 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   participant.iconPath = vscode.Uri.joinPath(context.extensionUri, "media", "iflow.svg");
   context.subscriptions.push(participant);
+}
+
+/** globalState key: extension version for which the "reload the window" warning
+ * was already shown (one warning per upgrade, not one per activation). */
+const UNREGISTERED_SETTINGS_WARNED_KEY = "iflow.unregisteredSettingsWarnedFor";
+
+/**
+ * An in-place extension upgrade only restarts the extension host: the window
+ * keeps the previous manifest in its configuration registry, so keys the new
+ * version added cannot be written until the window reloads ("not a registered
+ * configuration"). Probe every declared `iflow.*` key here — the registry-only
+ * `inspect().defaultValue` layer, since `get()` would also read the user's
+ * settings.json — and warn once per version, before the user hits a failed
+ * save.
+ */
+function warnAboutUnregisteredSettings(context: vscode.ExtensionContext): void {
+  const pkg = context.extension?.packageJSON as
+    | { version?: string; contributes?: { configuration?: unknown } }
+    | undefined;
+  const raw = pkg?.contributes?.configuration;
+  const blocks = (Array.isArray(raw) ? raw : raw ? [raw] : []) as Array<{
+    properties?: Record<string, unknown>;
+  }>;
+  const declared = new Set<string>();
+  for (const block of blocks) {
+    for (const key of Object.keys(block?.properties ?? {})) {
+      if (key.startsWith("iflow.")) declared.add(key);
+    }
+  }
+  if (declared.size === 0) return;
+  const version = pkg?.version ?? "";
+  if (context.globalState.get<string>(UNREGISTERED_SETTINGS_WARNED_KEY) === version) return;
+  const config = vscode.workspace.getConfiguration("iflow");
+  const missing = [...declared].filter((key) => {
+    const info = config.inspect(key.slice("iflow.".length));
+    return info === undefined || info.defaultValue === undefined;
+  });
+  if (missing.length === 0) return;
+  void context.globalState.update(UNREGISTERED_SETTINGS_WARNED_KEY, version);
+  void vscode.window
+    .showWarningMessage(
+      vscode.l10n.t("扩展已更新，重新加载窗口后新设置才能保存"),
+      vscode.l10n.t("重新加载窗口"),
+    )
+    .then((choice) => {
+      if (choice) void vscode.commands.executeCommand("workbench.action.reloadWindow");
+    });
 }
 
 /** Active editor selection → {relative path, line range, text} (M5). */

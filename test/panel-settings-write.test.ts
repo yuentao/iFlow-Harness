@@ -42,12 +42,16 @@ interface WriteLog {
   values: Record<string, unknown>;
   /** 完整键 → ConfigurationTarget。 */
   targets: Record<string, number | undefined>;
+  /** 每次 `update()` 尝试的完整键（未注册时面板应完全不调用它）。 */
+  attempts: string[];
 }
 
 /** 装一份与 VSCode 行为一致的假配置：`update()` 拒绝未在 manifest 声明的键
  * （ERROR_UNKNOWN_KEY），并按 manifest 的 default 回读。`forcedError` 模拟
- * 环境侧失败（settings.json 只读 / JSON 损坏 / Settings Sync 冲突）。返回还原函数。 */
-function installConfig(writes: WriteLog, forcedError?: Error): () => void {
+ * 环境侧失败（settings.json 只读 / JSON 损坏 / Settings Sync 冲突）；
+ * `unregistered` 模拟「就地升级后窗口注册表仍是旧 manifest」——这些键在
+ * `inspect().defaultValue` 里没有默认层，`update()` 同样被拒。返回还原函数。 */
+function installConfig(writes: WriteLog, forcedError?: Error, unregistered: string[] = []): () => void {
   const original = vscode.workspace.getConfiguration;
   (vscode.workspace as unknown as { getConfiguration: unknown }).getConfiguration = (section?: string) => {
     const prefix = section ? `${section}.` : "";
@@ -59,16 +63,20 @@ function installConfig(writes: WriteLog, forcedError?: Error): () => void {
         return (declared?.default !== undefined ? (declared.default as T) : defaultValue) as T;
       },
       has: (key: string): boolean => `${prefix}${key}` in schema || `${prefix}${key}` in writes.values,
-      inspect: (key: string) => ({
-        key: `${prefix}${key}`,
-        defaultValue: schema[`${prefix}${key}`]?.default,
-        globalValue: writes.values[`${prefix}${key}`],
-      }),
-      update: async (key: string, value: unknown, target?: number): Promise<void> => {
-        if (forcedError) throw forcedError;
+      inspect: (key: string) => {
         const full = `${prefix}${key}`;
+        return {
+          key: full,
+          defaultValue: unregistered.includes(full) ? undefined : schema[full]?.default,
+          globalValue: writes.values[full],
+        };
+      },
+      update: async (key: string, value: unknown, target?: number): Promise<void> => {
+        const full = `${prefix}${key}`;
+        writes.attempts.push(full);
+        if (forcedError) throw forcedError;
         const declared = schema[full];
-        if (!declared) {
+        if (!declared || unregistered.includes(full)) {
           // VSCode 的原话（ERROR_UNKNOWN_KEY）。面板不做猜测，只把它原样带进
           // 失败 toast，用户据此判断是「扩展版本旧」还是环境侧写入失败。
           throw new Error(`Unable to write to User Settings because ${full} is not a registered configuration.`);
@@ -132,6 +140,7 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
 type PanelInternals = {
   store: { sendToast: (level: string, message: string) => number };
   writeUserSetting: (key: string, value: unknown, label?: string) => Promise<boolean>;
+  applyPendingSettings: () => Promise<void>;
   handleWebviewMessage: (msg: unknown) => Promise<void>;
 };
 
@@ -140,6 +149,7 @@ describe("面板设置写入：效率档位 / 定期整理记忆", () => {
   let p: PanelInternals;
   let iflowHome: string;
   let storageDir: string;
+  let ctx: vscode.ExtensionContext;
   let writes: WriteLog;
   let restoreConfig: () => void;
 
@@ -147,13 +157,15 @@ describe("面板设置写入：效率档位 / 定期整理记忆", () => {
     iflowHome = await mkdtemp(path.join(os.tmpdir(), "iflow-settings-write-"));
     process.env.IFLOW_HOME = iflowHome;
     storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-settings-write-storage-"));
-    writes = { values: {}, targets: {} };
+    writes = { values: {}, targets: {}, attempts: [] };
     restoreConfig = installConfig(writes);
-    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    ctx = makeContext(storageDir);
+    panel = new ChatPanel(ctx, { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as PanelInternals;
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     restoreConfig();
     await panel.dispose();
     await rm(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -189,20 +201,61 @@ describe("面板设置写入：效率档位 / 定期整理记忆", () => {
     expect(toast).not.toHaveBeenCalled();
   });
 
-  it("未声明的键失败时，toast 带上 VSCode 的原始拒绝原因", async () => {
+  it("未注册（就地升级后窗口仍是旧 schema）→ 不抛错、不写盘、暂存并提示重载窗口", async () => {
+    restoreConfig();
+    restoreConfig = installConfig(writes, undefined, ["iflow.efficiencyMode"]);
     const toast = vi.spyOn(p.store, "sendToast");
 
-    await expect(p.writeUserSetting("notDeclaredAnywhere", true)).resolves.toBe(false);
+    await expect(p.writeUserSetting("efficiencyMode", "turbo")).resolves.toBe(false);
 
-    expect(writes.values["iflow.notDeclaredAnywhere"]).toBeUndefined();
+    // 写入根本没有尝试（VSCode 对未注册键的拒绝是确定性的，无需试探）。
+    expect(writes.attempts).not.toContain("iflow.efficiencyMode");
+    expect(writes.values["iflow.efficiencyMode"]).toBeUndefined();
     expect(toast).toHaveBeenCalledWith(
       "warning",
-      expect.stringContaining("设置写入失败：notDeclaredAnywhere"),
+      expect.stringContaining("已暂存"),
+      expect.objectContaining({
+        sticky: true,
+        action: { actionId: "reload-window", label: "重新加载窗口" },
+      }),
     );
-    expect(toast).toHaveBeenCalledWith(
-      "warning",
-      expect.stringContaining("is not a registered configuration"),
-    );
+    expect(toast).not.toHaveBeenCalledWith("warning", expect.stringContaining("设置写入失败"));
+    expect(ctx.globalState.get("iflow.pendingSettingsWrites")).toEqual({ efficiencyMode: "turbo" });
+  });
+
+  it("已注册且写入成功 → 清掉同名暂存，不弹失败 toast", async () => {
+    await ctx.globalState.update("iflow.pendingSettingsWrites", { efficiencyMode: "steady" });
+    const toast = vi.spyOn(p.store, "sendToast");
+
+    await expect(p.writeUserSetting("efficiencyMode", "turbo")).resolves.toBe(true);
+
+    expect(writes.values["iflow.efficiencyMode"]).toBe("turbo");
+    expect(ctx.globalState.get("iflow.pendingSettingsWrites")).toEqual({});
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("toastAction reload-window → 执行 workbench.action.reloadWindow", async () => {
+    const exec = vi.spyOn(vscode.commands, "executeCommand");
+
+    await p.handleWebviewMessage({ type: "toastAction", actionId: "reload-window", toastId: 7 });
+
+    expect(exec).toHaveBeenCalledWith("workbench.action.reloadWindow");
+  });
+
+  it("applyPendingSettings：已注册的回放一次并清空，未注册的保留", async () => {
+    restoreConfig();
+    restoreConfig = installConfig(writes, undefined, ["iflow.memoryMaintenanceEnabled"]);
+    await ctx.globalState.update("iflow.pendingSettingsWrites", {
+      efficiencyMode: "turbo",
+      memoryMaintenanceEnabled: true,
+    });
+
+    await p.applyPendingSettings();
+
+    expect(writes.values["iflow.efficiencyMode"]).toBe("turbo");
+    expect(writes.targets["iflow.efficiencyMode"]).toBe(vscode.ConfigurationTarget.Global);
+    expect(writes.values["iflow.memoryMaintenanceEnabled"]).toBeUndefined();
+    expect(ctx.globalState.get("iflow.pendingSettingsWrites")).toEqual({ memoryMaintenanceEnabled: true });
   });
 
   it("环境侧写入被拒（settings.json 只读）时，toast 带出真实错误信息", async () => {
