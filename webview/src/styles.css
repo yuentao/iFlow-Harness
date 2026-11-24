@@ -1110,10 +1110,15 @@ textarea::selection {
 
 /* --- Super Agent timeline: centered focus viewport ----------------------
    The timeline keeps ONE node horizontally centered and slides the track
-   under it with a transform (never scrollLeft). This mask fades both edges
-   so the previous / next steps dissolve instead of being sheared off at a
-   hard clip — the reading is "the track continues past here", not "the row
-   was cut".
+   under it with a transform (never scrollLeft). Each node is a fixed-width
+   column (SUPER_TIMELINE_NODE_PITCH = 88px: truncated label above, icon and
+   half-connectors below). This mask fades both edges so the previous / next
+   steps dissolve instead of being sheared off at a hard clip — the reading
+   is "the track continues past here", not "the row was cut".
+
+   The mask is ALWAYS on, never gated on "does the track overflow": a stepper
+   whose edges only fade sometimes reads as two different components. Left =
+   transparent → opaque, right = opaque → transparent.
 
    Both spellings are emitted on purpose: Chromium honours either, so an
    esbuild CSS fold (trap #22) can't silently drop the effect the way a

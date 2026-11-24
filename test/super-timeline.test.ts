@@ -306,14 +306,14 @@ describe("summarizeSuperTimelineProgress · 顶部进度计数", () => {
 });
 
 describe("estimateSuperTimelineGeometry · 等距模型", () => {
-  it("节点中心等距排列，轨道宽 = 末节点右缘", () => {
+  it("每个节点占一整列：中心 = 列中心，轨道宽 = 列数 × 列宽", () => {
     const { centers, trackWidth } = estimateSuperTimelineGeometry(3);
     expect(centers).toEqual([
-      SUPER_TIMELINE_NODE_SIZE / 2,
-      SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE / 2,
-      2 * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE / 2,
+      SUPER_TIMELINE_NODE_PITCH / 2,
+      SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_PITCH / 2,
+      2 * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_PITCH / 2,
     ]);
-    expect(trackWidth).toBe(2 * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE);
+    expect(trackWidth).toBe(3 * SUPER_TIMELINE_NODE_PITCH);
   });
 
   it("空序列给出空模型（组件据此渲染空轨，不除零）", () => {
@@ -365,14 +365,18 @@ describe("estimateSuperTimelineGeometry · 等距模型", () => {
       // 首节点：中心在实心带起点右侧；末节点：中心在实心带终点左侧。
       expect(firstScreen).toBeGreaterThanOrEqual(solidStart);
       expect(lastScreen).toBeLessThanOrEqual(solidEnd);
-      // 反证：没有内边距时首节点会落进渐隐带（说明这条断言真的在守东西）。
-      const bare = estimateSuperTimelineGeometry(15);
-      const bareFirst = bare.centers[0]! + computeSuperTimelineTranslateX({
-        focusCenter: bare.centers[0]!,
-        trackWidth: bare.trackWidth,
-        viewportWidth: viewport,
-      });
-      expect(bareFirst).toBeLessThan(solidStart);
+      // 反证（420px 面板）：没有内边距时，首列中心落在 15% 渐隐带内 —— 说明这条
+      // 断言真的在守东西。列宽变大后 300/360 视窗下裸首列中心已越过敏化带，
+      // 因此反证只在真实面板宽度上做。
+      if (viewport === 420) {
+        const bare = estimateSuperTimelineGeometry(15);
+        const bareFirst = bare.centers[0]! + computeSuperTimelineTranslateX({
+          focusCenter: bare.centers[0]!,
+          trackWidth: bare.trackWidth,
+          viewportWidth: viewport,
+        });
+        expect(bareFirst).toBeLessThan(solidStart);
+      }
     }
   });
 
@@ -380,7 +384,7 @@ describe("estimateSuperTimelineGeometry · 等距模型", () => {
     const viewport = 420;
     const padding = superTimelineTrackPadding(viewport);
     const geometry = estimateSuperTimelineGeometry(3, padding);
-    // 3 步：3*22 + 2*8 = 82 的节点区，加两端 padding 126 → 208 < 420。
+    // 3 步：3 列 × 88 = 264，加两端 padding 126 → 390 < 420。
     expect(geometry.trackWidth).toBeLessThanOrEqual(viewport);
     const shift = computeSuperTimelineTranslateX({
       focusCenter: geometry.centers[0]!,
@@ -398,17 +402,18 @@ describe("computeSuperTimelineTranslateX · 当前节点居中", () => {
   const geometry = estimateSuperTimelineGeometry(15);
 
   it("轨道装得下时整条轨道居中（空白均分两侧），奇数轨的中间节点正好在正中", () => {
-    const small = estimateSuperTimelineGeometry(3);
+    const viewport = 500;
+    const small = estimateSuperTimelineGeometry(5);
     const shift = computeSuperTimelineTranslateX({
-      focusCenter: small.centers[1]!,
+      focusCenter: small.centers[2]!,
       trackWidth: small.trackWidth,
-      viewportWidth: VIEWPORT,
+      viewportWidth: viewport,
     });
-    expect(shift).toBe(Math.round((VIEWPORT - small.trackWidth) / 2));
+    expect(shift).toBe(Math.round((viewport - small.trackWidth) / 2));
     // 中间节点精确居中；首末节点按规格豁免（宁可偏一点也不把空白全推一侧）。
-    expect(Math.abs(small.centers[1]! + shift - VIEWPORT / 2)).toBeLessThanOrEqual(1);
+    expect(Math.abs(small.centers[2]! + shift - viewport / 2)).toBeLessThanOrEqual(1);
     // 空白均分：两侧留白相等。
-    expect(shift).toBe(VIEWPORT - small.trackWidth - shift);
+    expect(shift).toBe(viewport - small.trackWidth - shift);
   });
 
   it("装不下时把当前节点放在视窗正中", () => {
@@ -503,11 +508,11 @@ describe("computeSuperTimelineEdgeHints · 屏外关键节点提示", () => {
   });
 
   it("关键节点就在视窗内：不产生任何边缘提示", () => {
-    const nodes = withCritical(5, 2);
+    const nodes = withCritical(2, 1);
     const geometry = estimateSuperTimelineGeometry(nodes.length);
-    // 5 个节点装得下 200px 视窗 → 整条轨居中，全部可见。
+    // 2 列 × 88 = 176 装得下 200px 视窗 → 整条轨居中，全部可见。
     const shift = computeSuperTimelineTranslateX({
-      focusCenter: geometry.centers[2]!,
+      focusCenter: geometry.centers[1]!,
       trackWidth: geometry.trackWidth,
       viewportWidth: VIEWPORT,
     });
@@ -619,15 +624,16 @@ describe("layoutSuperTimelineFocus · 平移 + 边缘提示一起算", () => {
       node("awaiting_input", "current"),
     ];
     const geometry = estimateSuperTimelineGeometry(nodes.length);
+    const viewportWidth = 400;
     const layout = layoutSuperTimelineFocus({
       nodes,
       centers: geometry.centers,
       trackWidth: geometry.trackWidth,
-      viewportWidth: VIEWPORT,
+      viewportWidth,
       focusIndex: 2,
     });
     expect(layout.hints).toEqual([]);
-    // 3 个节点装得下 → 整条轨居中。
-    expect(layout.translateX).toBe(Math.round((VIEWPORT - geometry.trackWidth) / 2));
+    // 3 列 × 88 = 264 装得下 400px → 整条轨居中。
+    expect(layout.translateX).toBe(Math.round((viewportWidth - geometry.trackWidth) / 2));
   });
 });

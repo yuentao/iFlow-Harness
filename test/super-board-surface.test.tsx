@@ -31,6 +31,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SuperSessionUi } from "../shared/super-agent";
+import { SUPER_TIMELINE_NODE_PITCH, SUPER_TIMELINE_NODE_SIZE } from "../shared/super-timeline";
 import { App } from "../webview/src/App";
 import { SuperAgentBoard } from "../webview/src/components/SuperAgentBoard";
 
@@ -477,7 +478,7 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     act(() => row!.click());
   }
 
-  it("聚焦视窗：当前节点居中，节点全部渲染，当前步文案在下方单行 truncate + title", () => {
+  it("聚焦视窗：当前节点居中，节点全部渲染，每个节点上方有单行 truncate + title 的标签", () => {
     render([session({ status: "running", startedAt: 2000, updatedAt: 3000, todos })]);
     expand();
     openTodoRow();
@@ -515,12 +516,33 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     expect(icons[1]!.getAttribute("aria-current")).toBe("step");
     expect(icons[3]!.getAttribute("aria-current")).toBeNull();
 
-    // 当前步文案在轨道下方：单行截断，完整原文进 title。
+    // 每个节点上方有自己的标签：单行 truncate，完整原文进 title（hover 可读）。
     const labels = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-label]"));
-    expect(labels).toHaveLength(1);
-    expect(labels[0]!.textContent).toBe("改写时间轴组件");
-    expect(labels[0]!.className).toContain("truncate");
-    expect(labels[0]!.getAttribute("title")).toBe("改写时间轴组件");
+    expect(labels).toHaveLength(4);
+    expect(labels.map((label) => label.textContent)).toEqual(todos.map((todo) => todo.content));
+    for (const label of labels) {
+      expect(label.className).toContain("truncate");
+      expect(label.getAttribute("title")).toBe(label.textContent);
+      // 视觉标签对读屏隐藏：完整文案由图标 aria-label 提供，不重复朗读。
+      expect(label.getAttribute("aria-hidden")).toBe("true");
+    }
+    // 当前步标签用主色，其它步骤按自身色调（done / idle）区分。
+    expect(labels[1]!.className).toContain("text-primary");
+    expect(labels[0]!.className).toContain("text-muted-foreground");
+    expect(labels[3]!.className).toContain("text-muted-foreground/80");
+
+    // 贯穿轨：首列左段 / 末列右段隐藏（轨不外伸），内部半段可见并与相邻列相接。
+    const firstLeft = el.querySelector<HTMLElement>(
+      '[data-timeline-col="0"] [data-timeline-link="left"]',
+    )!;
+    const lastRight = el.querySelector<HTMLElement>(
+      '[data-timeline-col="3"] [data-timeline-link="right"]',
+    )!;
+    expect(firstLeft.className).toContain("invisible");
+    expect(lastRight.className).toContain("invisible");
+    expect(
+      el.querySelector<HTMLElement>('[data-timeline-col="0"] [data-timeline-link="right"]')!.className,
+    ).not.toContain("invisible");
 
     // 顶部进度计数：1 个 done / 4 个节点。
     expect(el.textContent).toContain("进度 1/4");
@@ -565,8 +587,8 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     expect(waiting!.className).toContain("ring-warning");
     expect(waiting!.className).toContain("text-warning");
     expect(waiting!.getAttribute("data-timeline-critical")).toBe("true");
-    // 关键节点也是当前步：右侧文案同步用警告色。
-    const label = el.querySelector<HTMLElement>("[data-timeline-label]")!;
+    // 关键节点也是当前步：它自己那一列上方的标签用警告色。
+    const label = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-label]")).at(-1)!;
     expect(label.textContent).toBe("在等你回答");
     expect(label.className).toContain("text-warning");
     // 轨道上没有折叠/省略残留。
@@ -576,13 +598,14 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
 
   /**
    * jsdom 没有布局：视窗宽、节点矩形全是 0，居中平移与边缘提示都算不出来。
-   * 这里按组件实际使用的几何契约（节点 22 + 连接段 8）伪造 DOMRect，并且像
-   * 真实浏览器那样**返回已被 transform 平移过的坐标**，让「当前节点居中」
-   * 「屏外关键节点提示」这两条真逻辑在测试里跑真实数字。
+   * 这里按组件实际使用的几何契约（每节点一列 88px，图标 22px 在列内居中）伪造
+   * DOMRect，并且像真实浏览器那样**返回已被 transform 平移过的坐标**，让
+   * 「当前节点居中」「屏外关键节点提示」这两条真逻辑在测试里跑真实数字。
    */
   function stubTimelineLayout(viewportWidth: number): () => void {
-    const size = 22;
-    const pitch = 30;
+    const size = SUPER_TIMELINE_NODE_SIZE;
+    const pitch = SUPER_TIMELINE_NODE_PITCH;
+    const iconInset = (pitch - size) / 2;
     const makeRect = (left: number, width: number): DOMRect =>
       ({
         left,
@@ -613,11 +636,13 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
       if (el.dataset.timelineTrack) {
         const count = el.querySelectorAll("[data-timeline-icon]").length;
         const pad = padOf(el);
-        const width = count > 0 ? (count - 1) * pitch + size + pad * 2 : 0;
+        const width = count > 0 ? count * pitch + pad * 2 : 0;
         return makeRect(shiftOf(el), width);
       }
       const index = el.dataset.timelineIndex;
-      if (index !== undefined) return makeRect(shiftOf(el) + padOf(el) + Number(index) * pitch, size);
+      if (index !== undefined) {
+        return makeRect(shiftOf(el) + padOf(el) + Number(index) * pitch + iconInset, size);
+      }
       return originalRect.call(el);
     };
     Object.defineProperty(HTMLElement.prototype, "clientWidth", {
@@ -687,9 +712,8 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
   it("首末节点 clamp：当前步在第 1 / 最后一条时轨道不露白，且节点中心不在渐隐带里", () => {
     const VIEWPORT = 300;
     const PAD = Math.round(VIEWPORT * 0.15); // 45
-    const SPAN = 14 * 30 + 22; // 15 个节点的跨度
-    const TRACK = SPAN + PAD * 2; // 532
-    const HALF = 11;
+    const TRACK = 15 * SUPER_TIMELINE_NODE_PITCH + PAD * 2; // 1410
+    const HALF = SUPER_TIMELINE_NODE_SIZE / 2;
     const FADE = VIEWPORT * 0.15;
     const solidStart = Math.max(0, FADE - HALF);
     const solidEnd = VIEWPORT - Math.max(0, FADE - HALF);

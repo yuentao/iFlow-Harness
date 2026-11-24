@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -65,6 +64,7 @@ import {
   layoutSuperTimelineFocus,
   summarizeSuperTimelineProgress,
   superTimelineTrackPadding,
+  SUPER_TIMELINE_NODE_PITCH,
   SUPER_TODO_DETAIL_SEP,
   type SuperTimelineGeometry,
   type SuperTimelineNode,
@@ -599,7 +599,13 @@ function timelineNodeAria(node: SuperTimelineNode): string {
  *  - 中：一个固定视窗（`overflow-hidden` + `.timeline-viewport` 左右渐变遮罩），
  *    内层轨道用 `transform: translateX()` 平移，让**当前节点落在视窗正中**，
  *    左右各露出上一步 / 下一步并渐隐；更远的节点自然落在视窗之外；
- *  - 下：当前步文案，单行 `truncate` + `title`（窄面板下也读得出是哪一步）。
+ *  - 每列：上标签（单行 `truncate` + `title`，完整文案同时由图标的
+ *    `aria-label` 提供给读屏）+ 下图标与贯穿轨（左右各半段连接线，首列左段 /
+ *    末列右段隐藏）。
+ *
+ * 标签列宽 88px（`SUPER_TIMELINE_NODE_PITCH`，420px 面板容纳 4~5 列），图标在
+ * 列内水平居中，所以列中心就是节点中心 —— 与 `shared/super-timeline.ts` 的
+ * 几何模型同源。
  *
  * 平移量按实测 DOM 计算（`useLayoutEffect` + `offsetLeft` / `clientWidth`），
  * 视窗尺寸变化、节点变化时重算；首末节点时 clamp，绝不把轨道拉出空白。
@@ -757,8 +763,6 @@ function SuperTimeline({
     [nodes, activeGeometry, viewportWidth, focusIndex],
   );
 
-  const currentNode = nodes[currentIndex];
-
   return (
     <div
       role="group"
@@ -770,7 +774,7 @@ function SuperTimeline({
           才是相对整张卡片居中，而不是相对被「进度」标签挤窄的一段。 */}
       <div
         ref={viewportRef}
-        className="relative h-6 min-w-0 w-full"
+        className="relative h-11 min-w-0 w-full"
         data-timeline-viewport="true"
       >
         {/* 视窗：固定宽度 + overflow-hidden，左右渐变遮罩把上下步淡出。
@@ -804,30 +808,58 @@ function SuperTimeline({
                 : isAnchor
                   ? "ring-1 ring-primary/60"
                   : "";
+              // 贯穿轨：每列左右各半段，相邻两列端口相接成一条直线。首列左段 /
+              // 末列右段用 `invisible` 隐藏但保留宽度 —— 几何必须仍然等宽。
+              const line =
+                node.tone === "idle"
+                  ? "bg-muted-foreground/35"
+                  : node.tone === "failed"
+                    ? "bg-destructive/60"
+                    : "bg-primary/70";
               return (
-                <Fragment key={`node-${index}`}>
-                  {index > 0 && (
+                <div
+                  key={`node-${index}`}
+                  data-timeline-col={index}
+                  className="flex h-full shrink-0 flex-col justify-center gap-1"
+                  style={{ width: SUPER_TIMELINE_NODE_PITCH }}
+                >
+                  {/* 上：节点标签，单行 truncate；完整文案在 title（鼠标）与图标的
+                      aria-label（读屏）里。视觉标签对读屏隐藏，避免同一句话读两遍。 */}
+                  <span
+                    aria-hidden="true"
+                    data-timeline-label="true"
+                    title={timelineNodeLabel(node)}
+                    className={`block w-full truncate px-0.5 text-center text-ui-micro leading-tight ${timelineText(node)}`}
+                  >
+                    {timelineNodeLabel(node)}
+                  </span>
+                  {/* 下：左半连接段 + 图标 + 右半连接段 = 一条贯穿的轨。 */}
+                  <span className="flex w-full items-center">
                     <span
                       aria-hidden="true"
-                      className={`h-px w-2 shrink-0 ${
-                        node.tone === "idle" ? "bg-muted-foreground/35" : "bg-primary/70"
-                      }`}
+                      data-timeline-link="left"
+                      className={`h-px flex-1 ${index === 0 ? "invisible" : line}`}
                     />
-                  )}
-                  <span
-                    role="img"
-                    aria-label={timelineNodeAria(node)}
-                    aria-current={isCurrentStep ? "step" : undefined}
-                    title={timelineNodeLabel(node)}
-                    data-timeline-icon="true"
-                    data-timeline-index={index}
-                    data-timeline-critical={critical ? "true" : undefined}
-                    data-timeline-current={isAnchor ? "true" : undefined}
-                    className={`flex shrink-0 items-center justify-center rounded-full p-1 ${ring} ${timelineText(node)}`}
-                  >
-                    {timelineIcon(node)}
+                    <span
+                      role="img"
+                      aria-label={timelineNodeAria(node)}
+                      aria-current={isCurrentStep ? "step" : undefined}
+                      title={timelineNodeLabel(node)}
+                      data-timeline-icon="true"
+                      data-timeline-index={index}
+                      data-timeline-critical={critical ? "true" : undefined}
+                      data-timeline-current={isAnchor ? "true" : undefined}
+                      className={`flex shrink-0 items-center justify-center rounded-full p-1 ${ring} ${timelineText(node)}`}
+                    >
+                      {timelineIcon(node)}
+                    </span>
+                    <span
+                      aria-hidden="true"
+                      data-timeline-link="right"
+                      className={`h-px flex-1 ${index === nodes.length - 1 ? "invisible" : line}`}
+                    />
                   </span>
-                </Fragment>
+                </div>
               );
             })}
           </div>
@@ -863,27 +895,10 @@ function SuperTimeline({
         </div>
       )}
 
-      {/* 下：进度计数 + 当前步文案。计数在左（文本是主编码，轨道只是冗余
-          表达）；右侧放一份同宽但不可见的镜像计数，把左侧占位抵消掉，文案
-          因此真正居中在卡片下沿，而不是被计数挤偏。 */}
-      <div className="flex min-w-0 items-baseline gap-2">
+      {/* 下：进度计数。每个节点上方已有自己的标签，当前步不再重复一行文案
+          （截断的标签把完整原文放在 title / aria-label 里）。 */}
+      <div className="flex min-w-0 items-center gap-2">
         <span className="shrink-0 text-ui-caption tabular-nums text-muted-foreground">
-          {t("进度 {0}/{1}", progress.done, progress.total)}
-        </span>
-        <span
-          className={`min-w-0 flex-1 truncate text-center text-ui-caption font-medium ${
-            currentNode ? timelineText(currentNode) : "text-muted-foreground"
-          }`}
-          title={currentNode ? timelineNodeLabel(currentNode) : ""}
-          data-timeline-label="true"
-        >
-          {currentNode ? timelineNodeLabel(currentNode) : ""}
-        </span>
-        <span
-          aria-hidden="true"
-          className="invisible shrink-0 text-ui-caption tabular-nums"
-          data-timeline-label-spacer="true"
-        >
           {t("进度 {0}/{1}", progress.done, progress.total)}
         </span>
       </div>

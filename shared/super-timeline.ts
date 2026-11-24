@@ -345,16 +345,23 @@ export function summarizeSuperTimelineProgress(
 }
 
 /**
- * 轨道上单个节点的占位尺寸（px）。
+ * 轨道上单个节点的**图标**占位尺寸（px）。
  *
  * 节点是 `p-1` 包裹的 `ICON_INLINE`（14px）圆点 → 14 + 4×2 = 22px。这个数字是
- * 纯逻辑与组件共用的**几何契约**：居中平移要算节点中心，首帧 / jsdom 没有布局
- * 时也要给出可用的等距模型。改节点内边距时必须同步这里，否则平移会偏。
+ * 纯逻辑与组件共用的**几何契约**：边缘提示的可见带、以及实测节点中心的兜底
+ * 都按它算。改节点内边距时必须同步这里，否则判定会偏。
  */
 export const SUPER_TIMELINE_NODE_SIZE = 22;
 
-/** 相邻节点的中心间距（px）：节点 22 + 连接段 8（`w-2`）。 */
-export const SUPER_TIMELINE_NODE_PITCH = 30;
+/**
+ * 相邻节点的中心间距（px）—— 也就是**标签列宽**。
+ *
+ * 2026-11-24 的第三次改版：每个节点上方有自己的标签（单行 truncate + title），
+ * 图标下方是一条贯穿的连接轨。节点不再是「22px 圆点 + 8px 连接段」的紧凑串，
+ * 而是一个等宽的列：标签要放得下几个汉字，420px 面板里容纳 4~5 列 → 88px。
+ * 图标在列内水平居中，因此列中心就是节点中心。
+ */
+export const SUPER_TIMELINE_NODE_PITCH = 88;
 
 /** 轨道几何：节点中心的轨道内坐标 + 轨道总宽（px）。 */
 export interface SuperTimelineGeometry {
@@ -367,9 +374,14 @@ export interface SuperTimelineGeometry {
 /**
  * 等距模型（无布局环境 / 首帧兜底）。
  *
- * 节点尺寸与连接段都是固定类名，真实 DOM 里也是等距的 —— 所以这个模型不是
- * 估算，而是同一份几何契约的解析式。组件优先用实测矩形（字体缩放 / 自定义
- * 密度可能改变实际像素），量不到（jsdom 全 0）时才退回这里。
+ * 每个节点是一列固定宽度（{@link SUPER_TIMELINE_NODE_PITCH}）的标签 + 图标，
+ * 图标水平居中 → **列中心就是节点中心**：
+ *
+ *   centers[i] = pad + i * pitch + pitch / 2
+ *   trackWidth = pad * 2 + count * pitch
+ *
+ * 组件优先用实测矩形（字体缩放 / 自定义密度可能改变实际像素），量不到
+ * （jsdom 全 0）时才退回这里。
  *
  * `padding` 是轨道内层为渐隐带预留的水平内边距（见
  * {@link superTimelineTrackPadding}）：它是几何的一部分，节点中心整体右移
@@ -385,9 +397,9 @@ export function estimateSuperTimelineGeometry(
   return {
     centers: Array.from(
       { length: count },
-      (_, index) => pad + index * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE / 2,
+      (_, index) => pad + index * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_PITCH / 2,
     ),
-    trackWidth: (count - 1) * SUPER_TIMELINE_NODE_PITCH + SUPER_TIMELINE_NODE_SIZE + pad * 2,
+    trackWidth: count * SUPER_TIMELINE_NODE_PITCH + pad * 2,
   };
 }
 
