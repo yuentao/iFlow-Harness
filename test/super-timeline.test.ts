@@ -11,9 +11,9 @@ import {
   deriveSuperTimeline,
   describeSuperTimelineFacts,
   isCriticalTimelineNode,
-  layoutSuperTimeline,
+  layoutSuperTimelineRail,
   summarizeSuperTimelineProgress,
-  SUPER_TIMELINE_FOLD_MIN_NODES,
+  SUPER_TIMELINE_MAX_VISIBLE_NODES,
   SUPER_TODO_DETAIL_SEP,
   type SuperTimelineKind,
   type SuperTimelineNode,
@@ -299,90 +299,90 @@ describe("summarizeSuperTimelineProgress · 顶部进度计数", () => {
   });
 });
 
-describe("layoutSuperTimeline · 默认只展开当前步与上一步", () => {
-  /** 5 条 todo：done done done current pending。 */
-  function fiveNodes(): SuperTimelineNode[] {
-    return [
-      node("todo", "done"),
-      node("todo", "done"),
-      node("todo", "done"),
-      node("todo", "current"),
-      node("todo", "idle"),
-    ];
+describe("layoutSuperTimelineRail · 横向轨道窗口化", () => {
+  /** n 条 todo 节点，`current` 处为 current（-1 表示无 current）。 */
+  function todoNodes(n: number, current: number): SuperTimelineNode[] {
+    return Array.from({ length: n }, (_, index) =>
+      node("todo", index === current ? "current" : index < current ? "done" : "idle"),
+    );
   }
 
-  it("节点数低于阈值时整条展开（折叠只增加点击，不减少高度）", () => {
-    const nodes = fiveNodes().slice(0, SUPER_TIMELINE_FOLD_MIN_NODES - 1);
-    expect(layoutSuperTimeline(nodes, false)).toEqual(
-      nodes.map((_, index) => ({ type: "node", index })),
+  /** 被选中渲染的节点索引（按顺序）。 */
+  function visibleIndices(segments: ReturnType<typeof layoutSuperTimelineRail>): number[] {
+    return segments
+      .filter((segment) => segment.type === "node")
+      .map((segment) => (segment.type === "node" ? segment.index : -1));
+  }
+
+  /** 被压缩的索引（展开 gap 段）。 */
+  function hiddenIndices(segments: ReturnType<typeof layoutSuperTimelineRail>): number[] {
+    const out: number[] = [];
+    for (const segment of segments) {
+      if (segment.type !== "gap") continue;
+      for (let index = segment.from; index <= segment.to; index += 1) out.push(index);
+    }
+    return out;
+  }
+
+  it("节点数不超过上限时全部原样渲染，没有省略段", () => {
+    const nodes = todoNodes(SUPER_TIMELINE_MAX_VISIBLE_NODES, 5);
+    const segments = layoutSuperTimelineRail(nodes);
+    expect(segments.every((segment) => segment.type === "node")).toBe(true);
+    expect(visibleIndices(segments)).toEqual(nodes.map((_, index) => index));
+  });
+
+  it("空序列给出空段（组件据此渲染空轨）", () => {
+    expect(layoutSuperTimelineRail([])).toEqual([]);
+  });
+
+  it("超过上限：以当前步为中心窗口化，两端压成省略段", () => {
+    const nodes = todoNodes(20, 10);
+    const segments = layoutSuperTimelineRail(nodes);
+    const visible = visibleIndices(segments);
+    expect(visible).toHaveLength(SUPER_TIMELINE_MAX_VISIBLE_NODES);
+    expect(visible).toContain(10);
+    // 段保持原始时间顺序（索引单调递增）。
+    expect(visible).toEqual([...visible].sort((a, b) => a - b));
+    // 窗口两侧都留下省略段，且互不重叠、恰好覆盖全部未选中的索引。
+    const hidden = hiddenIndices(segments);
+    expect(hidden.length).toBe(20 - SUPER_TIMELINE_MAX_VISIBLE_NODES);
+    expect(new Set([...visible, ...hidden]).size).toBe(20);
+    expect(segments[0]?.type).toBe("gap");
+    expect(segments.at(-1)?.type).toBe("gap");
+  });
+
+  it("关键节点远离当前步也强制可见（占用窗口名额）", () => {
+    const nodes = todoNodes(20, 18);
+    // 索引 1 是失败节点（关键），离当前步很远。
+    nodes[1] = node("failed", "failed");
+    const segments = layoutSuperTimelineRail(nodes);
+    const visible = visibleIndices(segments);
+    expect(visible).toContain(1);
+    expect(visible).toContain(18);
+    expect(visible).toHaveLength(SUPER_TIMELINE_MAX_VISIBLE_NODES);
+    // 关键节点前后的未选中区间各自成段（中间隔着被选中的节点）。
+    expect(hiddenIndices(segments)).toContain(0);
+    expect(hiddenIndices(segments)).not.toContain(1);
+    expect(hiddenIndices(segments)).not.toContain(18);
+  });
+
+  it("终态轨没有 current：锚点是最后一个节点", () => {
+    const nodes = Array.from({ length: 20 }, () => node("todo", "done"));
+    const segments = layoutSuperTimelineRail(nodes);
+    const visible = visibleIndices(segments);
+    expect(visible).toContain(19);
+    expect(visible).toHaveLength(SUPER_TIMELINE_MAX_VISIBLE_NODES);
+    // 省略只出现在前端一段（窗口紧贴末尾）。
+    expect(segments.at(-1)?.type).toBe("node");
+    expect(segments[0]?.type).toBe("gap");
+  });
+
+  it("关键节点比上限还多时仍全部保留（宁可超出也不藏起需要介入的节点）", () => {
+    const nodes = Array.from({ length: 20 }, (_, index) =>
+      index % 2 === 0 ? node("failed", "failed") : node("todo", "done"),
     );
-  });
-
-  it("默认态：当前步 + 上一步露出，其余按连续区间各自折叠", () => {
-    const rows = layoutSuperTimeline(fiveNodes(), false);
-    // 锚点 = 当前节点(3)，上一步(2)一起露出；0/1 与 4 各折成一行。
-    expect(rows[0]).toEqual({ type: "folded", indices: [0, 1] });
-    expect(rows[1]).toEqual({ type: "node", index: 2 });
-    expect(rows[2]).toEqual({ type: "node", index: 3 });
-    expect(rows[3]).toEqual({ type: "folded", indices: [4] });
-  });
-
-  it("expanded=true 时全部展开，没有 folded 行", () => {
-    const rows = layoutSuperTimeline(fiveNodes(), true);
-    expect(rows.every((row) => row.type === "node")).toBe(true);
-    expect(rows).toHaveLength(5);
-  });
-
-  it("终态 todo 轨没有 current：锚点是最后一个节点，其前一步一起露出", () => {
-    const nodes = [
-      node("todo", "done"),
-      node("todo", "done"),
-      node("todo", "done"),
-      node("todo", "idle"),
-    ];
-    const rows = layoutSuperTimeline(nodes, false);
-    expect(rows).toContainEqual({ type: "node", index: 2 });
-    expect(rows).toContainEqual({ type: "node", index: 3 });
-    expect(rows[0]).toEqual({ type: "folded", indices: [0, 1] });
-  });
-
-  it("阶段轨（非 todolist）永不折叠：生命周期事实最多六行，折起来只丢信息", () => {
-    const nodes = [
-      node("dispatched", "done"),
-      node("attempt", "done"),
-      node("queued", "done"),
-      node("started", "done"),
-      node("completed", "done"),
-      node("integration", "idle"),
-    ];
-    expect(layoutSuperTimeline(nodes, false)).toEqual(
-      nodes.map((_, index) => ({ type: "node", index })),
-    );
-  });
-
-  it("关键状态永不折叠：等待回答 / 失败即使远离当前步也强制露出", () => {
-    const nodes = [
-      node("awaiting_input", "current"), // 关键：在等你回答
-      node("todo", "done"),
-      node("todo", "done"),
-      node("todo", "done"),
-      node("todo", "done"),
-      node("todo", "current"),
-    ];
-    const rows = layoutSuperTimeline(nodes, false);
-    // 关键节点单独露出，不与后面的折叠组混在一起。
-    expect(rows[0]).toEqual({ type: "node", index: 0 });
-    // 1..3 折成一行（4 是最后一个 current 的上一步，露出）。
-    expect(rows[1]).toEqual({ type: "folded", indices: [1, 2, 3] });
-    expect(rows.slice(2)).toEqual([
-      { type: "node", index: 4 },
-      { type: "node", index: 5 },
-    ]);
-  });
-
-  it("折叠组保留原始索引（webview 据此判断是否全部完成）", () => {
-    const rows = layoutSuperTimeline(fiveNodes(), false);
-    const folded = rows.find((row) => row.type === "folded");
-    expect(folded && folded.type === "folded" ? folded.indices : []).toEqual([0, 1]);
+    const segments = layoutSuperTimelineRail(nodes);
+    const visible = visibleIndices(segments);
+    for (let index = 0; index < 20; index += 2) expect(visible).toContain(index);
   });
 });

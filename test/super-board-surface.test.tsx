@@ -31,6 +31,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SuperSessionUi } from "../shared/super-agent";
+import { SUPER_TIMELINE_MAX_VISIBLE_NODES } from "../shared/super-timeline";
 import { App } from "../webview/src/App";
 import { SuperAgentBoard } from "../webview/src/components/SuperAgentBoard";
 
@@ -463,44 +464,46 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     act(() => row!.click());
   }
 
-  it("单列 rail：默认只展开当前步与上一步，其余折成一行；展开后长文本 truncate + title", () => {
+  it("横向单行：轨道节点全部渲染，当前步文案单行 truncate + title，无折叠按钮", () => {
     render([session({ status: "running", startedAt: 2000, updatedAt: 3000, todos })]);
     expand();
     openTodoRow();
 
     const el = rail();
-    // 单列纵向 rail：不再靠 flex-wrap 折成多列。
-    expect(el.className).toContain("flex-col");
+    // 横向单行：容器是 flex row，不再是单列纵向 rail，也不折成多行。
+    expect(el.className).toContain("flex");
+    expect(el.className).not.toContain("flex-col");
     expect(el.className).not.toContain("flex-wrap");
 
-    // 时间轴自身不再限高滚动：看板外层已经是滚动容器，内层再套一层会出现
-    // 滚动套滚动（滚轮落在哪层全看指针位置）。高度只由折叠控制。
+    // 内层不许出现任何滚动容器（纵向滚动套滚动、横向滚动条都会让滚轮
+    // 落在哪层全看指针位置）。横向轨道靠压缩而不是滚动解决宽度不足。
     expect(el.querySelector('[class*="max-h-"]')).toBeNull();
     expect(el.querySelector(".overflow-y-auto")).toBeNull();
+    expect(el.querySelector(".overflow-x-auto")).toBeNull();
+    expect(el.querySelector(".overflow-x-scroll")).toBeNull();
 
-    // 4 条 todo 达到折叠阈值：默认露出 2 个节点（当前步 + 上一步）+ 1 个折叠行。
+    // 4 条 todo 低于窗口上限：全部节点在轨道上，没有省略段。
     const icons = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-icon]"));
-    expect(icons).toHaveLength(2);
+    expect(icons).toHaveLength(4);
+    expect(el.querySelectorAll("[data-timeline-gap]")).toHaveLength(0);
+    // 每个节点带无障碍文案；进行中的那条带 aria-current="step"。
+    expect(icons[0]!.getAttribute("aria-label")).toBe("读取现有实现（已完成）");
+    expect(icons[1]!.getAttribute("aria-label")).toBe("改写时间轴组件（运行中）");
+    expect(icons[1]!.getAttribute("aria-current")).toBe("step");
+    expect(icons[3]!.getAttribute("aria-current")).toBeNull();
+
+    // 右侧只保留当前步文案（单行截断，完整原文进 title）。
     const labels = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-label]"));
-    expect(labels.map((node) => node.textContent)).toEqual(["读取现有实现", "改写时间轴组件"]);
-    // 折叠行说「其余 2 步」（后面两条未完成，不能谎报成已完成）。
-    const folded = [...el.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
-      (b.textContent ?? "").includes("其余 2 步"),
-    );
-    expect(folded).toBeTruthy();
+    expect(labels).toHaveLength(1);
+    expect(labels[0]!.textContent).toBe("改写时间轴组件");
+    expect(labels[0]!.className).toContain("truncate");
+    expect(labels[0]!.getAttribute("title")).toBe("改写时间轴组件");
+
+    // 折叠交互整体删除：轨道里不再有任何按钮。
+    expect(el.querySelectorAll("button")).toHaveLength(0);
 
     // 顶部进度计数：1 个 done / 4 个节点。
     expect(el.textContent).toContain("进度 1/4");
-
-    // 展开：4 条 todo 全部露出，长文本完整进入 title（可见文本单行 truncate）。
-    act(() => folded!.click());
-    const expandedIcons = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-icon]"));
-    expect(expandedIcons).toHaveLength(4);
-    const expandedLabels = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-label]"));
-    const last = expandedLabels.at(-1)!;
-    expect(last.textContent).toBe(longTodo);
-    expect(last.className).toContain("truncate");
-    expect(last.getAttribute("title")).toBe(longTodo);
 
     // 动态 todo 原文绝不过 i18n 字典（否则可能与字典 key 撞上被悄悄改写）。
     const keys = translate.mock.calls.map((call) => call[0]);
@@ -517,35 +520,7 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     expect(described).toContain(longTodo);
   });
 
-  it("折叠行可点击展开，展开后出现收起行，再点收起回到折叠态", () => {
-    render([session({ status: "running", startedAt: 2000, updatedAt: 3000, todos })]);
-    expand();
-    openTodoRow();
-
-    const el = rail();
-    const foldButton = (): HTMLButtonElement | undefined =>
-      [...el.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
-        (b.textContent ?? "").includes("其余") || (b.textContent ?? "").includes("已完成"),
-      );
-    expect(foldButton()).toBeTruthy();
-
-    // 展开 → 全部 4 条 todo 露出，出现「收起到当前步骤」。
-    act(() => foldButton()!.click());
-    expect(el.querySelectorAll("[data-timeline-icon]")).toHaveLength(4);
-    const collapseButton = [...el.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
-      (b.textContent ?? "").includes("收起到当前步骤"),
-    );
-    expect(collapseButton).toBeTruthy();
-    // 折叠行的 aria-expanded 必须如实反映状态（不是恒为 false 的假按钮）。
-    expect(foldButton()).toBeUndefined();
-
-    // 收起 → 回到「当前步 + 上一步」两行。
-    act(() => collapseButton!.click());
-    expect(el.querySelectorAll("[data-timeline-icon]")).toHaveLength(2);
-    expect(foldButton()).toBeTruthy();
-  });
-
-  it("关键状态永不折叠：等待回答的节点在默认态就露出并高亮", () => {
+  it("关键节点在轨道上始终可见且有强调（ring + 语义色，不只靠颜色）", () => {
     render([
       session({
         status: "awaiting_input",
@@ -562,15 +537,49 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     openTodoRow();
 
     const el = rail();
-    // 阶段轨（无 todos）整条展开：等待回答是真实节点，不在任何折叠体里。
-    expect(el.textContent).not.toContain("其余");
-    expect(el.textContent).not.toContain("已完成 0 步");
-    const labels = [...el.querySelectorAll<HTMLElement>("[data-timeline-label]")];
-    const waiting = labels.find((node) => node.textContent === "在等你回答");
+    const icons = [...el.querySelectorAll<HTMLElement>("[data-timeline-icon]")];
+    const waiting = icons.find((node) => node.getAttribute("aria-label") === "在等你回答");
     expect(waiting).toBeTruthy();
-    // 高亮：警告色文字 + 行底色（颜色只是冗余，图标形状与文案才是主编码）。
+    // 强调是「形状 + 描边 + 颜色」三重：环描边是关键节点的非颜色编码。
+    expect(waiting!.className).toContain("ring-1");
+    expect(waiting!.className).toContain("ring-warning");
     expect(waiting!.className).toContain("text-warning");
-    expect(waiting!.closest("div")!.className).toContain("bg-warning/10");
+    expect(waiting!.getAttribute("data-timeline-critical")).toBe("true");
+    // 关键节点也是当前步：右侧文案同步用警告色。
+    const label = el.querySelector<HTMLElement>("[data-timeline-label]")!;
+    expect(label.textContent).toBe("在等你回答");
+    expect(label.className).toContain("text-warning");
+    // 轨道上没有折叠/省略残留。
+    expect(el.textContent).not.toContain("省略");
+    expect(el.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("步骤超多（15 条）：压缩成省略段，当前步与关键节点仍可见，无横向滚动", () => {
+    const many = Array.from({ length: 15 }, (_, index) => ({
+      content: `步骤 ${index + 1}`,
+      status: index < 13 ? ("completed" as const) : index === 13 ? ("in_progress" as const) : ("pending" as const),
+    }));
+    render([session({ status: "running", startedAt: 2000, updatedAt: 3000, todos: many })]);
+    expand();
+    openTodoRow();
+
+    const el = rail();
+    const icons = [...el.querySelectorAll<HTMLElement>("[data-timeline-icon]")];
+    // 15 > 上限：窗口化后真实节点不超过上限。
+    expect(icons.length).toBeLessThanOrEqual(SUPER_TIMELINE_MAX_VISIBLE_NODES);
+    // 当前步（第 14 条）必须可见并带 aria-current。
+    const current = icons.find((node) => node.getAttribute("aria-current") === "step");
+    expect(current).toBeTruthy();
+    expect(current!.getAttribute("aria-label")).toBe("步骤 14（运行中）");
+    // 至少一段省略段，且报出省略步数（不是静默丢步）。
+    const gaps = [...el.querySelectorAll<HTMLElement>("[data-timeline-gap]")];
+    expect(gaps.length).toBeGreaterThan(0);
+    expect(gaps.some((gap) => (gap.getAttribute("title") ?? "").includes("步"))).toBe(true);
+    // 进度仍是全量计数，不受窗口化影响。
+    expect(el.textContent).toContain("进度 13/15");
+    // 仍然没有任何滚动容器。
+    expect(el.querySelector(".overflow-x-auto")).toBeNull();
+    expect(el.querySelector(".overflow-y-auto")).toBeNull();
   });
 });
 

@@ -72,9 +72,7 @@ const en: Record<string, string> = {
   // 超流体 todolist 时间轴：状态 / 优先级是静态词（todo 原文是动态文本，不进字典）
   "待办": "To do",
   "进度 {0}/{1}": "Progress {0}/{1}",
-  "已完成 {0} 步": "{0} step(s) done",
-  "其余 {0} 步": "{0} more step(s)",
-  "收起到当前步骤": "Collapse to the current step",
+  "省略 {0} 步": "{0} step(s) omitted",
   "高优先级": "High priority",
   "中优先级": "Medium priority",
   "低优先级": "Low priority",

@@ -295,22 +295,29 @@ export function describeSuperTimelineFacts(session: SuperSessionUi): string {
 }
 
 /* ------------------------------------------------------------------------- *
- * 布局：折叠策略（纯逻辑，webview 只负责画）
+ * 布局：横向单行轨道的窗口化（纯逻辑，webview 只负责画）
  *
- * 步骤一多，横向/多列排布会把阅读顺序打散。看板改成单列纵向 rail 之后，仍需
- * 一个「默认只展开当前步 + 上一步」的折叠策略，否则 20 条 todo 会把整张卡片
- * 撑成一面墙。规则全部收在这里，单测直接跑，组件不复制第二套判定。
+ * 2026-11-24：时间轴从「单列纵向 rail + 折叠」改成**横向单行轨道**。折叠交互
+ * 随之删除（一行放不下时不再折成「已完成 N 步」，而是压缩），但两条语义必须
+ * 保留：
+ *
+ *  1. 关键节点（等待回答 / 失败 / 合并冲突）**始终在轨道上可见**；
+ *  2. 当前步**始终在轨道上可见**。
+ *
+ * 步骤一多（面板只有约 400px 宽），节点不可能全画：这里把「必须可见」的节点
+ * 钉住，再以当前步为中心向外补足到 {@link SUPER_TIMELINE_MAX_VISIBLE_NODES}，
+ * 其余连续节点压缩成省略段。规则收在这里，单测直接跑，组件不复制第二套判定。
  * ------------------------------------------------------------------------- */
 
 /**
- * 关键节点：**需要用户介入**，任何折叠态都必须露出（不得藏进折叠体）。
+ * 关键节点：**需要用户介入**，横向轨道上必须始终可见并强调。
  *
  * - `awaiting_input`：子会话在等你回答，不回答它就永远停着；
  * - `failed`：失败原因要能一眼看到；
  * - `integration` 且色调是 failed：合并冲突 / 合并失败 —— 改动没落地，等人处理。
  *
- * `cancelled`（已中断）刻意**不算**关键：它已经结束，不需要用户做任何事，
- * 折叠进「其余 N 步」不丢可操作信息（阶段事实仍可在 title 里查）。
+ * `cancelled`（已中断）刻意**不算**关键：它已经结束，不需要用户做任何事；
+ * 它仍可能作为普通节点出现在窗口里，只是不享受「永远可见」的待遇。
  */
 export function isCriticalTimelineNode(node: SuperTimelineNode): boolean {
   if (node.kind === "awaiting_input") return true;
@@ -336,86 +343,85 @@ export function summarizeSuperTimelineProgress(
 }
 
 /**
- * 达到这个节点数才折叠 todolist。
+ * 横向轨道上最多画多少个真实节点。
  *
- * 3 个节点的阶段轨（派发 → 启动 → 在等你回答）全部展开也只占三行；把「派发」
- * 折成一行「已完成 1 步」反而多一个点击通道、还丢掉一条事实。折叠只在步骤
- * 真的多起来（≥4）时才有收益。
+ * 面板约 400px 宽（内容行实测约 354px）。左侧「进度 8/15」占约 51px，每个节点
+ * （14px 字形 + 2px 内边距）连同 4px 连接段约 20px。实测 10 个节点时右侧「当前
+ * 步骤」只剩约 79px（≈5 个中文字，读不出是哪一步），收到 8 个后仍有约 115px
+ * （≈9 个中文字）。再多就必须压缩（见 {@link layoutSuperTimelineRail}）——
+ * 横向轨道不能出现滚动条，也不能把图标挤成重叠的一团。
  */
-export const SUPER_TIMELINE_FOLD_MIN_NODES = 4;
+export const SUPER_TIMELINE_MAX_VISIBLE_NODES = 8;
 
 /**
- * 时间轴一行：真实节点，或一段被折叠起来的连续节点。
+ * 横向轨道的一段：一个真实节点，或一段被压缩的连续节点（省略段）。
  *
- * 折叠组保留 `indices` 而不是只保留数量：webview 用它判断「这一组是不是全都
- * 完成了」（全完成才说「已完成 N 步」，否则说「其余 N 步」，不把待办谎报成完成）。
+ * 省略段带 `from` / `to`（闭区间），组件据此报「省略 N 步」并保留原始位置，
+ * 不做「藏起来就看不见」的黑箱。
  */
-export type SuperTimelineRow =
+export type SuperTimelineRailSegment =
   | { type: "node"; index: number }
-  | { type: "folded"; indices: number[] };
+  | { type: "gap"; from: number; to: number };
 
 /**
- * 把节点序列折叠成渲染行。
+ * 把节点序列压成横向轨道可渲染的段序列。
  *
- * `expanded = true`：全部展开，一行一个节点（用户点了「展开其余 N 步」）。
- * `expanded = false`：默认折叠 ——
- *   1. 最后一个 `current` 节点（没有 current 的终态轨则取最后一个节点）与其
- *      **上一步**固定展开；
- *   2. 所有 {@link isCriticalTimelineNode} 关键节点固定展开；
- *   3. 其余节点按**连续区间**合成一个 `folded` 行，插在它原本的位置上。
+ * 策略（**压缩而非折叠**）：轨道是单行、无滚动、无展开交互，因此不能像旧纵向
+ * rail 那样把一段藏进可点击的折叠行。规则：
  *
- * 两条不折叠的前提：
+ *  1. 节点数 ≤ {@link SUPER_TIMELINE_MAX_VISIBLE_NODES}：全部原样渲染，无省略段。
+ *  2. 超出时先**钉住**必须可见的节点 —— 全部 {@link isCriticalTimelineNode}
+ *     关键节点，加锚点（最后一个 `current` 节点；终态轨没有 current 则取最后
+ *     一个节点）。
+ *  3. 钉住数仍不足上限时，以锚点为中心**由近及远**补齐（同距离先左后右，让
+ *     用户看到「刚走过的几步」和「马上要做的几步」）。
+ *  4. 其余未选中的连续节点合成 `gap` 段，插回原本位置。
  *
- *  - **阶段轨永不折叠。** 阶段轨是宿主观察到的生命周期事实，最多七行（派发 /
- *    第 N 次 / 排队 / 启动 / 在等你回答 / 终态 / 集成），每行都是一条独立信息；
- *    而它也是唯一可能含关键节点（等待回答、失败、合并冲突）的轨。让它整条展开
- *    是「关键状态永不折叠」最强的保证 —— 那些节点根本没有被折叠的机会。
- *  - 节点数 < {@link SUPER_TIMELINE_FOLD_MIN_NODES} 时整条轨全展开。
- *
- * todolist 轨的折叠仍显式钉住关键节点：当前 wire 下 todo 条目的 tone 只有
- * done / current / idle，但派生逻辑一旦扩展（例如把失败条目映射成 failed），
- * 钉住的规则必须已经就位，不能让「需要你介入」的步骤被顺手折起来。
+ * 保证：关键节点与当前步**永不被压缩**；段序列保持原始时间顺序；`gap` 段之间
+ * 不连续（相邻的未选中区间会被拆成两段，中间隔着被选中的节点）。
  */
-export function layoutSuperTimeline(
+export function layoutSuperTimelineRail(
   nodes: readonly SuperTimelineNode[],
-  expanded: boolean,
-): SuperTimelineRow[] {
-  const foldable = nodes.some((node) => node.kind === "todo");
-  if (
-    expanded ||
-    !foldable ||
-    nodes.length < SUPER_TIMELINE_FOLD_MIN_NODES
-  ) {
-    return nodes.map((_, index): SuperTimelineRow => ({ type: "node", index }));
+): SuperTimelineRailSegment[] {
+  const total = nodes.length;
+  if (total <= SUPER_TIMELINE_MAX_VISIBLE_NODES) {
+    return nodes.map((_, index): SuperTimelineRailSegment => ({ type: "node", index }));
   }
 
   const pinned = new Set<number>();
-  let current = -1;
+  let anchor = -1;
   nodes.forEach((node, index) => {
-    if (node.tone === "current") current = index;
+    if (node.tone === "current") anchor = index;
   });
-  const anchor = current >= 0 ? current : nodes.length - 1;
+  if (anchor < 0) anchor = total - 1;
   pinned.add(anchor);
-  if (anchor - 1 >= 0) pinned.add(anchor - 1);
   nodes.forEach((node, index) => {
     if (isCriticalTimelineNode(node)) pinned.add(index);
   });
 
-  const rows: SuperTimelineRow[] = [];
-  let group: number[] = [];
-  const flush = (): void => {
-    if (group.length === 0) return;
-    rows.push({ type: "folded", indices: group });
-    group = [];
-  };
-  nodes.forEach((_, index) => {
+  // 由近及远补齐：距离 1、2、3… 交替取锚点左右两侧。
+  let distance = 1;
+  while (pinned.size < SUPER_TIMELINE_MAX_VISIBLE_NODES && distance < total) {
+    const left = anchor - distance;
+    const right = anchor + distance;
+    if (left >= 0 && pinned.size < SUPER_TIMELINE_MAX_VISIBLE_NODES) pinned.add(left);
+    if (right < total && pinned.size < SUPER_TIMELINE_MAX_VISIBLE_NODES) pinned.add(right);
+    distance += 1;
+  }
+
+  const segments: SuperTimelineRailSegment[] = [];
+  let gapStart = -1;
+  for (let index = 0; index < total; index += 1) {
     if (pinned.has(index)) {
-      flush();
-      rows.push({ type: "node", index });
-    } else {
-      group.push(index);
+      if (gapStart >= 0) {
+        segments.push({ type: "gap", from: gapStart, to: index - 1 });
+        gapStart = -1;
+      }
+      segments.push({ type: "node", index });
+    } else if (gapStart < 0) {
+      gapStart = index;
     }
-  });
-  flush();
-  return rows;
+  }
+  if (gapStart >= 0) segments.push({ type: "gap", from: gapStart, to: total - 1 });
+  return segments;
 }

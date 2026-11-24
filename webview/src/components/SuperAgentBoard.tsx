@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -59,9 +60,8 @@ import {
   describeSuperTimelineFacts,
   deriveSuperTimeline,
   isCriticalTimelineNode,
-  layoutSuperTimeline,
+  layoutSuperTimelineRail,
   summarizeSuperTimelineProgress,
-  SUPER_TIMELINE_FOLD_MIN_NODES,
   SUPER_TODO_DETAIL_SEP,
   type SuperTimelineNode,
   type SuperTimelineTone,
@@ -564,21 +564,51 @@ function timelineText(node: SuperTimelineNode): string {
 }
 
 /**
- * 子会话时间轴：单列纵向 rail（左竖线 + 每步一个状态图标）。
+ * 节点在轨道上的无障碍文案。
  *
- * 旧实现是横向 `flex-wrap` 的圆点序列：步骤一多就折成多行、阅读顺序被打散，
- * 在窄面板里读起来像两列网格。现在固定一列，上下顺序即时间顺序，唯一。
+ * 阶段节点（已派出 / 已启动 / 在等你回答 / 失败…）的 label 本身已是完整状态词，
+ * 直接用；todolist 条目原文不含状态，补一个括号里的状态词，否则读屏用户无法
+ * 分辨「这条做完了没有」。状态词是静态中文，照常过字典；todo 原文不过字典。
+ */
+function timelineNodeAria(node: SuperTimelineNode): string {
+  const label = timelineNodeLabel(node);
+  if (node.kind !== "todo") return label;
+  const status =
+    node.tone === "done"
+      ? t("已完成")
+      : node.tone === "current"
+        ? t("运行中")
+        : node.tone === "failed"
+          ? t("失败")
+          : t("待办");
+  return `${label}（${status}）`;
+}
+
+/**
+ * 子会话时间轴：**横向单行轨道**（左进度计数 / 中节点轨 / 右当前步文案）。
+ *
+ * 2026-11-24 用户否决了上一版的「单列纵向 rail + 折叠」：纵向 rail 每一步占一行，
+ * 四五步就把卡片撑高，折叠行又引入第二个点击通道。现在整条轨压成一行：
+ *
+ *  - 左：`进度 4/5`（`tone === "done"` 计数 / 节点总数）——原来的细长进度条删掉，
+ *    横向轨道本身就是进度表达；
+ *  - 中：节点按时间顺序横排，形状是主编码（对勾 / 空心圈 / 问号 / 叉圈…），
+ *    颜色只是冗余。相邻节点用短线连接：已走过的段实色（`bg-primary/60`），
+ *    未到的段淡色（`bg-border`）；
+ *  - 右：当前步文案，单行 `truncate` + `title`，关键节点用语义色。
+ *
+ * 关键节点（等待回答 / 失败 / 合并冲突）**始终在轨道上可见**，并且不只靠颜色：
+ * 外层加 `ring` 描边，色觉障碍或灰度截图下也能一眼扫到。
  *
  * 数据全部来自 `deriveSuperTimeline` —— 有 todolist 时只画子会话自己建的步骤
  * （原文），否则降级回真实发生过的阶段事实，绝不渲染固定模板。阶段事实（派发
  * / 启动 / 集成等）在 todolist 模式下不再占节点，改由 `describeSuperTimelineFacts`
  * 收进 `title` / `aria-label`。
  *
- * 信息密度（方案 B）：顶部给进度计数；默认只展开「当前步 + 上一步」，其余按
- * 连续区间折成一行（`layoutSuperTimeline`，纯逻辑在 shared 侧）；失败 / 等待
- * 回答 / 合并冲突这类**需要用户介入**的节点永远展开并高亮。高度只由折叠控制，
- * 时间轴本身**不再**限高滚动 —— 看板外层已经是滚动容器，套一层会出现滚动套
- * 滚动，滚轮落在哪一层全看指针位置。
+ * 步骤过多（面板约 400px 宽）时**压缩而不是折叠**：`layoutSuperTimelineRail`
+ * 钉住关键节点与当前步，其余连续节点压成一段虚线省略段（带 title），轨道永不
+ * 出现横向滚动条 —— 看板外层已是滚动容器，内层再来一条横向滚动条会让滚轮
+ * 落在哪层全看指针位置。
  */
 function SuperTimeline({
   session,
@@ -588,9 +618,8 @@ function SuperTimeline({
   className?: string;
 }) {
   const nodes = useMemo(() => deriveSuperTimeline(session), [session]);
-  const [expanded, setExpanded] = useState(false);
   const progress = summarizeSuperTimelineProgress(nodes);
-  const rows = layoutSuperTimeline(nodes, expanded);
+  const segments = layoutSuperTimelineRail(nodes);
 
   const hasTodos = nodes.some((node) => node.kind === "todo");
   // todolist 模式：节点只画步骤原文，派发 / 启动 / 集成等事实挪到 title 前缀，
@@ -619,131 +648,107 @@ function SuperTimeline({
         })
         .join(" → ");
 
-  const percent = progress.total === 0 ? 0 : Math.round((progress.done / progress.total) * 100);
+  // 右侧文案的锚点与轨道一致：最后一个 current；终态轨没有 current 时取末节点。
+  const currentNode = useMemo(() => {
+    let current: SuperTimelineNode | undefined;
+    for (const node of nodes) if (node.tone === "current") current = node;
+    return current ?? nodes[nodes.length - 1];
+  }, [nodes]);
 
   return (
     <div
       role="group"
       aria-label={t("阶段轨：{0}", described)}
       title={described}
-      className={`flex min-w-0 flex-col gap-1 ${className}`}
+      className={`flex min-w-0 items-center gap-2 ${className}`}
     >
-      {/* 顶部进度：文本计数（3/6）是主编码，细条只是冗余。 */}
-      <div className="flex min-w-0 items-center gap-1.5">
-        <span className="shrink-0 text-ui-caption tabular-nums text-muted-foreground">
-          {t("进度 {0}/{1}", progress.done, progress.total)}
-        </span>
-        <span aria-hidden="true" className="h-0.5 min-w-0 flex-1 overflow-hidden rounded-full bg-border/40">
-          <span
-            className="block h-full rounded-full bg-primary transition-[width] duration-300"
-            style={{ width: `${percent}%` }}
-          />
-        </span>
-      </div>
+      {/* 左：进度计数。文本是主编码，横向轨道只是冗余表达。 */}
+      <span className="shrink-0 text-ui-caption tabular-nums text-muted-foreground">
+        {t("进度 {0}/{1}", progress.done, progress.total)}
+      </span>
 
-      <div className="relative flex min-w-0 flex-col gap-2">
-        {/* 贯穿整列的 rail：一条竖线从第一个图标中心画到最后一个图标中心。
-            逐行画线段永远拼不成连续的一条（行高只有 18px、图标占 12px，剩给
-            线段的只有 4~6px，视觉上就是一串点），所以线画在列上、行内容画在它
-            上面。`top-2` / `bottom-2` 让线止于首末图标中心而不是行边缘。
+      {/* 中：横向轨道。`shrink-0` 让图标尺寸恒定（压缩会让 14px 字形互相压住），
+          空间不够时由右侧文案让位（`flex-1 min-w-0 truncate`），永不横向滚动。 */}
+      <span className="flex shrink-0 items-center" data-timeline-rail="true">
+        {segments.map((segment, index) => {
+          const previous = segments[index - 1];
 
-            图标**不**加实色底来遮线：面板是亚克力半透明，一块 `bg-card` 圆盘
-            会在模糊层上留下明显色块。图标是描边字形，1px 的淡线（/40）从字形
-            背后穿过不破坏可读性；折叠行左侧留同样宽的空槽，线不会穿过字形。 */}
-        {rows.length > 1 && (
-          <span
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-y-2 left-0 flex w-3.5 justify-center"
-          >
-            <span className="h-full w-px bg-muted-foreground/40" />
-          </span>
-        )}
-        {rows.map((row) => {
-          if (row.type === "folded") {
-            const folded = row.indices
-              .map((index) => nodes[index])
-              .filter((node): node is SuperTimelineNode => node !== undefined);
-            const allDone = folded.every((node) => node.tone === "done");
-            const label = allDone
-              ? t("已完成 {0} 步", folded.length)
-              : t("其余 {0} 步", folded.length);
+          if (segment.type === "gap") {
+            // 省略段：一个省略号字形（「…」），不是虚线。实测 6px 的虚线在
+            // 4px 实线连接段旁边根本分辨不出，反而读成一串连接符；省略号是
+            // 「这里还有几步没画」的通用形状编码，与连接段一眼可分。宽度固定，
+            // 不随步数增长 —— 否则 30 步会把轨道挤爆。
+            const hidden = segment.to - segment.from + 1;
+            const reached = nodes[segment.to]?.tone !== "idle";
             return (
-              <div key={`folded-${row.indices[0]}`} className="relative min-w-0">
-                <DisclosureButton
-                  expanded={false}
-                  onClick={() => setExpanded(true)}
-                  className="w-full min-w-0 gap-1.5"
-                >
-                  {/* 折叠行不占 rail 上的图标位：rail 是贯穿整列的连续线，
-                      在上面画三点/横线会被穿成加号。左侧留同样宽的 14px 空槽，
-                      让 rail 连续通过、文案与真实步骤左对齐；折叠语义交给右侧
-                      chevron 与更淡的文案。 */}
-                  <span aria-hidden="true" className="w-3.5 shrink-0" />
-                  <span className="min-w-0 flex-1 truncate text-ui-caption text-muted-foreground/80">
-                    {label}
-                  </span>
-                  <ChevronDown className={`${ICON_INLINE} shrink-0 text-muted-foreground/70`} aria-hidden="true" />
-                </DisclosureButton>
-              </div>
+              <span
+                key={`gap-${segment.from}`}
+                aria-hidden="true"
+                title={t("省略 {0} 步", hidden)}
+                data-timeline-gap="true"
+                className={`flex shrink-0 items-center px-0.5 text-ui-caption leading-none ${
+                  reached ? "text-muted-foreground/70" : "text-muted-foreground/50"
+                }`}
+              >
+                …
+              </span>
             );
           }
 
-          const node = nodes[row.index];
+          const node = nodes[segment.index];
           if (!node) return null;
           const critical = isCriticalTimelineNode(node);
-          // 关键节点：图标 + 语义色之外再加一层底色，一眼能扫到；永不折叠。
-          const rowTint =
-            node.kind === "awaiting_input"
-              ? "rounded-sm bg-warning/10"
-              : critical
-                ? "rounded-sm bg-destructive/10"
-                : "";
-          // 只有失败原因 / 冲突说明值得换行；todo 的状态词仍只进 title。
-          const showDetail = critical && !!node.detail;
-          const label = timelineNodeLabel(node);
-          return (
-            <div key={`${node.kind}-${row.index}`} className={`relative flex min-w-0 items-stretch gap-1.5 ${rowTint}`}>
+          const isCurrent = node.tone === "current";
+          // 连接段：两个相邻节点之间才画（省略段自带虚线，不重复画）。
+          const connector =
+            previous?.type === "node" && previous.index === segment.index - 1 ? (
               <span
-                className={`relative flex w-3.5 shrink-0 items-center justify-center ${timelineText(node)}`}
+                key={`link-${segment.index}`}
                 aria-hidden="true"
+                className={`h-px w-1 shrink-0 ${
+                  node.tone === "idle" ? "bg-muted-foreground/35" : "bg-primary/70"
+                }`}
+              />
+            ) : null;
+          // 强调不只靠颜色：关键节点（需用户介入）与当前步都加 ring 描边，
+          // 灰度/色觉障碍下仍然可辨。关键节点的 ring 优先于当前步。
+          const ring = critical
+            ? node.kind === "awaiting_input"
+              ? "ring-1 ring-warning/70"
+              : "ring-1 ring-destructive/70"
+            : isCurrent
+              ? "ring-1 ring-primary/60"
+              : "";
+          return (
+            <Fragment key={`node-${segment.index}`}>
+              {connector}
+              <span
+                role="img"
+                aria-label={timelineNodeAria(node)}
+                aria-current={isCurrent ? "step" : undefined}
+                title={timelineNodeLabel(node)}
                 data-timeline-icon="true"
+                data-timeline-critical={critical ? "true" : undefined}
+                data-timeline-current={isCurrent ? "true" : undefined}
+                className={`flex shrink-0 items-center justify-center rounded-full p-px ${ring} ${timelineText(node)}`}
               >
                 {timelineIcon(node)}
               </span>
-              <span className="min-w-0 flex-1">
-                <span
-                  className={`block truncate text-ui-caption font-medium ${timelineText(node)}`}
-                  title={label}
-                  data-timeline-label="true"
-                >
-                  {label}
-                </span>
-                {showDetail && (
-                  <span className="mt-0.5 block break-words whitespace-pre-wrap pl-1 text-ui-caption text-destructive">
-                    {node.detail}
-                  </span>
-                )}
-              </span>
-            </div>
+            </Fragment>
           );
         })}
+      </span>
 
-        {expanded && nodes.length >= SUPER_TIMELINE_FOLD_MIN_NODES && (
-          <div className="relative min-w-0">
-            <DisclosureButton
-              expanded
-              onClick={() => setExpanded(false)}
-              className="w-full min-w-0 gap-1.5"
-            >
-              <span aria-hidden="true" className="w-3.5 shrink-0" />
-              <span className="min-w-0 flex-1 truncate text-ui-caption text-muted-foreground/80">
-                {t("收起到当前步骤")}
-              </span>
-              <ChevronDown className={`${ICON_INLINE} shrink-0 rotate-180 text-muted-foreground/70`} aria-hidden="true" />
-            </DisclosureButton>
-          </div>
-        )}
-      </div>
+      {/* 右：当前步文案，单行截断。其余步骤的原文在节点的 aria-label / title 里。 */}
+      <span
+        className={`min-w-0 flex-1 truncate text-ui-caption font-medium ${
+          currentNode ? timelineText(currentNode) : "text-muted-foreground"
+        }`}
+        title={currentNode ? timelineNodeLabel(currentNode) : ""}
+        data-timeline-label="true"
+      >
+        {currentNode ? timelineNodeLabel(currentNode) : ""}
+      </span>
     </div>
   );
 }
