@@ -1373,6 +1373,12 @@ export class SuperAgentHost {
         vscode.workspace
           .getConfiguration("iflow")
           .get<boolean>("superAgent.keepWorktree", false),
+      // 效率开关：turbo 时子会话任务书前置速推规则，与主会话同档。实时读，
+      // 改完对下一次派发生效；未知值按 steady（不注入）。
+      efficiencyMode: () => {
+        const mode = vscode.workspace.getConfiguration("iflow").get<string>("efficiencyMode");
+        return mode === "turbo" ? "turbo" : "steady";
+      },
       // 磁盘上最多保留多少个已结束子会话的工作目录（0 = 不限制）。
       maxWorktrees: () =>
         clampMaxSuperWorktrees(

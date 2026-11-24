@@ -56,7 +56,12 @@ import type {
 import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
 import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
-import { loadPrompt, renderPrompt } from "../../prompts/index.js";
+import {
+  EFFICIENCY_STEADY_PROMPT,
+  EFFICIENCY_TURBO_PROMPT,
+  loadPrompt,
+  renderPrompt,
+} from "../../prompts/index.js";
 import { canReviewTurn, collectTurnChanges } from "../../shared/turn-changes.js";
 import {
   clearQueue as clearQueueUi,
@@ -1598,6 +1603,15 @@ export class ChatPanel implements vscode.Disposable {
   private promptRequestSessionId: string | null = null;
   /** 本轮在飞请求是否已经发过一次 `session/cancel`（同一回合内不重复发）。 */
   private cancelSentForPrompt = false;
+  /**
+   * 每会话「已注入的档位」（`iflow.efficiencyMode`）：键是 CLI 会话 id。
+   *
+   * 注入策略是**仅档位变化时注入一次**：同一会话连续多轮只带一次速推规则，
+   * 否则每一轮都往 prompt 末尾塞同一段文字（纯浪费 token，且会重复进 CLI
+   * 历史）。基线是 CLI 固有默认 `steady` —— turbo 的新会话首轮就注入速推
+   * 块，steady 的新会话首轮不注入。条目随会话切换/重建清理，避免无限增长。
+   */
+  private injectedEfficiencyMode = new Map<string, "steady" | "turbo">();
   /**
    * 用户按过停止的**主会话** id（null = 没有压住）。
    *
@@ -8627,6 +8641,30 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
+  /**
+   * 效率开关：档位变化时，把对应的一段档位块追加到本轮 prompt 末尾。
+   *
+   * 只注入一次（不是每轮）：同一会话连续多轮只带一次速推规则，切回 steady
+   * 时再带一次「已退出速推」的恢复块。新会话（Map 里没有记录）按 `steady`
+   * 基线处理 —— 这正是 CLI 默认就在跑的规则，因此 steady 会话首轮不注入
+   * （行为与开关上线前逐字节一致），turbo 会话首轮就会注入速推块。
+   *
+   * 返回 true = 本轮追加了块（调用方据此知道这一轮带了档位规则）。
+   */
+  private appendEfficiencyBlock(prompt: ContentBlock[], sessionId: string): boolean {
+    const mode = asEfficiencyMode(
+      vscode.workspace.getConfiguration("iflow").get<string>("efficiencyMode", "steady"),
+    );
+    const injected = this.injectedEfficiencyMode.get(sessionId) ?? "steady";
+    if (injected === mode) return false;
+    prompt.push({
+      type: "text",
+      text: mode === "turbo" ? EFFICIENCY_TURBO_PROMPT : EFFICIENCY_STEADY_PROMPT,
+    });
+    this.injectedEfficiencyMode.set(sessionId, mode);
+    return true;
+  }
+
   private async setModel(modelId: string): Promise<void> {
     if (this.historySyncBusy) return;
     const sessionId = this.store.getState().sessionId;
@@ -9493,6 +9531,12 @@ export class ChatPanel implements vscode.Disposable {
       skills: meta?.availableSkills ?? [],
       currentModelId,
     });
+    // 效率开关：新会话的「已注入档位」基线是 CLI 固有默认 `steady`（不是当前
+    // 设置值）—— 这样 turbo 的新会话首轮就注入速推块，steady 的新会话首轮
+    // 不注入（与开关上线前逐字节一致）。同时清掉旧会话的记录，避免 Map 随
+    // 会话切换无限增长。
+    this.injectedEfficiencyMode.clear();
+    this.injectedEfficiencyMode.set(session.sessionId, "steady");
     this.applyLiveModels(modelsPromise, client, session.sessionId, cliModelId);
     // 多仓库协作：本次会话的 CLI 实际可见根 = 选中的根（add_dirs 为 null 时
     // 是全量根）。投影给 webview 做「已生效 / 对新会话生效」提示。
@@ -9927,6 +9971,14 @@ export class ChatPanel implements vscode.Disposable {
       const prompt: ContentBlock[] = [{ type: "text", text: promptText }];
       for (const img of images ?? []) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
+      }
+      // 效率开关：档位变化时在本轮末尾追加一段档位块（仅真实用户回合）。
+      // CLI 只按 `prompt[0]` 判定 slash 指令，末尾追加文本块不影响命令识别。
+      // 宿主驱动的回合（internal 家务 / hidden 汇报回灌）不消耗档位变化：
+      // 否则用户的下一条真实消息反而拿不到规则，而一次汇报轮把它带走了。
+      // `/compress` 同理 —— promptWithRetry 会把整份 prompt 换成 `/compress`。
+      if (!internal && !hidden && !isCompressTurn) {
+        this.appendEfficiencyBlock(prompt, promptSessionId);
       }
       // 最终汇报轮的 assistant 文本锚点：与 injectQqMainTurn 同口径（可见
       // text 块、排除 system），轮末只取基线之后的文本，避免把上一轮内容
