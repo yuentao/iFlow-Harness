@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, Sparkles, Trash2 } from "lucide-react";
+import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, Sparkles, Trash2, Users } from "lucide-react";
 import type {
   AuthUiState,
   HostSettingsUi,
@@ -61,7 +61,7 @@ import { QqSettings } from "./QqSettings";
  * width — the old stacked wrap stole ~312px of height at 360px viewports),
  * via the @container on .auth-modal-wide) + scrolling content → fixed footer.
  */
-export type SettingsTab = "api" | "chat" | "appearance" | "mcp" | "memory" | "assets" | "qq" | "runtime";
+export type SettingsTab = "api" | "chat" | "appearance" | "mcp" | "memory" | "assets" | "super" | "qq" | "runtime";
 
 /** Editor-state header override a section reports to the shell (back arrow +
  * contextual title while a sub-editor is open). */
@@ -117,7 +117,7 @@ export function SettingsModal({
     {
       label: t("工作方式"),
       tabs: [
-        { id: "chat", icon: MessageSquare, label: t("对话") },
+        { id: "chat", icon: MessageSquare, label: t("会话") },
         { id: "appearance", icon: Palette, label: t("外观与交互") },
       ],
     },
@@ -127,6 +127,7 @@ export function SettingsModal({
         { id: "mcp", icon: Server, label: t("MCP 与工具") },
         { id: "memory", icon: Brain, label: t("记忆与知识") },
         { id: "assets", icon: Sparkles, label: t("技能与命令") },
+        { id: "super", icon: Users, label: t("超流体") },
         { id: "qq", icon: Globe, label: t("QQ 机器人") },
       ],
     },
@@ -244,8 +245,11 @@ export function SettingsModal({
           {tab === "chat" && <ChatSection />}
           {tab === "appearance" && <AppearanceSection />}
           {tab === "mcp" && <McpTab busy={busy} onHeader={setSectionHeader} />}
-          {tab === "memory" && <MemorySection busy={busy} onHeader={setSectionHeader} />}
+          {tab === "memory" && (
+            <MemorySection busy={busy} onHeader={setSectionHeader} footer={<MemoryMaintenanceGroup />} />
+          )}
           {tab === "assets" && <AssetSection busy={busy} onHeader={setSectionHeader} />}
+          {tab === "super" && <SuperAgentSection />}
           {tab === "qq" && <QqSection />}
           {tab === "runtime" && <RuntimeSection />}
         </div>
@@ -510,7 +514,7 @@ function ContextWindowOverridesGroup({
       setError(
         check.reason === "model"
           ? t("请填写模型名")
-          : t("上下文长度必须是正整数（纯数字，不带 K / M 单位）"),
+          : t("上下文窗口必须是正整数（纯数字，不带 K / M 单位）"),
       );
       return;
     }
@@ -530,7 +534,7 @@ function ContextWindowOverridesGroup({
     <div className="px-4 py-4">
       <div className="text-ui-body font-medium leading-snug text-foreground">{t("上下文窗口覆写")}</div>
       <Hint className="mt-1">
-        {t("按模型指定上下文长度（token）。没列出的模型用内建表里的值；模型名精确匹配，不支持通配。")}
+        {t("按模型指定上下文窗口（token）。没列出的模型用内建表里的值；模型名精确匹配，不支持通配。")}
       </Hint>
       {rows.length > 0 && (
         <ul className="mt-2 flex flex-col gap-0.5">
@@ -570,7 +574,7 @@ function ContextWindowOverridesGroup({
           className="min-w-0 flex-1"
         />
         <TextInput
-          aria-label={t("上下文长度（token）")}
+          aria-label={t("上下文窗口")}
           value={windowDraft}
           onChange={(event) => {
             setWindowDraft(event.target.value);
@@ -751,11 +755,11 @@ const SUPER_MAX_ATTEMPTS_MIN = 1;
 const SUPER_MAX_ATTEMPTS_MAX = 5;
 const SUPER_DEPENDENCY_POLICY_DEFAULT: SuperDependencyPolicy = "block";
 
-/** Chat / turn-end behavior. 4.7: 自动生成标题 is a per-session action, not a
- * turn-end one — it moved to its own 会话 group so the group name stays
- * accurate. Descriptions are trimmed to one short line; the cost/threshold
- * caveats live in the ⓘ tooltip. */
-function ChatSection() {
+/** 超流体（Super Agent / 子会话）行为：并发、集成、重试、依赖策略、工作目录与
+ * 完全信任模式。原先挂在「对话」里，现在拆成独立分类，避免对话页被十余个
+ * 超流体控件淹没；分类内再拆两组——「编排与并发」放调度类开关，「安全与信任」
+ * 只放完全信任模式及其风险提示，组标题因此不会与分类名（超流体）重复。 */
+function SuperAgentSection() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
   // Super Agent 的两个新设置：宿主把字段接进 HostSettingsUi 之前，用可选扩展
@@ -769,16 +773,7 @@ function ChatSection() {
   const updateSuper = (patch: SuperAgentRetryPatch) => update(patch);
   return (
     <div className="space-y-4">
-      <SettingsGroup title={t("会话")}>
-        <ToggleRow
-          label={t("自动生成标题")}
-          description={t("首轮对话结束后，自动给会话起一个简短标题。")}
-          detail={t("每个会话只生成一次，会额外消耗少量 token。")}
-          checked={settings.autoTitle}
-          onChange={(autoTitle) => update({ autoTitle })}
-        />
-      </SettingsGroup>
-      <SettingsGroup title={t("超流体")}>
+      <SettingsGroup title={t("编排与并发")}>
         <NumberRow
           label={t("并发上限")}
           description={t("最多同时运行几个超流体。")}
@@ -839,24 +834,51 @@ function ChatSection() {
           checked={settings.superAgentKeepWorktree}
           onChange={(superAgentKeepWorktree) => update({ superAgentKeepWorktree })}
         />
+      </SettingsGroup>
+      <SettingsGroup title={t("安全与信任")}>
         <div>
           <ToggleRow
             label={t("完全信任模式")}
             description={t(
-              "子会话直接在主仓工作区运行，不做 worktree 隔离。默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。",
+              "超流体直接在主仓工作区运行，不做 Git 工作目录隔离。默认关闭：开启后不再向超流体施加工具白名单与 MCP 服务器白名单限制。",
             )}
             detail={t(
-              "开启后子会话保留全部内置工具与 broker 代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。",
+              "开启后超流体保留全部内置工具与共享代理的全部 MCP 服务器，可读写主仓工作区、执行命令，并允许在主仓 push、开 PR、合并。修改后对下一个派发的超流体生效。",
             )}
             checked={settings.superAgentFullTrust}
             onChange={(superAgentFullTrust) => update({ superAgentFullTrust })}
           />
-          <p className="mt-1 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
+          <p className="mt-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-ui-label leading-relaxed text-warning">
             {t(
-              "开启后子会话无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。",
+              "开启后超流体无需审批即可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。",
             )}
           </p>
         </div>
+      </SettingsGroup>
+    </div>
+  );
+}
+
+/** Chat / turn-end behavior. 4.7: 自动生成标题 is a per-session action, not a
+ * turn-end one — it lives in its own 会话 group so the group name stays
+ * accurate. 超流体（Super Agent）设置已拆到独立的「超流体」分类；
+ * 「记忆整理」整理的是记忆文件本身，已迁到「记忆与知识」分类
+ * （见 MemoryMaintenanceGroup），对话页只保留回合级动作。
+ * Descriptions are trimmed to one short line; the cost/threshold caveats live
+ * in the ⓘ tooltip. */
+function ChatSection() {
+  const settings = useChat((s) => s.hostSettings);
+  const update = useChat((s) => s.updateHostSetting);
+  return (
+    <div className="space-y-4">
+      <SettingsGroup title={t("会话")}>
+        <ToggleRow
+          label={t("自动生成标题")}
+          description={t("首轮对话结束后，自动给会话起一个简短标题。")}
+          detail={t("每个会话只生成一次，会额外消耗少量 token。")}
+          checked={settings.autoTitle}
+          onChange={(autoTitle) => update({ autoTitle })}
+        />
       </SettingsGroup>
       <SettingsGroup title={t("回合结束后")} hint={t("每轮结束可能多花一次模型调用")}>
         <div>
@@ -954,6 +976,99 @@ function ChatSection() {
   );
 }
 
+/**
+ * 记忆整理（P1）：定期在面板空闲时清理记忆托管区块——去重、合并、归档低价值条目。
+ *
+ * 它整理的是记忆文件本身，因此归入「记忆与知识」分类（原先挂在「对话」页，
+ * 与回合结束后的自动提取混在一起，容易被误读为又一个回合级动作）。控件与
+ * 文案保持原样：总开关关闭时从属行（策略 / 周期 / 阈值 / 预算）全部隐藏，
+ * 避免用户以为关掉开关仍在按默认值整理。
+ */
+function MemoryMaintenanceGroup() {
+  const settings = useChat((s) => s.hostSettings);
+  const update = useChat((s) => s.updateHostSetting);
+  return (
+    <SettingsGroup title={t("记忆整理")} hint={t("只在面板空闲时运行，默认只出报告")}>
+      <div>
+        <ToggleRow
+          label={t("定期整理记忆")}
+          description={t("空闲时清理记忆托管区块：去重、合并、归档低价值条目。")}
+          detail={t(
+            "只在没有进行中的回合、没有待处理的审批或提问、没有运行中的超流体，且空闲达到阈值时运行。默认关闭。",
+          )}
+          checked={settings.memoryMaintenanceEnabled}
+          onChange={(memoryMaintenanceEnabled) => update({ memoryMaintenanceEnabled })}
+        />
+        {settings.memoryMaintenanceEnabled && (
+          <DependentRow>
+            <ChoiceRow
+              label={t("整理策略")}
+              description={t("报告只汇总改动，应用才真正改写记忆文件。")}
+              detail={t(
+                "应用策略下每个文件先备份；若期间被其它程序改动则跳过该文件，绝不覆盖。",
+              )}
+              value={settings.memoryMaintenanceStrategy}
+              options={[
+                { value: "report", label: t("仅报告") },
+                { value: "apply", label: t("直接应用") },
+              ]}
+              onChange={(memoryMaintenanceStrategy) => update({ memoryMaintenanceStrategy })}
+            />
+            <NumberRow
+              label={t("整理周期")}
+              description={t("每隔多少天自动整理一次。")}
+              value={settings.memoryMaintenanceIntervalDays}
+              min={1}
+              max={90}
+              unit={t("天")}
+              onCommit={(memoryMaintenanceIntervalDays) => update({ memoryMaintenanceIntervalDays })}
+            />
+            <NumberRow
+              label={t("空闲阈值")}
+              description={t("面板空闲多少分钟后才整理。")}
+              value={settings.memoryMaintenanceIdleMinutes}
+              min={1}
+              max={240}
+              unit={t("分钟")}
+              onCommit={(memoryMaintenanceIdleMinutes) => update({ memoryMaintenanceIdleMinutes })}
+            />
+            <NumberRow
+              label={t("全局记忆预算")}
+              description={t("全局记忆托管区块的 token 预算，超出后优先归档。")}
+              value={settings.memoryMaintenanceGlobalTokenBudget}
+              min={500}
+              max={50000}
+              unit={t("tokens")}
+              onCommit={(memoryMaintenanceGlobalTokenBudget) => update({ memoryMaintenanceGlobalTokenBudget })}
+            />
+            <NumberRow
+              label={t("项目记忆预算")}
+              description={t("每个项目记忆文件的 token 预算。")}
+              value={settings.memoryMaintenanceProjectTokenBudget}
+              min={500}
+              max={50000}
+              unit={t("tokens")}
+              onCommit={(memoryMaintenanceProjectTokenBudget) => update({ memoryMaintenanceProjectTokenBudget })}
+            />
+            <NumberRow
+              label={t("总量预算")}
+              description={t("所有记忆托管区块的 token 合计阈值，超出即整理。")}
+              detail={t(
+                "超过它时即使未到整理周期也会触发整理；冷却期为 6 小时与周期的四分之一中较大者，冷却期内不重复触发。",
+              )}
+              value={settings.memoryMaintenanceTotalTokenBudget}
+              min={1000}
+              max={200000}
+              unit={t("tokens")}
+              onCommit={(memoryMaintenanceTotalTokenBudget) => update({ memoryMaintenanceTotalTokenBudget })}
+            />
+          </DependentRow>
+        )}
+      </div>
+    </SettingsGroup>
+  );
+}
+
 /** Appearance, notifications and keyboard shortcuts. */
 function AppearanceSection() {
   const settings = useChat((s) => s.hostSettings);
@@ -981,7 +1096,7 @@ function AppearanceSection() {
         />
         <ChoiceRow
           label={t("字号")}
-          description={t("调整面板整体字号。")}
+          description={t("调整面板整体字号")}
           detail={t("以标准为基准：紧凑约 0.92 倍，大约 1.1 倍。")}
           value={settings.uiFontSize}
           options={[
@@ -1071,7 +1186,7 @@ function RuntimeSection() {
         <ToggleRow
           label={t("启动时自动打开面板")}
           description={t("VSCode 启动时自动打开聊天面板。")}
-          detail={t("下次启动生效。")}
+          detail={t("下次启动生效")}
           checked={settings.autoOpenPanel}
           onChange={(autoOpenPanel) => update({ autoOpenPanel })}
         />
@@ -1124,7 +1239,7 @@ function RuntimeSection() {
         />
         <TextRow
           label={t("存储目录")}
-          description={t("快照存放在哪里。")}
+          description={t("快照存放在哪里")}
           detail={t("留空则用默认位置；支持 ~ 和相对路径。")}
           value={settings.checkpointDir}
           placeholder="~/.iflow/checkpoints"
@@ -1132,16 +1247,16 @@ function RuntimeSection() {
         />
         <TextRow
           label={t("Node.js 路径")}
-          description={t("留空则自动查找。")}
-          detail={t("修改后重启内核生效。")}
+          description={t("留空则自动查找")}
+          detail={t("修改后重启内核生效")}
           value={settings.nodePath}
           placeholder="C:\\Program Files\\nodejs\\node.exe"
           onCommit={(nodePath) => update({ nodePath })}
         />
         <ChoiceRow
           label={t("内核语言")}
-          description={t("内核的显示语言。")}
-          detail={t("修改后重启内核生效。")}
+          description={t("内核的显示语言")}
+          detail={t("修改后重启内核生效")}
           value={settings.language}
           options={languageOptions}
           onChange={(language) => update({ language })}
@@ -1689,7 +1804,7 @@ function ApiConfigSection({
         />
         <LinesRow
           label={t("成本单价")}
-          description={t("每行写「模型名=输入价,输出价」，单位为美元/百万 token，如 deepseek-v3=0.27,1.1。")}
+          description={t("每行写「模型名=输入价，输出价」，单位为美元/百万 token，如 deepseek-v3=0.27,1.1。")}
           value={settings.costTable}
           placeholder="deepseek-v3=0.27,1.1"
           onCommit={(costTable) => updateHostSetting({ costTable })}

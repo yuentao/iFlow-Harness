@@ -86,7 +86,7 @@ function UsageSummary({
   if (usage.input <= 0 && usage.output <= 0) return null;
   return (
     <span
-      className={`shrink-0 text-ui-micro tabular-nums text-muted-foreground${className ? ` ${className}` : ""}`}
+      className={`shrink-0 text-ui-caption tabular-nums text-muted-foreground${className ? ` ${className}` : ""}`}
       title={t("输入 {0} · 输出 {1}", formatBoardTokens(usage.input), formatBoardTokens(usage.output))}
     >
       ↑{formatBoardTokens(usage.input)} ↓{formatBoardTokens(usage.output)}
@@ -148,7 +148,7 @@ function StatusChips({ counts, compact = false }: { counts: SuperBoardCounts; co
 function WaveHeader({ wave }: { wave: SuperBoardWave }) {
   const range = rangeText(wave.startedAt, wave.endedAt);
   return (
-    <div className="flex min-w-0 items-center gap-1.5 px-2 py-1 text-ui-micro text-muted-foreground">
+    <div className="flex min-w-0 items-center gap-1.5 px-2 py-1 text-ui-caption text-muted-foreground">
       <Layers className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
       <span className="shrink-0 font-medium text-foreground">
         {wave.wave === 0 ? t("未分组") : t("第 {0} 波", wave.wave)}
@@ -159,7 +159,7 @@ function WaveHeader({ wave }: { wave: SuperBoardWave }) {
       <StatusChips counts={wave.counts} compact />
       <UsageSummary usage={wave.usage} className="max-[380px]:hidden" />
       {range && (
-        <span className="ml-auto shrink-0 text-ui-micro tabular-nums text-muted-foreground" title={range}>
+        <span className="ml-auto shrink-0 text-ui-caption tabular-nums text-muted-foreground" title={range}>
           {range}
         </span>
       )}
@@ -216,7 +216,7 @@ export function SuperBatchGroups({
               onClick={() => toggleGroup(group.runId)}
             >
               {open ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
-              <span className="min-w-0 truncate font-medium" title={group.runId}>
+              <span className="min-w-0 truncate text-ui-body font-medium" title={group.runId}>
                 {label}
               </span>
               <Chip tone="muted" title={t("{0} 个任务", group.counts.total)}>
@@ -226,7 +226,7 @@ export function SuperBatchGroups({
               <UsageSummary usage={group.usage} className="max-[380px]:hidden" />
               {range && (
                 <span
-                  className="ml-auto shrink-0 text-ui-micro tabular-nums text-muted-foreground max-[380px]:hidden"
+                  className="ml-auto shrink-0 text-ui-caption tabular-nums text-muted-foreground max-[380px]:hidden"
                   title={range}
                 >
                   {range}

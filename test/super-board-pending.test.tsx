@@ -297,7 +297,7 @@ describe("看板计数 chip 的可访问名", () => {
       baseSession({ id: "b", title: "任务乙", status: "running" }),
     ]);
     const chips = [...document.body.querySelectorAll('[aria-label]')].filter((el) =>
-      (el.getAttribute("aria-label") ?? "").includes("个进行中"),
+      (el.getAttribute("aria-label") ?? "").includes("个运行中"),
     );
     expect(chips.length).toBeGreaterThan(0);
   });

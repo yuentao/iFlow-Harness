@@ -2,69 +2,62 @@
 
 ## 概览
 
-`iflow-harness`（产品名「心流·驭光」）是一个 VSCode 扩展，通过 ACP（Agent Client Protocol）把 iFlow CLI 的 Agent 能力图形化接入编辑器。核心数据流为：`webview/`（React 投影）← 快照 / `blockPatch` ← `shared/`（纯 reducer）← ACP 事件 ← `src/`（Extension Host）← NDJSON JSON-RPC 2.0 ← 内置 CLI 子进程；用户操作反向经 WebviewToHost 消息进入 `src/panel/panel.ts` 路由。
+`iflow-harness`（产品名「心流·驭光」）是一个 VSCode 扩展，通过 ACP（Agent Client Protocol）把 iFlow CLI 的 Agent 能力图形化接入编辑器。
 
-规范会话状态只保存在 Extension Host，WebView 只消费快照并渲染。新增或扩展的能力包括资源生成与资源卡、错误建议、MCP catalog、Plan 规格与模式同步、provider presets、引导向导、会话导航、轮次变更展示、终端记录及 UI 设置；记忆、上下文来源、模型查询和 Profile 切换相关模块也有更新。
-
-`package.json` 当前版本为 `1.7.0`，根目录已有 `iflow-harness-1.7.0.vsix`，旧的 `1.6.0` VSIX 已删除。`AGENTS.md` 摘录仍写“当前版本 1.1.2”，属于文档滞后；发布前必须按 `CHANGELOG.md` 顶部核对版本。本轮采样覆盖 193/193 个文件。
+- 通信：spawn 内置 CLI 的 `--experimental-acp --stream` 子进程，NDJSON 分帧的 JSON-RPC 2.0 双向通信（单帧上限 8MB）。
+- 数据流：`webview/`（React 投影）← 快照 / `blockPatch` ← `shared/`（纯 reducer）← ACP 事件 ← `src/`（Extension Host）← NDJSON ← 内置 CLI；用户操作反向经 `WebviewToHost` 进入 `src/panel/panel.ts` 路由。**规范状态只在 Extension Host**，WebView 只渲染快照。
+- 执行体固定为内置裁剪版 CLI（`vendor/iflow-cli`，默认源为仓库内 `vendor/iflow-fork` 快照）；不探测 PATH / npm / 本机 CLI，无 `iflow.cliPath` 与 env 覆盖，缺失即报错。
+- 能力面：流式对话与工具审批、Diff 回退、会话持久化与恢复、检查点（影子 git）、API Profile 与凭据、@文件补全与多根引用、附件与选区上下文、提问卡、Super Agent 子会话编排、QQ 远程渠道、记忆与知识库、MCP catalog/诊断、上下文窗口与成本解析、导出。
 
 ## 技术栈与运行方式
 
-- **语言/框架**：TypeScript 7（strict）+ React 19 + Tailwind CSS 4 + zustand 5 + Vite 8 + vitest 5。`tsconfig.json` 开启 `strict`、`noUncheckedIndexedAccess`、`noUnusedLocals`；主工程使用 Node16 模块，webview 使用 Bundler resolution、`noEmit`、React JSX。
-- **运行环境**：VSCode `^1.90.0`；CI Node 22，esbuild target 为 node20；包为 ESM，扩展主入口为 `./dist/extension.cjs`，激活事件为 `onStartupFinished`。
-- **执行体**：唯一执行体是内置裁剪版 iFlow CLI（`vendor/iflow-cli`，npm 源包 `@yuentao/iflow-cli` 定制 fork）。通过 spawn `--experimental-acp --stream` 子进程通信，使用 NDJSON 分帧 JSON-RPC 2.0，帧上限 8MB。扩展不探测 PATH/npm/本机 CLI，不提供 `iflow.cliPath` 或环境变量覆盖。
-- **构建产物**：`dist/extension.cjs`、`webview/dist/index.html` 和根目录 VSIX。`npm run build` 依次生成图标、执行 tsc、打包 host、构建 webview。
-- **本地调试**：F5 前必须先执行 `npm run build`，并至少执行一次 `npm run vendor:cli`；内置 CLI 缺失会直接报错。`.vscode/launch.json` 提供 Extension Development Host 配置。
-- **对外贡献点**：Chat Participant `iflow.agent`；命令包括 `iflow.openPanel`、`iflow.newSession`、`iflow.askSelection`、`iflow.addSelectionToContext`、`iflow.rememberSelection`、`iflow.restartCli`、`iflow.exportSessionMarkdown`、`iflow.exportSessionJson`、`iflow.exportWireLog`。关键设置包括 `iflow.defaultMode`、`iflow.nodePath`、`iflow.warmStart`、`iflow.approvalMode`、`iflow.language`、`iflow.contextWindowOverrides`、`iflow.costTable` 等。
+- TypeScript 7（strict、`noUncheckedIndexedAccess`、`noUnusedLocals`）+ React 19 + Tailwind CSS 4 + zustand 5 + Vite 8 + vitest 5。
+- 主工程 Node16 模块解析（import 必须带 `.js`）；webview 独立 tsconfig（Bundler resolution、DOM lib、noEmit），由 `typecheck:webview` 检查。
+- VSCode `^1.90.0`；CI Node 22；esbuild target node20。包是 ESM，但扩展入口是 CJS 产物 `dist/extension.cjs`（`vscode` external，`.md` 以 text 内联）。
+- 产物：`dist/extension.cjs`、`webview/dist/index.html`、`vendor/os-notify/`（build 时从 node-notifier 复制）、根目录 VSIX。
+- 本地调试：F5 前先 `npm run build` 并至少跑一次 `npm run vendor:cli`；webview 用 `npm run webview:serve` 走 HTTP 打开（`file://` 会因绝对路径资源被 CORS 拒绝而白屏）。
+- 对外贡献点：Chat Participant `iflow.agent`；命令 `iflow.openPanel` / `newSession` / `askSelection` / `addSelectionToContext` / `rememberSelection` / `restartCli` / `exportSessionMarkdown` / `exportSessionJson` / `exportWireLog`（均以 `iflow.` 为前缀）；设置项完整清单以 `package.json` 的 `contributes.configuration` 为准（`test/settings-declared.test.ts` 对账）。
 
 ## 目录结构与关键模块
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/extension.ts` | 激活入口、命令注册、`@iflow` chat participant、编辑器选区入口及 `warmStart` 后台预热。 |
-| `src/acp/client.ts` | spawn CLI、initialize 握手、agent→client 文件系统回调、权限请求、提问与 Plan 扩展方法、进程树清理。 |
-| `src/acp/jsonrpc.ts` / `protocol.ts` | NDJSON 分帧、JSON-RPC 路由、错误分类及 ACP wire 类型；`jsonrpc.ts` 无 VSCode 依赖。 |
-| `src/acp/cli-locator.ts` | 硬解析内置 `bundle/entry.js`、定位 Node、维护全局状态缓存与并发去重、种默认规则、生成 ACP 启动参数。 |
-| `src/acp/auth.ts` / `models-query.ts` | SecretStorage 凭据、命名 Profile、热重认证；查询 `{baseUrl}/models`、读取 CLI settings 并归档过期 OAuth 缓存。 |
-| `src/panel/panel.ts` / `store.ts` | Webview 容器和消息路由；审批、提问、Plan、Diff 回退、持久化、重试、token 用量及 toast；Host reducer、节流快照和 `blockPatch`。 |
-| `src/panel/terminal.ts` | 面板终端记录相关 Host 逻辑。 |
-| `src/assets/service.ts` / `src/memory/service.ts` | 资源卡/资源生成的 Host 服务，以及记忆服务。 |
-| `shared/messages.ts` | Host ↔ WebView 消息协议、`Block`/`SessionState` 类型和 `applyBlockPatch`。 |
-| `shared/session-state.ts` / `context-source.ts` | 纯会话 reducer、SubAgent 归组、transcript 解析、块 ID、token 估算及 MCP diff 合成；上下文来源定义。 |
-| `shared/asset-gen.ts`、`error-advice.ts`、`mcp-catalog.ts`、`plan-spec.ts`、`provider-presets.ts`、`session-nav.ts`、`turn-changes.ts` | 新增的共享资源生成、错误建议、MCP catalog、Plan 规格、provider 预设、会话导航及轮次变更逻辑。 |
-| `webview/src/` | React UI、zustand 展示态、`i18n.ts`、组件、提示音与 `createMockHost`；本轮新增 `AssetCard`、`OnboardingWizard`、`TurnChanges` 等组件。 |
-| `scripts/` | `harness.mjs`、`vendor-cli.mjs`、`generate-icon.mjs`、`read-changelog.mjs`，以及新增的 `serve-webview.mjs` 本地服务脚本。 |
-| `test/` | 当前采样为 72 个文件，新增覆盖资源、错误建议、MCP、Plan、Profile、会话导航、终端记录、轮次变更、引导和 UI 设置等；`test/transcripts/timeout-session.json` 已删除。 |
-| `docs/`、`media/`、`l10n/`、`prompts/` | 文档与截图、图标资源、本地化 bundle、提示词资源。 |
-| `vendor/iflow-cli`、`vendor/iflow-defaults`、`scripts/iflow-defaults` | 内置 CLI 与默认规则相关目录；由裁剪/同步流程生成，当前顶层采样未展示被忽略或生成目录。 |
-| `iflow-harness-1.7.0.vsix`、`.tmp-*` | 当前 VSIX 产物；`.tmp-iflow-bundle.js`、`.tmp-patch-live-output.mjs`、`.tmp-probe-live.mjs` 和 serve 日志为根目录调试/临时产物，不属于核心产品模块。 |
+| `src/extension.ts` | 激活入口、命令注册、`@iflow` chat participant、选区入口、`warmStart` 预热、终端命令捕获。 |
+| `src/acp/` | `client.ts` spawn/握手/文件回调/权限与提问扩展方法；`jsonrpc.ts` 分帧与错误分类（零 VSCode 依赖）；`protocol.ts` wire 类型；`cli-locator.ts` 内置入口解析、Node 异步定位、默认规则、ACP 参数；`auth.ts`/`api-profiles.ts` 凭据与 Profile；`models-query.ts` live 模型；`complete.ts` 直连补全；`web-search.ts` 宿主检索；`mcp-broker.ts`；`cli-tokens-limit.ts` 窗口 → `IFLOW_TOKENS_LIMIT`；`os-notify.ts` 系统通知。 |
+| `src/panel/` | `panel.ts` 容器与消息路由（审批/提问/Diff/持久化/恢复/限流与溢出恢复/用量/toast，最大文件）；`store.ts` 节流快照与 `blockPatch`；`super-agent*.ts`+`super-store.ts`+`worktree.ts`+`workspace-roots.ts` 子会话编排与隔离；`session-persistence.ts`/`session-restore.ts`/`checkpoint-service.ts`/`checkpoints.ts` 持久化与影子 git 检查点；`attachments.ts`/`tool-diff-service.ts`/`wire-log.ts`/`terminal.ts`/`status-presenter.ts`/`context-window-overrides.ts`；`qq-host.ts`/`qqbot-host.ts` QQ 宿主接线。 |
+| `src/memory/`、`src/assets/`、`src/skills/`、`src/qq/` | 记忆读写与层级发现、面板服务（含知识库托管块）、知识库扫描与提示词、候选解析；资产文档服务；Skill 根扫描与调用解析；QQ 任务派发/汇报/去重、落盘、协议客户端、配置与设置。 |
+| `shared/` | `messages.ts` 协议与 `Block`/`SessionState`/`applyBlockPatch`/`evictBlockPayloads`；`session-state.ts` 纯 reducer（SubAgent 归组、transcript 解析、块 id、token 估算、MCP diff、`withoutPlanModes`）；`super-*.ts` 子会话状态机/委派/汇报/诊断/波次/看板/时间线/工具调用/白名单；其余为上下文窗口与成本、MCP catalog/诊断、回合变更与回合末合并提示、通知门控、队列、导出、hunk、Skill、检查点索引、模型元数据、Provider 预设、错误建议、会话导航、上下文来源、资产、QQ 纯逻辑。 |
+| `webview/src/` | `App.tsx`/`main.tsx`/`store.ts`（zustand + `createMockHost`）/`i18n.ts`/`styles.css`/`components/*`；控件统一收敛到 `components/ui.tsx`。 |
+| `scripts/`、`prompts/`、`test/` | `vendor-cli.mjs`/`harness.mjs`/`generate-icon.mjs`/`read-changelog.mjs`/`serve-webview.mjs`；提示词模板构建时内联进 bundle；vitest 用例与 `test/fixtures/` 探针脚本（录制产物被 gitignore）。 |
+| `vendor/` | `iflow-fork`（进 git 的 CLI 产物快照）、`iflow-cli`（`vendor:cli` 生成的裁剪副本，进 VSIX）、`iflow-defaults`（随包默认规则）、`os-notify`（build 复制的通知二进制）；后三者被 gitignore。 |
 
 ## 约定与陷阱
 
-1. **单向数据流**：规范状态只在 Extension Host；WebView 不运行协议逻辑。新增共享能力应放在 `shared/`，避免在 React 侧维护第二份会话状态。
-2. **内置 CLI 是唯一执行体**：不探测或回退到本机 CLI；`vendor/` 通常因 gitignore 不存在，缺少内置 CLI 时应直接失败。
-3. **`vendor:cli` 来源有文档漂移**：较新说明称默认从本地 fork `../iflow-fork` 拷贝并裁剪，npm 拉取需显式 `--version`；旧 README 仍可能写为直接拉取。CI 没有本地 fork 时，`npm run package` 会失败。
-4. **版本对齐是硬性要求**：`package.json` 当前为 `1.7.0`；`AGENTS.md` 仍写 `1.1.2`，而 `CHANGELOG.md` 顶部未在摘录中展示。发布前应同时核对 `package.json`、`CHANGELOG.md` 和生成的 VSIX。
-5. **测试数量不可直接引用文档**：当前采样 `test/` 有 72 个文件，但 `AGENTS.md` 仍写 11 文件 / 271 用例；实际用例数以 `npm test` 输出为准。
-6. **仓库地址不一致**：`package.json` 指向 GitHub，`AGENTS.md` 称实际 `git remote` 指向内部 GitLab；修改发布配置或推送前应确认目标源。
-7. **i18n 分层**：Host 使用 `vscode.l10n.t` 与 `l10n/bundle.l10n.en.json`；manifest 使用 `%key%` 与 `package.nls*.json`；webview 使用 `webview/src/i18n.ts`。新增文案不要硬编码。
-8. **安全边界**：API Key 仅存 VSCode SecretStorage；审批默认拒绝并有超时；Webview 使用 nonce CSP 与 DOMPurify。扩展侧文件回调限制在工作区范围，但执行类工具仍运行在本机真实 shell，审批卡不是沙箱。
-9. **协议注意点**：修改协议时注意 NDJSON 8MB 帧上限，以及 `_iflow/user/questions`、`_iflow/plan/exit`、`session/set_think` 等 iFlow 扩展方法。
-10. **Checkpoint 不修改用户 `.git`**：每轮快照写入独立影子仓库，非 git 目录也可使用；容量和轮数限制以 README 与相关设置为准。
-11. **根目录临时产物需区分**：新增 `.tmp-*` bundle、patch、probe 和 serve 文件不应被视作正式入口；发布前结合 `.vscodeignore` 检查打包范围。
+1. **单向数据流**：新增共享能力放 `shared/`；新增 wire 消息必须同时更新 `WebviewToHost` / `HostToWebview`。
+2. **内置 CLI 是唯一执行体**：不探测、不回退本机 CLI；`vendor/iflow-cli` 被 gitignore，缺失即报错。`vendor:cli` 默认源是仓库内 `vendor/iflow-fork/` 快照（不是 Mod 源码仓库），覆写用 `IFLOW_VENDOR_FORK_DIR` / `--from-dir` / `--from`，`--version` 才走 npm registry；改 PRUNE 清单后必须 `npm run harness` 验收。
+3. **版本对齐是硬性要求**：`CHANGELOG.md` 顶部是唯一来源，`package.json` 的 `version` 必须同步；发布前用 `grep '"version"' package.json` 与 `head -6 CHANGELOG.md` 自检。
+4. **测试数量不可引用文档**：用例数以 `npm test` 输出为准；全量回归用 `npx vitest run`（`--no-isolate` 会造成大量 mock 串味假失败）。
+5. **i18n 分层**：Host 用 `vscode.l10n.t`（中文为源语言）与 `l10n/bundle.l10n.en.json`；manifest 用 `%key%` 与 `package.nls*.json`；webview 用 `webview/src/i18n.ts`。新增文案不要硬编码。
+6. **安全边界**：API key / token 只存 SecretStorage；审批默认拒绝，审批卡与提问卡共用 5 分钟超时（审批按拒绝、提问按空答案继续）；Webview 用 nonce CSP，markdown 过 DOMPurify；附件 8MB 上限 / 5MB 降级；`openExternal` 只放行 http(s)。执行类工具跑在本机真实 shell，审批卡不是沙箱。
+7. **协议注意点**：8MB 帧上限；`set_mode` / `set_model` 不推通知，需乐观写回；`session/load` 不回放历史，先 `newSession` 取 meta；prompt 无超时，只由用户 Stop 中断；`diff.path` 不可信，按多候选定位。
+8. **路径与探测**：相对路径拼 `sessionCwd`（不是 `process.cwd()`）；写入走 `vscode.workspace.fs`；`where.exe` / `node --version` 必须异步，`execFileSync` 会冻结扩展宿主。
+9. **Plan 模式已移除**：`withoutPlanModes` 剔除 plan 并归一落点；残留 `_iflow/plan/exit` 记警告后自动放行，不弹卡、不阻塞。
+10. **内部纯文本任务直连端点**：enhance / 标题 / 记忆提取 / 资产草稿走 `streamChatCompletion`，发送前去 `@` 文件标记，带超时与 idle watchdog 与部分结果 salvage。
+11. **长会话内存**：webview 侧按块数 + 字节预算释放重 payload（host 全量保真）、wire 日志双上限、折叠体懒挂载、DiffView 前缀渲染。
+12. **子会话隔离**：独立 CLI 进程与 worktree，`allowedRoots` 只含 worktree 根、`--include-directories` 空；免确认 + shell 工具不受路径围栏约束，必须如实标注；自动合并串行执行并先做 merge 预演，绝不替用户 commit / stash / 撤销改动；worktree 里的 `node_modules` 联接不能与 `npm ci` 共存。
+13. **知识库注入**：由 `setManagedKnowledgeBlock` 在项目记忆文件末尾维护一个托管块（`## 项目知识库` + `@.iflow/knowledge/index.md`，由一对 `iflow-harness:knowledge` 注释标记包裹）；检测/注入/取消要遍历所有项目记忆文件，目标文件名遵循 CLI `contextFileName`，且不要在正文里内联写那对标记的字面量。
+14. **亚克力材质**：`.acrylic` 只写标准 `backdrop-filter`（前缀写法会被构建链折叠掉）；带 `backdrop-filter` 的祖先形成 backdrop root，浮层用近不透明 tint；浮卡内全屏弹框用 `createPortal`。
+15. **UI kit 唯一来源**：控件只住在 `webview/src/components/ui.tsx`（Composer 的提示 textarea 是唯一原生例外）；禁止 `text-[Npx]` / `rounded-[Npx]`；浮层菜单必须带 `shadow-float`；`Button` 是单行物种，不加 `py-*`。守卫 `test/ui-kit-guard.test.ts` 断言这些不变量。
 
 ## 常用命令
 
-- `npm ci`：按锁文件安装依赖；README 也可能使用 `npm install`。
-- `npm run typecheck`：执行 `tsc -p tsconfig.json --noEmit`，检查 host/shared 类型。
-- `npm test`：执行 `vitest run` 单次运行，非 watch；测试不依赖真实 CLI/API。
-- `npm run build`：图标生成 + tsc + esbuild host + vite build webview。
-- `npm run webview:dev`：webview 增量构建。
-- `cd webview && npx tsc --noEmit`：检查 webview 类型。
-- `npx vite build webview`：构建 webview；可用静态服务器打开 `webview/dist`。
-- `node scripts/serve-webview.mjs`：运行新增的本地 Webview 服务脚本，具体行为以脚本为准。
-- `npm run vendor:cli`：生成/更新 `vendor/iflow-cli`；支持 `--from-dir`、`--from`、`--version` 等参数。
-- `npm run defaults:sync`：把本机 `~/.iflow/` 默认规则同步到 `scripts/iflow-defaults/`。
-- `npm run harness`：驱动真实 iFlow CLI 跑 ACP 全流程；`--record` 录制 wire 日志，`--probe` 探测方法行为。
-- `npm run package`：执行 `vendor:cli` + `build` + `vsce package --no-dependencies`，产出包含内置 CLI 的 `.vsix`。
+- `npm ci`：按锁文件安装依赖。
+- `npm run typecheck`：`typecheck:host` + `typecheck:webview`。
+- `npm test`：`vitest run` 单次运行，不依赖真实 CLI / API。
+- `npm run build`：图标 + tsc + esbuild(host) + vite build webview。
+- `npm run webview:dev` / `npm run webview:serve`：webview 增量构建 / 静态服务 `webview/dist`。
+- `npm run vendor:cli` / `npm run defaults:sync`：生成裁剪内置 CLI / 同步本机默认规则。
+- `npm run harness`（可加 `--record` / `--probe` / `--prompt`）：驱动真实 CLI 跑 ACP 全流程，需先 `npm run build`。
+- `npm run lint:deps`：knip 死代码与依赖检查。
+- `npm run package`：`vendor:cli --force` + `build` + `vsce package --no-dependencies`。
 - `npm run icon`：仅重新生成 `media/icon.png`。

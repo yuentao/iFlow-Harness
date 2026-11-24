@@ -3,6 +3,7 @@ import {
   applyBlockPatch,
   EVICT_KEEP_BLOCKS,
   evictBlockPayloads,
+  sanitizeTranscriptBlocks,
   type Block,
   type ContextWindowOverridesUi,
   type HostSettingsUi,
@@ -83,6 +84,13 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   autoMemoryCapture: true,
   autoTitle: true,
   memoryExtractTimeoutSeconds: 90,
+  memoryMaintenanceEnabled: false,
+  memoryMaintenanceIntervalDays: 7,
+  memoryMaintenanceIdleMinutes: 15,
+  memoryMaintenanceGlobalTokenBudget: 4000,
+  memoryMaintenanceProjectTokenBudget: 2500,
+  memoryMaintenanceTotalTokenBudget: 12000,
+  memoryMaintenanceStrategy: "report",
   nextStepTimeoutSeconds: 25,
   compressTimeoutSeconds: 0,
   autoCompressThresholdPercent: 95,
@@ -844,7 +852,7 @@ function createMockHost(): HostApi {
           at: Date.now() - 62_000,
           kind: "session",
           level: "info",
-          message: "子会话已启动，模型 glm-5.3-flash-free",
+          message: "超流体已启动，模型 glm-5.3-flash-free",
         },
         {
           at: Date.now() - 18_000,
@@ -893,7 +901,7 @@ function createMockHost(): HostApi {
           at: Date.now() - 118_000,
           kind: "session",
           level: "info",
-          message: "子会话已启动",
+          message: "超流体已启动",
         },
         {
           at: Date.now() - 20_000,
@@ -949,7 +957,7 @@ function createMockHost(): HostApi {
           at: Date.now() - 298_000,
           kind: "session",
           level: "info",
-          message: "子会话已启动，模型 deepseek-v4-pro",
+          message: "超流体已启动，模型 deepseek-v4-pro",
         },
         {
           at: Date.now() - 190_000,
@@ -1023,7 +1031,7 @@ function createMockHost(): HostApi {
           at: Date.now() - 418_000,
           kind: "session",
           level: "info",
-          message: "子会话已启动（仅目录隔离）",
+          message: "超流体已启动（仅目录隔离）",
         },
         {
           at: Date.now() - 400_000,
@@ -1079,7 +1087,7 @@ function createMockHost(): HostApi {
           at: Date.now() - 538_000,
           kind: "session",
           level: "info",
-          message: "子会话已启动",
+          message: "超流体已启动",
         },
         {
           at: Date.now() - 516_000,
@@ -2328,7 +2336,7 @@ function createMockHost(): HostApi {
         // The mock mirrors the agent-cancel Mod: only the targeted agent
         // stops; the parent turn keeps running with an interrupted result.
         // (No real subagent lifecycle here, so settle the demo turn.)
-        demoBlocks.push({ kind: "text", text: "*（已停止该子代理，整轮继续，mock）*" });
+        demoBlocks.push({ kind: "text", text: "*（已停止该进程内子代理，整轮继续，mock）*" });
         settleMockTurn();
         return;
       }
@@ -3047,12 +3055,17 @@ export const useChat = create<ChatStore>((set, get) => ({
           get().send({ type: "superAgent", action: "transcript", sessionId: msg.sessionId });
           return s;
         }
-        const next =
+        const merged =
           msg.from <= 0 ? msg.blocks : [...prev.slice(0, msg.from), ...msg.blocks];
+        // 历史转录快照 / 旧版 wire 可能带缺字段的畸形块（见 shared 的
+        // sanitizeTranscriptBlocks 注释）。「查看实时进度」把这块数组原样喂给
+        // BlockView，任一畸形块都会在渲染期抛错、冒泡成 page 级白屏。入站时
+        // 先规范化：合法块 identity 不变，畸形块被修补或丢弃。
+        const safe = sanitizeTranscriptBlocks(merged);
         // Same payload budget as the main transcript: a long-running child can
         // accumulate large tool outputs, and the detail pane only mounts a
         // window of blocks at a time.
-        const capped = evictBlockPayloads(next, EVICT_KEEP_BLOCKS);
+        const capped = evictBlockPayloads(safe, EVICT_KEEP_BLOCKS);
         return { superTranscripts: { ...s.superTranscripts, [msg.sessionId]: capped } };
       });
       return;

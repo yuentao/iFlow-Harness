@@ -98,6 +98,24 @@ export function ApprovalCard({
   useEffect(() => {
     const row = actionsRef.current;
     if (!row) return;
+    // A card is pushed by the host and can mount mid-keystroke. Moving focus
+    // out of the editor here makes the user's NEXT character land on this
+    // card's button instead: its keydown target is then a BUTTON, so the
+    // editable-target gate in the shortcut handler below no longer applies
+    // and a stray "y" / "n" / Esc silently answers the hidden-just-arrived
+    // card. Keep the user's typing focus when one is live; the card stays
+    // clickable and Tab-reachable, and Y/N/Esc still work once focus is
+    // actually on it.
+    const active = document.activeElement as HTMLElement | null;
+    if (
+      active
+      && (active.tagName === "INPUT"
+        || active.tagName === "TEXTAREA"
+        || active.tagName === "SELECT"
+        || active.isContentEditable)
+    ) {
+      return;
+    }
     (row.querySelector<HTMLElement>("[data-autofocus]") ?? row.querySelector<HTMLButtonElement>("button"))?.focus();
   }, []);
 
@@ -127,7 +145,15 @@ export function ApprovalCard({
     // decision the user cannot see (the top card is what they are reading).
     if (!active) return;
     const handler = (e: KeyboardEvent) => {
-      if (answered || remoteTakeover || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      // IME safety: `isComposing` alone is not enough — the keydown that
+      // starts a composition and the one that commits it can report
+      // `keyCode === 229` / key "Process" while `isComposing` is already
+      // false. Reuse the same condition the Composer / Commit* fields use.
+      if (
+        answered || remoteTakeover || e.defaultPrevented
+        || e.isComposing || e.key === "Process" || e.keyCode === 229
+        || e.ctrlKey || e.metaKey || e.altKey
+      ) return;
       // A modal above this card (settings / confirm) owns the keyboard; the
       // card is still mounted underneath and must not answer a hidden prompt.
       if (document.querySelector(".auth-backdrop")) return;
@@ -267,7 +293,8 @@ export function ApprovalCard({
       </div>
       <div ref={actionsRef} role="group" aria-label={t("审批操作")} className="flex shrink-0 flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         {options.map((opt) => {
-          const label = OPTION_LABEL[opt.kind] ?? opt.name;
+          const canonical = OPTION_LABEL[opt.kind];
+          const label = canonical ? t(canonical) : opt.name;
           const isSafeSide = rejectOption?.optionId === opt.optionId;
           const { variant, className } = optionButton(opt.kind);
           return (
@@ -277,7 +304,7 @@ export function ApprovalCard({
               size="sm"
               disabled={answered || remoteTakeover}
               data-autofocus={isSafeSide ? true : undefined}
-              title={OPTION_LABEL[opt.kind] ? opt.name : undefined}
+              title={canonical ? opt.name : undefined}
               aria-label={approval.toolName ? t("{0}（{1}）", label, approval.toolName) : label}
               className={className}
               icon={opt.kind === "allow_always" ? <Lock className={`${ICON_INLINE} shrink-0`} /> : undefined}

@@ -16,6 +16,13 @@ const hostSettings = vi.hoisted(() => ({
   autoMemoryCapture: false,
   autoTitle: true,
   memoryExtractTimeoutSeconds: 90,
+  memoryMaintenanceEnabled: false,
+  memoryMaintenanceIntervalDays: 7,
+  memoryMaintenanceIdleMinutes: 15,
+  memoryMaintenanceGlobalTokenBudget: 4000,
+  memoryMaintenanceProjectTokenBudget: 2500,
+  memoryMaintenanceTotalTokenBudget: 12000,
+  memoryMaintenanceStrategy: "report" as const,
   nextStepTimeoutSeconds: 25,
   compressTimeoutSeconds: 0,
   autoCompressThresholdPercent: 95,
@@ -169,7 +176,7 @@ it("renders the font-size and density presets in Appearance settings", () => {
 
 it("exposes the redesigned top-level categories", () => {
   expect(container.textContent).toContain("账户与模型");
-  expect(container.textContent).toContain("对话");
+  expect(container.textContent).toContain("会话");
   expect(container.textContent).toContain("外观与交互");
   expect(container.textContent).not.toContain("权限与审批");
   expect(container.textContent).toContain("MCP 与工具");
@@ -177,7 +184,7 @@ it("exposes the redesigned top-level categories", () => {
   expect(container.textContent).toContain("运行与数据");
 });
 
-it("groups the eight tabs under four named sections", () => {
+it("groups the nine tabs under four named sections", () => {
   for (const group of ["账户", "工作方式", "扩展", "系统"]) {
     expect(container.textContent).toContain(group);
   }
@@ -185,7 +192,7 @@ it("groups the eight tabs under four named sections", () => {
   const tablist = container.querySelector('[role="tablist"]');
   expect(tablist).toBeTruthy();
   const tabs = container.querySelectorAll('[role="tab"]');
-  expect(tabs).toHaveLength(8);
+  expect(tabs).toHaveLength(9);
   expect([...tabs].filter((el) => el.getAttribute("tabindex") === "0")).toHaveLength(1);
 });
 
@@ -207,7 +214,7 @@ describe("窄屏设置导航（横向滚动 tab 条）", () => {
     expect(tokens).toContain("@min-[560px]:w-[172px]");
     // 每个 tab 不折行不收缩：超出容器宽度的部分横向滚动，而不是挤压换行。
     const tabs = nav.querySelectorAll("button");
-    expect(tabs).toHaveLength(8);
+    expect(tabs).toHaveLength(9);
     for (const tab of tabs) {
       expect(tab.className).toContain("shrink-0");
       expect(tab.className).not.toContain("basis-");
@@ -255,7 +262,7 @@ describe("窄屏设置导航（横向滚动 tab 条）", () => {
     expect(active.id).toBe("settings-tab-chat");
     const fire = (key: string) =>
       act(() => active.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })));
-    // 顺序：api → chat → appearance → mcp → memory → assets → qq → runtime。
+    // 顺序：api → chat → appearance → mcp → memory → assets → super → qq → runtime。
     fire("ArrowRight");
     expect(onTabChange).toHaveBeenLastCalledWith("appearance");
     expect(document.activeElement?.id).toBe("settings-tab-appearance");
@@ -333,16 +340,16 @@ it("toggles auto-title in the Conversation tab", () => {
  */
 it("keeps the full-trust switch off by default and says so on screen", () => {
   hostSettings.superAgentFullTrust = false;
-  renderTab("chat", BASIC_AUTH);
+  renderTab("super", BASIC_AUTH);
   const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
   expect(toggle).toBeTruthy();
   expect(toggle!.getAttribute("aria-checked")).toBe("false");
-  expect(container.textContent).toContain("默认关闭：开启后不再向子会话施加工具白名单与 MCP 服务器白名单限制。");
+  expect(container.textContent).toContain("默认关闭：开启后不再向超流体施加工具白名单与 MCP 服务器白名单限制。");
 });
 
 it("writes the full-trust switch value back to host settings", () => {
   hostSettings.superAgentFullTrust = false;
-  renderTab("chat", BASIC_AUTH);
+  renderTab("super", BASIC_AUTH);
   const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]')!;
   act(() => toggle.click());
   expect(updateHostSetting).toHaveBeenCalledWith({ superAgentFullTrust: true });
@@ -351,7 +358,7 @@ it("writes the full-trust switch value back to host settings", () => {
 it("reads the full-trust value back from the host settings", () => {
   hostSettings.superAgentFullTrust = true;
   try {
-    renderTab("chat", BASIC_AUTH);
+    renderTab("super", BASIC_AUTH);
     const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="完全信任模式"]');
     expect(toggle).toBeTruthy();
     expect(toggle!.getAttribute("aria-checked")).toBe("true");
@@ -495,7 +502,7 @@ function typeInto(input: HTMLInputElement, value: string) {
 it("rejects an empty model name with an inline error", () => {
   contextWindow.view = { overrides: [] };
   renderContextWindowOverrides();
-  typeInto(overrideInput("上下文长度（token）"), "960000");
+  typeInto(overrideInput("上下文窗口"), "960000");
   click("添加");
   expect(container.textContent).toContain("请填写模型名");
   expect(send).not.toHaveBeenCalledWith(
@@ -509,9 +516,9 @@ it("rejects a window value the runtime would silently drop", () => {
   contextWindow.view = { overrides: [] };
   renderContextWindowOverrides();
   typeInto(overrideInput("模型名"), "deepseek-v4.1-flash");
-  typeInto(overrideInput("上下文长度（token）"), "960K");
+  typeInto(overrideInput("上下文窗口"), "960K");
   click("添加");
-  expect(container.textContent).toContain("上下文长度必须是正整数（纯数字，不带 K / M 单位）");
+  expect(container.textContent).toContain("上下文窗口必须是正整数（纯数字，不带 K / M 单位）");
   expect(send).not.toHaveBeenCalledWith(
     expect.objectContaining({ type: "setContextWindowOverrides" }),
   );
@@ -521,7 +528,7 @@ it("submits a new override row under its normalized model name", () => {
   contextWindow.view = { overrides: [] };
   renderContextWindowOverrides();
   typeInto(overrideInput("模型名"), "auto/deepseek-v4.1-flash");
-  typeInto(overrideInput("上下文长度（token）"), "960000");
+  typeInto(overrideInput("上下文窗口"), "960000");
   click("添加");
   expect(send).toHaveBeenCalledWith({
     type: "setContextWindowOverrides",
@@ -561,7 +568,7 @@ it("fills the current model's built-in window into the draft", () => {
   renderContextWindowOverrides();
   click("填入建议值");
   expect(overrideInput("模型名").value).toBe("gemini-2.5-pro");
-  expect(overrideInput("上下文长度（token）").value).toBe("1048576");
+  expect(overrideInput("上下文窗口").value).toBe("1048576");
 });
 
 it("shows a waiting label until the profile-switch choice is answered", () => {
@@ -826,6 +833,115 @@ describe("回合末 timeout rows follow their toggle", () => {
     expect(number("记忆提取超时")).toBe("90");
     expect(number("压缩超时")).toBe("0");
     expect(number("自动压缩阈值")).toBe("95");
+  });
+});
+
+/**
+ * 记忆整理（P1）：设置分组在「记忆与知识」页渲染（整理的是记忆文件本身，
+ * 因此归入该分类，不再挂在「对话」页），且每个控件都通过 updateHostSetting
+ * 写回宿主。总开关关闭时从属行（策略 / 周期 / 阈值 / 预算）必须隐藏 ——
+ * 避免用户以为关掉开关仍在按默认值整理。
+ */
+describe("记忆整理设置", () => {
+  const label = (text: string) => text;
+
+  beforeEach(() => {
+    hostSettings.memoryMaintenanceEnabled = false;
+    hostSettings.memoryMaintenanceIntervalDays = 7;
+    hostSettings.memoryMaintenanceIdleMinutes = 15;
+    hostSettings.memoryMaintenanceGlobalTokenBudget = 4000;
+    hostSettings.memoryMaintenanceProjectTokenBudget = 2500;
+    hostSettings.memoryMaintenanceTotalTokenBudget = 12000;
+    hostSettings.memoryMaintenanceStrategy = "report";
+  });
+
+  it("在记忆与知识页渲染记忆整理分组与总开关", () => {
+    renderTab("memory", BASIC_AUTH);
+    expect(container.textContent).toContain("记忆整理");
+    const toggles = container.querySelectorAll<HTMLButtonElement>('button[role="switch"][aria-label="定期整理记忆"]');
+    // 只渲染一次：迁移后原分类与新分类不得同时出现。
+    expect(toggles).toHaveLength(1);
+    const toggle = toggles[0]!;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("对话页不再残留记忆整理分组", () => {
+    renderTab("chat", BASIC_AUTH);
+    expect(container.textContent).not.toContain("记忆整理");
+    expect(container.querySelector('button[role="switch"][aria-label="定期整理记忆"]')).toBeNull();
+  });
+
+  it("打开总开关会写回宿主设置", () => {
+    renderTab("memory", BASIC_AUTH);
+    const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="定期整理记忆"]')!;
+    act(() => toggle.click());
+    expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceEnabled: true });
+  });
+
+  it("关闭时隐藏策略与数值行", () => {
+    renderTab("memory", BASIC_AUTH);
+    expect(container.textContent).not.toContain("整理策略");
+    expect(container.textContent).not.toContain("整理周期");
+    expect(container.textContent).not.toContain("空闲阈值");
+    expect(container.textContent).not.toContain("全局记忆预算");
+    expect(container.textContent).not.toContain("项目记忆预算");
+    expect(container.textContent).not.toContain("总量预算");
+  });
+
+  it("打开后渲染策略分段控件并写回所选值", () => {
+    hostSettings.memoryMaintenanceEnabled = true;
+    renderTab("memory", BASIC_AUTH);
+    expect(container.textContent).toContain("整理策略");
+    const apply = [...container.querySelectorAll<HTMLButtonElement>('button[role="radio"]')].find(
+      (b) => b.textContent === "直接应用",
+    );
+    expect(apply).toBeTruthy();
+    act(() => apply!.click());
+    expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceStrategy: "apply" });
+  });
+
+  it("渲染周期 / 阈值 / 三个预算的当前值", () => {
+    hostSettings.memoryMaintenanceEnabled = true;
+    renderTab("memory", BASIC_AUTH);
+    const number = (name: string) =>
+      container.querySelector<HTMLInputElement>(`input[aria-label="${name}"]`)?.value;
+    expect(number(label("整理周期"))).toBe("7");
+    expect(number(label("空闲阈值"))).toBe("15");
+    expect(number(label("全局记忆预算"))).toBe("4000");
+    expect(number(label("项目记忆预算"))).toBe("2500");
+    expect(number(label("总量预算"))).toBe("12000");
+  });
+
+  it("提交空闲阈值时写回宿主设置", () => {
+    hostSettings.memoryMaintenanceEnabled = true;
+    renderTab("memory", BASIC_AUTH);
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="空闲阈值"]')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setter.call(input, "30");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => {
+      input.focus();
+      input.blur();
+    });
+    expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceIdleMinutes: 30 });
+  });
+
+  it("提交总量预算时写回宿主设置", () => {
+    hostSettings.memoryMaintenanceEnabled = true;
+    renderTab("memory", BASIC_AUTH);
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="总量预算"]')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setter.call(input, "16000");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => {
+      input.focus();
+      input.blur();
+    });
+    expect(updateHostSetting).toHaveBeenCalledWith({ memoryMaintenanceTotalTokenBudget: 16000 });
   });
 });
 

@@ -14,7 +14,14 @@ import { buildFollowupPrompt, parseFollowupResponse } from "../shared/turn-follo
 import { buildAssetGenPrompt } from "../shared/asset-gen.js";
 import { buildModelMetadataPrompt } from "../shared/model-metadata.js";
 import { buildIncrementalKnowledgePrompt, buildKnowledgePrompt } from "../src/memory/knowledge.js";
-import { renderPrompt } from "../prompts/index.js";
+import { loadPrompt, renderPrompt } from "../prompts/index.js";
+import {
+  MAX_MERGE_FACTS,
+  suggestionsToActions,
+  type MergeSuggestion,
+  type RejectedMerge,
+} from "../src/memory/curate-llm.js";
+import { parseManagedFacts } from "../shared/memory-curate.js";
 import type { Block } from "../shared/messages.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -85,6 +92,19 @@ function queueCompletion(result: CompletionResult | (() => Promise<CompletionRes
   completionMock.state.next = typeof result === "function" ? result : () => Promise.resolve(result);
 }
 
+/**
+ * 为连续多次模型调用排队回包：第 N 次 `completeInternalPrompt` 取第 N 个结果。
+ * 用尽后返回 `failed`（空文本）—— L2 分批用例靠它逐批喂不同的 merges 信封。
+ */
+function queueSequence(results: Array<CompletionResult | (() => Promise<CompletionResult>)>) {
+  let index = 0;
+  completionMock.state.next = () => {
+    const next = results[index++];
+    if (next === undefined) return Promise.resolve({ text: "", reason: "failed" });
+    return typeof next === "function" ? next() : Promise.resolve(next);
+  };
+}
+
 // --- panel scaffolding ----------------------------------------------------------
 
 const TEST_CREDS = { baseUrl: "https://gateway.test/v1", apiKey: "sk-test-1234", modelName: "test-model" };
@@ -140,11 +160,15 @@ type PanelInternals = {
   runInternalPrompt: (text: string) => Promise<string | null>;
   enhancePrompt: (requestId: number, text: string) => Promise<void>;
   cancelEnhance: (requestId: number) => void;
+  suggestMemoryMerges: (
+    facts: string[],
+  ) => Promise<{ suggestions: MergeSuggestion[]; rejected: RejectedMerge[] }>;
   internalPromptTimeoutMs: number;
   internalPromptIdleMs: number;
   postToWebview: (message: unknown) => void;
   pendingEnhance: { requestId: number; cancel: () => void; sessionId: string | null } | null;
   store: { getState: () => { activeSessionId: string | null; sessionId: string | null } };
+  log: { lines: { level: string; message: string }[] };
 };
 
 const internals = (panel: ChatPanel) => panel as unknown as PanelInternals;
@@ -744,6 +768,7 @@ const SHIPPED_TEMPLATES = [
   "asset-gen-contracts",
   "knowledge",
   "knowledge-incremental",
+  "memory-curate",
 ];
 
 describe("prompt templates (prompts/)", () => {
@@ -751,6 +776,14 @@ describe("prompt templates (prompts/)", () => {
     for (const name of SHIPPED_TEMPLATES) {
       expect(existsSync(path.join(here, "..", "prompts", `${name}.md`), "utf8")).toBe(true);
     }
+  });
+
+  it("registers memory-curate in prompts/index.ts so loadPrompt resolves it", () => {
+    // L2 语义合并依赖这条模板；未注册时 loadPrompt 会抛「not registered」，
+    // 而该错误只会在真实整理时暴露 —— 这里提前钉住。
+    const text = loadPrompt("memory-curate");
+    expect(text).toContain("{{facts}}");
+    expect(text).toContain('"merges"');
   });
 
   it("makes the main session an orchestrator that only delegates, plans, manages and reports", () => {
@@ -983,5 +1016,249 @@ describe("prompt templates (prompts/)", () => {
   it("keeps the slash-command contract's own {{args}} token verbatim", () => {
     expect(buildAssetGenPrompt("command", "fix", "x")).toContain("`{{args}}`");
     expect(buildAssetGenPrompt("agent", "a", "x")).not.toContain("`{{args}}`");
+  });
+});
+
+// --- L2 语义合并：分批 / 反查 / 跨批去重 / 单批失败 ------------------------------
+
+/** 模型回包信封（`parseMergeResponse` 取首个 { 到末个 } 解析）。 */
+function mergeReply(merges: unknown): CompletionResult {
+  return { text: JSON.stringify({ merges }), reason: "complete" };
+}
+
+describe("ChatPanel L2 语义合并 (suggestMemoryMerges)", () => {
+  let panel: ChatPanel;
+  let storageDir: string;
+
+  beforeEach(async () => {
+    completionMock.state.calls = [];
+    queueCompletion({ text: "", reason: "failed" });
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-l2-merge-storage-"));
+    panel = makePanel(storageDir).panel;
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  it("按 MAX_MERGE_FACTS 分批，每批一次模型调用", async () => {
+    const facts = Array.from({ length: 100 }, (_, i) => `唯一事实 ${i}`);
+    queueSequence([mergeReply([]), mergeReply([]), mergeReply([])]);
+
+    const result = await internals(panel).suggestMemoryMerges(facts);
+
+    // 100 条按 40 切：40 / 40 / 20，每批都真的发了一次模型请求。
+    expect(completionMock.state.calls).toHaveLength(3);
+    const numbered = completionMock.state.calls.map(
+      (call) => (call.prompt.match(/^\d+\. /gm) ?? []).length,
+    );
+    expect(numbered).toEqual([MAX_MERGE_FACTS, MAX_MERGE_FACTS, 100 - 2 * MAX_MERGE_FACTS]);
+    // 占位符已被替换（提示词完整）。
+    for (const call of completionMock.state.calls) expect(call.prompt).not.toContain("{{facts}}");
+    expect(result.suggestions).toHaveLength(0);
+  });
+
+  it("含 @path 标记时，模型基于 stripped 文本返回的 keep/absorb 能反查回原始文本并定位行号", async () => {
+    const markdown = [
+      "# 记忆",
+      "",
+      "## iFlow Added Memories",
+      "",
+      "- 遵循 @docs/style.md 的格式约定",
+      "- 格式约定见 docs/style.md",
+      "",
+    ].join("\n");
+    const facts = parseManagedFacts(markdown);
+    const originalTexts = facts.map((fact) => fact.text);
+    // 模型只看到去掉 @ 的文本，按 stripped 文本回填 keep/absorb。
+    queueSequence([
+      mergeReply([
+        {
+          keep: "遵循 docs/style.md 的格式约定",
+          absorb: ["格式约定见 docs/style.md"],
+          merged: "按 docs/style.md 的格式约定执行",
+          reason: "同一约定",
+        },
+      ]),
+    ]);
+
+    const result = await internals(panel).suggestMemoryMerges(originalTexts);
+
+    // 发送前去掉 @（陷阱 #26），但回包经反查表还原成原始文本。
+    const sent = completionMock.state.calls[0]?.prompt ?? "";
+    expect(sent).not.toContain("@docs/");
+    expect(sent).toContain("docs/style.md");
+    expect(result.suggestions).toHaveLength(1);
+    expect(result.suggestions[0]?.keep).toBe("遵循 @docs/style.md 的格式约定");
+    expect(result.suggestions[0]?.absorb).toEqual(["格式约定见 docs/style.md"]);
+
+    // 反查后的原始文本能按行号定位（applyCurationPlan 的 merge 依赖行号）。
+    const actions = suggestionsToActions(result.suggestions, facts);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      kind: "merge",
+      targetLine: facts[0]?.line,
+      mergeLines: [facts[1]?.line],
+    });
+  });
+
+  it("跨批重复建议同一 keep 时只保留首个、不产生重复建议", async () => {
+    // 42 条 → 两批（40 + 2）。keep/absorb 在批 1（索引 0/1）与批 2（索引 40/41）
+    // 各出现一次（同一原文），模拟模型对重复事实给出同一条合并建议。
+    const facts = Array.from({ length: 40 }, (_, i) => `填充事实 ${i}`);
+    facts[0] = "使用 pnpm 管理依赖";
+    facts[1] = "依赖安装统一用 pnpm";
+    facts.push("使用 pnpm 管理依赖"); // 索引 40
+    facts.push("依赖安装统一用 pnpm"); // 索引 41
+    expect(facts).toHaveLength(42);
+
+    const sameMerge = [
+      {
+        keep: "使用 pnpm 管理依赖",
+        absorb: ["依赖安装统一用 pnpm"],
+        merged: "依赖统一用 pnpm 管理",
+        reason: "同一约定",
+      },
+    ];
+    queueSequence([mergeReply(sameMerge), mergeReply(sameMerge)]);
+
+    const result = await internals(panel).suggestMemoryMerges(facts);
+
+    expect(completionMock.state.calls).toHaveLength(2);
+    // 只保留首个 keep，第二批的同一条被静默丢弃（不重复、也不进 rejected）。
+    expect(result.suggestions).toHaveLength(1);
+    expect(result.suggestions[0]?.keep).toBe("使用 pnpm 管理依赖");
+    expect(result.rejected).toHaveLength(0);
+  });
+
+  it("某一批回包为空（网关失败）时其它批的建议仍生效", async () => {
+    // 100 条 → 三批（40 / 40 / 20）。批 1、3 各有一条有效合并，批 2 回包为空。
+    const facts = Array.from({ length: 100 }, (_, i) => `填充事实 ${i}`);
+    facts[0] = "使用 pnpm 管理依赖";
+    facts[1] = "依赖安装统一用 pnpm";
+    facts[80] = "回答使用中文";
+    facts[81] = "回复统一中文";
+
+    queueSequence([
+      mergeReply([
+        {
+          keep: "使用 pnpm 管理依赖",
+          absorb: ["依赖安装统一用 pnpm"],
+          merged: "依赖统一用 pnpm 管理",
+          reason: "同一约定",
+        },
+      ]),
+      { text: "", reason: "failed" }, // 批 2：网关无回包
+      mergeReply([
+        {
+          keep: "回答使用中文",
+          absorb: ["回复统一中文"],
+          merged: "统一用中文回答",
+          reason: "同一约定",
+        },
+      ]),
+    ]);
+
+    const result = await internals(panel).suggestMemoryMerges(facts);
+
+    expect(completionMock.state.calls).toHaveLength(3);
+    // 批 2 的空回包只丢这一批，批 1、3 的建议都保留。
+    expect(result.suggestions.map((s) => s.keep).sort()).toEqual(
+      ["使用 pnpm 管理依赖", "回答使用中文"].sort(),
+    );
+    expect(result.rejected).toHaveLength(0);
+  });
+
+  it("某一批模型调用抛错时只丢该批，其它批建议仍生效（有意行为变更）", async () => {
+    // 有意行为变更：此前的实现没有逐批 try/catch，某批抛错会中断整个调用、
+    // 丢弃全部建议（维护层降级为 L1）。现在逐批隔离 —— 单批瞬时故障只丢该批。
+    const facts = Array.from({ length: 100 }, (_, i) => `填充事实 ${i}`);
+    facts[0] = "使用 pnpm 管理依赖";
+    facts[1] = "依赖安装统一用 pnpm";
+    facts[80] = "回答使用中文";
+    facts[81] = "回复统一中文";
+
+    queueSequence([
+      mergeReply([
+        {
+          keep: "使用 pnpm 管理依赖",
+          absorb: ["依赖安装统一用 pnpm"],
+          merged: "依赖统一用 pnpm 管理",
+          reason: "同一约定",
+        },
+      ]),
+      () => Promise.reject(new Error("网关超时")), // 批 2：抛错
+      mergeReply([
+        {
+          keep: "回答使用中文",
+          absorb: ["回复统一中文"],
+          merged: "统一用中文回答",
+          reason: "同一约定",
+        },
+      ]),
+    ]);
+
+    const result = await internals(panel).suggestMemoryMerges(facts);
+
+    // 三批都发过请求；批 2 抛错不影响批 1、3。
+    expect(completionMock.state.calls).toHaveLength(3);
+    expect(result.suggestions.map((s) => s.keep).sort()).toEqual(
+      ["使用 pnpm 管理依赖", "回答使用中文"].sort(),
+    );
+    expect(result.rejected).toHaveLength(0);
+    // 失败批次有日志痕迹：点名第 2/3 批与错误摘要，并有一条汇总。
+    const warns = internals(panel).log.lines.filter((line) => line.level === "warn");
+    expect(
+      warns.some((line) => line.message.includes("第 2/3 批") && line.message.includes("网关超时")),
+    ).toBe(true);
+    expect(warns.some((line) => line.message.includes("1/3 批调用失败"))).toBe(true);
+  });
+
+  it("全部批次都抛错时返回空建议、不抛错（维护层降级为纯 L1）", async () => {
+    const facts = Array.from({ length: 100 }, (_, i) => `填充事实 ${i}`);
+    queueSequence([
+      () => Promise.reject(new Error("网关超时 A")),
+      () => Promise.reject(new Error("网关超时 B")),
+      () => Promise.reject(new Error("网关超时 C")),
+    ]);
+
+    const result = await internals(panel).suggestMemoryMerges(facts);
+
+    expect(completionMock.state.calls).toHaveLength(3);
+    expect(result.suggestions).toHaveLength(0);
+    expect(result.rejected).toHaveLength(0);
+    const warns = internals(panel).log.lines.filter((line) => line.level === "warn");
+    expect(warns.some((line) => line.message.includes("3/3 批调用失败"))).toBe(true);
+  });
+
+  it("空回包与抛错混合时：空回包跳过、抛错批次隔离，其余批建议保留", async () => {
+    // 100 条 → 三批（40 / 40 / 20）：批 1 抛错、批 2 空回包、批 3 有效建议。
+    const facts = Array.from({ length: 100 }, (_, i) => `填充事实 ${i}`);
+    facts[80] = "回答使用中文";
+    facts[81] = "回复统一中文";
+
+    queueSequence([
+      () => Promise.reject(new Error("网关超时")),
+      { text: "", reason: "failed" }, // 批 2：网关无回包（不是抛错）
+      mergeReply([
+        {
+          keep: "回答使用中文",
+          absorb: ["回复统一中文"],
+          merged: "统一用中文回答",
+          reason: "同一约定",
+        },
+      ]),
+    ]);
+
+    const result = await internals(panel).suggestMemoryMerges(facts);
+
+    expect(completionMock.state.calls).toHaveLength(3);
+    // 只有批 3 的建议存活；抛错与空回包都不产生建议，也不进 rejected。
+    expect(result.suggestions.map((s) => s.keep)).toEqual(["回答使用中文"]);
+    expect(result.rejected).toHaveLength(0);
+    const warns = internals(panel).log.lines.filter((line) => line.level === "warn");
+    expect(warns.some((line) => line.message.includes("第 1/3 批"))).toBe(true);
+    expect(warns.some((line) => line.message.includes("1/3 批调用失败"))).toBe(true);
   });
 });

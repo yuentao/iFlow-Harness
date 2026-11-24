@@ -51,7 +51,8 @@ export interface ChildShellGuardContext {
    */
   nodeModulesIsLink?: boolean;
   /**
-   * 子会话是否直接跑在**主仓工作区**（repo 档 / 合并子会话，无隔离）。
+   * 子会话是否直接跑在**主仓工作区**（repo 档：合并子会话与完全信任子会话
+   * 共用这一档，无隔离）。
    *
    * 这一档没有自己的分支与临时工作目录：`git reset --hard` / `git clean -fd`
    * / `git checkout -- .` 会直接在用户的工作区里丢掉未提交改动，不可逆。
@@ -59,8 +60,22 @@ export interface ChildShellGuardContext {
    * 破坏性 git 规则的判定**只在这一档生效** —— 由宿主按
    * `session.isolation.kind === "repo"` 显式传入，不靠路径猜测（repo 档的
    * 子会话可以 `cd` 到子目录里执行 git，路径相等判断会漏）。
+   *
+   * 注意：合并任务书的硬边界（push / rebase / 切分支 / stash）**不**看这个
+   * 字段，而看 {@link mergeChild} —— 完全信任子会话在同一档里被允许 push。
    */
   repoWorkspace?: boolean;
+  /**
+   * 子会话是否是真**合并子会话**（`spawnMerge` 派出、任务书是合并任务）。
+   *
+   * 与 {@link repoWorkspace} 分开：完全信任子会话（`isolation.fullTrust`）
+   * 同样跑在主仓工作区（kind === "repo"），但它的任务书允许 push / 建 PR /
+   * 合并 —— 只看隔离档位会把这类正常动作当成「越过合并边界」并终止会话
+   * （误判）。合并任务书的硬边界（push / rebase / 删分支 / 切分支 / stash /
+   * 扫走用户改动的 `git add -A`）**只对真正的合并子会话生效**，由宿主持有
+   * 的合并目标表（`mergeTargets`）显式传入；缺省 false 即不做合并边界判定。
+   */
+  mergeChild?: boolean;
   /**
    * 读取子会话工作目录内的脚本文件内容（可选）。
    *
@@ -254,11 +269,14 @@ const MERGE_STAGE_GIT_REASON =
  * repo 档写/编辑工具命中受保护路径的拒绝文案（`session` 档）。
  *
  * `.git/` 是仓库元数据（config / hooks / MERGE_HEAD / refs），`.iflow/super/`
- * 是宿主自己的子会话工作树与归档元数据 —— 两者都不是合并产物，改写它们
+ * 是宿主自己的子会话工作树与归档元数据 —— 两者都不是任务产物，改写它们
  * 等于绕过宿主的安全网。命令还没执行就终止，避免留下半改写的元数据。
+ *
+ * 文案刻意不写「合并子会话」：这条检查按 `repoWorkspace` 生效，完全信任
+ * 子会话同样命中，谎称它是合并子会话会把执行者引向错误的结论。
  */
 const PROTECTED_PATH_REASON =
-  "Blocked by the host guard: this merge child session must not write to protected repository metadata (.git/) or the host's Super Agent metadata (.iflow/super/). Only resolve the conflicted source files and let git create the merge commit.";
+  "Blocked by the host guard: this child session runs in the MAIN repository workspace and must not write to protected repository metadata (.git/) or the host's Super Agent metadata (.iflow/super/). Edit only the files that belong to your task and let git manage its own metadata.";
 
 const LINK_REASON =
   "Blocked by the host guard: creating a link (mklink / junction / symlink) that points at node_modules is not allowed. A child session must not share the main workspace's dependencies — deleting a linked node_modules (e.g. `npm ci`) destroys the real dependency tree. Install dependencies inside your own working directory instead.";
@@ -314,9 +332,10 @@ function classifyText(
 
   // ① repo 档（主仓工作区）的破坏性 git 命令 —— 不可逆地丢掉用户未提交
   //    改动。worktree 档不走这条规则（毁掉的是自己的临时目录）。
-  //    紧随其后的是 repo 档合并任务书的硬边界（push / rebase / 删分支 /
-  //    切分支 / stash / 扫走用户改动的 add -A）—— 同样只作用于 repo 档，
-  //    在命令执行的那一帧就终止，不等它真的跑起来。
+  //    紧随其后的是**真合并子会话**的任务书硬边界（push / rebase / 删分支 /
+  //    切分支 / stash / 扫走用户改动的 add -A）—— 只看 mergeChild，不看隔离
+  //    档位（完全信任子会话同样跑在主仓工作区，但允许 push / 合并）。命中
+  //    就在命令执行的那一帧终止，不等它真的跑起来。
   const gitVerdict =
     classifyDestructiveGit(segments, ctx) ?? classifyMergeBoundaryGit(segments, ctx);
   if (gitVerdict) return gitVerdict;
@@ -392,8 +411,9 @@ export function classifyChildToolCall(
  *
  * 背景：`run_shell_command` 的命令文本走 {@link classifyChildToolCall}，
  * 但 `write_file` / `replace` 这类工具根本不带命令文本，护栏对它们完全失明
- * —— 而合并子会话就跑在主仓工作区，能直接改写 `.git/config`、hooks、
- * MERGE_HEAD 或宿主的 `.iflow/super/` 子会话元数据，绕过全部安全网。
+ * —— 而 repo 档子会话（合并 / 完全信任）就跑在主仓工作区，能直接改写
+ * `.git/config`、hooks、MERGE_HEAD 或宿主的 `.iflow/super/` 子会话元数据，
+ * 绕过全部安全网。
  * 这条检查补上这个缺口：只对 repo 档（`repoWorkspace`）生效，只看「即将
  * 执行」的两帧，目标落在受保护路径下即终止会话。
  *
@@ -647,7 +667,7 @@ function classifyDestructiveGit(
 }
 
 /**
- * repo 档合并子会话的「任务书硬边界」git 规则（仅 `repoWorkspace` 生效）。
+ * 真合并子会话的「任务书硬边界」git 规则（仅 `ctx.mergeChild` 生效）。
  *
  * {@link classifyDestructiveGit} 管的是「丢用户未提交文件」，这里管的是
  * 「越过合并任务书写死的边界」：push / rebase / 删分支 / 切分支 / stash
@@ -655,25 +675,44 @@ function classifyDestructiveGit(
  * 结果（推送到远端、改写历史、丢掉来源分支、藏起用户改动）。预检帧据此
  * 终止整个子会话。
  *
+ * 判据是 `mergeChild` 而不是隔离档位：完全信任子会话也跑在主仓工作区
+ * （`repoWorkspace`），但它的任务书明确允许 push / 建 PR / 合并 —— 把
+ * 「跑在主仓工作区」当成合并子会话会让完全信任子会话的正常动作被误杀。
+ * 宿主按合并目标表（`mergeTargets`）显式传入。
+ *
  * 另一类 `git add -A` / `git commit -a` 会把用户**其它**未提交改动卷进
  * 合并提交：后果严重但可由用户恢复，且这类命令常出现在冲突解决中途 ——
  * 终止会话会把仓库留在 MERGE_HEAD 中间态（任务书明令禁止）。因此按
  * `tool` 档处理：审批路径拒掉单次调用，预检路径刻意不终止（见
  * MERGE_STAGE_GIT_REASON 的说明）。
  *
- * worktree 档完全不受这些规则约束：那些子会话本就被允许 push / 建 PR。
+ * worktree 档与非合并的 repo 档（完全信任）完全不受这些规则约束：那些
+ * 子会话本就被允许 push / 建 PR / 合并。破坏性 git 仍由
+ * {@link classifyDestructiveGit} 按 `repoWorkspace` 拦截。
  */
 function classifyMergeBoundaryGit(
   segments: string[][],
   ctx: ChildShellGuardContext,
 ): ChildShellGuardResult | null {
-  if (!ctx.repoWorkspace) return null;
+  if (!ctx.mergeChild) return null;
   for (const tokens of segments) {
     const invocation = findGitInvocation(tokens);
     if (!invocation) continue;
     const { subcommand, args } = invocation;
-    if (subcommand === "push" || subcommand === "rebase" || subcommand === "stash") {
+    // push 只有 dry-run 是纯预演（不碰远端）；其余形态都会推送。
+    if (subcommand === "push" && !args.some((arg) => arg.toLowerCase() === "--dry-run")) {
       return { decision: "deny", reason: MERGE_BOUNDARY_GIT_REASON, severity: "session" };
+    }
+    if (subcommand === "rebase") {
+      return { decision: "deny", reason: MERGE_BOUNDARY_GIT_REASON, severity: "session" };
+    }
+    // stash 只有 list / show 是只读查看；无子命令（默认 push）与
+    // push/pop/apply/drop/clear 都会改动工作区或藏起用户改动，仍拦。
+    if (subcommand === "stash") {
+      const operation = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+      if (operation !== "list" && operation !== "show") {
+        return { decision: "deny", reason: MERGE_BOUNDARY_GIT_REASON, severity: "session" };
+      }
     }
     if (deletesBranch(subcommand, args) || switchesBranch(subcommand, args)) {
       return { decision: "deny", reason: MERGE_BOUNDARY_GIT_REASON, severity: "session" };
@@ -709,7 +748,33 @@ function switchesBranch(subcommand: string, args: readonly string[]): boolean {
   const lower = args.map((arg) => arg.toLowerCase());
   if (lower.some((arg) => arg === "-b" || arg === "-B" || arg === "--orphan")) return false;
   if (lower.includes("--")) return false;
-  return lower.some((arg) => !arg.startsWith("-") && arg !== "." && arg !== "./" && arg !== ".\\");
+  return lower.some(
+    (arg) =>
+      !arg.startsWith("-") &&
+      arg !== "." &&
+      arg !== "./" &&
+      arg !== ".\\" &&
+      !looksLikeCheckoutPath(arg),
+  );
+}
+
+/**
+ * checkout 的目标是不是「文件/路径」而不是「分支名」。
+ *
+ * `git checkout src/panel/a.ts` 是单文件检出，不离开合并现场；只有像
+ * `git checkout main` 这种没有任何路径特征的目标才当成切分支。判据取宽：
+ * 带路径分隔符（`/` 或 `\`）或带常见文件扩展名即视为路径 —— 宁可少拦一次
+ * 文件检出，也不把正常的冲突文件检出误判成越界切分支。
+ *
+ * 已知取舍：分支名本身带 `/`（如 `iflow/super/x`）也会落进「路径」这一侧，
+ * 这类切分支不再被本函数识别；调用方若需要更强的保证，应依赖
+ * {@link findGitInvocation} 之外的显式分支清单。
+ */
+function looksLikeCheckoutPath(target: string): boolean {
+  if (target.includes("/") || target.includes("\\")) return true;
+  return /\.(ts|tsx|js|jsx|mjs|cjs|json|md|markdown|css|scss|less|html|htm|txt|yml|yaml|toml|xml|py|go|rs|java|c|h|cc|cpp|hpp|cs|sh|ps1|vue|svelte|png|jpe?g|gif|svg|ico|lock)$/i.test(
+    target,
+  );
 }
 
 /** `git add -A` / `git add .` / `git commit -a`（把用户其它改动卷进合并）。 */
@@ -733,32 +798,77 @@ function stagesAllChanges(subcommand: string, args: readonly string[]): boolean 
 /**
  * 在一个命令段里找 git 调用，返回子命令与它之后的参数。
  *
+ * **只在命令位认 git**（见 {@link commandStartIndex}）：段首命令，或已知
+ * 包装命令后面那个内层命令。绝不扫描任意 token —— 否则
+ * `Select-String -Path docs -Pattern git push`、`rg -n git stash test/`
+ * 这类只读检索会把搜索模式里的 `git` 当成真实调用，整段会话被误终止。
+ *
  * 跳过 git 的全局选项：取值型（`-C <dir>` / `-c <k=v>` / `--git-dir <path>`）
  * 连它后面那个词一起跳过，布尔型（`--no-pager`）只跳过自己 —— 否则
  * `git -C repo reset --hard` 的子命令会被读成 `repo`，规则直接失明。
  */
 function findGitInvocation(tokens: string[]): { subcommand: string; args: string[] } | null {
-  for (let i = 0; i < tokens.length; i++) {
-    if (!GIT_BINARIES.has(commandName(tokens[i]!))) continue;
-    let j = i + 1;
-    while (j < tokens.length) {
-      const token = tokens[j]!;
-      if (!token.startsWith("-")) break;
-      if (token.includes("=")) {
-        j += 1;
-        continue;
-      }
-      if (GIT_GLOBAL_VALUE_OPTIONS.has(token.toLowerCase())) {
-        j += 2;
-        continue;
-      }
+  const start = commandStartIndex(tokens);
+  if (start < 0) return null;
+  if (!GIT_BINARIES.has(commandName(tokens[start]!))) return null;
+  let j = start + 1;
+  while (j < tokens.length) {
+    const token = tokens[j]!;
+    if (!token.startsWith("-")) break;
+    if (token.includes("=")) {
       j += 1;
+      continue;
     }
-    const subcommand = tokens[j];
-    if (!subcommand) return null;
-    return { subcommand: commandName(subcommand), args: tokens.slice(j + 1) };
+    if (GIT_GLOBAL_VALUE_OPTIONS.has(token.toLowerCase())) {
+      j += 2;
+      continue;
+    }
+    j += 1;
   }
-  return null;
+  const subcommand = tokens[j];
+  if (!subcommand) return null;
+  return { subcommand: commandName(subcommand), args: tokens.slice(j + 1) };
+}
+
+/**
+ * 命令段里「真正要执行的命令」所在的下标。
+ *
+ * 只有这些位置才算命令位：
+ *  - 段首词本身（`git ...` / `npm ...`）；
+ *  - 已知包装命令的内层首词 —— `cmd /c <命令>`、`powershell -Command <命令>`、
+ *    `bash -c <命令>`、`sh -c <命令>`、`call <命令>`、`npx <命令>`。
+ *
+ * 返回 -1 表示这一段没有可识别的命令位：只有选项、包装命令后面没有内联
+ * 命令开关（例如 `bash run.sh` 的脚本名不是命令），或压根是别的命令。
+ * 这正是「只读检索不误伤」的关键 —— 搜索模式、字符串字面量、参数值里的
+ * `git` 都不在命令位。
+ *
+ * 已知漏网边界：`FOO=1 git push`（前置环境变量赋值）与 `sudo git push`
+ * 这类命令前缀不在已知包装清单里，会被判成非命令位。宿主环境是 Windows、
+ * 任务书也不依赖这两种写法，因此不额外处理。
+ */
+function commandStartIndex(tokens: readonly string[]): number {
+  if (tokens.length === 0) return -1;
+  const first = commandName(tokens[0]!);
+  if (GIT_BINARIES.has(first)) return 0;
+  // `npx <命令> ...`：跳过 npx 的选项，第一个非选项词就是被执行的命令。
+  if (first === "npx") {
+    for (let i = 1; i < tokens.length; i++) {
+      if (!tokens[i]!.startsWith("-")) return i;
+    }
+    return -1;
+  }
+  // `call <命令>`（cmd 批处理内联调用）：内层命令紧跟其后，没有 `-c` 开关。
+  if (first === "call") return tokens.length > 1 ? 1 : -1;
+  if (!WRAPPER_COMMANDS.has(first)) return -1;
+  // `cmd /c` / `powershell -Command` / `bash -c`：内层命令跟在开关之后。
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (!/^[-/]/.test(token)) continue;
+    if (!INLINE_COMMAND_FLAGS.has(token.replace(/^[-/]/, "").toLowerCase())) continue;
+    return i + 1 < tokens.length ? i + 1 : -1;
+  }
+  return -1;
 }
 
 /** 该子命令+参数是否会不可逆地丢改动（repo 档口径）。 */

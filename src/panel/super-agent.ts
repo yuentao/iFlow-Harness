@@ -142,6 +142,7 @@ import {
   superBranchName,
   superIsolationDir,
   superWorktreeRoots,
+  type WorkingTreeState,
   worktreeHasUncommittedChanges,
   worktreePathFor,
 } from "./worktree.js";
@@ -1323,11 +1324,28 @@ export class SuperAgentManager {
     return child;
   }
 
-  /** 是否已有一个合并子会话在跑（主仓工作区没有版本隔离）。 */
+  /**
+   * 是否已有一个**真合并子会话**在跑（主仓工作区没有版本隔离）。
+   *
+   * 判据是合并目标表（`spawnMerge` 登记、`finalizeMergeChild` / 清理时删除）
+   * 而不是 `isolation.kind === "repo"`：完全信任子会话也跑在主仓工作区，
+   * 把它算成合并子会话会让真正的合并请求被拒派（队列永久卡住）。
+   */
   private repoMergeRunning(): boolean {
-    for (const session of this.sessions.values()) {
-      if (session.isolation.kind !== "repo") continue;
-      if (!isTerminalSuperStatus(session.status)) return true;
+    return this.hasRunningMergeChild();
+  }
+
+  /**
+   * 是否真有合并子会话在跑（只认 `spawnMerge` 派出、尚未收尾的那一个）。
+   *
+   * 宿主用它在汇报 / 回执 / 委派轮的 drain 上做互斥：只有合并子会话在主仓
+   * 工作区跑 git 时才需要让主会话避让。完全信任子会话不占这条车道 ——
+   * 否则它的存在会挡住主会话的汇报（真实故障：汇报轮永远投不出去）。
+   */
+  hasRunningMergeChild(): boolean {
+    for (const id of this.mergeTargets.keys()) {
+      const session = this.sessions.get(id);
+      if (session && !isTerminalSuperStatus(session.status)) return true;
     }
     return false;
   }
@@ -3159,6 +3177,10 @@ export class SuperAgentManager {
             cwd: session.isolation.path,
             repoRoot: this.deps.repoRoot,
             repoWorkspace: session.isolation.kind === "repo",
+            // 合并任务书的硬边界只对**真合并子会话**生效：完全信任子会话
+            // 同样跑在 repo 档（主仓工作区），但它的任务书允许 push / 合并。
+            // 真源就是派发时登记的合并目标表，不看隔离档位。
+            mergeChild: this.mergeTargets.has(id),
             nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
             readLocalFile: (filePath) => {
               try {
@@ -3344,6 +3366,8 @@ export class SuperAgentManager {
       cwd: session.isolation.path,
       repoRoot: this.deps.repoRoot,
       repoWorkspace: session.isolation.kind === "repo",
+      // 与预检路径同一口径：合并边界只看真合并子会话。
+      mergeChild: this.mergeTargets.has(id),
       nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
     });
     return verdict.decision === "deny" ? { reason: verdict.reason } : null;
@@ -3597,6 +3621,16 @@ export class SuperAgentManager {
     await this.integrationChain;
   }
 
+  /**
+   * 只读读取主工作区状态。
+   *
+   * 收敛成一个方法是为了单测能覆盖它：合并提示的误报根源正是「用旧快照决定
+   * 文案」—— 单测注入「合并前脏、合并后干净」的序列即可验证文案只认实时结果。
+   */
+  private readWorkingTree(): Promise<WorkingTreeState> {
+    return inspectWorkingTree(this.deps.repoRoot);
+  }
+
   private async runIntegration(id: string, attempt: number): Promise<void> {
     const session = this.sessions.get(id);
     if (!session || this.disposed) return;
@@ -3643,7 +3677,7 @@ export class SuperAgentManager {
     }
 
     if (mode === "merge") {
-      const tree = await inspectWorkingTree(this.deps.repoRoot);
+      const tree = await this.readWorkingTree();
       if (!tree.available) {
         record(
           {
@@ -3719,16 +3753,19 @@ export class SuperAgentManager {
       const result = await mergeBranch({ repoRoot: this.deps.repoRoot, branch: isolation.branch });
       if (result.ok) {
         const target = (await currentBranch(this.deps.repoRoot)) ?? "当前分支";
+        // 文案以**合并之后**的实时工作区为准：合并前的 `tree` 只是一次快照，
+        // 用户可能在这期间提交了改动（或被前一次合并吸收），照抄旧快照就会
+        // 谎报「你本地未提交的 N 处改动原样保留」—— 主会话会据此让用户去
+        // 清理并不存在的东西。真正需要如实告知的是「此刻还留在工作区里的
+        // 未提交改动」。探测失败（null）时什么都不声称，只报已合入。
+        const live = await this.readWorkingTree().catch(() => null);
+        const kept = describeKeptLocalChanges(live);
         record(
           {
             state: "merged",
-            detail: tree.clean
-              ? `已合入 ${target}`
-              : `已合入 ${target}（你本地未提交的 ${tree.dirtyCount} 处改动原样保留）`,
+            detail: kept ? `已合入 ${target}（${kept.zh}）` : `已合入 ${target}`,
           },
-          tree.clean
-            ? `merged into ${target}`
-            : `merged into ${target} (the ${tree.dirtyCount} uncommitted local change(s) were kept as they were)`,
+          kept ? `merged into ${target} (${kept.en})` : `merged into ${target}`,
         );
       } else {
         // 合并没成：确认它到底有没有启动（预演之后 HEAD 可能被别处改过）。
@@ -4954,7 +4991,7 @@ export function classifySuperFailureKind(error: string): SuperFailureKind {
   if (/blocked|destructive|guard|护栏|依赖.*失败|上游/.test(text)) return "blocked";
   if (/interrupt|cancel|abort|中断|已停止|stopped by|user stop/.test(text)) return "interrupted";
   if (
-    /退出|exit|crash|崩溃|timeout|超时|无响应|限流|rate.?limit|econn|network|网络瞬断|watchdog|看门狗/.test(
+    /退出|exit|crash|崩溃|timeout|timed?[\s-]+out|超时|无响应|限流|rate.?limit|econn|network|网络瞬断|watchdog|看门狗/.test(
       text,
     )
   ) {
@@ -5347,6 +5384,39 @@ function describePaths(paths: readonly string[], limit = 5): string {
 function describePathsEn(paths: readonly string[], limit = 5): string {
   const head = paths.slice(0, limit).join(", ");
   return paths.length > limit ? `${head} and ${paths.length - limit} more` : head;
+}
+
+/**
+ * 合并成功后「你本地未提交的改动原样保留」这句文案的**实时**来源。
+ *
+ * 判据必须是合并**之后**重新读到的 `git status`，不能沿用合并前的快照：
+ * 预演 + 真实 merge + 分支探测要花时间，用户完全可能在这期间提交或丢弃了
+ * 改动（改动也可能被前一次合并吸收）—— 照抄旧快照就会报出一个早已不存在的
+ * 脏工作区，主会话据此让用户去清理并不存在的东西。
+ *
+ * 返回 null = 此刻工作区干净、或状态读不到（宁可什么都不声称），调用方只报
+ * 「已合入 X」。返回文案时如实列出仍在工作区的具体文件 —— 真正脏的时候，
+ * 用户仍必须知道自己的改动没被合并覆盖。
+ */
+export function describeKeptLocalChanges(
+  tree: WorkingTreeState | null,
+): { zh: string; en: string } | null {
+  if (!tree || !tree.available || tree.dirtyCount === 0) return null;
+  const tracked = tree.trackedPaths;
+  if (tracked.length === 0) {
+    // 只有未跟踪文件：git 从不覆盖它们，如实计数即可（逐个列会淹掉正文）。
+    return {
+      zh: `工作区仍有你未跟踪的 ${tree.untrackedCount} 个文件，未被合并触碰`,
+      en: `your ${tree.untrackedCount} untracked file(s) are still in the working tree, untouched by the merge`,
+    };
+  }
+  const untrackedNote = tree.untrackedCount > 0 ? `，另有未跟踪文件 ${tree.untrackedCount} 个` : "";
+  const untrackedNoteEn =
+    tree.untrackedCount > 0 ? `, plus ${tree.untrackedCount} untracked file(s)` : "";
+  return {
+    zh: `你本地未提交的改动原样保留：${describePaths(tracked)}${untrackedNote}`,
+    en: `your uncommitted local changes were kept as they were: ${describePathsEn(tracked)}${untrackedNoteEn}`,
+  };
 }
 
 /** 重试提示词里的截断：上一次的错误/摘要可能很长，别把它们整段塞进提示词。 */

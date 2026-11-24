@@ -53,7 +53,7 @@ import {
   type SuperDirectiveTask,
 } from "../../../shared/super-agent";
 import type { ToolBlock } from "../../../shared/messages";
-import { parseSuperToolCall } from "../../../shared/super-tool-call";
+import { parseSuperToolCall, resolveSuperToolCallKind } from "../../../shared/super-tool-call";
 import { DELEGATION_ORIGIN_ATTR } from "./SuperDelegationFly";
 import { Button, Chip, ICON_INLINE, IconButton } from "./ui";
 import { Markdown, copyText } from "./Markdown";
@@ -435,13 +435,11 @@ function ActionRows({ actions }: { actions: SuperDirectiveAction[] }) {
           <Chip tone={ACTION_TONES[action.action] ?? "muted"}>
             {t(ACTION_LABELS[action.action] ?? action.action)}
           </Chip>
-          {/* 标题在前、id 在后：用户第一眼能认出针对哪个子会话，id 仍保留
-              便于精确排障。取不到标题（围栏路径 / 记录已清理）时退回裸 id，
-              不留空的括号或分隔符（分层纪律：webview 只渲染宿主给的字段）。 */}
+          {/* 只渲染人能读懂的标识：有标题显示标题，没有标题显示本卡内的序号。
+              内部 sessionId 属于排障信息，不摊到卡面上（分层纪律：webview 只
+              渲染宿主给的可读字段）。 */}
           <code className="min-w-0 break-all font-mono text-ui-micro text-muted-foreground">
-            {action.title?.trim()
-              ? t("{0}（{1}）", action.title.trim(), action.sessionId)
-              : action.sessionId || t("未指定超流体")}
+            {action.title?.trim() || t("第 {0} 个", index + 1)}
           </code>
           {action.keepBranch && (
             <span className="text-ui-micro text-muted-foreground">{t("保留分支")}</span>
@@ -529,7 +527,8 @@ interface SuperToolTaskView {
 type SuperToolCallParse =
   | { ok: true; tasks: SuperToolTaskView[]; error: string | null }
   | { ok: false; reason: "pending" }
-  | { ok: false; reason: "invalid"; detail: string };
+  | { ok: false; reason: "invalid"; detail: string }
+  | { ok: false; reason: "conflict" };
 
 /** 折叠态任务书预览预算：与围栏任务卡同源，按块截断而不是切半句。 */
 const SUPER_TOOL_PREVIEW_CHARS = 200;
@@ -585,6 +584,13 @@ function superToolCallFailureDetail(block: ToolBlock): string {
  * 混合载荷（部分条目合法）时宿主同时给 tasks 与 error，卡片两者都呈现。
  */
 function parseSuperToolCallPayload(block: ToolBlock): SuperToolCallParse {
+  // 载荷同时带 tasks 与 actions：宿主 `parseSuperToolCall` 判为 conflict 并
+  // 整份拒绝（一条都不执行，见 shared/super-tool-call.ts）。渲染层必须先按
+  // 同一份纯函数识别出来 —— 否则下面回解 input 会成功拿到 tasks，把一次被
+  // 宿主拒绝的调用画成「已派发」。
+  if (resolveSuperToolCallKind("dispatch", block.input) === "conflict") {
+    return { ok: false, reason: "conflict" };
+  }
   const hostError = block.superTasksError?.trim() || null;
   const host = block.superTasks;
   if (host && host.length > 0) {
@@ -673,7 +679,7 @@ function SuperToolStatusChip({
 const ACTION_RESULT_REASON: Record<SuperActionReceipt["reason"], string> = {
   applied: "已生效",
   "already-terminal": "此前已结束，无需中断",
-  "not-found": "找不到该超流体（可能已被清理或 id 有误）",
+  "not-found": "找不到该超流体（可能已被清理或编号有误）",
   "not-applicable": "当前状态不适用",
 };
 
@@ -753,8 +759,12 @@ function ActionResultNotice({ results }: { results: SuperActionReceipt[] }) {
     );
   }
   const notFound = failed.some((receipt) => receipt.reason === "not-found");
-  const reasons = failed
-    .map((receipt) => `${receipt.sessionId}: ${t(ACTION_RESULT_REASON[receipt.reason])}`)
+  // 内部 sessionId 不上卡面：用「第 N 个」定位（N 与动作行序号一致）。
+  const reasons = results
+    .map((receipt, index) =>
+      receipt.ok ? "" : t("第 {0} 个：{1}", index + 1, t(ACTION_RESULT_REASON[receipt.reason])),
+    )
+    .filter(Boolean)
     .join("；");
   return (
     <div
@@ -768,7 +778,7 @@ function ActionResultNotice({ results }: { results: SuperActionReceipt[] }) {
       <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
       <span className="min-w-0 break-words">
         {notFound
-          ? t("有 {0} 个动作未生效（目标不存在或 id 有误）", failed.length)
+          ? t("有 {0} 个动作未生效（目标不存在或编号有误）", failed.length)
           : t("有 {0} 个动作未生效", failed.length)}
         ：{reasons}
       </span>
@@ -928,11 +938,14 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
   );
   const tasks = parsed.ok ? parsed.tasks : [];
   // 成功分支里也可能带 error（混合载荷：坏条目被丢弃、合法条目照常派发）。
+  // conflict 是宿主判过的结构错误（整份拒绝），同样按「未派发」呈现。
   const dispatchError = parsed.ok
     ? parsed.error
     : parsed.reason === "invalid"
       ? parsed.detail
-      : null;
+      : parsed.reason === "conflict"
+        ? t("参数冲突")
+        : null;
   return (
     <DirectiveSurface
       className="my-2"
@@ -974,6 +987,16 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
             </div>
           )}
         </>
+      ) : parsed.reason === "conflict" ? (
+        // 宿主判为参数冲突：tasks 与 actions 互斥，整份载荷被拒绝，一条都没
+        // 派发。卡面只说清结构问题与正确做法，不摊开原始 JSON。
+        <div className="px-3 py-2">
+          <DirectiveFailureBanner
+            testId="super-tool-call-conflict"
+            text={t("tasks 与 actions 不能同时传入，请拆成两次调用")}
+            rawInput={block.input || undefined}
+          />
+        </div>
       ) : parsed.reason === "pending" ? (
         <div className="flex items-center gap-2 px-3 py-2 text-ui-caption text-muted-foreground">
           <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />

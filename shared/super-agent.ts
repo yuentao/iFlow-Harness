@@ -4329,21 +4329,56 @@ export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
     activeOmitted += 1;
   }
   const kept = activeLines.slice(0, activeLines.length - activeOmitted);
+  // 终态条目：先尽量保留完整行（含结论摘要），放不下的**降级成精简行**
+  // （id + 状态 + 短标题）继续填，只有两档都放不下才计入 omitted。
+  //
+  // 旧实现只对活跃行做降级，终态行放不下就整条丢弃 —— 实测 3 个已完成的
+  // 子会话（结论各约 400 字符）第 3 个直接被折叠进「… (1 more omitted)」，
+  // 主 Agent 既不知道它存在，也不会去核对 / 合并它的结论（用户报告「汇报
+  // 在注入时以 omitted for budget 被省略」）。id 一旦折叠，主 Agent 连
+  // cancel / answer / retry 都无从下手；保留精简行则至少能看见「有这么一个
+  // 已完成的子会话」。
   const inactiveLines = inactive.map((session) => describeSuperSessionLine(session));
-  let inactiveKept = 0;
-  while (
-    inactiveKept < inactiveLines.length &&
-    fits(
-      [...kept, ...inactiveLines.slice(0, inactiveKept + 1)],
-      activeOmitted + (inactiveLines.length - inactiveKept - 1),
-    )
-  ) {
-    inactiveKept += 1;
+  const inactiveCompact = inactive.map((session) => describeSuperSessionCompactLine(session));
+  /** 已保留的终态行（与 `inactive` 同下标），以及它是否已降级为精简行。 */
+  const inactiveOut: string[] = [];
+  const inactiveOutIndex: number[] = [];
+  let skipped = 0;
+  for (let i = 0; i < inactiveLines.length; i += 1) {
+    // 剩余未处理条目一律按「会被省略」估算注记长度：注记本身占预算，
+    // 已跳过的那些也要算进去，否则会一边塞行一边低估 omitted 文案。
+    const omittedIfSkipped = skipped + (inactiveLines.length - i - 1);
+    if (fits([...kept, ...inactiveOut, inactiveLines[i]!], activeOmitted + omittedIfSkipped)) {
+      inactiveOut.push(inactiveLines[i]!);
+      inactiveOutIndex.push(i);
+      continue;
+    }
+    if (fits([...kept, ...inactiveOut, inactiveCompact[i]!], activeOmitted + omittedIfSkipped)) {
+      inactiveOut.push(inactiveCompact[i]!);
+      inactiveOutIndex.push(i);
+      continue;
+    }
+    skipped += 1;
   }
-  return render(
-    [...kept, ...inactiveLines.slice(0, inactiveKept)],
-    activeOmitted + (inactiveLines.length - inactiveKept),
-  );
+  // 收尾裁剪：上面的估算偏保守（跳过的条目数可能比预想更多），再逐条回退
+  // 直到真的放进预算，硬保证 ≤ 上限。回退时先尝试把完整行降级为精简行
+  // （保住 id + 状态），只有连精简行都放不下才整条丢弃。
+  let inactiveOmitted = inactiveLines.length - inactiveOut.length;
+  while (
+    inactiveOut.length > 0 &&
+    !fits([...kept, ...inactiveOut], activeOmitted + inactiveOmitted)
+  ) {
+    const last = inactiveOut.length - 1;
+    const compact = inactiveCompact[inactiveOutIndex[last]!]!;
+    if (inactiveOut[last] !== compact && fits([...kept, ...inactiveOut.slice(0, last), compact], activeOmitted + inactiveOmitted)) {
+      inactiveOut[last] = compact;
+      continue;
+    }
+    inactiveOut.pop();
+    inactiveOutIndex.pop();
+    inactiveOmitted += 1;
+  }
+  return render([...kept, ...inactiveOut], activeOmitted + inactiveOmitted);
 }
 
 // ---------------------------------------------------------------------------
@@ -4571,12 +4606,12 @@ export function extractSuperActions(text: string, fromOffset = 0): SuperActionSc
 
 /** 解析动作块正文。null = 格式非法（要提示），[] = 合法但无可执行动作（静默）。 */
 function parseActionBody(body: string): SuperAction[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return null;
-  }
+  // 与派发通道同源：动作正文也走宽松修复（原始换行 / 尾逗号 / 非法转义），
+  // 修不好才判非法。严格 JSON.parse 会让同一份脏 JSON「围栏能派发、动作却
+  // 静默丢失」—— 两条通道的容错口径必须一致（复用 parseJsonLoose，不另写）。
+  const loose = parseJsonLoose(body);
+  if (!loose.ok) return null;
+  const parsed = loose.value;
   const raw = Array.isArray(parsed)
     ? parsed
     : isRecord(parsed) && Array.isArray(parsed.actions)
@@ -4739,9 +4774,19 @@ export function buildSuperReportPrompt(
   // 关闭），自动把任务重跑一遍会像是没听话。
   const allDropped = entries.every((entry) => entry.report.state === "dropped");
   if (allDropped) {
+    // 智能体自己通过管理动作取消的子会话，宿主已另发一条动作回执明确告知
+    // 结果（buildSuperActionReceiptPrompt）。这里若照旧说「用户喊停、要不要
+    // 继续」会与那条回执自相矛盾（2026-11-23 实测）。只有整批 dropped 条目
+    // 都归因为 "agent" 时才用取消口径；含 user / system 的批次维持原措辞。
+    const allCancelledByAgent = entries.every(
+      (entry) => entry.session.interruptedBy === "agent",
+    );
+    const droppedNote = allCancelledByAgent
+      ? "These child sessions were **cancelled by you** through a child-session management action; the host already delivered an action receipt confirming the result — they did not fail, and the user did not stop them. Do not re-run them, and do not ask the user to decide whether to resume: just briefly confirm the cancellation and where it stopped, then move on."
+      : "These child sessions were **interrupted** (the user stopped them, or the panel was closed at the time) — they did not fail. Do not re-run them automatically, and do not assume the work continues: briefly state where they stopped and what was left behind, then ask the user whether to continue.";
     return [
       ...head,
-      "These child sessions were **interrupted** (the user stopped them, or the panel was closed at the time) — they did not fail. Do not re-run them automatically, and do not assume the work continues: briefly state where they stopped and what was left behind, then ask the user whether to continue.",
+      droppedNote,
       ...(pendingNote ? [pendingNote] : []),
     ].join("\n");
   }
@@ -4884,7 +4929,11 @@ const SUPER_ACTION_LABEL_EN: Record<SuperActionReceipt["action"], string> = {
  * **正文是英文**：与子会话汇报提示词同款约定（子会话跑的是同一份英文系统提示）。
  * 协议标记（`[子会话动作回执]`）保持原样：宿主与模型约定用它识别「这是回执」。
  */
-export function buildSuperActionReceiptPrompt(receipts: readonly SuperActionReceipt[]): string {
+export function buildSuperActionReceiptPrompt(
+  receipts: readonly SuperActionReceipt[],
+  /** 已并入本回执的 agent-cancel dropped 汇报（方案 B：不再另起汇报轮）。 */
+  mergedReports: readonly SuperReportEntry[] = [],
+): string {
   if (receipts.length === 0) return "";
   const lines = receipts.map((receipt) => {
     const outcome =
@@ -4898,10 +4947,24 @@ export function buildSuperActionReceiptPrompt(receipts: readonly SuperActionRece
     const detail = receipt.detail ? ` (${receipt.detail})` : "";
     return `- ${SUPER_ACTION_LABEL_EN[receipt.action]} child session #${receipt.sessionId}: ${outcome}${detail}`;
   });
+  const mergedLines = mergedReports.map(({ session, report }) => {
+    const summary = report.summary.trim() || (session.summary ?? "").trim() || (session.error ?? "").trim();
+    const where = summary ? ` — where it stopped: ${summary}` : "";
+    return `- Child session #${session.id} "${session.title}" ${superReportLabel(report.state)} (cancelled by you)${where}`;
+  });
   return [
     "[子会话动作回执]",
     "The host executed the child-session management actions from your previous message. This is not a user message, and it is not something you said earlier.",
     ...lines,
+    ...(mergedLines.length > 0
+      ? [
+          "",
+          "[Cancelled child-session state — merged into this receipt]",
+          "The final states below are delivered together with this action receipt. The host will NOT send a separate status-report turn for these cancellations — this is the ONLY host turn for them.",
+          ...mergedLines,
+          "Acknowledge the applied cancellation and where it stopped together, briefly, then move on. Do not re-run these child sessions, do not ask the user whether to resume, and do not answer this state in a later separate turn.",
+        ]
+      : []),
     "",
     "Actions reported as applied — including idempotent repeats of an already-finished child session — must NOT be sent again: repeating them cannot change the outcome and only wastes a turn.",
     "For an action that was NOT applied, check the board for the current child-session ids and send a corrected action instead of repeating the same one.",

@@ -2103,7 +2103,7 @@ export class QqHost {
     if (last !== undefined && now - last < QQ_FINAL_RESCUE_PROGRESS_MIN_INTERVAL_MS) return;
     this.qqFinalRescueProgressAt.set(taskId, now);
     const text = vscode.l10n.t(
-      "任务仍在进行中：还有 {0} 个子会话未结束，最终结论会在它们全部完成后送达。",
+      "任务仍在进行中：还有 {0} 个超流体未结束，最终结论会在它们全部完成后送达。",
       String(activeChildren),
     );
     await this.deliverQqMainIntermediateText(owner, text, [taskId]);

@@ -261,7 +261,7 @@ describe("QqSettings", () => {
     const trusted = items.find((item) => item.textContent?.includes("受信任"))!;
     act(() => trusted.click());
     expect(onChange).toHaveBeenCalledWith({ remotePolicy: "trusted" });
-    expect(container.textContent).toContain("工具调用无需 QQ 审核直接执行");
+    expect(container.textContent).toContain("工具调用无需 QQ 审批直接执行");
   });
 
   it("默认态：两列表格（条目 / 操作），行内无输入框，条目列含备注与完整脱敏值", () => {
@@ -1049,7 +1049,7 @@ describe("QqSettings", () => {
     expect(container.querySelector("input[aria-label='同时运行的任务数']")).toBeNull();
   });
 
-  it("待审核用户列表：脱敏 openid、来源、次数、预览与时间", () => {
+  it("待审批用户列表：脱敏 openid、来源、次数、预览与时间", () => {
     render(
       <Harness
         pending={[
@@ -1074,7 +1074,7 @@ describe("QqSettings", () => {
       />,
     );
     const text = container.textContent ?? "";
-    expect(text).toContain("待审核用户");
+    expect(text).toContain("待审批用户");
     // 与白名单区同一套脱敏：前 4 + 固定 8 个 * + 后 4（≤8 位整体覆盖）。
     // 完整 openid / 完整群号都不出现。
     expect(text).toContain("abcd********3456");
@@ -1128,13 +1128,12 @@ describe("QqSettings", () => {
     expect(starRuns.every((run) => run.length === 8)).toBe(true);
   });
 
-  it("待审核列表为空时不渲染该区", () => {
+  it("待审批列表为空时不渲染该区", () => {
     render(<Harness pending={[]} />);
-    expect(container.textContent).not.toContain("待审核用户");
-    expect(container.textContent).not.toContain("暂无待审核用户");
+    expect(container.textContent).not.toContain("待审批用户");
   });
 
-  it("批准 / 拒绝把 openid 与动作交回调用方", () => {
+  it("允许 / 拒绝把 openid 与动作交回调用方", () => {
     const openid = "openid-123456";
     render(
       <Harness
@@ -1150,7 +1149,7 @@ describe("QqSettings", () => {
         ]}
       />,
     );
-    clickText("批准");
+    clickText("允许");
     expect(onUserAction).toHaveBeenCalledWith(openid, "approve");
     clickText("拒绝");
     expect(onUserAction).toHaveBeenCalledWith(openid, "reject");

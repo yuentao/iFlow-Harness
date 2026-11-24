@@ -1105,9 +1105,12 @@ describe("super agent · 汇报", () => {
     expect(text).toContain("do not merely suggest them");
   });
 
-  it("全部被中断的汇报不催主会话继续，而是先问用户", () => {
+  it("全部被中断的汇报不催主会话继续，而是先问用户（用户喊停）", () => {
     const text = buildSuperReportPrompt([
-      { session: session({ status: "cancelled" }), report: { state: "dropped", summary: "用户中断", at: 1 } },
+      {
+        session: session({ status: "cancelled", interruptedBy: "user" }),
+        report: { state: "dropped", summary: "用户中断", at: 1 },
+      },
     ]);
     expect(text).toContain("were **interrupted**");
     expect(text).toContain("Do not re-run them automatically");
@@ -1115,9 +1118,56 @@ describe("super agent · 汇报", () => {
     expect(text).not.toContain("do not stop and wait for the user to speak again");
   });
 
+  it("系统收口导致的全 dropped 汇报保留用户问询措辞", () => {
+    const text = buildSuperReportPrompt([
+      {
+        session: session({ status: "cancelled", interruptedBy: "system" }),
+        report: { state: "dropped", summary: "面板关闭", at: 1 },
+      },
+    ]);
+    expect(text).toContain("were **interrupted**");
+    expect(text).toContain("ask the user whether to continue");
+  });
+
+  it("智能体主动取消的全 dropped 汇报：只简短确认，不问是否继续、不重跑", () => {
+    const text = buildSuperReportPrompt([
+      {
+        session: session({ status: "cancelled", interruptedBy: "agent" }),
+        report: { state: "dropped", summary: "主会话取消", at: 1 },
+      },
+    ]);
+    expect(text).toContain("were **cancelled by you**");
+    expect(text).toContain("action receipt confirming the result");
+    expect(text).toContain("Do not re-run them");
+    expect(text).not.toContain("ask the user whether to continue");
+    expect(text).not.toContain("were **interrupted**");
+    expect(text).not.toContain("do not stop and wait for the user to speak again");
+  });
+
+  it("混合来源的 dropped 批次维持原有中断措辞（保守口径）", () => {
+    const text = buildSuperReportPrompt([
+      {
+        session: session({ id: "super-1", status: "cancelled", interruptedBy: "agent" }),
+        report: { state: "dropped", summary: "主会话取消", at: 1 },
+      },
+      {
+        session: session({ id: "super-2", status: "cancelled", interruptedBy: "user" }),
+        report: { state: "dropped", summary: "用户中断", at: 2 },
+      },
+    ]);
+    expect(text).toContain("were **interrupted**");
+    expect(text).toContain("ask the user whether to continue");
+    expect(text).not.toContain("were **cancelled by you**");
+  });
+
   it("全部被中断且还有超流体在跑：保留中断说明，并补上仍在运行的说明", () => {
     const text = buildSuperReportPrompt(
-      [{ session: session({ status: "cancelled" }), report: { state: "dropped", summary: "用户中断", at: 1 } }],
+      [
+        {
+          session: session({ status: "cancelled", interruptedBy: "user" }),
+          report: { state: "dropped", summary: "用户中断", at: 1 },
+        },
+      ],
       { pendingCount: 1 },
     );
     expect(text).toContain("were **interrupted**");
@@ -1481,6 +1531,46 @@ describe("super agent · 看板摘要", () => {
     expect(beforeOmitted.indexOf("active-55")).toBeLessThan(beforeOmitted.indexOf("old-0"));
   });
 
+  it("终态子会话超预算时降级为精简行保住 id，不整条折叠进 omitted", () => {
+    // 用户实测回归：3 个子会话完成，看板却把第 3 条折叠成「… (1 more child
+    // session(s) omitted for budget)」—— 主 Agent 既看不到它的结论，也拿不到
+    // 它的 id 去核对 / 合并 / retry。旧实现只对**活跃**行降级为精简行，终态
+    // 行放不下就整条丢弃；真实汇报结论常在 400 字符量级，3 条就能超 4000 预算。
+    const done = [0, 1, 2].map((i) =>
+      session({
+        id: `super-${i}`,
+        title: `任务 ${i}`,
+        status: "completed",
+        summary: `结${"过".repeat(399)}#${i}`,
+      }),
+    );
+    const digest = buildSuperDigest(done);
+    expect(digest.length).toBeLessThanOrEqual(SUPER_DIGEST_MAX_CHARS);
+    // 三个 id 一个都不能丢。
+    for (const entry of done) expect(digest).toContain(entry.id);
+    // 预算足够容纳精简行 → 不该出现省略注记。
+    expect(digest).not.toMatch(/omitted for budget/);
+  });
+
+  it("条目多到连精简行都放不下时：仍硬保证预算上限，并如实注明省略数量", () => {
+    // 降级只能救「行太长」，救不了「行太多」：这时必须回退到省略，且最终
+    // 长度仍不得超过预算（否则提示词会被无界撑大）。
+    const many = Array.from({ length: 200 }, (_, i) =>
+      session({
+        id: `super-${i}`,
+        title: `任务 ${i}`,
+        status: "completed",
+        summary: `结${"过".repeat(399)}#${i}`,
+      }),
+    );
+    const digest = buildSuperDigest(many);
+    expect(digest.length).toBeLessThanOrEqual(SUPER_DIGEST_MAX_CHARS);
+    expect(digest).toMatch(/\d+ more child session\(s\) omitted for budget/);
+    // 保留部分仍然从头部开始（最近的派发顺序），尾部如实折叠。
+    expect(digest).toContain("super-0");
+    expect(digest).not.toContain("super-199");
+  });
+
   it("单行摘要压成一行并截断过长文本", () => {
     const line = describeSuperSessionLine(
       session({ status: "completed", summary: `第一行\n第二行${"长".repeat(300)}` }),
@@ -1664,6 +1754,25 @@ describe("super agent · 动作回执", () => {
 
   it("没有回执时不产出提示词（不发空回合）", () => {
     expect(buildSuperActionReceiptPrompt([])).toBe("");
+  });
+
+  it("方案 B：并入的 agent-cancel 上报写明是同一轮，且带上停止位置", () => {
+    const text = buildSuperActionReceiptPrompt(
+      [{ action: "cancel", sessionId: "super-1", ok: true, reason: "applied" }],
+      [
+        {
+          session: session({ id: "super-1", status: "cancelled", interruptedBy: "agent" }),
+          report: { state: "dropped", summary: "已跑到一半，停在登录跳转", at: 2000 },
+        },
+      ],
+    );
+    expect(text).toContain("[子会话动作回执]");
+    expect(text).toContain("merged into this receipt");
+    expect(text).toContain("super-1");
+    expect(text).toContain("已跑到一半，停在登录跳转");
+    // 关键：明确要求主会话把取消与状态当成同一轮，不再对这个 cancel 回答第二次。
+    expect(text).toContain("ONLY host turn");
+    expect(text).toContain("do not answer this state in a later separate turn");
   });
 });
 

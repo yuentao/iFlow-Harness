@@ -21,6 +21,7 @@ import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import type { SuperCancelOutcome } from "../src/panel/super-agent.js";
+import type { SuperReport, SuperSessionUi } from "../shared/super-agent.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 import type { SessionState } from "../shared/messages.js";
 
@@ -104,6 +105,18 @@ type PanelInternals = {
   }[]) => Promise<void>;
   /** 换会话 / 恢复会话 / 热重认证时的扫描与去重账本重置。 */
   resetSuperDirectiveScans: () => void;
+  /** 子会话上报入队（manager.cancel 的 notifyReport 走这条）。 */
+  queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
+  pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }>;
+  pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }>;
+  pendingSuperReports: Map<string, { size: number }>;
+  /** 面板未代理的宿主内部状态：只在测试里通过 private 字段读取。 */
+  superHost: {
+    reportDeliveryUnacked: Map<string, unknown>;
+    reportRedeliveryMs: number;
+    reconcileReportDelivery: () => void;
+  };
+  autoTurnsStoppedFor: string | null;
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
   notifyOs: (event: string, text: string) => boolean;
@@ -234,6 +247,116 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
         .find((item) => item.includes("super-1")) ?? "";
     expect(line).toContain("already applied (idempotent)");
     expect(line).not.toContain("NOT applied");
+  });
+
+  it("方案 B：一次 agent cancel 只产生一条 hidden 回合（上报并入回执，不再另答一次）", async () => {
+    const cancelled: SuperSessionUi = {
+      id: "super-cancel",
+      title: "半途任务",
+      task: "做一半",
+      status: "cancelled",
+      interruptedBy: "agent",
+      mainSessionId: "actions-session",
+      isolation: { kind: "directory", path: "/tmp/super-cancel" },
+      createdAt: 1000,
+      updatedAt: 1000,
+      reports: [],
+    };
+    const cancel = vi.fn(async (id: string, source: string) => {
+      expect(source).toBe("agent");
+      // 复刻 manager.cancel 末尾的 notifyReport：dropped 上报同步入队。
+      p.queueSuperReport([
+        {
+          session: cancelled,
+          report: { state: "dropped", summary: "停在登录跳转", at: 2000 },
+        },
+      ]);
+      return { ok: true, reason: "cancelled" as const, status: "cancelled" as const };
+    });
+    p.superAgent = { list: () => [cancelled], reportPrompt: () => "REPORT-TEXT", cancel };
+    const sendPrompt = vi.fn(async () => true);
+    p.sendPrompt = sendPrompt as unknown as PanelInternals["sendPrompt"];
+
+    p.scanSuperActions({
+      type: "text",
+      text: [
+        "```super-agent-actions",
+        '{"actions":[{"action":"cancel","sessionId":"super-cancel"}]}',
+        "```",
+      ].join("\n"),
+    });
+    await waitFor(() => sendPrompt.mock.calls.length > 0);
+    // 再多给几拍心跳：旧实现会在这时冒出第二条独立的汇报回合。
+    await flush();
+    await flush();
+
+    expect(cancel).toHaveBeenCalledTimes(1);
+    // 核心回归：一次 cancel 只有一条 assistant/hidden 回合，没有第二条汇报轮。
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    const promptText = String(sendPrompt.mock.calls[0]?.[0]);
+    expect(promptText).toContain("[子会话动作回执]");
+    expect(promptText).toContain("停在登录跳转");
+    expect(promptText).not.toContain("[子会话状态上报]");
+    expect(p.pendingSuperReportPrompts).toHaveLength(0);
+    expect(p.pendingSuperActionReceipts).toHaveLength(0);
+    // 上报已确认出缓冲：不会被心跳再投一次。
+    expect(p.pendingSuperReports.get("actions-session")?.size ?? 0).toBe(0);
+  });
+
+  it("方案 B：回执轮被 Stop 打断时上报不丢，心跳重投仍走回执队列", async () => {
+    const cancelled: SuperSessionUi = {
+      id: "super-cancel-held",
+      title: "被打断的取消",
+      task: "做一半",
+      status: "cancelled",
+      interruptedBy: "agent",
+      mainSessionId: "actions-session",
+      isolation: { kind: "directory", path: "/tmp/super-cancel-held" },
+      createdAt: 1000,
+      updatedAt: 1000,
+      reports: [],
+    };
+    const cancel = vi.fn(async () => {
+      p.queueSuperReport([
+        {
+          session: cancelled,
+          report: { state: "dropped", summary: "停在验证前", at: 2000 },
+        },
+      ]);
+      return { ok: true, reason: "cancelled" as const, status: "cancelled" as const };
+    });
+    p.superAgent = { list: () => [cancelled], reportPrompt: () => "REPORT-TEXT", cancel };
+    const sendPrompt = vi.fn(async () => true);
+    p.sendPrompt = sendPrompt as unknown as PanelInternals["sendPrompt"];
+    // Stop 压住：回执照投，但这轮不算真正 settle。
+    p.autoTurnsStoppedFor = "actions-session";
+
+    p.scanSuperActions({
+      type: "text",
+      text: [
+        "```super-agent-actions",
+        '{"actions":[{"action":"cancel","sessionId":"super-cancel-held"}]}',
+        "```",
+      ].join("\n"),
+    });
+    await waitFor(() => sendPrompt.mock.calls.length > 0);
+    await flush();
+    await flush();
+
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    // 上报没有被 confirm：转入 delivered-unacked，缓冲键保持 in-flight。
+    expect(p.superHost.reportDeliveryUnacked.size).toBe(1);
+    expect(p.pendingSuperReports.get("actions-session")?.size ?? 0).toBe(1);
+    expect(p.pendingSuperReportPrompts).toHaveLength(0);
+
+    // 用户下一轮解除 Stop：心跳重投必须回到**回执**队列，而不是拆成独立汇报轮。
+    p.autoTurnsStoppedFor = null;
+    p.superHost.reportRedeliveryMs = 0;
+    p.superHost.reconcileReportDelivery();
+    expect(p.superHost.reportDeliveryUnacked.size).toBe(0);
+    expect(p.pendingSuperActionReceipts).toHaveLength(1);
+    expect(String(p.pendingSuperActionReceipts[0]?.text)).toContain("[子会话动作回执]");
+    expect(p.pendingSuperReportPrompts).toHaveLength(0);
   });
 
   /** 直接驱动看板「单个中断」宿主路由，并抓取 store 发出的 toast。 */

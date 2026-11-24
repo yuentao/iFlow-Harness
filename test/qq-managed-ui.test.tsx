@@ -324,7 +324,7 @@ describe("纯 QQBot 界面文案", () => {
   });
 });
 
-describe("待审核用户（授权模型）", () => {
+describe("待审批用户（授权模型）", () => {
   function pending(): void {
     act(() =>
       useChat.getState().applyHostMessage({
@@ -351,16 +351,16 @@ describe("待审核用户（授权模型）", () => {
     act(() => button!.click());
   }
 
-  it("列表脱敏渲染，批准 / 拒绝 post qqUserAction", () => {
+  it("列表脱敏渲染，允许 / 拒绝 post qqUserAction", () => {
     pending();
     render();
     const text = container.textContent ?? "";
-    expect(text).toContain("待审核用户");
+    expect(text).toContain("待审批用户");
     expect(text).toContain("open********cdef");
     expect(text).not.toContain("openid-abcdef");
     expect(text).toContain("帮我看看构建为什么失败");
 
-    clickText("批准");
+    clickText("允许");
     expect(postMessage).toHaveBeenCalledWith({
       type: "qqUserAction",
       openid: "openid-abcdef",
@@ -374,10 +374,10 @@ describe("待审核用户（授权模型）", () => {
     });
   });
 
-  it("空列表不渲染待审核区，未授权时隐藏测试连接 / 解除绑定", () => {
+  it("空列表不渲染待审批区，未授权时隐藏测试连接 / 解除绑定", () => {
     render();
     const text = container.textContent ?? "";
-    expect(text).not.toContain("待审核用户");
+    expect(text).not.toContain("待审批用户");
     expect(text).toContain("一键接入 QQ 机器人");
     expect(text).not.toContain("测试连接");
     expect(text).not.toContain("解除绑定");

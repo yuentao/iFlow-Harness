@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode, errorMessage, isContextOverflowError, isRateLimitError, isThinkingUnsupportedError, isTransientStreamError } from "../src/acp/jsonrpc.js";
 
 describe("errorMessage", () => {
@@ -339,6 +339,31 @@ describe("JsonRpcPeer", () => {
     b.onNotification("update", (p) => received.push(p));
     a.notify("update", { v: 42 });
     expect(received).toEqual([{ v: 42 }]);
+  });
+
+  it("a throwing notification handler does not swallow later notifications", () => {
+    // 一帧通知的回调抛错若冒到 NDJSON 解析循环，同一 chunk 里后续的帧会全部
+    // 停止分发（整条流被吞掉）。必须捕获、记录，然后继续分发。
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const peer = new JsonRpcPeer(() => {});
+      const received: unknown[] = [];
+      peer.onNotification("boom", () => {
+        throw new Error("handler exploded");
+      });
+      peer.onNotification("ok", (p) => received.push(p));
+      const chunk =
+        JSON.stringify({ jsonrpc: "2.0", method: "boom", params: {} }) +
+        "\n" +
+        JSON.stringify({ jsonrpc: "2.0", method: "ok", params: { v: 1 } }) +
+        "\n";
+      expect(() => peer.handleData(chunk)).not.toThrow();
+      expect(received).toEqual([{ v: 1 }]);
+      expect(warn).toHaveBeenCalled();
+      expect(String(warn.mock.calls[0]?.[0])).toContain("boom");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("rejects a request on error response", async () => {

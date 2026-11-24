@@ -239,10 +239,19 @@ describe("合并载荷纠偏 · super-agent 工具的 actions 参数", () => {
     expect(parsed.actions[0]?.sessionId).toBe("super-x");
   });
 
-  it("有 tasks 时不改判（派发优先），两者都带也不误吞", () => {
+  it("有 tasks 时按派发处理；tasks 与 actions 同时非空 → conflict 明确报错", () => {
     const withTasks = { tasks: [{ title: "甲", task: "做事" }] };
     expect(resolveSuperToolCallKind("dispatch", withTasks)).toBe("dispatch");
-    expect(resolveSuperToolCallKind("dispatch", { ...withTasks, ...actionArgs })).toBe("dispatch");
+    // 派发与动作互斥：并存不是「派发优先」，而是结构错误，必须显式失败，
+    // 不能静默挑一条通道执行、把另一半指令凭空丢掉。
+    expect(resolveSuperToolCallKind("dispatch", { ...withTasks, ...actionArgs })).toBe(
+      "conflict",
+    );
+    const parsed = parseSuperToolCall("dispatch", { ...withTasks, ...actionArgs });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.reason).toContain("both tasks and actions");
+    expect(parsed.issues[0]).toContain("tasks 与 actions");
   });
 
   it("空 actions 不改判：照派发解析并明确失败，不静默成功", () => {
@@ -250,10 +259,49 @@ describe("合并载荷纠偏 · super-agent 工具的 actions 参数", () => {
     expect(parseSuperToolCall("dispatch", { actions: [] }).ok).toBe(false);
   });
 
-  it("反向不改判：actions 工具带 tasks 仍按 actions 处理", () => {
+  it("反向不改判：actions 工具带纯 tasks 仍按 actions 处理（不误吞派发载荷）", () => {
     expect(resolveSuperToolCallKind("actions", { tasks: [{ title: "甲", task: "做事" }] })).toBe(
       "actions",
     );
+  });
+
+  it("actions 通道：tasks 与 actions 并存同样判 conflict（与工具名无关）", () => {
+    // 与 dispatch 侧同口径：并存是载荷结构错误，不能只执行 actions 把 tasks
+    // 静默丢弃。
+    const both = { tasks: [{ title: "甲", task: "做事" }], ...actionArgs };
+    expect(resolveSuperToolCallKind("actions", both)).toBe("conflict");
+    const parsed = parseSuperToolCall("actions", both);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.reason).toContain("both tasks and actions");
+    expect(parsed.issues[0]).toContain("tasks 与 actions");
+    expect(parsed.issues[0]).toContain("分开");
+  });
+
+  it("actions 通道：纯 actions 行为不变（仍解析出动作）", () => {
+    expect(resolveSuperToolCallKind("actions", actionArgs)).toBe("actions");
+    const parsed = parseSuperToolCall("actions", actionArgs);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.kind).toBe("actions");
+    expect(parsed.tasks).toEqual([]);
+    expect(parsed.actions).toEqual([{ action: "cancel", sessionId: "super-x" }]);
+  });
+
+  it("actions 通道：纯 tasks（无 actions）行为不变 —— 不误判 conflict，按 actions 解析为空载失败", () => {
+    const pureTasks = { tasks: [{ title: "甲", task: "做事" }] };
+    expect(resolveSuperToolCallKind("actions", pureTasks)).toBe("actions");
+    // 名字是 actions 却不带动作：明确失败，绝不静默成功或改判派发。
+    expect(parseSuperToolCall("actions", pureTasks).ok).toBe(false);
+  });
+
+  it("actions 通道：tasks / actions 都为空数组行为不变（不判 conflict，按空载失败）", () => {
+    const empty = { tasks: [], actions: [] };
+    expect(resolveSuperToolCallKind("actions", empty)).toBe("actions");
+    expect(parseSuperToolCall("actions", empty).ok).toBe(false);
+    // dispatch 侧同样保持：两者都空 → 仍按 dispatch，解析为空载失败。
+    expect(resolveSuperToolCallKind("dispatch", empty)).toBe("dispatch");
+    expect(parseSuperToolCall("dispatch", empty).ok).toBe(false);
   });
 });
 
@@ -415,5 +463,37 @@ describe("parseSuperDelegationPayload · 畸形载荷诊断", () => {
     if (!parsed.ok) return;
     expect(parsed.tasks.flat()).toHaveLength(1);
     expect(parsed.issues).toEqual(["tasks[1].task 必须是字符串"]);
+  });
+});
+
+/**
+ * 动作围栏的容错口径必须与派发通道一致：同一份「脏但语义完整」的 JSON
+ * （尾逗号 / 裸换行 / 非法转义）在委派围栏里能派发，在动作围栏里也必须能执行。
+ * 旧实现用严格 JSON.parse，两条通道的容错口径不对称 —— 动作被静默丢弃。
+ */
+describe("动作围栏 · 宽松解析（与派发通道同源）", () => {
+  it("尾逗号（对象 / 数组末尾都有）也能解析出动作", () => {
+    const text = [
+      "```super-agent-actions",
+      '{"actions":[{"action":"cancel","sessionId":"super-x",},],}',
+      "```",
+    ].join("\n");
+    const scan = extractSuperActions(text, 0);
+    expect(scan.invalidBlocks).toEqual([]);
+    expect(scan.actions).toEqual([{ action: "cancel", sessionId: "super-x" }]);
+  });
+
+  it("answer 文本里的裸换行被修复后原样保留", () => {
+    const text = [
+      "```super-agent-actions",
+      '{"actions":[{"action":"answer","sessionId":"super-a","answers":{"问题":"第一行',
+      '第二行"}}]}',
+      "```",
+    ].join("\n");
+    const scan = extractSuperActions(text, 0);
+    expect(scan.invalidBlocks).toEqual([]);
+    expect(scan.actions[0]).toMatchObject({ action: "answer", sessionId: "super-a" });
+    if (scan.actions[0]?.action !== "answer") return;
+    expect(scan.actions[0].answers["问题"]).toBe("第一行\n第二行");
   });
 });

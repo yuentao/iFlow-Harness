@@ -230,7 +230,7 @@ function modelMetadataLabel(src: ModelMetadataSource | null): string {
     // 五档权威链的第 2/3 档（占用条与 CLI 共用同一 resolver）：数值来自活动
     // API 配置档 / 内核 settings.json 顶层，不是猜测出来的估算值。
     case "profile":
-      return t("接口配置档");
+      return t("API 配置");
     case "settings":
       return t("内核配置");
     case "fallback-estimate":
@@ -2411,7 +2411,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 disabled={stopping}
                 onClick={stopGeneration}
               >
-                <span className="@max-[340px]:hidden">{stopping ? t("正在停止…") : t("停止")}</span>
+                <span className="@max-[340px]:hidden">{stopping ? t("正在停止…") : t("停止生成")}</span>
               </Button>
             ) : (
               <Button

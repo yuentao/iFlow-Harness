@@ -705,7 +705,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                                           const dotTitle =
                                             view === undefined
                                               ? status === null
-                                                ? t("拿不到连接状态（内核未连接，或没有开启状态上报）")
+                                                ? t("无法获取连接状态（内核未连接，或没有开启状态上报）")
                                                 : t("连接状态读取中…")
                                               : statusLabel(view, discovering) + (view.error ? ` — ${view.error}` : "");                return (
                   <div key={i} className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card">
@@ -950,7 +950,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       : !view || view.status === "disconnected" || view.disabled || view.blocked
                         ? view?.blocked && view.childConnected === undefined
                           ? t("主会话不加载 MCP，新建超流体并连接后才会上报工具列表")
-                          : t("拿不到工具列表（未连接，或没有开启状态上报）")
+                          : t("无法获取工具列表（未连接，或没有开启状态上报）")
                         : view.childConnected === true
                           ? t("主会话不加载 MCP，工具由超流体通过共享代理使用")
                           : view.status === "connected"

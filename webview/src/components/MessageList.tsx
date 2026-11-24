@@ -703,9 +703,9 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
  * verbatim.
  */
 function localizeStepTitle(title: string): string {
-  if (/^task$/i.test(title.trim())) return t("子代理");
+  if (/^task$/i.test(title.trim())) return t("进程内子代理");
   let m = /^Launch agent\(([^)]*)\):\s*([\s\S]*)$/.exec(title);
-  if (m) return t("启动子代理 {0}：{1}", m[1], m[2]);
+  if (m) return t("启动进程内子代理 {0}：{1}", m[1], m[2]);
   m = /^Reading\s+([\s\S]+)$/.exec(title);
   if (m) return t("读取 {0}", m[1]);
   m = /^Running:\s*([\s\S]*)$/.exec(title);
@@ -846,7 +846,7 @@ const SubAgentCard = memo(function SubAgentCard({ block, chrome = "card" }: { bl
         {canStop && (
           <IconButton
             icon={<Square className="size-3" />}
-            label={t("停止此子代理")}
+            label={t("停止此进程内子代理")}
             size="sm"
             tone="danger"
             onClick={() => send({ type: "stopSubagent", sessionId: sessionId!, agentId: block.agentId })}
@@ -854,7 +854,7 @@ const SubAgentCard = memo(function SubAgentCard({ block, chrome = "card" }: { bl
         )}
       </div>
       <div className={`flex flex-wrap gap-3 font-mono text-ui-caption text-muted-foreground ${flat ? "px-2 pb-1" : "px-3 pb-2"}`}>
-        <span title={t("token 数为按对话估算，包含子代理")}>
+        <span title={t("token 数为按对话估算，包含进程内子代理")}>
           {block.tokens === undefined ? "—" : `≈ ${block.tokens.toLocaleString()} tokens`}
         </span>
         <span>{t("耗时")} {duration}</span>
@@ -1198,7 +1198,7 @@ function UserMessage({
           <>
         {block.origin === "qq" && (
           <div className="mb-1.5 flex items-center gap-1.5" title={t("这条消息来自 QQ 机器人转发的远程用户，不是本机输入")}>
-            <Chip tone="info">{t("QQ")}</Chip>
+            <Chip tone="info">QQ</Chip>
             <span className="text-ui-micro text-muted-foreground">{t("来自 QQ 渠道")}</span>
           </div>
         )}
@@ -1347,14 +1347,14 @@ function UserMessage({
           title={t("回滚到这一轮之前")}
           message={
             canRollbackFiles
-              ? t("选择回滚范围：只把文件恢复到这一轮之前、只删除这条消息及之后的对话，或两者都做。")
-              : t("这一轮的快照不完整，无法恢复文件，只能删除这条消息及之后的对话。")
+              ? t("选择回滚范围：只把文件回退到这一轮之前、只删除这条消息及之后的对话，或两者都做。")
+              : t("这一轮的快照不完整，无法回退文件，只能删除这条消息及之后的对话。")
           }
           onCancel={() => setConfirmRollback(false)}
           actions={[
             {
               label: t("文件"),
-              title: canRollbackFiles ? t("只把工作区文件恢复到这一轮之前") : t("这一轮的快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("只把工作区文件回退到这一轮之前") : t("这一轮的快照不完整，无法回退文件"),
               disabled: !canRollbackFiles,
               onClick: () => rollback("files"),
             },
@@ -1365,7 +1365,7 @@ function UserMessage({
             },
             {
               label: t("全部"),
-              title: canRollbackFiles ? t("恢复文件，并删除这条消息及之后的对话") : t("这一轮的快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("回退文件，并删除这条消息及之后的对话") : t("这一轮的快照不完整，无法回退文件"),
               disabled: !canRollbackFiles,
               variant: "primary",
               onClick: () => rollback("both"),

@@ -73,6 +73,11 @@
         "category": "iFlow"
       },
       {
+        "command": "iflow.curateMemory",
+        "title": "%command.curateMemory.title%",
+        "category": "iFlow"
+      },
+      {
         "command": "iflow.restartCli",
         "title": "%command.restartCli.title%",
         "category": "iFlow"
@@ -481,6 +486,52 @@
           "minimum": 0,
           "maximum": 600,
           "description": "%iflow.configuration.memoryExtractTimeoutSeconds.description%"
+        },
+        "iflow.memoryMaintenanceEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%iflow.configuration.memoryMaintenanceEnabled.description%"
+        },
+        "iflow.memoryMaintenanceIntervalDays": {
+          "type": "number",
+          "default": 7,
+          "minimum": 1,
+          "maximum": 90,
+          "description": "%iflow.configuration.memoryMaintenanceIntervalDays.description%"
+        },
+        "iflow.memoryMaintenanceIdleMinutes": {
+          "type": "number",
+          "default": 15,
+          "minimum": 1,
+          "maximum": 240,
+          "description": "%iflow.configuration.memoryMaintenanceIdleMinutes.description%"
+        },
+        "iflow.memoryMaintenanceGlobalTokenBudget": {
+          "type": "number",
+          "default": 4000,
+          "minimum": 500,
+          "maximum": 50000,
+          "description": "%iflow.configuration.memoryMaintenanceGlobalTokenBudget.description%"
+        },
+        "iflow.memoryMaintenanceProjectTokenBudget": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 500,
+          "maximum": 50000,
+          "description": "%iflow.configuration.memoryMaintenanceProjectTokenBudget.description%"
+        },
+        "iflow.memoryMaintenanceTotalTokenBudget": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "maximum": 200000,
+          "description": "%iflow.configuration.memoryMaintenanceTotalTokenBudget.description%"
+        },
+        "iflow.memoryMaintenanceStrategy": {
+          "type": "string",
+          "enum": ["report", "apply"],
+          "default": "report",
+          "description": "%iflow.configuration.memoryMaintenanceStrategy.description%"
         },
         "iflow.nextStepTimeoutSeconds": {
           "type": "number",

@@ -13,8 +13,9 @@ import type {
   MemoryStateUi,
 } from "../../shared/messages.js";
 import { estimateTokens } from "../../shared/session-state.js";
+import { createBackup, readBackup } from "./backup.js";
 import { discoverMemoryFiles, type DiscoveredMemoryFile } from "./discovery.js";
-import { buildExtractionConversation, parseCandidates } from "./extract.js";
+import { buildExtractionConversation, normalizeFact, parseCandidates } from "./extract.js";
 import {
   appendFact,
   deleteFacts,
@@ -93,6 +94,157 @@ export interface MemoryWriteResult {
   path: string;
   conflict?: boolean;
   error?: string;
+}
+
+/**
+ * Thrown by the fact-level editing APIs when the caller's `expectedHash` no
+ * longer matches the file. Same meaning as the `conflict: true` reply that
+ * `saveFile` posts to the WebView — the file was changed by someone else
+ * (the CLI's save_memory tool, another editor) and the edit must not land on
+ * top of it. Callers can catch this and re-read before retrying.
+ */
+export class MemoryConflictError extends Error {
+  readonly conflict = true;
+  constructor(message = "文件已被其他程序改动，请重新打开后再保存") {
+    super(message);
+    this.name = "MemoryConflictError";
+  }
+}
+
+export interface RewriteFactsResult {
+  /** Rewrite entries that matched at least one fact. */
+  applied: number;
+  /** Rewrite entries that matched nothing (or asked for an empty result). */
+  skipped: number;
+}
+
+export interface ArchiveFactsResult {
+  /** Number of fact entries moved into the Archived Memories section. */
+  archived: number;
+}
+
+/** Heading that holds retired facts. Deliberately English to match the
+ * CLI-generated `## iFlow Added Memories` marker, and because `parseFacts`
+ * stops at the next `## ` heading — archived rows are therefore never counted
+ * as live facts. */
+const ARCHIVED_MARKER = "## Archived Memories";
+
+const FENCE_LINE = /^\s*(```|~~~)/;
+
+/**
+ * Character range of the managed section body: right after the
+ * `## iFlow Added Memories` marker up to (excluding) the next `## ` heading.
+ * Null when the file has no marker.
+ */
+function managedSectionBounds(content: string): { bodyStart: number; bodyEnd: number } | null {
+  const markerIndex = content.indexOf(MEMORY_MARKER);
+  if (markerIndex === -1) return null;
+  const bodyStart = markerIndex + MEMORY_MARKER.length;
+  let bodyEnd = content.indexOf("\n## ", bodyStart);
+  if (bodyEnd === -1) bodyEnd = content.length;
+  return { bodyStart, bodyEnd };
+}
+
+interface BulletLine {
+  index: number;
+  prefix: string;
+  text: string;
+}
+
+/**
+ * Bullet entries inside the managed body, skipping fenced code blocks: a
+ * `- item` line inside ``` fences is illustrative, not a fact, and must never
+ * be rewritten or archived.
+ */
+function scanBullets(lines: readonly string[]): BulletLine[] {
+  const out: BulletLine[] = [];
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (FENCE_LINE.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const match = /^(\s*-\s+)(.*\S)\s*$/.exec(line);
+    if (!match) continue;
+    out.push({ index: i, prefix: match[1] ?? "- ", text: (match[2] ?? "").trim() });
+  }
+  return out;
+}
+
+/** Same fact? Exact trimmed text first, then the extractor's normalized form
+ * so punctuation / whitespace drift still matches. */
+function sameFact(a: string, b: string): boolean {
+  if (a === b) return true;
+  const na = normalizeFact(a);
+  return na.length > 0 && na === normalizeFact(b);
+}
+
+/** Apply rewrites to the managed body. Returns the new body and per-entry hit
+ * counts; the input is never mutated. `applied + skipped` always equals the
+ * number of rewrites passed in — an entry with a blank `from`/`to` can never
+ * hit, so it lands in `skipped` instead of vanishing from the tally. */
+function rewriteManagedBody(
+  body: string,
+  rewrites: readonly { from: string; to: string }[],
+): { body: string; applied: number; skipped: number } {
+  const lines = body.split("\n");
+  const entries = rewrites.map((rewrite) => ({
+    from: rewrite.from.trim(),
+    to: rewrite.to.trim(),
+    hit: false,
+  }));
+  const usable = entries.filter((entry) => entry.from.length > 0 && entry.to.length > 0);
+  for (const bullet of scanBullets(lines)) {
+    for (const entry of usable) {
+      if (!sameFact(bullet.text, entry.from)) continue;
+      lines[bullet.index] = `${bullet.prefix}${entry.to}`;
+      entry.hit = true;
+      break;
+    }
+  }
+  const applied = entries.filter((entry) => entry.hit).length;
+  return { body: lines.join("\n"), applied, skipped: entries.length - applied };
+}
+
+/** Remove matching facts from the managed body and return both the new body
+ * and the texts that were actually moved out. */
+function archiveManagedBody(
+  body: string,
+  texts: readonly string[],
+): { body: string; archived: string[] } {
+  const wanted = texts.map((text) => text.trim()).filter((text) => text.length > 0);
+  if (wanted.length === 0) return { body, archived: [] };
+  const lines = body.split("\n");
+  const drop = new Set<number>();
+  const archived: string[] = [];
+  for (const bullet of scanBullets(lines)) {
+    if (wanted.some((text) => sameFact(bullet.text, text))) {
+      drop.add(bullet.index);
+      archived.push(bullet.text);
+    }
+  }
+  if (drop.size === 0) return { body, archived: [] };
+  return { body: lines.filter((_, index) => !drop.has(index)).join("\n"), archived };
+}
+
+/** Append retired facts to the file-end Archived Memories section, creating
+ * the heading when absent. Nothing above is touched. */
+function appendArchived(content: string, facts: readonly string[]): string {
+  if (facts.length === 0) return content;
+  const bullets = facts.map((fact) => `- ${fact}`).join("\n");
+  const heading = /^## Archived Memories[ \t]*$/m.exec(content);
+  if (!heading) {
+    const base = content.trimEnd();
+    return `${base}${base ? "\n\n" : ""}${ARCHIVED_MARKER}\n${bullets}\n`;
+  }
+  const sectionStart = heading.index + heading[0].length;
+  let sectionEnd = content.indexOf("\n## ", sectionStart);
+  if (sectionEnd === -1) sectionEnd = content.length;
+  const before = content.slice(0, sectionEnd).trimEnd();
+  const after = content.slice(sectionEnd).trimStart();
+  return `${before}\n${bullets}${after ? `\n\n${after}` : "\n"}`;
 }
 
 /** Minimum gap between automatic extractions (one per ~2 minutes at most). */
@@ -391,6 +543,129 @@ export class MemoryService {
       } catch (error) {
         this.postSaveError(target.path, messageOf(error));
       }
+    });
+  }
+
+  /**
+   * Fact-level rewrite inside the managed `## iFlow Added Memories` section.
+   * Each entry is matched by exact text, then by the extractor's normalized
+   * form, so whitespace / punctuation drift still lands. Unmatched entries
+   * are counted in `skipped`. Fenced code and `@` imports are never touched.
+   *
+   * `expectedHash` mirrors `saveFile`: a mismatch means another writer edited
+   * the file in the meantime, so we back out with `MemoryConflictError`
+   * instead of clobbering their change. The current content is backed up
+   * before the write so the edit can be rolled back.
+   */
+  async rewriteFacts(
+    filePath: string,
+    rewrites: ReadonlyArray<{ from: string; to: string }>,
+    expectedHash?: string | null,
+  ): Promise<RewriteFactsResult> {
+    const target = await this.resolveTarget(filePath);
+    if (!target || !target.editable) {
+      throw new Error(vscode.l10n.t("这个文件不可编辑"));
+    }
+    return this.enqueue(async () => {
+      const current = (await readIfExists(target.path)) ?? "";
+      const currentHash = sha256(current);
+      if (expectedHash !== undefined && expectedHash !== null && expectedHash !== currentHash) {
+        throw new MemoryConflictError();
+      }
+      const bounds = managedSectionBounds(current);
+      if (!bounds) return { applied: 0, skipped: rewrites.length };
+      const body = current.slice(bounds.bodyStart, bounds.bodyEnd);
+      const result = rewriteManagedBody(body, rewrites);
+      if (result.applied === 0) return { applied: 0, skipped: result.skipped };
+      const next = `${current.slice(0, bounds.bodyStart)}${result.body}${current.slice(bounds.bodyEnd)}`;
+      if (next === current) return { applied: result.applied, skipped: result.skipped };
+      await createBackup(this.home(), target.path, current);
+      await writeAtomic(target.path, next);
+      target.exists = true;
+      const file = await this.buildFileUi(target);
+      this.options.post({
+        type: "memorySaved",
+        path: target.path,
+        ok: true,
+        ...(file ? { file } : {}),
+      });
+      this.options.log.info(`memory facts rewritten: ${target.path} (${result.applied})`);
+      return { applied: result.applied, skipped: result.skipped };
+    });
+  }
+
+  /**
+   * Move facts out of the managed section into a file-end `## Archived
+   * Memories` section. `parseFacts` stops at the next `## ` heading, so an
+   * archived row stops counting as a live fact immediately. Fenced code and
+   * `@` imports are preserved verbatim; the current file is backed up first.
+   */
+  async archiveFacts(filePath: string, texts: readonly string[]): Promise<ArchiveFactsResult> {
+    const target = await this.resolveTarget(filePath);
+    if (!target || !target.editable) {
+      throw new Error(vscode.l10n.t("这个文件不可编辑"));
+    }
+    return this.enqueue(async () => {
+      const current = (await readIfExists(target.path)) ?? "";
+      const bounds = managedSectionBounds(current);
+      if (!bounds) return { archived: 0 };
+      const body = current.slice(bounds.bodyStart, bounds.bodyEnd);
+      const result = archiveManagedBody(body, texts);
+      if (result.archived.length === 0) return { archived: 0 };
+      const withBody = `${current.slice(0, bounds.bodyStart)}${result.body}${current.slice(bounds.bodyEnd)}`;
+      const next = appendArchived(withBody, result.archived);
+      await createBackup(this.home(), target.path, current);
+      await writeAtomic(target.path, next);
+      target.exists = true;
+      const file = await this.buildFileUi(target);
+      this.options.post({
+        type: "memorySaved",
+        path: target.path,
+        ok: true,
+        ...(file ? { file } : {}),
+      });
+      this.options.log.info(`memory facts archived: ${target.path} (${result.archived.length})`);
+      return { archived: result.archived.length };
+    });
+  }
+
+  /**
+   * Restore a memory file from one of its backups. The current content is
+   * backed up first, so the restore itself is reversible. `expectedHash`
+   * gates the overwrite exactly like `saveFile` — a file edited since the
+   * backup was taken is refused rather than silently replaced.
+   */
+  async restoreFromBackup(
+    backupPath: string,
+    targetPath: string,
+    expectedHash?: string | null,
+  ): Promise<{ ok: boolean; path: string }> {
+    const target = await this.resolveTarget(targetPath);
+    if (!target || !target.editable) {
+      throw new Error(vscode.l10n.t("这个文件不可编辑"));
+    }
+    const content = await readBackup(backupPath);
+    if (content === null) {
+      throw new Error(vscode.l10n.t("备份文件不存在或无法读取"));
+    }
+    return this.enqueue(async () => {
+      const current = (await readIfExists(target.path)) ?? "";
+      const currentHash = sha256(current);
+      if (expectedHash !== undefined && expectedHash !== null && expectedHash !== currentHash) {
+        throw new MemoryConflictError();
+      }
+      await createBackup(this.home(), target.path, current);
+      await writeAtomic(target.path, content);
+      target.exists = true;
+      const file = await this.buildFileUi(target);
+      this.options.post({
+        type: "memorySaved",
+        path: target.path,
+        ok: true,
+        ...(file ? { file } : {}),
+      });
+      this.options.log.info(`memory restored from backup: ${target.path}`);
+      return { ok: true, path: target.path };
     });
   }
 

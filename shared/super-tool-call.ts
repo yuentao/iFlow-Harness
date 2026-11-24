@@ -125,6 +125,14 @@ function normalizeArgsJson(args: unknown): string | null {
 }
 
 /**
+ * 载荷类别判定结果。`"conflict"` 表示 `tasks` 与 `actions` **同时非空** ——
+ * 派发与动作是两条互斥的执行通道，一份载荷里两者并存时无法安全挑一个执行，
+ * 必须让调用方显式报错（{@link parseSuperToolCall} 会转成 `ok:false`），
+ * 绝不能静默按派发处理、把动作部分丢掉。
+ */
+export type SuperToolCallKindResolution = SuperToolCallKind | "conflict";
+
+/**
  * 综合工具名与载荷决定真正的协议类别。
  *
  * 新版内置 `super-agent` 工具的 schema 同时接受 `tasks` 与 `actions`（见
@@ -133,18 +141,36 @@ function normalizeArgsJson(args: unknown): string | null {
  * dispatch，若照派发解析就「找不到任务」→ 宿主误报「未派发子会话」。因此只
  * 在「有非空 actions 且没有非空 tasks」时改判成 actions。反向不改判：
  * `super-agent-actions` 工具历史上只带 actions，保持原语义、避免误吞派发载荷。
+ *
+ * 两者同时非空时返回 `"conflict"`：这是**载荷结构错误**（一次调用不能既派发
+ * 又管理），显式报错比静默丢掉一半更诚实。判定**与工具名无关** —— dispatch
+ * 与 actions 通道同口径拒绝，否则 `super-agent-actions` 块里混进 tasks 时
+ * 宿主只执行 actions、tasks 被静默丢弃。
+ *
+ * 分工：vendor loader 已在**工具调用通道**拒绝 tasks+actions 并存（提交
+ * 54af386），这里主要覆盖**围栏块通道**（以及合成围栏前的兜底），两条通道
+ * 因此不会出现「一边拒绝、一边静默丢一半」的不对称。
  */
 export function resolveSuperToolCallKind(
   kind: SuperToolCallKind,
   args: unknown,
-): SuperToolCallKind {
-  if (kind !== "dispatch") return kind;
+): SuperToolCallKindResolution {
+  // 载荷结构先于工具名判定：`tasks` 与 `actions` 同时非空是**载荷结构错误**，
+  // 与名字无关 —— 无论 dispatch 还是 actions 通道都必须返回 `"conflict"`，
+  // 否则 `super-agent-actions` 块里混进 tasks 时宿主只执行 actions、把 tasks
+  // 静默丢弃，与 dispatch 侧的拒绝口径不对称。
   const value = normalizeArgsValue(args);
-  if (!value || typeof value !== "object" || Array.isArray(value)) return kind;
-  const record = value as Record<string, unknown>;
-  const hasActions = Array.isArray(record.actions) && record.actions.length > 0;
-  const hasTasks = Array.isArray(record.tasks) && record.tasks.length > 0;
-  return hasActions && !hasTasks ? "actions" : kind;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    const hasActions = Array.isArray(record.actions) && record.actions.length > 0;
+    const hasTasks = Array.isArray(record.tasks) && record.tasks.length > 0;
+    if (hasActions && hasTasks) return "conflict";
+    // 反向不改判：`super-agent-actions` 名字只带 actions 时保持原语义，
+    // 绝不把派发载荷改判成动作。
+    if (kind !== "dispatch") return kind;
+    return hasActions ? "actions" : kind;
+  }
+  return kind;
 }
 
 /** 管理动作的合法名字（与 `shared/super-agent.ts` 的解析器一致）。 */
@@ -251,6 +277,11 @@ export type SuperToolCallResult = ({ ok: true } & SuperToolCallPayload) | SuperT
  * {@link resolveSuperToolCallKind} 按载荷改判，返回值的 `kind` 也是纠偏后的值，
  * 宿主据此分流到动作执行，而不是把空任务当成「未派发」。
  *
+ * 两者**同时非空**时判定为 `"conflict"` 并按失败返回（**与工具名无关**：
+ * dispatch 与 actions 通道一致，见 {@link resolveSuperToolCallKind}）：
+ * 派发与动作互斥，静默挑一条通道执行会让另一半指令凭空消失。让模型拆成
+ * 两次调用。
+ *
  * 注意：`{"actions":[]}` 这类语法合法但空载的载荷同样按失败返回 —— 宿主会
  * 留一条痕迹，而不是让用户以为指令已经生效。
  */
@@ -258,7 +289,16 @@ export function parseSuperToolCall(
   kind: SuperToolCallKind,
   args: unknown,
 ): SuperToolCallResult {
-  const effectiveKind = resolveSuperToolCallKind(kind, args);
+  const resolved = resolveSuperToolCallKind(kind, args);
+  if (resolved === "conflict") {
+    return {
+      ok: false,
+      reason:
+        "the payload contains both tasks and actions — dispatch and actions must be sent in separate tool calls",
+      issues: ["tasks 与 actions 不能同时出现在同一次调用里（派发与动作必须分开）"],
+    };
+  }
+  const effectiveKind = resolved;
   const text = synthesizeSuperToolCallBlock(effectiveKind, args);
   if (!text) {
     return { ok: false, reason: "the tool arguments are not a JSON payload", issues: [] };

@@ -124,7 +124,7 @@ function dialog(label: string): HTMLElement {
 /** The status span on a row (icon + label + colour), found by its exact label. */
 function chipSpan(label: string): HTMLElement {
   const el = [...document.body.querySelectorAll<HTMLElement>("span")].find(
-    (s) => s.textContent === label && s.classList.contains("text-ui-micro"),
+    (s) => s.textContent === label && s.classList.contains("text-ui-caption"),
   );
   expect(el).toBeTruthy();
   return el!;

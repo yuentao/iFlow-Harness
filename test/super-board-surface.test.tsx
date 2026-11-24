@@ -197,7 +197,7 @@ describe("Super Agent 看板表面材质", () => {
     );
     // 只剩身份簇；状态簇连壳都不在，簇间 10px 不会因为空簇多算一次。
     expect(clusters).toHaveLength(1);
-    expect(el.textContent).not.toContain("个进行中");
+    expect(el.textContent).not.toContain("个运行中");
   });
 
   it("展开面板走真亚克力材质（portal 出 header，自带 backdrop blur）", () => {
@@ -287,7 +287,7 @@ describe("Super Agent 看板阶段轨", () => {
 
   /** 节点文案（标签在 DOM 里常驻，窄容器只是被 CSS 隐藏）。 */
   function labels(): HTMLElement[] {
-    return Array.from(rail().querySelectorAll<HTMLElement>("span.text-ui-micro"));
+    return Array.from(rail().querySelectorAll<HTMLElement>("span.text-ui-caption"));
   }
 
   it("折叠行只报状态，阶段轨只在展开后出现一次", () => {
@@ -478,7 +478,7 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     expect(dots).toHaveLength(4);
 
     // 最后一条长文本完整出现在 DOM（不是省略号、不是被容器切掉）。
-    const labels = Array.from(el.querySelectorAll<HTMLElement>("span.text-ui-micro"));
+    const labels = Array.from(el.querySelectorAll<HTMLElement>("span.text-ui-caption"));
     const last = labels.at(-1)!;
     expect(last.textContent).toBe(longTodo);
     expect(last.className).toContain("break-words");
@@ -488,14 +488,14 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     const keys = translate.mock.calls.map((call) => call[0]);
     for (const todo of todos) expect(keys).not.toContain(todo.content);
     // 静态状态词照常过字典（可翻译）。
-    expect(keys).toContain("进行中");
+    expect(keys).toContain("运行中");
     expect(keys).toContain("高优先级");
 
     // 阶段事实挪进 title / aria-label：派发、启动仍可查，todo 状态也在。
     const described = el.getAttribute("aria-label")!;
     expect(described).toContain("已派出");
     expect(described).toContain("已启动");
-    expect(described).toContain("进行中");
+    expect(described).toContain("运行中");
     expect(described).toContain(longTodo);
   });
 });
@@ -1793,9 +1793,9 @@ describe("Super Agent 看板 · 已中断状态静音色与中断来源", () => 
     return el!;
   }
 
-  /** 折叠行状态 chip 的文案节点（内层 text-ui-micro），其父才是着色状态 span。 */
+  /** 折叠行状态 chip 的文案节点（内层 text-ui-caption），其父才是着色状态 span。 */
   function statusLabel(trigger: HTMLButtonElement, text: string): HTMLElement {
-    const el = [...trigger.querySelectorAll<HTMLElement>("span.text-ui-micro")].find(
+    const el = [...trigger.querySelectorAll<HTMLElement>("span.text-ui-caption")].find(
       (s) => s.textContent === text,
     );
     expect(el).toBeTruthy();

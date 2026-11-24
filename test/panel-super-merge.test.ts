@@ -22,8 +22,17 @@ import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
-import { SuperAgentManager, type SuperAgentDeps } from "../src/panel/super-agent.js";
-import { mergeBranch, previewMerge, type WorktreeGitRunner } from "../src/panel/worktree.js";
+import {
+  SuperAgentManager,
+  describeKeptLocalChanges,
+  type SuperAgentDeps,
+} from "../src/panel/super-agent.js";
+import {
+  mergeBranch,
+  previewMerge,
+  type WorkingTreeState,
+  type WorktreeGitRunner,
+} from "../src/panel/worktree.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 import type { SessionState } from "../shared/messages.js";
 import type { SuperSessionUi } from "../shared/super-agent.js";
@@ -353,6 +362,52 @@ describe("S1 · 预演与合并的只读不变量（deps 注入，确定性）",
   });
 });
 
+describe("S1 · 合并提示只认实时工作区（不照抄派发时的快照）", () => {
+  const clean: WorkingTreeState = {
+    available: true,
+    clean: true,
+    dirtyCount: 0,
+    inProgress: null,
+    trackedPaths: [],
+    untrackedCount: 0,
+  };
+
+  it("实时工作区干净 → 不产生「N 处改动原样保留」这类文案", () => {
+    expect(describeKeptLocalChanges(clean)).toBeNull();
+  });
+
+  it("状态读不到 → 宁可不声称，返回 null（只报已合入）", () => {
+    expect(describeKeptLocalChanges(null)).toBeNull();
+    expect(
+      describeKeptLocalChanges({ ...clean, available: false, clean: false, dirtyCount: 3 }),
+    ).toBeNull();
+  });
+
+  it("仍有已跟踪未提交改动 → 如实列出具体文件", () => {
+    const kept = describeKeptLocalChanges({
+      ...clean,
+      clean: false,
+      dirtyCount: 2,
+      trackedPaths: ["src/a.ts", "b.txt"],
+    });
+    expect(kept?.zh).toContain("原样保留");
+    expect(kept?.zh).toContain("src/a.ts");
+    expect(kept?.zh).toContain("b.txt");
+    expect(kept?.en).toContain("src/a.ts");
+  });
+
+  it("只有未跟踪文件 → 如实计数，不谎称已跟踪改动被保留", () => {
+    const kept = describeKeptLocalChanges({
+      ...clean,
+      clean: false,
+      dirtyCount: 1,
+      untrackedCount: 1,
+    });
+    expect(kept?.zh).toContain("未跟踪");
+    expect(kept?.zh).not.toContain("原样保留");
+  });
+});
+
 describe("S1 · 自动合并的两条让路分支（真实 git，工作区不变）", () => {
   let repo: string;
   let mgr: SuperAgentManager;
@@ -500,5 +555,79 @@ describe("S1 · 自动合并的两条让路分支（真实 git，工作区不变
     expect(mgr.get("s-b")?.integration?.state).toBe("merged");
     expect(Number(git(repo, "rev-list", "--count", "--merges", `${baseRef}..HEAD`))).toBe(2);
     expect(fs.existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(false);
+  }, 60000);
+
+  it("合并前工作区干净：提示只报已合入，不含「原样保留」", async () => {
+    addChildWithCommit("s-clean", "iflow/super/clean", "child.txt", "child\n");
+    expect(git(repo, "status", "--porcelain")).toBe("");
+
+    await integrate("s-clean");
+
+    const session = mgr.get("s-clean")!;
+    expect(session.integration?.state).toBe("merged");
+    expect(session.integration?.detail).toContain("已合入");
+    // 关键：不能凭派发时的旧快照谎报「N 处改动原样保留」。
+    expect(session.integration?.detail).not.toContain("原样保留");
+    expect(session.integration?.detail).not.toContain("未提交");
+    // 合并没有失败，改动真的回到了主工作区。
+    expect(fs.readFileSync(path.join(repo, "child.txt"), "utf8").replace(/\r\n/g, "\n")).toBe(
+      "child\n",
+    );
+    expect(git(repo, "status", "--porcelain")).toBe("");
+  }, 60000);
+
+  it("合并前工作区确有无关未提交改动：提示列出具体文件，且改动未被覆盖", async () => {
+    addChildWithCommit("s-dirty", "iflow/super/dirty", "child.txt", "child\n");
+    fs.writeFileSync(path.join(repo, "shared.txt"), "user work\n", "utf8");
+
+    await integrate("s-dirty");
+
+    const session = mgr.get("s-dirty")!;
+    expect(session.integration?.state).toBe("merged");
+    expect(session.integration?.detail).toContain("原样保留");
+    expect(session.integration?.detail).toContain("shared.txt");
+    // 真正脏的时候，用户的改动仍原样留在工作区里（没被合并覆盖）。
+    expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe("user work\n");
+    expect(git(repo, "status", "--porcelain")).toContain("shared.txt");
+  }, 60000);
+
+  it("派发时快照脏、合并时已干净：提示不照抄旧快照谎报「原样保留」", async () => {
+    addChildWithCommit("s-stale", "iflow/super/stale", "child.txt", "child\n");
+    const staleSnapshot: WorkingTreeState = {
+      available: true,
+      clean: false,
+      dirtyCount: 3,
+      inProgress: null,
+      trackedPaths: ["gone-1.ts", "gone-2.ts", "gone-3.ts"],
+      untrackedCount: 0,
+    };
+    const cleanNow: WorkingTreeState = {
+      available: true,
+      clean: true,
+      dirtyCount: 0,
+      inProgress: null,
+      trackedPaths: [],
+      untrackedCount: 0,
+    };
+    // 合并前的检查读到旧快照（脏），合并之后的复查读到实时结果（干净）——
+    // 这正是线上误报的形态：改动早已被后续提交吸收，旧快照却还在说「保留」。
+    const internals = mgr as unknown as { readWorkingTree: () => Promise<WorkingTreeState> };
+    let reads = 0;
+    internals.readWorkingTree = async () => {
+      reads += 1;
+      return reads === 1 ? staleSnapshot : cleanNow;
+    };
+
+    await integrate("s-stale");
+
+    const session = mgr.get("s-stale")!;
+    expect(session.integration?.state).toBe("merged");
+    expect(session.integration?.detail).toContain("已合入");
+    expect(session.integration?.detail).not.toContain("原样保留");
+    expect(session.integration?.detail).not.toContain("gone-1.ts");
+    // 合并没有因为旧快照而失败：改动真的回到了主工作区。
+    expect(fs.readFileSync(path.join(repo, "child.txt"), "utf8").replace(/\r\n/g, "\n")).toBe(
+      "child\n",
+    );
   }, 60000);
 }, 60000);

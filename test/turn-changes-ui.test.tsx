@@ -47,7 +47,7 @@ it("renders a changed-files summary and opens a file in the editor", () => {
   expect(rows[0]?.getAttribute("title")).toContain("src/first.ts");
   act(() => rows[1]!.click());
   expect(send).toHaveBeenLastCalledWith({ type: "openLocation", path: "src/second.ts", toolCallId: "second" });
-  const undo = container.querySelectorAll<HTMLButtonElement>('button[aria-label="撤销此文件的本轮修改"]');
+  const undo = container.querySelectorAll<HTMLButtonElement>('button[aria-label="回退此文件的本轮修改"]');
   expect(undo).toHaveLength(2);
   act(() => undo[1]!.click());
   expect(send).toHaveBeenLastCalledWith({ type: "revertTurnFile", sessionId: "s", userBlockId: "u", key: "src/second.ts" });
@@ -71,12 +71,12 @@ it("rolls back the whole turn from the footer", () => {
 });
 it("hides undo when unsafe and on historical turns", () => {
   reply({ records: [record("safe", "safe.ts", 1, 0), record("created", "created.ts", 2, 0, 1, false)] });
-  expect(container.querySelectorAll('button[aria-label="撤销此文件的本轮修改"]')).toHaveLength(1);
+  expect(container.querySelectorAll('button[aria-label="回退此文件的本轮修改"]')).toHaveLength(1);
   act(() => useChat.setState({ state: {
     ...useChat.getState().state!,
     blocks: [{ kind: "user", id: "u", text: "go" }, { kind: "user", id: "next", text: "next" }],
   } }));
-  expect(container.querySelectorAll('button[aria-label="撤销此文件的本轮修改"]')).toHaveLength(0);
+  expect(container.querySelectorAll('button[aria-label="回退此文件的本轮修改"]')).toHaveLength(0);
 });
 it("translates the changed-files summary", () => {
   setLocale("en");

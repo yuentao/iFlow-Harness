@@ -137,6 +137,18 @@ describe("核心接线 · 失败归一后诊断/失败分类/状态说明有数�
     expect(classifySuperFailureKind("plain prepare error")).toBe("terminal");
   });
 
+  it("真实失败文本分类：英文 timed out 握手超时归为 retryable（回归）", () => {
+    // 内核/进程意外退出 —— 早已是 retryable，防回归。
+    expect(classifySuperFailureKind("Agent process exited unexpectedly (code=1)")).toBe("retryable");
+    expect(classifySuperFailureKind("超流体内核退出（code=1）")).toBe("retryable");
+    expect(classifySuperFailureKind("子会话准备中无响应超时")).toBe("retryable");
+    // 回归点：英文措辞是 timed out，旧正则只有 timeout，匹配不上 → 曾误判 terminal。
+    expect(classifySuperFailureKind("Request timed out after 120000ms: session/new")).toBe("retryable");
+    // 同一族措辞也要覆盖，避免只修一种写法。
+    expect(classifySuperFailureKind("handshake timed-out after 30s")).toBe("retryable");
+    expect(classifySuperFailureKind("time out while waiting for session/new")).toBe("retryable");
+  });
+
   it("spawn 阶段先留 spawn 诊断，再叠加 session/failed 诊断形成轨迹", async () => {
     const { manager } = makeFailureManager({ plans: ["throw"] });
     const child = manager.spawn({ title: "prepare 抛错", task: "炸在准备阶段" });

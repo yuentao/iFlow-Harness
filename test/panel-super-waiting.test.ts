@@ -483,11 +483,11 @@ describe("ChatPanel 等待超流体汇报期间的状态", () => {
       };
       p.updateStatusBar({ ...base, superSessions: [child({ status: "running" })] });
       expect(p.statusBar.text).not.toContain("生成中");
-      expect(p.statusBar.text).toContain("超流体进行中");
+      expect(p.statusBar.text).toContain("运行中");
 
       p.updateStatusBar({ ...base, superSessions: [child({ status: "awaiting_input" })] });
       expect(p.statusBar.text).not.toContain("生成中");
-      expect(p.statusBar.text).toContain("等待你处理");
+      expect(p.statusBar.text).toContain("等你回答");
     });
 
     it("恢复期间（replaying + streaming）：状态栏显示正在恢复会话，不再谎称生成中", () => {

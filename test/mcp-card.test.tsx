@@ -184,7 +184,7 @@ it("colors a disconnected detail chip with the danger tone and labels its scope"
   clickTitle("详情");
   expect([...container.querySelectorAll("span")].some((s) => s.className.includes("bg-destructive"))).toBe(true);
   expect(container.textContent).toContain("全局");
-      expect(container.textContent).toContain("拿不到工具列表");});
+      expect(container.textContent).toContain("无法获取工具列表");});
 it("refresh re-reads disk config and status without a second save in flight", () => {
   reply({ a: { command: "node" } });
   statusReply({ discoveryState: "completed", servers: { a: { status: "connected", toolCount: 0, promptCount: 0, tools: [], prompts: [], contextTokens: 0 } } });

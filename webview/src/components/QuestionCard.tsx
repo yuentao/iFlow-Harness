@@ -64,6 +64,20 @@ export function QuestionCard({
   // that precede it, so scope to the actions row.
   const actionsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    // A question can arrive while the user is mid-typing in the Composer.
+    // Do not steal that focus: once it moves to this card's button, the next
+    // keystroke has a BUTTON target and slips past the editable-target gate
+    // in the ESC handler below. The card remains clickable / Tab-reachable.
+    const active = document.activeElement as HTMLElement | null;
+    if (
+      active
+      && (active.tagName === "INPUT"
+        || active.tagName === "TEXTAREA"
+        || active.tagName === "SELECT"
+        || active.isContentEditable)
+    ) {
+      return;
+    }
     actionsRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, []);
 
@@ -77,7 +91,14 @@ export function QuestionCard({
   useEffect(() => {
     if (!active) return;
     const handler = (e: KeyboardEvent) => {
-      if (answered || remoteTakeover || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      // Same IME-safe condition as ApprovalCard / Composer: the composition
+      // start/commit keystrokes can carry keyCode 229 / key "Process" with
+      // isComposing false, so they must never dismiss the card.
+      if (
+        answered || remoteTakeover || e.defaultPrevented
+        || e.isComposing || e.key === "Process" || e.keyCode === 229
+        || e.ctrlKey || e.metaKey || e.altKey
+      ) return;
       if (e.key !== "Escape") return;
       if (document.querySelector(".auth-backdrop")) return;
       const target = e.target as HTMLElement | null;

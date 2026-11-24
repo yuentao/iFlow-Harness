@@ -87,6 +87,12 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
   let panel: ChatPanel;
   let storageDir: string;
   let iflowHome: string;
+  // 宿主 shell 可能带着 IFLOW_TOKENS_LIMIT（本任务环境实测为 960000）：
+  // AcpClient 以 `{ ...process.env, ...spawnEnv }` 起子进程，而五档权威链在
+  // 「无依据」档刻意不往 spawnEnv 放这个键 —— 不清掉宿主的陈旧值，子进程
+  // 就会继承它，让「无依据不推」的断言假失败。beforeEach 先存后删，
+  // afterEach 原样恢复，保持测试 hermetic。
+  let originalTokensLimitEnv: string | undefined;
 
   beforeEach(() => {
     // nodePath 指向当前进程可执行文件：concealNodeExecutable 会直接返回它，
@@ -98,6 +104,10 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     delete process.env.IFLOW_SUPER_TOOL;
     // 宿主 shell 可能带着真实的 IFLOW_SYSTEM_MD；不清掉会掩盖宿主自己设的值。
     delete process.env.IFLOW_SYSTEM_MD;
+    // 宿主 shell 可能带着 IFLOW_TOKENS_LIMIT：子进程会继承它，掩盖「无依据
+    // 不推」这档的真实行为。先存后删，测完在 afterEach 里恢复。
+    originalTokensLimitEnv = process.env.IFLOW_TOKENS_LIMIT;
+    delete process.env.IFLOW_TOKENS_LIMIT;
     // stub 默认没有 workspace.fs，materializeSystemPrompt 会写入失败而返回 null；
     // 这里只补最小读写，其它 fs 调用仍保持原来的报错行为。
     (vscode.workspace as unknown as { fs: unknown }).fs = {
@@ -118,6 +128,9 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     delete process.env.IFLOW_SUPER_TOOL;
     delete process.env.IFLOW_SYSTEM_MD;
     delete process.env.IFLOW_HOME;
+    // 恢复宿主 shell 原有的 IFLOW_TOKENS_LIMIT（无则维持删除）。
+    if (originalTokensLimitEnv === undefined) delete process.env.IFLOW_TOKENS_LIMIT;
+    else process.env.IFLOW_TOKENS_LIMIT = originalTokensLimitEnv;
     delete (vscode.workspace as unknown as { fs?: unknown }).fs;
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     fs.rmSync(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
