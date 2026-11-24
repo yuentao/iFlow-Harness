@@ -2,7 +2,7 @@
   "name": "iflow-harness",
   "displayName": "%iflow.displayName%",
   "description": "%iflow.description%",
-  "version": "3.11.2",
+  "version": "3.11.3",
   "type": "module",
   "publisher": "yuantao",
   "author": {
