@@ -367,7 +367,7 @@
   "扫码者未能写入白名单（重启后会丢失）：{0}": "Could not add the scanning user to the allowlist (it will be lost after a restart): {0}",
   "文件在回退确认期间被修改，请重试": "The file changed while the revert confirmation was open. Try again",
   "无法写入 QQ 白名单：{0}": "Could not write the QQ allowlist: {0}",
-  "无法写入 QQ 设置：{0}（请在已打开的工作区中设置）": "Could not write QQ settings: {0} (configure them in an open workspace)",
+  "已解除绑定，但设置写入失败：{0}（{1}）": "Unbound, but failed to write the setting: {0} ({1})",
   "无法回退：该文件缺少编辑前内容（可能是本轮新建的文件）": "Cannot revert: this file has no pre-edit content (it may have been created in this turn)",
   "无法打开 {0}：{1}": "Cannot open {0}: {1}",
   "未找到 API 配置：{0}": "API profile not found: {0}",

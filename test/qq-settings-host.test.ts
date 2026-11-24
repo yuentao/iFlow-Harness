@@ -9,6 +9,7 @@ import {
 } from "../src/qq/settings-host.js";
 import { QQ_SECRET_KEYS } from "../src/qq/config.js";
 import type { QqSettingsUi } from "../shared/messages.js";
+import * as vscode from "vscode";
 
 /** 完整默认值（与 shared/messages.ts 的 pickQqSettingsUi 默认一致）。 */
 const DEFAULTS: QqSettingsUi = {
@@ -497,6 +498,64 @@ describe("ensureBridgeSecrets", () => {
     expect(info).not.toHaveBeenCalled();
     expect(warn).not.toHaveBeenCalled();
     expect(error).not.toHaveBeenCalled();
+  });
+});
+
+describe("createVscodeQqSettingsIo 写入作用域", () => {
+  const secrets = {
+    get: async () => undefined,
+    store: async () => undefined,
+    delete: async () => undefined,
+  };
+  const original = vscode.workspace.getConfiguration;
+  afterEach(() => {
+    (vscode.workspace as unknown as { getConfiguration: unknown }).getConfiguration = original;
+  });
+
+  it("写入落 Global；没有工作区覆盖时不碰 Workspace（无工作区也不抛错）", async () => {
+    const calls: Array<{ key: string; value: unknown; target: number | undefined }> = [];
+    (vscode.workspace as unknown as { getConfiguration: unknown }).getConfiguration = () => ({
+      get: () => undefined,
+      inspect: () => ({ workspaceValue: undefined }),
+      update: async (key: string, value: unknown, target?: number) => {
+        if (target === vscode.ConfigurationTarget.Workspace) {
+          // 真实 VSCode 在没打开工作区时的行为。
+          throw new Error("Unable to write to Workspace Settings because no workspace is opened.");
+        }
+        calls.push({ key, value, target });
+      },
+    });
+
+    const io = createVscodeQqSettingsIo(secrets);
+    await expect(io.writeAll({ enabled: true, maxConcurrentTasks: 3 })).resolves.toBeUndefined();
+
+    expect(calls).toEqual([
+      { key: "enabled", value: true, target: vscode.ConfigurationTarget.Global },
+      { key: "maxConcurrentTasks", value: 3, target: vscode.ConfigurationTarget.Global },
+    ]);
+  });
+
+  it("存量 Workspace 覆盖在写 Global 后同一次操作里被单键清掉", async () => {
+    const calls: Array<{ key: string; value: unknown; target: number | undefined }> = [];
+    const workspaceValues: Record<string, unknown> = { enabled: true };
+    (vscode.workspace as unknown as { getConfiguration: unknown }).getConfiguration = () => ({
+      get: () => undefined,
+      inspect: (key: string) => ({ workspaceValue: workspaceValues[key] }),
+      update: async (key: string, value: unknown, target?: number) => {
+        calls.push({ key, value, target });
+        if (target === vscode.ConfigurationTarget.Workspace) delete workspaceValues[key];
+      },
+    });
+
+    const io = createVscodeQqSettingsIo(secrets);
+    await io.writeAll({ enabled: false, autoMerge: false });
+
+    expect(calls).toEqual([
+      { key: "enabled", value: false, target: vscode.ConfigurationTarget.Global },
+      { key: "enabled", value: undefined, target: vscode.ConfigurationTarget.Workspace },
+      { key: "autoMerge", value: false, target: vscode.ConfigurationTarget.Global },
+    ]);
+    expect(workspaceValues.enabled).toBeUndefined();
   });
 });
 
