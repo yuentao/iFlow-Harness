@@ -293,3 +293,137 @@ export function describeSuperTimelineFacts(session: SuperSessionUi): string {
     .map((node) => node.label)
     .join(" → ");
 }
+
+/* ------------------------------------------------------------------------- *
+ * 布局：折叠策略（纯逻辑，webview 只负责画）
+ *
+ * 步骤一多，横向/多列排布会把阅读顺序打散。看板改成单列纵向 rail 之后，仍需
+ * 一个「默认只展开当前步 + 上一步」的折叠策略，否则 20 条 todo 会把整张卡片
+ * 撑成一面墙。规则全部收在这里，单测直接跑，组件不复制第二套判定。
+ * ------------------------------------------------------------------------- */
+
+/**
+ * 关键节点：**需要用户介入**，任何折叠态都必须露出（不得藏进折叠体）。
+ *
+ * - `awaiting_input`：子会话在等你回答，不回答它就永远停着；
+ * - `failed`：失败原因要能一眼看到；
+ * - `integration` 且色调是 failed：合并冲突 / 合并失败 —— 改动没落地，等人处理。
+ *
+ * `cancelled`（已中断）刻意**不算**关键：它已经结束，不需要用户做任何事，
+ * 折叠进「其余 N 步」不丢可操作信息（阶段事实仍可在 title 里查）。
+ */
+export function isCriticalTimelineNode(node: SuperTimelineNode): boolean {
+  if (node.kind === "awaiting_input") return true;
+  if (node.kind === "failed") return true;
+  if (node.kind === "integration" && node.tone === "failed") return true;
+  return false;
+}
+
+/** 时间轴进度：已完成节点数 / 节点总数（用于顶部计数，如 3/6）。 */
+export interface SuperTimelineProgress {
+  /** `tone === "done"` 的节点数（todo 模式下即 completed 条目数）。 */
+  done: number;
+  /** 节点总数（只算真实发生过的节点，不预置占位）。 */
+  total: number;
+}
+
+export function summarizeSuperTimelineProgress(
+  nodes: readonly SuperTimelineNode[],
+): SuperTimelineProgress {
+  let done = 0;
+  for (const node of nodes) if (node.tone === "done") done += 1;
+  return { done, total: nodes.length };
+}
+
+/**
+ * 达到这个节点数才折叠 todolist。
+ *
+ * 3 个节点的阶段轨（派发 → 启动 → 在等你回答）全部展开也只占三行；把「派发」
+ * 折成一行「已完成 1 步」反而多一个点击通道、还丢掉一条事实。折叠只在步骤
+ * 真的多起来（≥4）时才有收益。
+ */
+export const SUPER_TIMELINE_FOLD_MIN_NODES = 4;
+
+/**
+ * 展开态超过这个节点数才给滚动容器（默认折叠态几乎不会触发）。
+ *
+ * 优先折叠、其次滚动：展开全部后若仍然过高，就限高 + 内部滚动，并由组件
+ * 自动贴底，保证最新步骤可见。
+ */
+export const SUPER_TIMELINE_SCROLL_THRESHOLD = 8;
+
+/**
+ * 时间轴一行：真实节点，或一段被折叠起来的连续节点。
+ *
+ * 折叠组保留 `indices` 而不是只保留数量：webview 用它判断「这一组是不是全都
+ * 完成了」（全完成才说「已完成 N 步」，否则说「其余 N 步」，不把待办谎报成完成）。
+ */
+export type SuperTimelineRow =
+  | { type: "node"; index: number }
+  | { type: "folded"; indices: number[] };
+
+/**
+ * 把节点序列折叠成渲染行。
+ *
+ * `expanded = true`：全部展开，一行一个节点（用户点了「展开其余 N 步」）。
+ * `expanded = false`：默认折叠 ——
+ *   1. 最后一个 `current` 节点（没有 current 的终态轨则取最后一个节点）与其
+ *      **上一步**固定展开；
+ *   2. 所有 {@link isCriticalTimelineNode} 关键节点固定展开；
+ *   3. 其余节点按**连续区间**合成一个 `folded` 行，插在它原本的位置上。
+ *
+ * 两条不折叠的前提：
+ *
+ *  - **阶段轨永不折叠。** 阶段轨是宿主观察到的生命周期事实，最多七行（派发 /
+ *    第 N 次 / 排队 / 启动 / 在等你回答 / 终态 / 集成），每行都是一条独立信息；
+ *    而它也是唯一可能含关键节点（等待回答、失败、合并冲突）的轨。让它整条展开
+ *    是「关键状态永不折叠」最强的保证 —— 那些节点根本没有被折叠的机会。
+ *  - 节点数 < {@link SUPER_TIMELINE_FOLD_MIN_NODES} 时整条轨全展开。
+ *
+ * todolist 轨的折叠仍显式钉住关键节点：当前 wire 下 todo 条目的 tone 只有
+ * done / current / idle，但派生逻辑一旦扩展（例如把失败条目映射成 failed），
+ * 钉住的规则必须已经就位，不能让「需要你介入」的步骤被顺手折起来。
+ */
+export function layoutSuperTimeline(
+  nodes: readonly SuperTimelineNode[],
+  expanded: boolean,
+): SuperTimelineRow[] {
+  const foldable = nodes.some((node) => node.kind === "todo");
+  if (
+    expanded ||
+    !foldable ||
+    nodes.length < SUPER_TIMELINE_FOLD_MIN_NODES
+  ) {
+    return nodes.map((_, index): SuperTimelineRow => ({ type: "node", index }));
+  }
+
+  const pinned = new Set<number>();
+  let current = -1;
+  nodes.forEach((node, index) => {
+    if (node.tone === "current") current = index;
+  });
+  const anchor = current >= 0 ? current : nodes.length - 1;
+  pinned.add(anchor);
+  if (anchor - 1 >= 0) pinned.add(anchor - 1);
+  nodes.forEach((node, index) => {
+    if (isCriticalTimelineNode(node)) pinned.add(index);
+  });
+
+  const rows: SuperTimelineRow[] = [];
+  let group: number[] = [];
+  const flush = (): void => {
+    if (group.length === 0) return;
+    rows.push({ type: "folded", indices: group });
+    group = [];
+  };
+  nodes.forEach((_, index) => {
+    if (pinned.has(index)) {
+      flush();
+      rows.push({ type: "node", index });
+    } else {
+      group.push(index);
+    }
+  });
+  flush();
+  return rows;
+}

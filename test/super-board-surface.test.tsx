@@ -270,7 +270,7 @@ describe("Super Agent 看板阶段轨", () => {
   }
 
   function rails(): NodeListOf<HTMLElement> {
-    return document.body.querySelectorAll<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+    return document.body.querySelectorAll<HTMLElement>('[role="group"][aria-label^="阶段轨："]');
   }
 
   /** 阶段轨元素：只在展开后出现，且恰好一个。 */
@@ -280,14 +280,14 @@ describe("Super Agent 看板阶段轨", () => {
     return all[0]!;
   }
 
-  /** 轨上的圆点（每个真实节点一个）。 */
+  /** 轨上的状态图标（每个露出的真实节点一个；折叠行不算）。 */
   function dots(): HTMLElement[] {
-    return Array.from(rail().querySelectorAll<HTMLElement>(".rounded-full"));
+    return Array.from(rail().querySelectorAll<HTMLElement>("[data-timeline-icon]"));
   }
 
   /** 节点文案（标签在 DOM 里常驻，窄容器只是被 CSS 隐藏）。 */
   function labels(): HTMLElement[] {
-    return Array.from(rail().querySelectorAll<HTMLElement>("span.text-ui-caption"));
+    return Array.from(rail().querySelectorAll<HTMLElement>("[data-timeline-label]"));
   }
 
   it("折叠行只报状态，阶段轨只在展开后出现一次", () => {
@@ -309,7 +309,7 @@ describe("Super Agent 看板阶段轨", () => {
     expand();
     openRow();
 
-    const rail = document.body.querySelector<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+    const rail = document.body.querySelector<HTMLElement>('[role="group"][aria-label^="阶段轨："]');
     expect(rail).toBeTruthy();
     // 派发（createdAt 恒有）+ 启动（startedAt 存在）——没有「收尾」「完成」这种
     // 尚未发生的占位节点。
@@ -317,12 +317,11 @@ describe("Super Agent 看板阶段轨", () => {
     expect(rail!.getAttribute("aria-label")).toContain("已启动");
     expect(rail!.getAttribute("aria-label")).not.toContain("已完成");
 
-    const dots = rail!.querySelectorAll(".rounded-full");
-    expect(dots).toHaveLength(2);
-    // 已发生=实心（静音色），当前=主色 + ring 高亮。
-    expect(dots[0]!.className).toContain("bg-muted-foreground/60");
-    expect(dots[1]!.className).toContain("bg-primary");
-    expect(dots[1]!.className).toContain("ring-2");
+    const icons = rail!.querySelectorAll("[data-timeline-icon]");
+    expect(icons).toHaveLength(2);
+    // 已发生=静音文字色，当前=主色（形状才是主编码，颜色只是冗余）。
+    expect(icons[0]!.className).toContain("text-muted-foreground");
+    expect(icons[1]!.className).toContain("text-primary");
   });
 
   it("queued：出现排队节点且为当前高亮（信息色）", () => {
@@ -337,8 +336,7 @@ describe("Super Agent 看板阶段轨", () => {
 
     const all = dots();
     expect(all).toHaveLength(2);
-    expect(all[1]!.className).toContain("bg-info");
-    expect(all[1]!.className).toContain("ring-2");
+    expect(all[1]!.className).toContain("text-info");
 
     const last = labels().at(-1)!;
     expect(last.textContent).toBe("排队");
@@ -368,8 +366,7 @@ describe("Super Agent 看板阶段轨", () => {
 
     const all = dots();
     expect(all).toHaveLength(3);
-    expect(all[2]!.className).toContain("bg-warning");
-    expect(all[2]!.className).toContain("ring-2");
+    expect(all[2]!.className).toContain("text-warning");
 
     const last = labels().at(-1)!;
     expect(last.textContent).toBe("在等你回答");
@@ -403,8 +400,8 @@ describe("Super Agent 看板阶段轨", () => {
 
     const all = dots();
     expect(all).toHaveLength(4);
-    // 终态没有「当前」节点：不该再有 ring 高亮。
-    expect(all.some((dot) => dot.className.includes("ring-2"))).toBe(false);
+    // 终态没有「当前」节点：不该再有主色图标。
+    expect(all.some((dot) => dot.className.includes("text-primary"))).toBe(false);
 
     const last = labels().at(-1)!;
     expect(last.textContent).toBe("已自动合并");
@@ -422,7 +419,7 @@ describe("Super Agent 看板阶段轨", () => {
 
     const all = dots();
     expect(all).toHaveLength(3);
-    expect(all[2]!.className).toContain("bg-destructive");
+    expect(all[2]!.className).toContain("text-destructive");
 
     const last = labels().at(-1)!;
     expect(last.textContent).toBe("失败");
@@ -453,36 +450,52 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
   ];
 
   function rail(): HTMLElement {
-    const all = document.body.querySelectorAll<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+    const all = document.body.querySelectorAll<HTMLElement>('[role="group"][aria-label^="阶段轨："]');
     expect(all).toHaveLength(1);
     return all[0]!;
   }
 
-  it("只画 todo 节点，最后一条长文本完整可见且不被字典改写", () => {
-    render([session({ status: "running", startedAt: 2000, updatedAt: 3000, todos })]);
-    expand();
+  function openTodoRow(): void {
     const row = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
       (b.textContent ?? "").includes("修复登录跳转"),
     );
     expect(row).toBeTruthy();
     act(() => row!.click());
+  }
+
+  it("单列 rail：默认只展开当前步与上一步，其余折成一行；展开后长文本 truncate + title", () => {
+    render([session({ status: "running", startedAt: 2000, updatedAt: 3000, todos })]);
+    expand();
+    openTodoRow();
 
     const el = rail();
-    // 目标：任何窄屏下都不硬裁 —— 换行而不是 overflow-hidden / max-w-[…] 截断。
-    expect(el.className).not.toContain("overflow-hidden");
-    expect(el.className).not.toContain("max-w-[");
-    expect(el.className).toContain("flex-wrap");
+    // 单列纵向 rail：不再靠 flex-wrap 折成多列。
+    expect(el.className).toContain("flex-col");
+    expect(el.className).not.toContain("flex-wrap");
 
-    // 4 条 todo = 4 个圆点；阶段事实不再占节点。
-    const dots = Array.from(el.querySelectorAll<HTMLElement>(".rounded-full"));
-    expect(dots).toHaveLength(4);
+    // 4 条 todo 达到折叠阈值：默认露出 2 个节点（当前步 + 上一步）+ 1 个折叠行。
+    const icons = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-icon]"));
+    expect(icons).toHaveLength(2);
+    const labels = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-label]"));
+    expect(labels.map((node) => node.textContent)).toEqual(["读取现有实现", "改写时间轴组件"]);
+    // 折叠行说「其余 2 步」（后面两条未完成，不能谎报成已完成）。
+    const folded = [...el.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes("其余 2 步"),
+    );
+    expect(folded).toBeTruthy();
 
-    // 最后一条长文本完整出现在 DOM（不是省略号、不是被容器切掉）。
-    const labels = Array.from(el.querySelectorAll<HTMLElement>("span.text-ui-caption"));
-    const last = labels.at(-1)!;
+    // 顶部进度计数：1 个 done / 4 个节点。
+    expect(el.textContent).toContain("进度 1/4");
+
+    // 展开：4 条 todo 全部露出，长文本完整进入 title（可见文本单行 truncate）。
+    act(() => folded!.click());
+    const expandedIcons = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-icon]"));
+    expect(expandedIcons).toHaveLength(4);
+    const expandedLabels = Array.from(el.querySelectorAll<HTMLElement>("[data-timeline-label]"));
+    const last = expandedLabels.at(-1)!;
     expect(last.textContent).toBe(longTodo);
-    expect(last.className).toContain("break-words");
-    expect(last.className).not.toContain("whitespace-nowrap");
+    expect(last.className).toContain("truncate");
+    expect(last.getAttribute("title")).toBe(longTodo);
 
     // 动态 todo 原文绝不过 i18n 字典（否则可能与字典 key 撞上被悄悄改写）。
     const keys = translate.mock.calls.map((call) => call[0]);
@@ -497,6 +510,62 @@ describe("Super Agent 看板时间轴 · 超流体 todolist", () => {
     expect(described).toContain("已启动");
     expect(described).toContain("运行中");
     expect(described).toContain(longTodo);
+  });
+
+  it("折叠行可点击展开，展开后出现收起行，再点收起回到折叠态", () => {
+    render([session({ status: "running", startedAt: 2000, updatedAt: 3000, todos })]);
+    expand();
+    openTodoRow();
+
+    const el = rail();
+    const foldButton = (): HTMLButtonElement | undefined =>
+      [...el.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+        (b.textContent ?? "").includes("其余") || (b.textContent ?? "").includes("已完成"),
+      );
+    expect(foldButton()).toBeTruthy();
+
+    // 展开 → 全部 4 条 todo 露出，出现「收起到当前步骤」。
+    act(() => foldButton()!.click());
+    expect(el.querySelectorAll("[data-timeline-icon]")).toHaveLength(4);
+    const collapseButton = [...el.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes("收起到当前步骤"),
+    );
+    expect(collapseButton).toBeTruthy();
+    // 折叠行的 aria-expanded 必须如实反映状态（不是恒为 false 的假按钮）。
+    expect(foldButton()).toBeUndefined();
+
+    // 收起 → 回到「当前步 + 上一步」两行。
+    act(() => collapseButton!.click());
+    expect(el.querySelectorAll("[data-timeline-icon]")).toHaveLength(2);
+    expect(foldButton()).toBeTruthy();
+  });
+
+  it("关键状态永不折叠：等待回答的节点在默认态就露出并高亮", () => {
+    render([
+      session({
+        status: "awaiting_input",
+        startedAt: 2000,
+        pending: {
+          kind: "question",
+          requestId: "q-1",
+          questions: [],
+          deadline: 305_000,
+          timeoutMs: 300_000,
+        },
+      }),
+    ]);
+    openTodoRow();
+
+    const el = rail();
+    // 阶段轨（无 todos）整条展开：等待回答是真实节点，不在任何折叠体里。
+    expect(el.textContent).not.toContain("其余");
+    expect(el.textContent).not.toContain("已完成 0 步");
+    const labels = [...el.querySelectorAll<HTMLElement>("[data-timeline-label]")];
+    const waiting = labels.find((node) => node.textContent === "在等你回答");
+    expect(waiting).toBeTruthy();
+    // 高亮：警告色文字 + 行底色（颜色只是冗余，图标形状与文案才是主编码）。
+    expect(waiting!.className).toContain("text-warning");
+    expect(waiting!.closest("div")!.className).toContain("bg-warning/10");
   });
 });
 

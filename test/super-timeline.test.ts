@@ -10,8 +10,13 @@ import type { SuperSessionUi, SuperTodoUi } from "../shared/super-agent.js";
 import {
   deriveSuperTimeline,
   describeSuperTimelineFacts,
+  isCriticalTimelineNode,
+  layoutSuperTimeline,
+  summarizeSuperTimelineProgress,
+  SUPER_TIMELINE_FOLD_MIN_NODES,
   SUPER_TODO_DETAIL_SEP,
   type SuperTimelineKind,
+  type SuperTimelineNode,
 } from "../shared/super-timeline.js";
 
 function session(overrides: Partial<SuperSessionUi> = {}): SuperSessionUi {
@@ -250,5 +255,134 @@ describe("deriveSuperTimeline · 只用 todolist 节点", () => {
     expect(describeSuperTimelineFacts(session({ todos, startedAt: 2000 }))).toBe(
       "已派出 → 已启动",
     );
+  });
+});
+
+/** 造节点的小工具：只关心 kind / tone。 */
+function node(kind: SuperTimelineKind, tone: SuperTimelineNode["tone"]): SuperTimelineNode {
+  return { kind, tone, label: kind };
+}
+
+describe("isCriticalTimelineNode · 需要用户介入的节点", () => {
+  it("等待回答 / 失败 / 合并失败是关键节点", () => {
+    expect(isCriticalTimelineNode(node("awaiting_input", "current"))).toBe(true);
+    expect(isCriticalTimelineNode(node("failed", "failed"))).toBe(true);
+    expect(isCriticalTimelineNode(node("integration", "failed"))).toBe(true);
+  });
+
+  it("已完成 / 已中断 / 跳过的集成 / 普通 todo 不是关键节点", () => {
+    expect(isCriticalTimelineNode(node("completed", "done"))).toBe(false);
+    // 已中断不需要用户动手 —— 折起来不丢可操作信息。
+    expect(isCriticalTimelineNode(node("cancelled", "failed"))).toBe(false);
+    // 跳过 / 无需合并是静音事实，不是冲突。
+    expect(isCriticalTimelineNode(node("integration", "idle"))).toBe(false);
+    expect(isCriticalTimelineNode(node("integration", "done"))).toBe(false);
+    expect(isCriticalTimelineNode(node("todo", "current"))).toBe(false);
+    expect(isCriticalTimelineNode(node("dispatched", "done"))).toBe(false);
+  });
+});
+
+describe("summarizeSuperTimelineProgress · 顶部进度计数", () => {
+  it("done = tone 为 done 的节点数，total = 全部节点", () => {
+    const nodes = [
+      node("dispatched", "done"),
+      node("started", "done"),
+      node("completed", "done"),
+      node("integration", "idle"),
+      node("todo", "current"),
+    ];
+    expect(summarizeSuperTimelineProgress(nodes)).toEqual({ done: 3, total: 5 });
+  });
+
+  it("空节点序列给出 0/0（组件据此避免除零）", () => {
+    expect(summarizeSuperTimelineProgress([])).toEqual({ done: 0, total: 0 });
+  });
+});
+
+describe("layoutSuperTimeline · 默认只展开当前步与上一步", () => {
+  /** 5 条 todo：done done done current pending。 */
+  function fiveNodes(): SuperTimelineNode[] {
+    return [
+      node("todo", "done"),
+      node("todo", "done"),
+      node("todo", "done"),
+      node("todo", "current"),
+      node("todo", "idle"),
+    ];
+  }
+
+  it("节点数低于阈值时整条展开（折叠只增加点击，不减少高度）", () => {
+    const nodes = fiveNodes().slice(0, SUPER_TIMELINE_FOLD_MIN_NODES - 1);
+    expect(layoutSuperTimeline(nodes, false)).toEqual(
+      nodes.map((_, index) => ({ type: "node", index })),
+    );
+  });
+
+  it("默认态：当前步 + 上一步露出，其余按连续区间各自折叠", () => {
+    const rows = layoutSuperTimeline(fiveNodes(), false);
+    // 锚点 = 当前节点(3)，上一步(2)一起露出；0/1 与 4 各折成一行。
+    expect(rows[0]).toEqual({ type: "folded", indices: [0, 1] });
+    expect(rows[1]).toEqual({ type: "node", index: 2 });
+    expect(rows[2]).toEqual({ type: "node", index: 3 });
+    expect(rows[3]).toEqual({ type: "folded", indices: [4] });
+  });
+
+  it("expanded=true 时全部展开，没有 folded 行", () => {
+    const rows = layoutSuperTimeline(fiveNodes(), true);
+    expect(rows.every((row) => row.type === "node")).toBe(true);
+    expect(rows).toHaveLength(5);
+  });
+
+  it("终态 todo 轨没有 current：锚点是最后一个节点，其前一步一起露出", () => {
+    const nodes = [
+      node("todo", "done"),
+      node("todo", "done"),
+      node("todo", "done"),
+      node("todo", "idle"),
+    ];
+    const rows = layoutSuperTimeline(nodes, false);
+    expect(rows).toContainEqual({ type: "node", index: 2 });
+    expect(rows).toContainEqual({ type: "node", index: 3 });
+    expect(rows[0]).toEqual({ type: "folded", indices: [0, 1] });
+  });
+
+  it("阶段轨（非 todolist）永不折叠：生命周期事实最多六行，折起来只丢信息", () => {
+    const nodes = [
+      node("dispatched", "done"),
+      node("attempt", "done"),
+      node("queued", "done"),
+      node("started", "done"),
+      node("completed", "done"),
+      node("integration", "idle"),
+    ];
+    expect(layoutSuperTimeline(nodes, false)).toEqual(
+      nodes.map((_, index) => ({ type: "node", index })),
+    );
+  });
+
+  it("关键状态永不折叠：等待回答 / 失败即使远离当前步也强制露出", () => {
+    const nodes = [
+      node("awaiting_input", "current"), // 关键：在等你回答
+      node("todo", "done"),
+      node("todo", "done"),
+      node("todo", "done"),
+      node("todo", "done"),
+      node("todo", "current"),
+    ];
+    const rows = layoutSuperTimeline(nodes, false);
+    // 关键节点单独露出，不与后面的折叠组混在一起。
+    expect(rows[0]).toEqual({ type: "node", index: 0 });
+    // 1..3 折成一行（4 是最后一个 current 的上一步，露出）。
+    expect(rows[1]).toEqual({ type: "folded", indices: [1, 2, 3] });
+    expect(rows.slice(2)).toEqual([
+      { type: "node", index: 4 },
+      { type: "node", index: 5 },
+    ]);
+  });
+
+  it("折叠组保留原始索引（webview 据此判断是否全部完成）", () => {
+    const rows = layoutSuperTimeline(fiveNodes(), false);
+    const folded = rows.find((row) => row.type === "folded");
+    expect(folded && folded.type === "folded" ? folded.indices : []).toEqual([0, 1]);
   });
 });
