@@ -10320,6 +10320,19 @@ export class ChatPanel implements vscode.Disposable {
       for (const img of regenImages) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
+      // 效率开关：与 sendPrompt 同一注入语义 —— 重生成也是真实用户回合，
+      // 用户切到速推后直接点重生成，这一轮同样要带上档位块。
+      //
+      // 守卫对齐 sendPrompt 的 `!internal && !hidden && !isCompressTurn`：
+      // hidden 宿主回合根本不写 user 块（重生成取不到它），唯一的 internal
+      // 宿主驱动 user 块是 QQ 注入轮（块上带 `origin: "qq"`），所以
+      // `origin !== "qq"` 正是这里 `!internal && !hidden` 的等价写法 —— 否则
+      // 重生成一条 QQ 注入轮会把档位变化消耗掉，用户下一条真实消息反而拿不到
+      // 规则。`/compress` 守卫同样保留：promptWithRetry 会把整份 prompt 换成
+      // `/compress`。
+      if (!isCompressTurn && lastUserBlock?.origin !== "qq") {
+        this.appendEfficiencyBlock(prompt, promptSessionId);
+      }
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
       // Session replaced mid-flight: the completion must not settle the NEW
       // session's state — drop like the sendPrompt success path.

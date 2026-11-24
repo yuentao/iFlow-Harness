@@ -79,6 +79,7 @@ type PanelInternals = {
   injectedEfficiencyMode: Map<string, "steady" | "turbo">;
   store: {
     getState: () => { sessionId: string | null; status: string; blocks: unknown[] };
+    replaceState: (next: unknown) => void;
     sessionStarted: (meta: { sessionId: string }) => void;
     sendToast: (...args: unknown[]) => number;
   };
@@ -207,6 +208,98 @@ describe("ChatPanel 效率开关注入", () => {
     expect(p.injectedEfficiencyMode.get("eff-session")).toBe("turbo");
     calls[0]!.resolve({ stopReason: "end_turn" });
     await turn;
+  });
+
+  it("档位未变时重生成不注入档位块", async () => {
+    const first = send("做点事");
+    await flush();
+    expect(textsOf(calls[0]!)).toHaveLength(1);
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await first;
+    await flush();
+
+    // steady 基线：Map 里没有记录 = 与 CLI 默认一致，重生成同样不该带块。
+    const regen = p.handleWebviewMessage({ type: "regenerate" });
+    await flush();
+    expect(calls).toHaveLength(2);
+    const texts = textsOf(calls[1]!);
+    expect(texts.join("\n")).not.toContain(EFFICIENCY_TURBO_PROMPT);
+    expect(texts.join("\n")).not.toContain(EFFICIENCY_STEADY_PROMPT);
+    expect(p.injectedEfficiencyMode.get("eff-session")).toBeUndefined();
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await regen;
+  });
+
+  it("切到 turbo 后重生成带上速推块并更新注入记录", async () => {
+    const first = send("做点事");
+    await flush();
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await first;
+    await flush();
+
+    // 用户切到速推后直接点重生成：这一轮必须带速推规则。
+    setConfigOverrides({ checkpoints: false, efficiencyMode: "turbo" });
+    const regen = p.handleWebviewMessage({ type: "regenerate" });
+    await flush();
+    expect(calls).toHaveLength(2);
+    const texts = textsOf(calls[1]!);
+    expect(texts[0]).toContain("做点事");
+    expect(texts.at(-1)).toBe(EFFICIENCY_TURBO_PROMPT);
+    expect(p.injectedEfficiencyMode.get("eff-session")).toBe("turbo");
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await regen;
+  });
+
+  it("重生成注入后紧接一轮普通对话不重复注入", async () => {
+    const first = send("做点事");
+    await flush();
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await first;
+    await flush();
+
+    setConfigOverrides({ checkpoints: false, efficiencyMode: "turbo" });
+    const regen = p.handleWebviewMessage({ type: "regenerate" });
+    await flush();
+    expect(textsOf(calls[1]!).at(-1)).toBe(EFFICIENCY_TURBO_PROMPT);
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await regen;
+    await flush();
+
+    // 重生成已把 turbo 记进 Map：紧随其后的普通回合不再重复带块。
+    const next = send("下一轮");
+    await flush();
+    expect(calls).toHaveLength(3);
+    expect(textsOf(calls[2]!)).toHaveLength(1);
+    expect(textsOf(calls[2]!).join("\n")).not.toContain(EFFICIENCY_TURBO_PROMPT);
+    calls[2]!.resolve({ stopReason: "end_turn" });
+    await next;
+  });
+
+  it("重生成 QQ 注入轮不消耗档位变化，随后的真实用户回合仍注入", async () => {
+    // QQ 注入轮是唯一带 user 块的宿主驱动（internal）回合：重生成它时
+    // 不能把档位变化消耗掉，否则用户下一条真实消息拿不到规则。
+    p.store.replaceState({
+      ...p.store.getState(),
+      status: "idle",
+      blocks: [{ kind: "user", id: "u-qq", text: "QQ 转来的消息", origin: "qq" }],
+    });
+    setConfigOverrides({ checkpoints: false, efficiencyMode: "turbo" });
+
+    const regen = p.handleWebviewMessage({ type: "regenerate" });
+    await flush();
+    expect(calls).toHaveLength(1);
+    expect(textsOf(calls[0]!).join("\n")).not.toContain(EFFICIENCY_TURBO_PROMPT);
+    expect(p.injectedEfficiencyMode.get("eff-session")).toBeUndefined();
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await regen;
+    await flush();
+
+    const real = send("真实消息");
+    await flush();
+    expect(calls).toHaveLength(2);
+    expect(textsOf(calls[1]!).at(-1)).toBe(EFFICIENCY_TURBO_PROMPT);
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await real;
   });
 
   it("hidden 宿主回合不消耗档位变化，随后的真实用户回合仍注入", async () => {
