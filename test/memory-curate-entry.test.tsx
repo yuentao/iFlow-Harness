@@ -363,7 +363,7 @@ describe("requestId 命名空间：两个入口互不认领", () => {
     // 不再停留在 loading（ok 表示流程跑通）。
     expect(buttonByText("整理记忆")).toBeTruthy();
     const status = container.querySelector('[role="status"][aria-live="polite"]')!;
-    expect(status.textContent).toContain("1 个文件失败");
+    expect(status.textContent).toContain("另有 1 个文件处理失败");
     // warning 色阶：没有成功绿的 success 类。
     expect(status.className).toContain("warning");
     expect(status.className).not.toContain("success");

@@ -317,7 +317,7 @@ export function MemorySection({
           // 部分失败：宿主的 message 是基础摘要（共享 l10n 词典不归本改动），
           // 失败数在这里用 webview 自己的词典补上，色阶随 failed 走 warning。
           const base = msg.message ?? t("记忆整理完成");
-          setCurateFlash(failed > 0 ? `${base} · ${t("{0} 个文件失败", failed)}` : base);
+          setCurateFlash(failed > 0 ? `${base}；${t("另有 {0} 个文件处理失败", failed)}` : base);
           if (curateFlashTimer.current) clearTimeout(curateFlashTimer.current);
           curateFlashTimer.current = setTimeout(() => setCurateFlash(null), 6000);
         } else {
@@ -655,7 +655,7 @@ export function MemorySection({
         >
           {curating ? t("整理中…") : t("整理记忆")}
         </Button>
-        <span className="text-ui-caption text-muted-foreground">{t("按当前设置执行一次")}</span>
+        <span className="text-ui-caption text-muted-foreground">{t("按当前设置立即整理一次")}</span>
       </ActionRow>
       {curateFlash && (
         curateFailed > 0 ? (

@@ -894,7 +894,7 @@ describe("记忆整理设置", () => {
     renderTab("memory", BASIC_AUTH);
     expect(container.textContent).toContain("整理策略");
     const apply = [...container.querySelectorAll<HTMLButtonElement>('button[role="radio"]')].find(
-      (b) => b.textContent === "直接应用",
+      (b) => b.textContent === "执行并改写文件",
     );
     expect(apply).toBeTruthy();
     act(() => apply!.click());

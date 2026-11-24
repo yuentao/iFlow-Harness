@@ -3737,7 +3737,7 @@ export class ChatPanel implements vscode.Disposable {
    * 手动触发一轮整理（命令面板 `iflow.curateMemory`、记忆页按钮与
    * `/memory-curate` 指令）。绕过 enabled / 空闲 / 到期判定，但仍遵守
    * 「已在运行」与跨窗口锁；完成后用 toast 汇报应用/跳过/冲突条数
-   * 与节省的 token。report 策略下 writeFile 是空操作，汇报为「预计应用」。
+   * 与节省的 token。report 策略下 writeFile 是空操作，汇报为「将更新」。
    *
    * `requestId` 只在 webview 触发时传入：回包 `memoryCurated` 让按钮结束
    * loading 并就地显示失败；命令面板触发不传，行为与原先一致。
@@ -3778,14 +3778,14 @@ export class ChatPanel implements vscode.Disposable {
     const message =
       (dryRun
         ? vscode.l10n.t(
-            "记忆整理（仅报告）：预计应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 预计节省 {3} tokens",
+            "记忆整理预览（不会修改文件）：将更新 {0} 个记忆文件，{1} 个文件保持原样（无需改动或整理后没更省），{2} 个文件因被其它程序改动而跳过，预计可省 {3} tokens",
             applied,
             skipped,
             conflict,
             report.savedTokens,
-          ) + (l2Skipped ? vscode.l10n.t(" · L2 已跳过（report 模式）") : "")
+          ) + (l2Skipped ? vscode.l10n.t("；预览模式不调用模型，智能合并已跳过") : "")
         : vscode.l10n.t(
-            "记忆整理完成：应用 {0} 个文件 · 跳过 {1} · 冲突 {2} · 节省 {3} tokens",
+            "记忆整理完成：已更新 {0} 个记忆文件，{1} 个文件保持原样（无需改动或整理后没更省），{2} 个文件因被其它程序改动而跳过，共省下 {3} tokens",
             applied,
             skipped,
             conflict,

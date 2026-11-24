@@ -46,7 +46,7 @@
   "iflow.configuration.memoryMaintenanceGlobalTokenBudget.description": "全局记忆托管区块的 token 预算。超出后优先删除重复、合并或归档低价值条目。默认 4000，范围 500–50000。",
   "iflow.configuration.memoryMaintenanceProjectTokenBudget.description": "每个项目记忆文件托管区块的 token 预算。默认 2500，范围 500–50000。",
   "iflow.configuration.memoryMaintenanceTotalTokenBudget.description": "所有记忆文件托管区块的 token 合计阈值。超过后即使未到整理周期也会触发整理（冷却期为 6 小时与周期的四分之一中较大者，冷却期内不重复触发）。默认 12000，范围 1000–200000。",
-  "iflow.configuration.memoryMaintenanceStrategy.description": "自动整理做什么：「报告」只汇总将要发生的改动；「应用」会改写记忆文件（每个文件先备份，若期间被其它程序改动则跳过）。默认报告。",
+  "iflow.configuration.memoryMaintenanceStrategy.description": "自动整理做什么：「只预览」只统计将要发生的改动，不改动文件；「执行」会真正改写记忆文件（每个文件先备份，若期间被其它程序改动则跳过该文件）。默认「只预览」。",
   "iflow.configuration.nextStepTimeoutSeconds.description": "回合末下一步建议的最长等待时间（秒）。回合末的标题生成、下一步建议与记忆提取合并为一次模型调用，实际超时取所启用任务中最宽松的一个。默认 25，范围 0–300（0 表示不限制）。",
   "iflow.configuration.compressTimeoutSeconds.description": "压缩会话的最长等待时间（秒）。默认 0 表示不限制——压缩很大的会话本来就可能需要几分钟；设为非 0 后，超时的压缩会被取消并给出提示。范围 0–600。",
   "iflow.configuration.autoCompressThresholdPercent.description": "上下文占用达到该百分比时触发自动压缩。仅在开启「自动压缩上下文」时生效。默认 95，范围 50–100。",

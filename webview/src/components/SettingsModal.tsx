@@ -988,7 +988,7 @@ function MemoryMaintenanceGroup() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
   return (
-    <SettingsGroup title={t("记忆整理")} hint={t("只在面板空闲时运行，默认只出报告")}>
+    <SettingsGroup title={t("记忆整理")} hint={t("只在面板空闲时运行；默认只预览，不改动文件")}>
       <div>
         <ToggleRow
           label={t("定期整理记忆")}
@@ -1003,14 +1003,14 @@ function MemoryMaintenanceGroup() {
           <DependentRow>
             <ChoiceRow
               label={t("整理策略")}
-              description={t("报告只汇总改动，应用才真正改写记忆文件。")}
+              description={t("「只预览」只统计会改动哪些文件，「执行」才真正改写记忆文件。")}
               detail={t(
                 "应用策略下每个文件先备份；若期间被其它程序改动则跳过该文件，绝不覆盖。",
               )}
               value={settings.memoryMaintenanceStrategy}
               options={[
-                { value: "report", label: t("仅报告") },
-                { value: "apply", label: t("直接应用") },
+                { value: "report", label: t("只预览（不改文件）") },
+                { value: "apply", label: t("执行并改写文件") },
               ]}
               onChange={(memoryMaintenanceStrategy) => update({ memoryMaintenanceStrategy })}
             />

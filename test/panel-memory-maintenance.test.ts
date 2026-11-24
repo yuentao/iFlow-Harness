@@ -522,7 +522,7 @@ describe("记忆整理：手动触发回包的失败粒度", () => {
     // 关键：部分失败不再被当成整体失败。
     expect(reply.ok).toBe(true);
     expect(reply.failed).toBe(1);
-    expect(String(reply.message)).toContain("应用 1 个文件");
+    expect(String(reply.message)).toContain("将更新 1 个记忆文件");
     // toast 也是 warning（与 webview 的 warning 色阶一致）。
     expect(toasts).toHaveLength(1);
     expect(toasts[0]!.level).toBe("warning");

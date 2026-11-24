@@ -868,20 +868,20 @@ const en: Record<string, string> = {
   "自动提取记忆": "Auto-extract memories",
   // --- 记忆整理（P1） ---
   "记忆整理": "Memory curation",
-  "只在面板空闲时运行，默认只出报告":
-    "Runs only while the panel is idle; reports by default",
+  "只在面板空闲时运行；默认只预览，不改动文件":
+    "Runs only while the panel is idle; previews by default without touching files",
   "定期整理记忆": "Curate memories on a schedule",
   "空闲时清理记忆托管区块：去重、合并、归档低价值条目。":
     "Tidy the managed memory sections while idle: dedupe, merge and archive low-value facts.",
   "只在没有进行中的回合、没有待处理的审批或提问、没有运行中的超流体，且空闲达到阈值时运行。默认关闭。":
     "Runs only when no turn is streaming, no approval or question is pending, no Superfluid is running, and the panel has been idle for the threshold. Off by default.",
   "整理策略": "Curation strategy",
-  "报告只汇总改动，应用才真正改写记忆文件。":
-    "Report only summarises the changes; apply actually rewrites the memory files.",
+  "「只预览」只统计会改动哪些文件，「执行」才真正改写记忆文件。":
+    "Preview only counts what would change; Apply actually rewrites the memory files.",
   "应用策略下每个文件先备份；若期间被其它程序改动则跳过该文件，绝不覆盖。":
-    "In apply mode each file is backed up first; a file changed by another program in the meantime is skipped, never overwritten.",
-  "仅报告": "Report only",
-  "直接应用": "Apply",
+    "When applying, each file is backed up first; a file changed by another program in the meantime is skipped, never overwritten.",
+  "只预览（不改文件）": "Preview only (no changes)",
+  "执行并改写文件": "Apply and rewrite files",
   "整理周期": "Curation interval",
   "每隔多少天自动整理一次。": "How often automatic curation runs, in days.",
   "空闲阈值": "Idle threshold",
@@ -902,7 +902,7 @@ const en: Record<string, string> = {
   // 记忆整理：手动触发入口（记忆页按钮 + /memory-curate）
   "整理记忆": "Curate memories",
   "整理中…": "Curating…",
-  "按当前设置执行一次": "Runs one round with the current settings",
+  "按当前设置立即整理一次": "Runs one round now with the current settings",
   "立即对记忆托管区块去重、合并、归档低价值条目":
     "Dedupe, merge and archive low-value facts in the managed memory sections right away",
   "立即整理记忆：去重、合并、归档低价值条目":
@@ -911,7 +911,7 @@ const en: Record<string, string> = {
     "Memory curation started; the result will be reported when it finishes",
   "记忆整理完成": "Memory curation finished",
   "记忆整理未能开始": "Memory curation could not start",
-  "{0} 个文件失败": "{0} file(s) failed",
+  "另有 {0} 个文件处理失败": "{0} more file(s) failed to process",
   "已触发记忆整理；该指令不接受附件，附带的图片/文件/上下文未发送":
     "Memory curation started; this command takes no attachments, so the attached images/files/contexts were not sent",
   "该指令不接受参数，已按整理记忆执行":
