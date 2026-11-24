@@ -831,10 +831,6 @@ const en: Record<string, string> = {
   "保存后要新建会话或重启内核才生效": "Takes effect after a new session or a Core restart",
   "请先创建项目记忆文件": "Create a project memory file first",
   "新建会话": "New session",
-  "重启内核使记忆生效": "Restart Core to apply memory",
-  "重启内核并恢复当前会话，使记忆立即生效":
-    "Restart the Core and restore the current session so memory applies immediately",
-  "改动不会影响正在进行的会话。": "Changes do not affect an ongoing session.",
   "文件已在磁盘上发生变化，请重新加载后再保存":
     "The file changed on disk — reload before saving",
   "保存失败": "Save failed",
@@ -901,6 +897,18 @@ const en: Record<string, string> = {
     "When exceeded, curation runs even before the interval elapses; the cooldown is the longer of 6 hours or a quarter of the interval, during which it does not retrigger.",
   "天": "days",
   "分钟": "min",
+  // 记忆整理：手动触发入口（记忆页按钮 + /memory-curate）
+  "整理记忆": "Curate memories",
+  "整理中…": "Curating…",
+  "按当前设置执行一次": "Runs one round with the current settings",
+  "立即对记忆托管区块去重、合并、归档低价值条目":
+    "Dedupe, merge and archive low-value facts in the managed memory sections right away",
+  "立即整理记忆：去重、合并、归档低价值条目":
+    "Curate memories now: dedupe, merge and archive low-value facts",
+  "已触发记忆整理，完成后会提示结果":
+    "Memory curation started; the result will be reported when it finishes",
+  "记忆整理完成": "Memory curation finished",
+  "记忆整理未能开始": "Memory curation could not start",
   // F3 Phase 3: project knowledge
   "项目知识库": "Project knowledge",
   "{0} 篇文档": "{0} doc(s)",

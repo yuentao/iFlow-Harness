@@ -5,10 +5,12 @@ import {
   ChevronRight,
   ExternalLink,
   FileText,
+  Loader2,
   Pencil,
   Plus,
   RefreshCw,
   Save,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import type { KnowledgeDocUi, MemoryFactUi, MemoryFileUi, MemoryScope, MemoryStateUi, WebviewToHost } from "../../../shared/messages";
@@ -254,7 +256,14 @@ export function MemorySection({
   const [knowledgeToggling, setKnowledgeToggling] = useState(false);
   const knowledgeBusy = knowledgeGenerating || knowledgeToggling;
   const knowledgeJobRef = useRef<string | null>(null);
+  // 「整理记忆」手动触发：请求号自增，回包按 requestId 认领（迟到的旧回包
+  // 不得结束新一轮的 loading）。
+  const [curating, setCurating] = useState(false);
+  const [curateError, setCurateError] = useState<string | null>(null);
+  const [curateFlash, setCurateFlash] = useState<string | null>(null);
+  const curateSeq = useRef(0);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const curateFlashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pendingPath = useRef<string | null>(null);
   // The last write request, kept so an inline "重试" can resend it verbatim
   // (append / delete / save all carry different payloads).
@@ -282,7 +291,22 @@ export function MemorySection({
         stage?: string;
         message?: string;
         jobId?: string;
+        requestId?: number;
       };
+      if (msg?.type === "memoryCurated") {
+        if (msg.requestId !== curateSeq.current) return;
+        setCurating(false);
+        if (msg.ok) {
+          setCurateError(null);
+          setCurateFlash(msg.message ?? t("记忆整理完成"));
+          if (curateFlashTimer.current) clearTimeout(curateFlashTimer.current);
+          curateFlashTimer.current = setTimeout(() => setCurateFlash(null), 6000);
+        } else {
+          setCurateFlash(null);
+          setCurateError(msg.message ?? t("记忆整理未能开始"));
+        }
+        return;
+      }
       if (msg?.type === "knowledgeJob") {
         if (knowledgeJobRef.current && msg.jobId && msg.jobId !== knowledgeJobRef.current) return;
         const stage = msg.stage ?? null;
@@ -354,6 +378,7 @@ export function MemorySection({
     return () => {
       window.removeEventListener("message", handler);
       if (flashTimer.current) clearTimeout(flashTimer.current);
+      if (curateFlashTimer.current) clearTimeout(curateFlashTimer.current);
     };
   }, [send]);
 
@@ -420,6 +445,16 @@ export function MemorySection({
 
   function open(file: MemoryFileUi) {
     send({ type: "openMemoryFile", path: file.path });
+  }
+
+  /** 手动触发一轮记忆整理（与 `/memory-curate` 指令走同一个 host 入口）。 */
+  function curateNow() {
+    if (busy || saving || curating) return;
+    setCurateError(null);
+    setCurateFlash(null);
+    setCurating(true);
+    const requestId = ++curateSeq.current;
+    send({ type: "curateMemoryNow", requestId });
   }
 
   function generateKnowledge(mode: "incremental" | "full") {
@@ -588,6 +623,31 @@ export function MemorySection({
       <div className="rounded-lg border border-border/70 bg-surface/60 px-2.5 py-1.5 text-ui-label leading-relaxed text-muted-foreground">
         {t("这些记忆文件会在每次请求时自动带给模型。它们会随请求一起发送，请不要写入密钥。")}
       </div>
+
+      <ActionRow>
+        <Button
+          variant="secondary"
+          icon={curating ? <Loader2 className={`${ICON_INLINE} animate-spin`} /> : <Sparkles className={ICON_INLINE} />}
+          disabled={busy || saving || curating}
+          title={t("立即对记忆托管区块去重、合并、归档低价值条目")}
+          onClick={curateNow}
+        >
+          {curating ? t("整理中…") : t("整理记忆")}
+        </Button>
+        <span className="text-ui-caption text-muted-foreground">{t("按当前设置执行一次")}</span>
+      </ActionRow>
+      {curateFlash && (
+        <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-ui-label text-success">
+          <Check className="size-3 shrink-0" />
+          <span className="min-w-0 flex-1">{curateFlash}</span>
+        </div>
+      )}
+      {curateError && (
+        <div role="alert" className="flex items-start gap-1.5 rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-destructive">
+          <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+          <span className="min-w-0 flex-1">{curateError}</span>
+        </div>
+      )}
 
       {state === null ? (
         <div className="py-4 text-center text-ui-body text-muted-foreground">{t("读取中…")}</div>
@@ -870,22 +930,6 @@ export function MemorySection({
               </div>
             </div>
           </SettingsDisclosure>
-
-          <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2">
-            <Button variant="secondary" disabled={busy} onClick={() => send({ type: "newSession" })}>
-              {t("新建会话")}
-            </Button>
-            <Button
-              variant="secondary"
-              icon={<RefreshCw className={ICON_INLINE} />}
-              disabled={busy}
-              title={t("重启内核并恢复当前会话，使记忆立即生效")}
-              onClick={() => send({ type: "restartCli" })}
-            >
-              {t("重启内核使记忆生效")}
-            </Button>
-            <span className="text-ui-caption text-muted-foreground">{t("改动不会影响正在进行的会话。")}</span>
-          </div>
         </>
       )}
       {footer}

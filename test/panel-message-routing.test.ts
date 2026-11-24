@@ -21,7 +21,7 @@ const panelSource = fs.readFileSync(path.join(here, "..", "src", "panel", "panel
 
 /** 重构前从原 switch 逐字提取的 83 个 case 类型（源码顺序），外加多仓库协作
  * 新增的 setSessionRoots = 84 个，再加设置页上下文窗口覆写
- * setContextWindowOverrides = 85 个。 */
+ * setContextWindowOverrides = 85 个，再加「立即整理记忆」curateMemoryNow = 86 个。 */
 const EXPECTED_CASES = [
   "ready", "sendPrompt", "queueAction", "resolveContext", "stopSubagent", "superAgent",
   "superRetryWave", "superRetryFailed", "requestSuperResidueList", "superResidueHandle",
@@ -36,7 +36,8 @@ const EXPECTED_CASES = [
   "listMcpServers", "saveMcpServers", "mcpStatus", "fetchModelMetadata", "cancelModelMetadata",
   "listAssets", "readAsset", "saveAsset", "createAsset", "deleteAsset", "generateAsset",
   "listMemory", "readMemoryFile", "saveMemoryFile", "appendMemoryFact", "deleteMemoryFacts",
-  "createProjectMemory", "applyMemoryCandidates", "dismissMemoryCandidates", "openMemoryFile",
+  "createProjectMemory", "applyMemoryCandidates", "dismissMemoryCandidates", "curateMemoryNow",
+  "openMemoryFile",
   "generateKnowledge", "setKnowledgeInjection", "openKnowledgeFile", "regenerate",
   "deleteUserMessage", "editAndResend", "exportSession", "enhancePrompt", "cancelEnhance",
   "toastAction", "togglePlanItem", "exportToolOutput", "qqSettingsPatch", "qqTaskAction",
@@ -55,7 +56,8 @@ const DOMAIN_CASES = {
     "listMcpServers", "saveMcpServers", "mcpStatus", "fetchModelMetadata", "cancelModelMetadata",
     "listAssets", "readAsset", "saveAsset", "createAsset", "deleteAsset", "generateAsset",
     "listMemory", "readMemoryFile", "saveMemoryFile", "appendMemoryFact", "deleteMemoryFacts",
-    "createProjectMemory", "applyMemoryCandidates", "dismissMemoryCandidates", "openMemoryFile",
+    "createProjectMemory", "applyMemoryCandidates", "dismissMemoryCandidates", "curateMemoryNow",
+    "openMemoryFile",
     "generateKnowledge", "setKnowledgeInjection", "openKnowledgeFile", "regenerate",
     "deleteUserMessage", "editAndResend", "exportSession", "enhancePrompt", "cancelEnhance",
     "toastAction", "exportToolOutput",
@@ -94,8 +96,8 @@ describe("阶段 7 · Webview 消息路由分域等价性", () => {
   const routerBody = methodBody("private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {");
   const routerCases = caseLabels(routerBody);
 
-  it("薄入口的 case 清单 == 重构前的 83 个 + 后续新增（多仓库协作 setSessionRoots、设置页覆写 setContextWindowOverrides）", () => {
-    expect(routerCases).toHaveLength(85);
+  it("薄入口的 case 清单 == 重构前的 83 个 + 后续新增（setSessionRoots、setContextWindowOverrides、curateMemoryNow）", () => {
+    expect(routerCases).toHaveLength(86);
     expect(sorted(routerCases)).toEqual(sorted(EXPECTED_CASES));
   });
 
@@ -119,7 +121,8 @@ describe("阶段 7 · Webview 消息路由分域等价性", () => {
     // 本轮是纯移动：不新增 case，也不需要改 WebviewToHost。若有人把新消息
     // 直接塞进分域函数却没进薄入口，上面第 2 条会立刻失败。
     // 多仓库协作新增了 setSessionRoots（见 EXPECTED_CASES），计数随之 +1；
-    // 设置页的上下文窗口覆写又新增 setContextWindowOverrides，计数再 +1。
-    expect(new Set(routerCases).size).toBe(85);
+    // 设置页的上下文窗口覆写又新增 setContextWindowOverrides，计数再 +1；
+    // 记忆页「整理记忆」按钮 / `/memory-curate` 指令新增 curateMemoryNow，再 +1。
+    expect(new Set(routerCases).size).toBe(86);
   });
 });

@@ -2692,6 +2692,7 @@ export class ChatPanel implements vscode.Disposable {
       case "createProjectMemory":
       case "applyMemoryCandidates":
       case "dismissMemoryCandidates":
+      case "curateMemoryNow":
       case "openMemoryFile":
       case "generateKnowledge":
       case "setKnowledgeInjection":
@@ -3192,6 +3193,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "dismissMemoryCandidates":
         this.memory.dismissCandidates(msg.sessionId);
+        break;
+      case "curateMemoryNow":
+        void this.curateMemoryNow(msg.requestId);
         break;
       case "openMemoryFile":
         void this.memory.openFile(msg.path);
@@ -3704,20 +3708,31 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 手动触发一轮整理（命令面板 `iflow.curateMemory`）。绕过 enabled / 空闲 / 到期
-   * 判定，但仍遵守「已在运行」与跨窗口锁；完成后用 toast 汇报应用/跳过/冲突条数
+   * 手动触发一轮整理（命令面板 `iflow.curateMemory`、记忆页按钮与
+   * `/memory-curate` 指令）。绕过 enabled / 空闲 / 到期判定，但仍遵守
+   * 「已在运行」与跨窗口锁；完成后用 toast 汇报应用/跳过/冲突条数
    * 与节省的 token。report 策略下 writeFile 是空操作，汇报为「预计应用」。
+   *
+   * `requestId` 只在 webview 触发时传入：回包 `memoryCurated` 让按钮结束
+   * loading 并就地显示失败；命令面板触发不传，行为与原先一致。
    */
-  async curateMemoryNow(): Promise<void> {
+  async curateMemoryNow(requestId?: number): Promise<void> {
+    const reply = (ok: boolean, message: string): void => {
+      if (requestId === undefined) return;
+      this.postToWebview({ type: "memoryCurated", requestId, ok, message });
+    };
     const scheduler = this.maintenance;
-    if (!scheduler) return;
+    if (!scheduler) {
+      const message = vscode.l10n.t("记忆整理未能开始：可能已在运行，或另一个窗口正在整理。");
+      reply(false, message);
+      return;
+    }
     const dryRun = this.maintenanceStrategy() === "report";
     const report = await scheduler.runNow("manual");
     if (!report) {
-      this.store.sendToast(
-        "warning",
-        vscode.l10n.t("记忆整理未能开始：可能已在运行，或另一个窗口正在整理。"),
-      );
+      const message = vscode.l10n.t("记忆整理未能开始：可能已在运行，或另一个窗口正在整理。");
+      this.store.sendToast("warning", message);
+      reply(false, message);
       return;
     }
     let applied = 0;
@@ -3747,6 +3762,7 @@ export class ChatPanel implements vscode.Disposable {
           report.savedTokens,
         );
     this.store.sendToast(failed > 0 ? "warning" : "info", message);
+    reply(failed === 0, message);
     // apply 之后刷新记忆卡片（saveFile 已逐条 post memorySaved，这里再拉一次全量状态）。
     if (!dryRun) void this.memory.sendState();
   }

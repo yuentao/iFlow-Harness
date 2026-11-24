@@ -124,6 +124,20 @@ const EMPTY_SKILLS: SkillInfo[] = [];
 const EMPTY_MODELS: ModelInfoUi[] = [];
 
 /**
+ * 面板本地 slash 指令：`/memory-curate` 立即跑一轮记忆整理。
+ *
+ * 它不是 CLI 指令（CLI 不认识，会被当成 unknown command 而模型看不到），
+ * 也不该走模型：与记忆页的「整理记忆」按钮一样直接调用宿主
+ * `curateMemoryNow`（同一条 MaintenanceScheduler 通道）。
+ */
+export const MEMORY_CURATE_COMMAND = "memory-curate";
+
+/** 文本是否恰好是该指令（允许前后空白；带参数时按普通提示词处理）。 */
+export function isMemoryCurateCommand(text: string): boolean {
+  return text.trim().toLowerCase() === `/${MEMORY_CURATE_COMMAND}`;
+}
+
+/**
  * Session token usage, read as PRIMITIVE selectors — postMessage re-clones the
  * usage object on every patch, so an object selector would re-render on every
  * blockPatch (up to 12.5/s while streaming); primitives only move when the
@@ -954,7 +968,14 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       })),
     [skills],
   );
-  const allCommands = useMemo(() => [...commands, ...skillCommands], [commands, skillCommands]);
+  const allCommands = useMemo(
+    () => [
+      { name: MEMORY_CURATE_COMMAND, description: t("立即整理记忆：去重、合并、归档低价值条目") },
+      ...commands,
+      ...skillCommands,
+    ],
+    [commands, skillCommands],
+  );
   const cmdMatches = useMemo(() => {
     if (!text.startsWith("/") || text.includes(" ")) return [];
     const input = text.slice(1).toLowerCase();
@@ -1042,6 +1063,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   // arrive after a cancel or a session switch.
   const [enhancing, setEnhancing] = useState(false);
   const enhanceSeq = useRef(0);
+  /** 面板本地指令（/memory-curate）的请求号；回包只用于宿主 toast，这里只需自增。 */
+  const curateSeq = useRef(0);
   const enhancePending = useRef(false);
   const enhanceOriginal = useRef<string | null>(null);
   const enhanceSnapshot = useRef<string | null>(null);
@@ -1425,6 +1448,18 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     // The draft is gone once sent — a rewrite still in flight would
     // ghost-fill the cleared composer, so cancel it first.
     cancelInflightRef.current();
+    // 面板本地指令：/memory-curate 直接触发宿主整理，绝不作为提示词发给模型
+    // （CLI 会把未知 / 指令当成 unknown command，模型根本看不到正文）。
+    if (isMemoryCurateCommand(value) && images.length === 0 && attachments.length === 0 && contexts.length === 0) {
+      send({ type: "curateMemoryNow", requestId: ++curateSeq.current });
+      setText("");
+      setHistIndex(-1);
+      histDraft.current = null;
+      histEntryRef.current = null;
+      editedRecall.current = false;
+      showNote(t("已触发记忆整理，完成后会提示结果"), "info");
+      return;
+    }
     // 只发送真的带数据的图片；说明必须与之一一对应（占位槽没有 data，
     // 不能把它的说明错位给下一张）。
     const sentImages = images.filter((img) => img.data);
@@ -2050,6 +2085,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               }
               if (e.key === "Enter" || e.key === "Tab") {
                 e.preventDefault();
+                // 完整输入了面板本地指令时直接执行；其余情况仍是补全。
+                if (e.key === "Enter" && isMemoryCurateCommand(text)) {
+                  submit();
+                  return;
+                }
                 setText(`/${cmdMatches[cmdIndex]!.name} `);
                 return;
               }

@@ -2338,6 +2338,11 @@ export type HostToWebview =
   /** Auto-extraction produced candidates and the user asked to review them
    * (toast action). Nothing has been written yet. */
   | { type: "memoryCandidates"; sessionId: string | null; candidates: MemoryCandidateUi[] }
+  /** Reply to `curateMemoryNow` (memory card button / `/memory-curate`): one
+   * manual curation round finished. `ok:false` means it could not start
+   * (already running, or another window holds the lock); `message` is the
+   * user-facing summary either way. */
+  | { type: "memoryCurated"; requestId: number; ok: boolean; message: string }
   /** Project-knowledge generation progress (fast path, no agent tools). */
   | {
       type: "knowledgeJob";
@@ -2768,6 +2773,11 @@ export type WebviewToHost =
   | { type: "applyMemoryCandidates"; sessionId: string | null; candidates: MemoryCandidateUi[] }
   /** Drop pending candidates without writing. */
   | { type: "dismissMemoryCandidates"; sessionId: string | null }
+  /** Manually run one memory curation round now (memory card button and the
+   * `/memory-curate` slash command). Bypasses the enabled / idle / interval
+   * gates but still respects "already running" and the cross-window lock.
+   * Reply: `memoryCurated` with the same requestId. */
+  | { type: "curateMemoryNow"; requestId: number }
   /** Generate/refresh the project knowledge index. `jobId` correlates the
    * `knowledgeJob` stage updates so a stale job cannot unlock the UI.
    * `mode: "incremental"` (default) reuses the previous index + source diff

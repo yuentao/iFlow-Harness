@@ -3221,6 +3221,7 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "memorySaved" ||
       msg.type === "memoryFileContent" ||
       msg.type === "memoryCandidates" ||
+      msg.type === "memoryCurated" ||
       msg.type === "knowledgeJob" ||
       msg.type === "profileDeleteResult" ||
       msg.type === "saveAuthResult" ||
