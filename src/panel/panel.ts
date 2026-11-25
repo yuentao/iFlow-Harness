@@ -2769,6 +2769,7 @@ export class ChatPanel implements vscode.Disposable {
       case "setSessionRoots":
       case "stageFiles":
       case "pickAttachments":
+      case "pickDefaultWorkspace":
       case "openImage":
       case "saveAuth":
       case "clearAuth":
