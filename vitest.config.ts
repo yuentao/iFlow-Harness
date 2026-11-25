@@ -17,7 +17,7 @@ export default defineConfig({
   plugins: [mdAsText],
   resolve: {
     alias: [
-      { find: /^vscode$/, replacement: path.resolve(__dirname, "test/vscode-stub.ts") },
+      { find: /^vscode$/, replacement: path.resolve(import.meta.dirname, "test/vscode-stub.ts") },
     ],
   },
   test: {
