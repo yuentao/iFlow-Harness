@@ -5,6 +5,14 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { McpSection } from "../webview/src/components/McpCard";
 import { entriesToServers, sameMcpServers } from "../webview/src/components/mcp-servers";
 
+// jsdom has no ResizeObserver; the row Dropdown observes its menu on open.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
+
 const send = vi.hoisted(() => vi.fn());
 vi.mock("../webview/src/store", () => ({ useChat: (selector: (s: { send: typeof send }) => unknown) => selector({ send }) }));
 vi.mock("../webview/src/i18n", () => ({ t: (s: string, ...args: string[]) => s.replace(/\{(\d+)\}/g, (_, i) => args[Number(i)] ?? "") }));
@@ -53,6 +61,26 @@ it("preserves unknown fields and legal prototype-like names while rejecting dupl
   expect(() => entriesToServers([{ name: " same ", json: '{}' }, { name: "same", json: '{}' }])).toThrow("same");
   expect(sameMcpServers({ a: { x: 1, y: 2 } }, { a: { y: 2, x: 1 } })).toBe(true);
 });
+it("persists a deletion to disk so reopening the card cannot resurrect the server", () => {
+  reply({ keep: { command: "node" }, gone: { command: "npx" } });
+  expect(container.textContent).toContain("gone");
+  clickTitle("服务器 gone 的操作");
+  bodyClick("删除"); // row menu item
+  expect(document.body.textContent).toContain("确定删除");
+  bodyClick("删除"); // ConfirmDialog confirm
+  const call = send.mock.calls.find(([m]) => m.type === "saveMcpServers")?.[0];
+  expect(call).toBeTruthy();
+  expect(call!.servers).toEqual({ keep: { command: "node" } });
+  expect(Object.hasOwn(call!.servers, "gone")).toBe(false);
+  // Reopen the settings panel: a fresh disk read must not bring it back.
+  act(() => root.unmount());
+  root = createRoot(container);
+  act(() => root.render(<McpSection busy={false} onHeader={header} />));
+  reply(call!.servers);
+  expect(container.textContent).not.toContain("gone");
+  expect(container.textContent).toContain("keep");
+});
+
 it("shows success only after Host confirms and retains draft on save failure", () => {
   reply({ original: { command: "node", unknown: { kept: true } } });
   click("保存");
@@ -97,6 +125,12 @@ function statusReply(status: null | { discoveryState?: string; servers: Record<s
 }
 function clickTitle(title: string) {
   const button = [...container.querySelectorAll("button")].find((b) => b.getAttribute("title") === title);
+  expect(button).toBeTruthy();
+  act(() => button!.click());
+}
+// ConfirmDialog portals onto document.body, outside the component container.
+function bodyClick(text: string) {
+  const button = [...document.body.querySelectorAll("button")].find((b) => b.textContent === text);
   expect(button).toBeTruthy();
   act(() => button!.click());
 }
