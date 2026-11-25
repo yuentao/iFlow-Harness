@@ -72,13 +72,8 @@ import {
 import { checkpointLabelFromText } from "../../shared/checkpoints.js";
 import { ToolDiffService } from "./tool-diff-service.js";
 import { StatusPresenter } from "./status-presenter.js";
-import {
-  buildAddDirs,
-  buildWorkspaceRootsUi,
-  normalizeSelection,
-  rewriteRootMentions,
-  workspaceRootsFrom,
-} from "./workspace-roots.js";
+import { buildAddDirs, rewriteRootMentions } from "./workspace-roots.js";
+import { WorkspaceRootsService } from "./workspace-roots-service.js";
 import { SessionPersistenceService, type PersistedTranscript } from "./session-persistence.js";
 import { CheckpointService } from "./checkpoint-service.js";
 import { SessionRestoreService, type RestoreOutcome } from "./session-restore.js";
@@ -703,10 +698,6 @@ const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
 const WORKSPACE_PROFILE_KEY = "iflow.workspaceActiveProfile";
 /** workspaceState key: the last model selected in this workspace. */
 const WORKSPACE_MODEL_KEY = "iflow.workspaceActiveModel";
-/** workspaceState key (多仓库协作): 用户为**之后新建**的会话选中的目标根集合
- * （绝对路径数组）。它只是「下一个会话的偏好」——当前会话的 CLI 上下文与 cwd
- * 一律不动，已有会话的根集合记在会话索引的 `roots` 字段里。 */
-const SESSION_ROOTS_KEY = "iflow.sessionRoots";
 /** workspaceState key: first-run wizard skipped/finished (never auto-open it
  * again in this workspace once true). */
 const ONBOARDING_DISMISSED_KEY = "iflow.onboardingDismissed";
@@ -1052,6 +1043,10 @@ export class ChatPanel implements vscode.Disposable {
    * "Diff revert" section are thin delegates to this instance, so the
    * webview-message switch and tests keep their existing contract. */
   private readonly toolDiff: ToolDiffService;
+  /** 多仓库协作：工作区根目录管理（目标根子集、投影三态、add_dirs）外迁到
+   * `WorkspaceRootsService`。下方同名方法都是薄委托，供 webview 消息分派、
+   * SessionRestoreService deps 与既有测试零改动调用。 */
+  private readonly workspaceRootsService: WorkspaceRootsService;
   private connecting: Promise<void> | null = null;
   /**
    * Handshake generation counter (P0-3 restart escape). restartCli bumps it
@@ -1852,6 +1847,15 @@ export class ChatPanel implements vscode.Disposable {
       post: (m) => this.postToWebview(m),
     });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m), language: vscode.env.language });
+    // 工作区根目录管理：所有 panel 状态在调用时通过箭头回调读取（陷阱 #8），
+    // 构造期只固定回调，不固定 services.workspaceRoot / workspaceFolders 快照。
+    this.workspaceRootsService = new WorkspaceRootsService({
+      getWorkspaceState: () => this.context.workspaceState,
+      getState: () => this.store.getState(),
+      setWorkspaceRoots: (value) => this.store.setWorkspaceRoots(value),
+      getWorkspaceRoot: () => this.services.workspaceRoot,
+      getWorkspace: () => vscode.workspace,
+    });
     this.toolDiff = new ToolDiffService({
       log: { warn: (m) => this.log.warn(m) },
       // sessionCwd is read at call time — never pass a context-snapshot base
@@ -6001,26 +6005,24 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   // --- 多仓库协作：目标根子集 ------------------------------------------------
+  // panel.ts 拆分：方法体已外迁到 `WorkspaceRootsService`；这里保留同名薄委托，
+  // webview 消息分派 / SessionRestoreService deps / 既有测试的调用契约不变。
 
   /** 当前工作区根的单一来源（realpath + 去重 + 稳定排序，第一根保持 VSCode
    * 第一个文件夹 —— 进程 cwd 依赖它）。 */
   private workspaceRootInfos(): WorkspaceRootUi[] {
-    return workspaceRootsFrom(vscode.workspace);
+    return this.workspaceRootsService.workspaceRootInfos();
   }
 
-  /** 用户为「之后的新会话」选中的根（workspaceState 持久化，未知路径被丢弃）。 */
-  private selectedSessionRoots(roots: readonly WorkspaceRootUi[]): string[] {
-    const stored = this.context.workspaceState.get<string[]>(SESSION_ROOTS_KEY, []);
-    return normalizeSelection(stored, roots);
+  /** 用户为「之后的新会话」选中的根（workspaceState 持久化，未知路径被丢弃）。
+   * 外迁后 panel 内部已无调用者，作为兼容入口保留（非 private 以避免 TS6133）。 */
+  selectedSessionRoots(roots: readonly WorkspaceRootUi[]): string[] {
+    return this.workspaceRootsService.selectedSessionRoots(roots);
   }
 
-  /** 当前会话的 CLI 实际使用的根（存于会话索引的 `roots` 字段）。 */
-  private appliedSessionRoots(): string[] | null {
-    const state = this.store.getState();
-    const id = state.activeSessionId ?? state.sessionId;
-    if (!id) return null;
-    const summary = state.sessions.find((s) => s.id === id);
-    return summary?.roots ?? null;
+  /** 当前会话的 CLI 实际使用的根（存于会话索引的 `roots` 字段）。兼容入口同上。 */
+  appliedSessionRoots(): string[] | null {
+    return this.workspaceRootsService.appliedSessionRoots();
   }
 
   /**
@@ -6032,17 +6034,7 @@ export class ChatPanel implements vscode.Disposable {
    * 单根工作区不渲染选择器，投影写 null。
    */
   private publishWorkspaceRoots(applied?: readonly string[] | null): void {
-    const roots = this.workspaceRootInfos();
-    if (roots.length <= 1) {
-      this.store.setWorkspaceRoots(null);
-      return;
-    }
-    const selected = this.selectedSessionRoots(roots);
-    const appliedRoots =
-      applied === undefined
-        ? this.store.getState().workspaceRoots?.applied ?? this.appliedSessionRoots() ?? null
-        : applied;
-    this.store.setWorkspaceRoots(buildWorkspaceRootsUi(roots, selected, appliedRoots));
+    this.workspaceRootsService.publishWorkspaceRoots(applied);
   }
 
   /**
@@ -6050,14 +6042,7 @@ export class ChatPanel implements vscode.Disposable {
    * cwd 与 ensureClient 同源（`services.workspaceRoot` 测试钩子优先）。
    */
   private sessionAddDirs(): string[] | null {
-    const roots = this.workspaceRootInfos();
-    if (roots.length <= 1) return null;
-    const cwd =
-      this.services.workspaceRoot ??
-      roots[0]?.path ??
-      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
-      null;
-    return buildAddDirs(this.selectedSessionRoots(roots), roots, cwd);
+    return this.workspaceRootsService.sessionAddDirs();
   }
 
   /**
@@ -6070,12 +6055,7 @@ export class ChatPanel implements vscode.Disposable {
    * 语义容易被误读成「工作区丢了」），UI 也会阻止取消最后一个根。
    */
   private async setSessionRoots(roots: readonly string[]): Promise<void> {
-    const all = this.workspaceRootInfos();
-    if (all.length <= 1) return;
-    const normalized = normalizeSelection(roots, all);
-    const next = normalized.length > 0 ? normalized : all.map((r) => r.path);
-    await this.context.workspaceState.update(SESSION_ROOTS_KEY, next);
-    this.publishWorkspaceRoots();
+    await this.workspaceRootsService.setSessionRoots(roots);
   }
 
   /**
@@ -6084,10 +6064,7 @@ export class ChatPanel implements vscode.Disposable {
    * 重载不换会话，根可见范围必须保持不变，否则收紧过的会话会被悄悄放宽。
    */
   private currentSessionAddDirs(): string[] | null {
-    const all = this.workspaceRootInfos();
-    if (all.length <= 1) return null;
-    const cwd = this.services.workspaceRoot ?? all[0]?.path ?? null;
-    return buildAddDirs(this.appliedSessionRoots(), all, cwd);
+    return this.workspaceRootsService.currentSessionAddDirs();
   }
 
   /**
