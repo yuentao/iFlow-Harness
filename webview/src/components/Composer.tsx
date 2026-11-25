@@ -1213,6 +1213,17 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           return next;
         });
       };
+      reader.onerror = () => {
+        // 读取失败不能留下一个 data 为空的破图占位：撤掉一个空槽并如实提示。
+        // 与 onload 对称地取「第一个空槽」——多张图并发读时，谁先落地谁占
+        // 最前面的空位，失败的那张则释放一个空位，槽数始终等于成功数。
+        setImages((prev) => {
+          const idx = prev.findIndex((img) => img.data === "");
+          if (idx < 0) return prev; // 槽位已被移除，或已被别的读取填上
+          return prev.filter((_, i) => i !== idx);
+        });
+        showNote(t("图片读取失败，已跳过"), "warning");
+      };
       reader.readAsDataURL(file);
     }
   }
