@@ -171,7 +171,15 @@ export class AcpClient {
     this.child = child;
     this.peer = new JsonRpcPeer(
       (line) => {
-        if (child.stdin?.writable) child.stdin.write(line + "\n");
+        // M4: a destroyed/ended stdin used to make this a silent no-op — the
+        // host dismissed the approval/question card while the CLI never got
+        // the reply, leaving the turn stuck until a manual Stop. Throw so
+        // JsonRpcPeer's reply fallback rejects pending requests (incl. the
+        // in-flight prompt) and the host turn settles.
+        if (!child.stdin || !child.stdin.writable) {
+          throw new Error("Agent stdin is not writable; cannot send JSON-RPC message");
+        }
+        child.stdin.write(line + "\n");
       },
       this.options.wireTap,
       // R5: surface unparseable stdout lines (banners, noise) to the host.
