@@ -582,6 +582,28 @@ export const QQ_RESULT_CHANGED_WHILE_DELIVERING =
 export const QQ_DEFAULT_RETENTION_DAYS = 30;
 
 /**
+ * 幂等键表的容量上限（`adapter:msgId` → 一次受理）。
+ *
+ * 与 adapter 的入站去重上限同量级：只做内存判定，跨重启由任务归档恢复，超限
+ * 按最近使用淘汰最旧键（`delete` + `set` 近似 LRU），不让进程长驻时无界增长。
+ */
+export const QQ_MAX_TRACKED_IDEMPOTENCY_KEYS = 5_000;
+/**
+ * 幂等键的默认回收窗口（与默认终态归档保留期对齐）。
+ *
+ * 实际窗口按实例的 `taskRetentionDays` 推导：归档还在就必须继续挡住平台重投
+ * 的同一条消息，所以 `reserve:` 占位键与真实键**共用同一窗口**——创建链路
+ * 含多次落盘 + 投递重试，给占位单独设短 TTL 会打开「占位先过期、同一 msgId
+ * 被重复派发」的破口。关闭归档清理时（taskRetentionDays <= 0）键永不过期。
+ */
+export const QQ_IDEMPOTENCY_TTL_MS = QQ_DEFAULT_RETENTION_DAYS * 24 * 60 * 60_000;
+/**
+ * 短窗相似去重的外层键上限（按 taskId）。每键的值已按 15s 窗口惰性清理，
+ * 但键本身以前从不回收；这里与进度槽位同口径限容量，终态再按裸 taskId 清理。
+ */
+export const QQ_MAX_TRACKED_RECENT_OUTBOUND = 500;
+
+/**
  * 主会话渠道等待「主会话空闲」的上限。
  *
  * 本地回合可能跑很久（真实任务没有超时），所以这个上限只是「永远等不到」
@@ -778,6 +800,15 @@ interface PendingUnbindConfirm {
   chatType: "private" | "group";
   chatId: string;
   timer: NodeJS.Timeout;
+}
+
+/** 一条幂等键记账：真实键指向 taskId，reserve: 占位键指向一次性占位串。 */
+interface IdempotencyEntry {
+  taskId: string;
+  /** 写入时刻（与任务归档同一时基，用注入的 now）。 */
+  at: number;
+  /** 临时占位键用短 TTL；真实键的窗口与归档保留期对齐。 */
+  reserved: boolean;
 }
 
 /** 一个已转发到 QQ、正等用户作答的远程任务提问。 */
@@ -1129,7 +1160,18 @@ export class QqService {
   private readonly questionTimeoutMs: number;
 
   private readonly tasks = new Map<string, QqTask>();
-  private readonly idempotency = new Map<string, string>();
+  /**
+   * 入站消息幂等键（`adapter:msgId` → 条目）。跨重启由任务归档恢复；运行期
+   * 读时判 TTL、写时限容量，避免长驻进程无界增长。去重语义不变：窗口内同一
+   * 消息仍只建一个任务。
+   */
+  private readonly idempotency = new Map<string, IdempotencyEntry>();
+  /**
+   * 已被运行期 sweep 回收的终态任务 id（墓碑）。tasks 表摘除后，仍持有旧
+   * 非终态快照的迟到事件会以快照作 fallback 绕过终态粘性；墓碑让这类提交
+   * 一律无效。与幂等键同量级上限，且仅存 id，不抵消回收收益。
+   */
+  private readonly sweptTaskIds = new Set<string>();
   private readonly queue: string[] = [];
   private readonly jobs = new Set<Promise<void>>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
@@ -1333,7 +1375,7 @@ export class QqService {
         continue;
       }
       this.tasks.set(task.taskId, task);
-      this.idempotency.set(task.idempotencyKey, task.taskId);
+      this.trackIdempotency(task.idempotencyKey, task.taskId, false);
     }
 
     const interrupted = new Set<string>();
@@ -1624,7 +1666,7 @@ export class QqService {
 
   private async createTaskFromMessage(msg: InboundMessage, prompt: string): Promise<void> {
     const key = makeIdempotencyKey(QQ_ADAPTER, msg.msgId);
-    const existingId = this.idempotency.get(key);
+    const existingId = this.readIdempotency(key);
     if (existingId) {
       const existing = this.tasks.get(existingId);
       const label = existing ? taskDisplayTitle(existing) : shortTaskId(existingId);
@@ -1636,7 +1678,7 @@ export class QqService {
     // 入站事件会各自通过上面的检查、各自建一个任务并执行两次（两者都要到
     // persist 才写幂等键，期间隔着多次 await commitStatus）。
     const reservation = `reserve:${randomInt(0x7fffffff).toString(36)}:${Date.now().toString(36)}`;
-    this.idempotency.set(key, reservation);
+    this.trackIdempotency(key, reservation, true);
 
     // 畸形附件守卫：wire 上的 attachments 可能被塞进非数组或数组里含 null，
     // 直接 .map 会抛 TypeError 打断整条入站链路。
@@ -1667,12 +1709,14 @@ export class QqService {
         DEFAULT_QQ_TASK_LIMITS,
       );
       if (!validation.ok) {
+        this.releaseIdempotencyReservation(key, reservation);
         this.notify(`QQ 任务被拒绝（${validation.code}）：${validation.message}`);
         await this.deliver(msg, `任务被拒绝：${validation.message}`);
         return;
       }
 
       if (!this.consumeRateLimit(msg.senderId)) {
+        this.releaseIdempotencyReservation(key, reservation);
         const limit = Math.max(1, this.config.rateLimitPerMin);
         this.notify(
           `QQ 用户 ${maskQqOpenId(msg.senderId)} 触发限流（每分钟 ${limit} 条）`,
@@ -1733,7 +1777,7 @@ export class QqService {
     } catch (error) {
       // 建任务链路上任何一步写盘失败都必须回滚预留键，否则这条 msgId 永久
       // 被占、用户重发也永远收到「已受理」却没有任何任务在跑。
-      if (this.idempotency.get(key) === reservation) this.idempotency.delete(key);
+      this.releaseIdempotencyReservation(key, reservation);
       throw error;
     }
   }
@@ -2264,7 +2308,7 @@ export class QqService {
     return false;
   }
 
-  /** 记录一次中间正文出站（只留短窗内的若干条，超出窗口的惰性清理）。 */
+  /** 记录一次中间正文出站（值按短窗惰性清理，键按容量 LRU 淘汰）。 */
   private recordOutboundText(taskId: string, text: string): void {
     const normalized = normalizeQqOutboundText(text);
     if (normalized.length < QQ_OUTBOUND_SIMILAR_MIN_CHARS) return;
@@ -2273,7 +2317,14 @@ export class QqService {
       (entry) => at - entry.at < QQ_OUTBOUND_SIMILAR_WINDOW_MS,
     );
     list.push({ text: normalized, at });
+    // delete + set：最近活跃的 taskId 排到末尾，与进度槽位同一淘汰口径。
+    this.recentOutboundText.delete(taskId);
     this.recentOutboundText.set(taskId, list);
+    while (this.recentOutboundText.size > QQ_MAX_TRACKED_RECENT_OUTBOUND) {
+      const oldest = this.recentOutboundText.keys().next();
+      if (oldest.done) break;
+      this.recentOutboundText.delete(oldest.value);
+    }
   }
 
   /**
@@ -2746,7 +2797,7 @@ export class QqService {
     );
   }
 
-  /** 转发提问的共用实现：规范化 → 定位任务 → 切 waiting_answer → 挂槽 → 投递。 */
+  /** 转发提问的共用实现：规范化 → 定位任务 → 同步挂槽 → 切 waiting_answer → 投递。 */
   private async forwardQuestionToTask(
     findTask: () => QqTask | undefined,
     rawQuestions: readonly QqRemoteQuestion[],
@@ -2787,23 +2838,71 @@ export class QqService {
       text: firstQuestion.length > 200 ? `${firstQuestion.slice(0, 199)}…` : firstQuestion,
       at,
     };
-    const waiting = await this.commitStatus(task, "waiting_answer", {
-      pending,
-      updatedAt: Math.max(task.updatedAt, at),
-    });
-    if (isTerminalStatus(waiting.status)) return;
 
+    // 同步占位：has() 检查与 set() 之间不能有 await。否则同一 taskId 的两条
+    // 并发提问会双双通过检查、后者覆盖前者的槽位——先到的那份答案就会按
+    // 被覆盖的 questions 组装，灌给另一个问题。挂槽先于落盘还堵上了
+    // 「答案先于等待注册到达」的窗口：落盘期间用户作答能命中同一个槽位。
     const timer = setTimeout(() => {
       void this.expireQuestion(taskId);
     }, this.questionTimeoutMs);
     timer.unref?.();
-    this.pendingAnswers.set(taskId, {
+    const slot: PendingAnswer = {
       taskId,
       superSessionId: answerSuperSessionId ?? task.correlation.superSessionId ?? "",
       channel,
       questions,
       timer,
-    });
+    };
+    this.pendingAnswers.set(taskId, slot);
+
+    const releaseSlot = (): void => {
+      clearTimeout(timer);
+      // 只回滚自己登记的槽位：并发回答 / 超时可能已摘槽甚至重建，误删会打断
+      // 新一轮等待。
+      if (this.pendingAnswers.get(taskId) === slot) this.pendingAnswers.delete(taskId);
+    };
+
+    let waiting: QqTask;
+    try {
+      waiting = await this.commitStatus(task, "waiting_answer", {
+        pending,
+        updatedAt: Math.max(task.updatedAt, at),
+      });
+    } catch (error) {
+      releaseSlot();
+      // persist() 先把 waiting_answer 同步写进内存再 await 落盘：保存抛错时
+      // 状态已变、槽位已撤，任务会永久卡住。这里把内存快照恢复到运行态
+      // （不再落盘——store 正故障，下次重启会从上一份成功快照恢复）。
+      const current = this.tasks.get(taskId);
+      if (current?.status === "waiting_answer") {
+        this.tasks.set(taskId, {
+          ...current,
+          status: "running",
+          pending: undefined,
+          updatedAt: Math.max(current.updatedAt, this.now()),
+        });
+      }
+      throw error;
+    }
+    if (isTerminalStatus(waiting.status)) {
+      releaseSlot();
+      return;
+    }
+    if (this.pendingAnswers.get(taskId) !== slot) {
+      // 落盘窗口内答案已先到（或超时 / 本机作答已摘槽）：若期间已有新的
+      // 等待登记接管，状态归新槽位管，本次迟到写入绝不能插手；只有槽位已
+      // 被消费且无人接管时，才把迟到的 waiting_answer 恢复为运行态。
+      if (
+        !this.pendingAnswers.has(taskId) &&
+        this.tasks.get(taskId)?.status === "waiting_answer"
+      ) {
+        void this.clearPendingAndResume(taskId, waiting).catch((error) => {
+          this.log(`QQ 提问迟到回滚失败：${errorText(error)}`);
+        });
+      }
+      return;
+    }
 
     await this.deliverTaskNotice(
       waiting,
@@ -3544,7 +3643,7 @@ export class QqService {
     );
   }
 
-  /** 写入进度类记账表并施加键数上限（delete + set 让最近使用的键排到末尾）。 */
+  /** 写进度类记账表并施加上限（delete + set 让最近使用的键排到末尾）。 */
   private trackProgressSlot<T>(map: Map<string, T>, slot: string, value: T): void {
     map.delete(slot);
     map.set(slot, value);
@@ -3555,9 +3654,74 @@ export class QqService {
     }
   }
 
+  /** 幂等键窗口与归档保留期同源；关闭归档清理时键也永不过期。 */
+  private get idempotencyTtlMs(): number {
+    return this.taskRetentionDays > 0
+      ? this.taskRetentionDays * 24 * 60 * 60_000
+      : Number.POSITIVE_INFINITY;
+  }
+
+  /** 读幂等键：窗口内才命中，过期键 / 已回收任务的键当场回收。 */
+  private readIdempotency(key: string): string | undefined {
+    const entry = this.idempotency.get(key);
+    if (!entry) return undefined;
+    if (
+      this.now() - entry.at >= this.idempotencyTtlMs ||
+      (this.sweptTaskIds.has(entry.taskId) && !entry.reserved)
+    ) {
+      // 只在仍是同一条目时回收，避免误删后来写入的新值。
+      if (this.idempotency.get(key) === entry) this.idempotency.delete(key);
+      return undefined;
+    }
+    return entry.taskId;
+  }
+
+  /** 写幂等键：最近使用移到末尾，超限淘汰最旧，口径同进度槽位。 */
+  private trackIdempotency(key: string, taskId: string, reserved: boolean): void {
+    this.idempotency.delete(key);
+    this.idempotency.set(key, { taskId, at: this.now(), reserved });
+    while (this.idempotency.size > QQ_MAX_TRACKED_IDEMPOTENCY_KEYS) {
+      const oldest = this.idempotency.keys().next();
+      if (oldest.done) break;
+      this.idempotency.delete(oldest.value);
+    }
+  }
+
+  /** 回滚 reserve: 占位键；只有仍是本次占位才删，绝不误删已定稿的真实键。 */
+  private releaseIdempotencyReservation(key: string, reservation: string): void {
+    const entry = this.idempotency.get(key);
+    if (entry?.reserved && entry.taskId === reservation) this.idempotency.delete(key);
+  }
+
+  /**
+   * 运行期回收陈旧的终态任务内存条目（归档清理仍由 start() 的 prune 负责）。
+   * 写入时顺带调用，避免长驻进程里 tasks 只增不减；非终态任务永不清理。
+   */
+  private sweepTaskMemory(): void {
+    if (this.taskRetentionDays <= 0) return;
+    const cutoff = this.now() - this.taskRetentionDays * 24 * 60 * 60_000;
+    for (const [taskId, task] of this.tasks) {
+      if (!isTerminalStatus(task.status) || task.updatedAt >= cutoff) continue;
+      this.tasks.delete(taskId);
+      this.clearTaskRuntimeSlots(taskId);
+      this.recentOutboundText.delete(taskId);
+      this.idempotency.delete(task.idempotencyKey);
+      // 墓碑让仍持有旧快照的迟到提交无法复活已收尾任务；按插入序限容量。
+      this.sweptTaskIds.delete(taskId);
+      this.sweptTaskIds.add(taskId);
+      while (this.sweptTaskIds.size > QQ_MAX_TRACKED_IDEMPOTENCY_KEYS) {
+        const oldest = this.sweptTaskIds.values().next();
+        if (oldest.done) break;
+        this.sweptTaskIds.delete(oldest.value);
+      }
+    }
+  }
+
   /** 任务终态 / 归档清理后，删除其全部进度记账键（`taskId:` 前缀）。 */
   private clearTaskRuntimeSlots(taskId: string): void {
     const prefix = `${taskId}:`;
+    // 短窗正文的外层键是裸 taskId，不在前缀循环里，按精确键单独回收。
+    this.recentOutboundText.delete(taskId);
     for (const map of [
       this.progressRefreshes,
       this.progressFingerprints,
@@ -3896,6 +4060,12 @@ export class QqService {
     next: QqTaskStatus,
     patch?: Partial<QqTask>,
   ): Promise<QqTask> {
+    // 已被 sweep 回收的终态任务：即便调用方还攥着旧的非终态快照，也不允许
+    // 借 `?? task` 的 fallback 绕过终态粘性把任务写活。
+    if (this.sweptTaskIds.has(task.taskId)) {
+      this.log(`QQ 任务 ${task.taskId}：已回收的终态任务，忽略 ${next} 提交`);
+      return task;
+    }
     const latest = this.tasks.get(task.taskId) ?? task;
 
     // 终态粘性优先：任务一旦收尾，任何后续提交（迟到的执行体事件、重复的
@@ -3954,10 +4124,12 @@ export class QqService {
   private async persist(task: QqTask): Promise<void> {
     const previous = this.tasks.get(task.taskId);
     this.tasks.set(task.taskId, task);
-    this.idempotency.set(task.idempotencyKey, task.taskId);
+    this.trackIdempotency(task.idempotencyKey, task.taskId, false);
     await this.store.saveTask(task as unknown as QqTaskRecord);
     // 终态任务的进度/刷新记账不再有用：联动清掉，防止按 taskId 无界增长。
     if (isTerminalStatus(task.status)) this.clearTaskRuntimeSlots(task.taskId);
+    // 长驻进程里任务表只靠 start() 清理不够：每次落盘顺带回收超期的终态条目。
+    this.sweepTaskMemory();
     // 只有真变了才通知：同一份记录被重复 persist（例如收尾后的回包写回）
     // 不该再推一次快照。比较的是「看板会展示的关键字段集合」：updatedAt 是
     // 必变项，但同毫秒内只有 pending / result / failure / correlation 变化的
