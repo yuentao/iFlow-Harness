@@ -612,6 +612,7 @@
     "typecheck": "npm run typecheck:host && npm run typecheck:webview",
     "typecheck:host": "tsc -p tsconfig.json --noEmit",
     "typecheck:webview": "tsc -p webview/tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
     "lint:deps": "knip",
     "harness": "node scripts/harness.mjs",
