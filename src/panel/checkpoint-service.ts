@@ -68,6 +68,11 @@ export interface CheckpointServiceDeps {
   readUserSetting?: <T>(key: string, fallback: T) => T;
 }
 
+/** Per-process sequence for unique temp file names (pid + seq, same
+ * discipline as super-store.ts): multiple windows writing the same index
+ * must never share a `${target}.tmp` path. */
+let tmpSeq = 0;
+
 export class CheckpointService {
   /** Shadow-git snapshotter (one shadow repo per session). */
   private readonly checkpoints: CheckpointManager;
@@ -167,8 +172,12 @@ export class CheckpointService {
     if ((state.activeSessionId ?? state.sessionId) !== sessionId) return;
     const next = upsertCheckpoint(state.checkpoints ?? [], entry);
     this.deps.setCheckpoints(next);
-    void this.persistCheckpointIndex(sessionId, next);
-    void this.enforceCheckpointRetention(sessionId);
+    void this.persistCheckpointIndex(sessionId, next).catch((error: unknown) => {
+      this.deps.log.warn(`checkpoint index persist failed for ${sessionId}: ${errorMessage(error)}`);
+    });
+    void this.enforceCheckpointRetention(sessionId).catch((error: unknown) => {
+      this.deps.log.warn(`checkpoint retention failed for ${sessionId}: ${errorMessage(error)}`);
+    });
   }
 
   /**
@@ -198,18 +207,25 @@ export class CheckpointService {
       if (dropped.length > 0) {
         const keptShas = [...new Set(kept.map((c) => c.sha).filter((s): s is string => !!s))];
         try {
-          const mapping = keptShas.length > 0
-            ? await this.checkpoints.pruneToKeptShas(sessionId, keptShas)
-            : [];
-          if (this.deps.isDisposed()) return;
-          const live = this.deps.getState();
-          if ((live.activeSessionId ?? live.sessionId) !== sessionId) return;
-          const remap = new Map(mapping.map((m) => [m.oldSha, m.newSha]));
-          const rewritten = kept.map((c) =>
-            c.sha && remap.has(c.sha) ? { ...c, sha: remap.get(c.sha)! } : c);
-          this.deps.setCheckpoints(rewritten);
-          void this.persistCheckpointIndex(sessionId, rewritten);
-          this.deps.log.info(`checkpoint retention: dropped ${dropped.length} turn(s) for ${sessionId}`);
+          // The whole rewrite → index write → gc sequence runs on the SAME
+          // chain as every other index write. The rewritten index MUST reach
+          // disk before gc deletes the old commits; if the write throws, gc
+          // never runs and the old index still points at restorable shas.
+          await this.enqueueCheckpointTask(async () => {
+            if (this.deps.isDisposed()) return;
+            const live = this.deps.getState();
+            if ((live.activeSessionId ?? live.sessionId) !== sessionId) return;
+            const mapping = keptShas.length > 0
+              ? await this.checkpoints.rewriteKeptShas(sessionId, keptShas)
+              : [];
+            const remap = new Map(mapping.map((m) => [m.oldSha, m.newSha]));
+            const rewritten = kept.map((c) =>
+              c.sha && remap.has(c.sha) ? { ...c, sha: remap.get(c.sha)! } : c);
+            this.deps.setCheckpoints(rewritten);
+            await this.writeCheckpointIndexFile(sessionId, rewritten);
+            if (keptShas.length > 0) await this.checkpoints.gcSession(sessionId);
+            this.deps.log.info(`checkpoint retention: dropped ${dropped.length} turn(s) for ${sessionId}`);
+          });
         } catch (error) {
           this.deps.log.warn(`checkpoint retention failed for ${sessionId}: ${errorMessage(error)}`);
         }
@@ -278,19 +294,45 @@ export class CheckpointService {
     );
   }
 
-  /** Atomic index write (temp + rename), serialized on its own chain. */
-  persistCheckpointIndex(sessionId: string, checkpoints: readonly CheckpointUi[]): Promise<void> {
+  /**
+   * Run one checkpoint disk task on the shared serial chain. The chain stores
+   * an error-swallowing tail (one failed write must not block later writes),
+   * but the RETURNED promise still rejects so callers can observe/report the
+   * failure — which is why every fire-and-forget caller attaches `.catch`.
+   */
+  private enqueueCheckpointTask<T>(task: () => Promise<T>): Promise<T> {
     const run = this.checkpointPersistChain
       .then(() => new Promise<void>((resolve) => setImmediate(resolve)))
-      .then(async () => {
-        const target = this.checkpointIndexPath(sessionId);
-        await mkdir(path.dirname(target), { recursive: true });
-        const tmp = `${target}.tmp`;
-        await writeFile(tmp, serializeCheckpointIndex(checkpoints), "utf8");
-        await rename(tmp, target);
-      });
-    this.checkpointPersistChain = run.catch(() => {});
+      .then(task);
+    this.checkpointPersistChain = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  /** Atomic index write (temp + rename), serialized on its own chain. */
+  persistCheckpointIndex(sessionId: string, checkpoints: readonly CheckpointUi[]): Promise<void> {
+    return this.enqueueCheckpointTask(() => this.writeCheckpointIndexFile(sessionId, checkpoints));
+  }
+
+  /**
+   * One raw atomic write — MUST only be called from inside a
+   * `checkpointPersistChain` task (calling `persistCheckpointIndex` there
+   * would deadlock by queueing behind itself).
+   *
+   * Temp name is pid + monotonic seq (never a fixed `${target}.tmp`): two
+   * windows writing the same session index cannot overwrite each other's
+   * temp file. Any failure removes that temp file before rethrowing.
+   */
+  private async writeCheckpointIndexFile(sessionId: string, checkpoints: readonly CheckpointUi[]): Promise<void> {
+    const target = this.checkpointIndexPath(sessionId);
+    await mkdir(path.dirname(target), { recursive: true });
+    const tmp = `${target}.${process.pid.toString(36)}-${(tmpSeq++).toString(36)}.tmp`;
+    try {
+      await writeFile(tmp, serializeCheckpointIndex(checkpoints), "utf8");
+      await rename(tmp, target);
+    } catch (error) {
+      await rm(tmp, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   /**
@@ -343,7 +385,9 @@ export class CheckpointService {
     const pruned = pruneCheckpointsForBlocks(list, state.blocks);
     if (pruned.length === list.length) return;
     this.deps.setCheckpoints(pruned);
-    void this.persistCheckpointIndex(sessionId, pruned);
+    void this.persistCheckpointIndex(sessionId, pruned).catch((error: unknown) => {
+      this.deps.log.warn(`checkpoint index persist failed for ${sessionId}: ${errorMessage(error)}`);
+    });
   }
 
   /** Delete a session's shadow repo (session deleted / pruned as dead). */

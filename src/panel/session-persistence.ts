@@ -74,6 +74,11 @@ export interface SessionPersistenceDeps {
   readonly maxRecentSessions: number;
 }
 
+/** Per-process sequence for unique temp file names (pid + seq, same
+ * discipline as super-store.ts): two windows writing the same transcript
+ * must never share a fixed `${target}.tmp` path. */
+let tmpSeq = 0;
+
 export class SessionPersistenceService {
   /** Serializes per-session transcript file writes (P2): overlapping persists
    * must not interleave inside one file's temp+rename sequence. */
@@ -219,10 +224,15 @@ export class SessionPersistenceService {
 
   async writeTranscriptFile(sessionId: string, payload: string): Promise<void> {
     const target = this.ownTranscriptFilePath(sessionId);
-    const tmp = `${target}.tmp`;
+    const tmp = `${target}.${process.pid.toString(36)}-${(tmpSeq++).toString(36)}.tmp`;
     await mkdir(this.transcriptDir(), { recursive: true });
-    await writeFile(tmp, payload, "utf8");
-    await rename(tmp, target);
+    try {
+      await writeFile(tmp, payload, "utf8");
+      await rename(tmp, target);
+    } catch (error) {
+      await rm(tmp, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   /**
