@@ -375,7 +375,7 @@ describe("QQ 通道状态 — 平台错误码可见", () => {
       text: "最终答复",
     });
     expect(failed.ok).toBe(false);
-    expect(failed.error).toContain("40054");
+    expect((failed as { error?: string }).error).toContain("40054");
 
     const detail = (await adapter.health()).detail ?? "";
     expect(detail).toContain("40054");

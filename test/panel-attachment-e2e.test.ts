@@ -210,9 +210,9 @@ describe("agent attachment header · end-to-end (panel → CLI)", () => {
     expect(recorded).toContain("2. （无说明）");
 
     // 转录里的用户块保留逐图说明，与 images 同下标。
-    const userBlocks = panel.store
+    const userBlocks = (panel as any).store
       .getState()
-      .blocks.filter((block) => block.kind === "user");
+      .blocks.filter((block: { kind: string; imageCaptions?: string[] }) => block.kind === "user");
     expect(userBlocks).toHaveLength(1);
     const user = userBlocks[0]!;
     expect(user.kind === "user" ? user.imageCaptions : undefined).toEqual(["报错弹窗", ""]);
@@ -227,21 +227,21 @@ describe("agent attachment header · end-to-end (panel → CLI)", () => {
 
     expect(sent).toHaveLength(1);
     expect(sent[0]).not.toContain("已附图片（按顺序）：");
-    const user = panel.store.getState().blocks.find((block) => block.kind === "user");
+    const user = (panel as any).store.getState().blocks.find((block: { kind: string; imageCaptions?: string[] }) => block.kind === "user");
     expect(user && user.kind === "user" ? user.imageCaptions : undefined).toBeUndefined();
   });
 
   it("regenerate re-sends the images with the same ordered caption list", async () => {
     // 用公开 store API 造出「上一轮带图带说明」的转录，并把状态收回 idle，
     // 让 regenerate() 的 streaming 守卫放行。
-    panel.store.userPrompt(
+    (panel as any).store.userPrompt(
       "look at this",
       ["data:image/png;base64,QUJD", "data:image/png;base64,REVG"],
       undefined,
       undefined,
       ["报错弹窗", "修复后界面"],
     );
-    panel.store.promptCompleted("end_turn");
+    (panel as any).store.promptCompleted("end_turn");
 
     await (panel as unknown as { handleWebviewMessage: (m: unknown) => Promise<void> }).handleWebviewMessage({
       type: "regenerate",

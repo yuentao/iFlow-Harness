@@ -871,7 +871,7 @@ describe("super agent · 归档与恢复", () => {
       pending: {
         kind: "question",
         requestId: "req-1",
-        questions: [{ header: "h", question: "选哪个？" }],
+        questions: [{ header: "h", question: "选哪个？", options: [], multiSelect: false }],
         deadline: 5000,
         timeoutMs: 300_000,
       },

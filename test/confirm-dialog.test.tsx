@@ -25,7 +25,7 @@ declare global {
 
 let root: Root;
 let container: HTMLDivElement;
-let onCancel: ReturnType<typeof vi.fn>;
+let onCancel: ReturnType<typeof vi.fn<() => void>>;
 
 function backdrop(): HTMLElement {
   const el = document.body.querySelector<HTMLElement>(".auth-backdrop");
@@ -44,7 +44,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  onCancel = vi.fn();
+  onCancel = vi.fn<() => void>();
   act(() =>
     root.render(
       <ConfirmDialog title="删除会话？" message="此操作不可撤销" cancelLabel="取消" onCancel={onCancel} />,

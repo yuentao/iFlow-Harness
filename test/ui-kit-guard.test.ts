@@ -514,11 +514,11 @@ describe("select overlay", () => {
     expect(document.activeElement).toBe(items[2]);
 
     act(() => {
-      items[2].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      items[2]!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     });
     expect(document.activeElement).toBe(items[0]);
 
-    act(() => items[1].click());
+    act(() => items[1]!.click());
     expect(onChange).toHaveBeenCalledWith("deny");
     expect(document.body.querySelector("[role='menu']")).toBeNull();
     expect(trigger!.getAttribute("aria-expanded")).toBe("false");

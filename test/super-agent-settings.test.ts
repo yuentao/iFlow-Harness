@@ -162,8 +162,8 @@ function group(title: string): HTMLElement {
 beforeEach(() => {
   send.mockReset();
   updateHostSetting.mockReset();
-  hostSettings.superAgentMaxAttempts = undefined;
-  hostSettings.superAgentDependencyPolicy = undefined;
+  hostSettings.superAgentMaxAttempts = undefined as never;
+  hostSettings.superAgentDependencyPolicy = undefined as never;
   hostSettings.superAgentFullTrust = false;
   setLocale("zh-cn");
   container = document.createElement("div");

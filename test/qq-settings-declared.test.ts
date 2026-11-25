@@ -99,7 +99,7 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
   });
 
   it.each(SPECS)("$key 的类型 / 默认值 / 取值范围与约定一致", (spec) => {
-    const schema = props[spec.key];
+    const schema = props[spec.key]!;
     expect(schema, `${spec.key} 未声明`).toBeTruthy();
     expect(schema.type).toBe(spec.type);
     expect(schema.default).toEqual(spec.default);

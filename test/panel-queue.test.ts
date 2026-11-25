@@ -15,7 +15,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
-    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : defaultValue),
+    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : (defaultValue as T)),
     update: (key: string, value: unknown) => {
       store.set(key, value);
       return Promise.resolve();
@@ -668,14 +668,14 @@ describe("ChatPanel 停止生成", () => {
   let panel: ChatPanel;
   let p: StopInternals;
   let storageDir: string;
-  let client: { cancel: ReturnType<typeof vi.fn>; prompt: ReturnType<typeof vi.fn> };
+  let client: { cancel: ReturnType<typeof vi.fn<(id: string) => void>>; prompt: ReturnType<typeof vi.fn<(req: unknown, timeoutMs?: number) => Promise<{ stopReason: string }>>> };
 
   beforeEach(() => {
     setConfigOverrides({ checkpoints: false });
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-stop-storage-"));
     panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as StopInternals;
-    client = { cancel: vi.fn(), prompt: vi.fn() };
+    client = { cancel: vi.fn<(id: string) => void>(), prompt: vi.fn<(req: unknown, timeoutMs?: number) => Promise<{ stopReason: string }>>() };
     p.client = client;
     p.ensureClient = async () => client;
     p.persistActiveTranscript = async () => {};

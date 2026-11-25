@@ -163,7 +163,7 @@ describe("Web Audio cue", () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       expect(unhandled).toHaveLength(0);
-      expect(consoleError.mock.calls.filter((a) => String(a[0]).includes("render error"))).toHaveLength(0);
+      expect(consoleError.mock.calls.filter((a: unknown[]) => String(a[0]).includes("render error"))).toHaveLength(0);
     } finally {
       window.removeEventListener("unhandledrejection", onUnhandled);
     }
@@ -187,7 +187,7 @@ describe("ErrorBoundary throttling", () => {
     expect(container.textContent).toContain("这段内容显示不出来");
     // React 19 自身也会 console.error 报告被捕获的错误，只数边界自己的日志
     const renderErrorCount = () =>
-      consoleError.mock.calls.filter((a) => String(a[0]).includes("[iflow] render error")).length;
+      consoleError.mock.calls.filter((a: unknown[]) => String(a[0]).includes("[iflow] render error")).length;
     expect(renderErrorCount()).toBeGreaterThan(0);
 
     // 模拟 host 以 ~80ms（12.5/s）推 blockPatch，resetKey 每次都变
@@ -235,7 +235,7 @@ describe("main transcript sanitize", () => {
     const st = useChat.getState();
     act(() => st.applyHostMessage({ type: "snapshot", state: snapshotState(blocks as unknown as Block[]) } as never));
     render(<ErrorBoundary variant="page"><App /></ErrorBoundary>);
-    const renderErrors = consoleError.mock.calls.filter((a) => String(a[0]).includes("render error"));
+    const renderErrors = consoleError.mock.calls.filter((a: unknown[]) => String(a[0]).includes("render error"));
     expect(renderErrors).toHaveLength(0);
     expect(document.body.textContent).not.toContain("界面出错了");
   });
@@ -250,7 +250,7 @@ describe("main transcript sanitize", () => {
       tail: snapshotState([]),
     } as never));
     render(<ErrorBoundary variant="page"><App /></ErrorBoundary>);
-    const renderErrors = consoleError.mock.calls.filter((a) => String(a[0]).includes("render error"));
+    const renderErrors = consoleError.mock.calls.filter((a: unknown[]) => String(a[0]).includes("render error"));
     expect(renderErrors).toHaveLength(0);
     expect(document.body.textContent).not.toContain("界面出错了");
   });

@@ -91,7 +91,7 @@ describe("AcpClient (integration with mock ACP agent)", () => {
 
     const text = updates
       .filter((u) => u.update.sessionUpdate === "agent_message_chunk")
-      .map((u) => (u.update.content as { text?: string }).text ?? "")
+      .map((u) => ((u.update as { content?: { text?: string } }).content?.text ?? ""))
       .join("");
     expect(text).toBe("Hello world");
   });
@@ -148,9 +148,9 @@ describe("AcpClient (integration with mock ACP agent)", () => {
     const report = await client.mcpStatus(session.sessionId);
     expect(report.available).toBe(true);
     expect(report.discoveryState).toBe("completed");
-    expect(report.servers.share.status).toBe("connected");
-    expect(report.servers.share.tools[0]?.name).toBe("share_echo");
-    expect(report.servers.broken.errorKind).toBe("spawn_failed");
+    expect(report.servers.share!.status).toBe("connected");
+    expect(report.servers.share!.tools[0]?.name).toBe("share_echo");
+    expect(report.servers.broken!.errorKind).toBe("spawn_failed");
 
     const withoutMod = createClient(undefined, undefined, { ACP_MOCK_MCP_STATUS: "off" });
     await withoutMod.connect();
@@ -317,7 +317,7 @@ describe("AcpClient (integration with mock ACP agent)", () => {
 
     const notes = updates
       .filter((u) => u.update.sessionUpdate === "agent_message_chunk")
-      .map((u) => (u.update.content as { text?: string }).text ?? "");
+      .map((u) => ((u.update as { content?: { text?: string } }).content?.text ?? ""));
     const escapeNote = notes.find((n) => n.startsWith("sandbox-"));
     expect(escapeNote).toBeDefined();
     expect(escapeNote!).toContain("sandbox-blocked");

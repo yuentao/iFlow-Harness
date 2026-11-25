@@ -253,11 +253,11 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     // 成功必须清屏：qqLoginQr 是独立通道，不覆盖就会残留旧二维码 + 倒计时。
     const confirmed = posted.find(
       (m) => m.type === "qqLoginQr" && m.phase === "confirmed",
-    );
+    ) as { dataUrl?: string; expiresAt?: number } | undefined;
     expect(confirmed, "成功后 confirmed 清屏帧").toBeTruthy();
     expect(confirmed?.dataUrl).toBe("");
     expect(confirmed?.expiresAt).toBe(0);
-    const confirmedAt = posted.indexOf(confirmed!);
+    const confirmedAt = (posted as unknown[]).indexOf(confirmed);
     const loggedInAt = posted.findIndex(
       (m) => m.type === "qqManagedStatus" && m.phase === "logged_in",
     );

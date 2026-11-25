@@ -1863,7 +1863,7 @@ function createMockHost(): HostApi {
       if (m.type === "deleteSession") {
         demoMeta.sessions = demoMeta.sessions.filter((s) => s.id !== m.sessionId);
         if (demoMeta.activeSessionId === m.sessionId) {
-          demoMeta.activeSessionId = demoMeta.sessions[0]?.id ?? null;
+          demoMeta.activeSessionId = (demoMeta.sessions[0]?.id ?? null) as string;
           demoBlocks.length = 0;
           demoBlocks.push({ kind: "text", text: "已删除该会话（mock）" });
         }

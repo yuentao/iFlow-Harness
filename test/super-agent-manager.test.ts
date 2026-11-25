@@ -628,7 +628,7 @@ describe("super agent · 编排", () => {
     expect(harness.needInputs).toHaveLength(0);
 
     const questions: UserQuestion[] = [
-      { header: "方案", question: "用哪个方案？", multiSelect: false, options: [{ label: "A" }] },
+      { header: "方案", question: "用哪个方案？", multiSelect: false, options: [{ label: "A", description: "" }] },
     ];
     const pendingCall = harness.clients[0]!.callbacks.onUserQuestions?.({
       sessionId: "sub-1",
@@ -655,7 +655,7 @@ describe("super agent · 编排", () => {
 
     const pendingCall = harness.clients[0]!.callbacks.onUserQuestions?.({
       sessionId: "sub-1",
-      questions: [{ header: "方案", question: "用哪个方案？", multiSelect: false, options: [{ label: "A" }] }],
+      questions: [{ header: "方案", question: "用哪个方案？", multiSelect: false, options: [{ label: "A", description: "" }] }],
     } as never);
     await until(() => harness.sessions[0]?.status === "awaiting_input");
     expect(harness.needInputs).toHaveLength(1);
@@ -2463,7 +2463,7 @@ describe("super agent · 编排修复回归", () => {
       await until(() => harness.sessions[0]?.status === "running");
 
       const questions: UserQuestion[] = [
-        { header: "方案", question: "用哪个方案？", multiSelect: false, options: [{ label: "A" }] },
+        { header: "方案", question: "用哪个方案？", multiSelect: false, options: [{ label: "A", description: "" }] },
       ];
       let answered: unknown = null;
       const pendingCall = harness.clients[0]!.callbacks
@@ -2502,7 +2502,7 @@ describe("super agent · 编排修复回归", () => {
     try {
       const callA = cb.onUserQuestions?.({
         sessionId: "sub-1",
-        questions: [{ header: "方案A", question: "A？", multiSelect: false, options: [{ label: "A" }] }],
+        questions: [{ header: "方案A", question: "A？", multiSelect: false, options: [{ label: "A", description: "" }] }],
       } as never);
       expect(harness.sessions[0]?.pending?.questions[0]?.header).toBe("方案A");
 

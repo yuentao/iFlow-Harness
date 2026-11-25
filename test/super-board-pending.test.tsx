@@ -220,7 +220,7 @@ describe("看板提问区与主会话提问卡同源", () => {
   it("作答后把答案回传给宿主（按 header 索引）", () => {
     render([askingSession()]);
     const firstRadio = document.body.querySelectorAll('[role="radio"]')[0]!;
-    act(() => firstRadio.click());
+    act(() => (firstRadio as HTMLElement).click());
     act(() => buttonByText("提交回答").click());
 
     expect(send).toHaveBeenCalledWith({

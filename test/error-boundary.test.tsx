@@ -70,8 +70,8 @@ describe("ErrorBoundary", () => {
     expect(container.textContent).toContain("这段内容显示不出来");
     expect(container.textContent).not.toContain("ok");
     // …and the stack is logged for root-cause follow-up (webview devtools).
-    const logged = consoleError.mock.calls.map((c) => String(c[0]));
-    expect(logged.some((m) => m.includes("[iflow] render error"))).toBe(true);
+    const logged = consoleError.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(logged.some((m: string) => m.includes("[iflow] render error"))).toBe(true);
   });
 
   it("renders the full-screen fallback for variant=page", () => {

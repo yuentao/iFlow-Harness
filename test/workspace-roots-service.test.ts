@@ -151,7 +151,7 @@ describe("WorkspaceRootsService · applied 三态与投影", () => {
       storedRoots: [C],
       sessions: [summary("s1", [B])],
       initialWorkspaceRoots: {
-        roots: [A, B, C],
+        roots: [A, B, C] as never,
         selected: [C],
         applied: [A, B],
         pendingChange: false,

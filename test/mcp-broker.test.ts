@@ -66,8 +66,14 @@ async function waitFor(predicate: () => boolean, timeoutMs = 15_000): Promise<vo
   throw new Error("condition not met in time");
 }
 
+/** The broker rewrites every configured server into a remote HTTP proxy entry. */
+type RemoteProxyEntry = { name?: string; type: string; url?: string; headers?: Record<string, string> };
+function remoteServers(broker: McpBroker): RemoteProxyEntry[] {
+  return broker.sessionServers() as RemoteProxyEntry[];
+}
+
 function tokenOf(broker: McpBroker): string {
-  const headers = broker.sessionServers()[0]?.headers;
+  const headers = remoteServers(broker)[0]?.headers;
   const token = headers?.[MCP_BROKER_TOKEN_HEADER];
   if (!token) throw new Error("broker session servers carry no token");
   return token;
@@ -197,7 +203,7 @@ describe("McpBroker · 共享 stdio 进程", () => {
     });
     cleanups.push(() => broker.dispose());
 
-    const entries = broker.sessionServers();
+    const entries = remoteServers(broker);
     expect(entries).toHaveLength(2);
     for (const entry of entries) {
       expect(entry.type).toBe("http");
@@ -207,8 +213,8 @@ describe("McpBroker · 共享 stdio 进程", () => {
     expect(broker.names()).toEqual(["alpha", "beta"]);
 
     const token = tokenOf(broker);
-    const alpha = broker.sessionServers().find((entry) => entry.name === "alpha");
-    const beta = broker.sessionServers().find((entry) => entry.name === "beta");
+    const alpha = remoteServers(broker).find((entry) => entry.name === "alpha");
+    const beta = remoteServers(broker).find((entry) => entry.name === "beta");
     expect(alpha?.url).toBeTruthy();
     expect(beta?.url).toBeTruthy();
 
@@ -255,7 +261,7 @@ describe("McpBroker · 共享 stdio 进程", () => {
     cleanups.push(() => broker.dispose());
     await broker.prewarm();
 
-    const entry = broker.sessionServers()[0]!;
+    const entry = remoteServers(broker)[0]!;
     const token = tokenOf(broker);
     const response = await postRpc(entry.url!, token, {
       jsonrpc: "2.0",
@@ -280,7 +286,7 @@ describe("McpBroker · 共享 stdio 进程", () => {
       servers: { alpha: { command: process.execPath, args: [fakeServer, "--name", "alpha"] } },
     });
     cleanups.push(() => broker.dispose());
-    const entry = broker.sessionServers()[0]!;
+    const entry = remoteServers(broker)[0]!;
 
     const unauthorized = await fetch(entry.url!, {
       method: "POST",
@@ -313,7 +319,7 @@ describe("McpBroker · 共享 stdio 进程", () => {
     await broker.prewarm();
     await waitFor(() => spawnLines(logFile).length === 1);
     const pid = Number(spawnLines(logFile)[0]!.split(" ")[1]);
-    const url = broker.sessionServers()[0]!.url!;
+    const url = remoteServers(broker)[0]!.url!;
 
     await broker.dispose();
 
@@ -393,7 +399,7 @@ describe("McpBroker · 远程上游", () => {
     cleanups.push(() => broker.dispose());
     await broker.prewarm();
 
-    const entry = broker.sessionServers()[0]!;
+    const entry = remoteServers(broker)[0]!;
     const token = tokenOf(broker);
     const [first, second] = await Promise.all([
       childSession(entry.url!, token, "remote_echo"),
@@ -467,7 +473,7 @@ describe("McpBroker · 远程上游", () => {
     });
     cleanups.push(() => broker.dispose());
 
-    const entry = broker.sessionServers()[0]!;
+    const entry = remoteServers(broker)[0]!;
     const token = tokenOf(broker);
     const init = await postRpc(entry.url!, token, {
       jsonrpc: "2.0",
@@ -621,7 +627,7 @@ describe("McpBroker · websocket 上游与上游入站请求（全离线）", ()
     cleanups.push(() => broker.dispose());
     await broker.prewarm();
 
-    const entry = broker.sessionServers()[0]!;
+    const entry = remoteServers(broker)[0]!;
     const token = tokenOf(broker);
     const session = await childSession(entry.url!, token, "ws_echo");
     expect(session.init.status).toBe(200);
@@ -698,7 +704,7 @@ describe("McpBroker · websocket 上游与上游入站请求（全离线）", ()
     cleanups.push(() => broker.dispose());
     await broker.prewarm();
 
-    const entry = broker.sessionServers()[0]!;
+    const entry = remoteServers(broker)[0]!;
     const session = await childSession(entry.url!, tokenOf(broker), "injected_echo");
     expect(session.init.status).toBe(200);
     expect(toolNames(session.list)).toContain("injected_echo");
@@ -726,7 +732,7 @@ describe("McpBroker · websocket 上游与上游入站请求（全离线）", ()
     cleanups.push(() => broker.dispose());
     await broker.prewarm();
 
-    const entry = broker.sessionServers()[0]!;
+    const entry = remoteServers(broker)[0]!;
     const token = tokenOf(broker);
     const session = await childSession(entry.url!, token, "alpha_echo");
     expect(session.init.status).toBe(200);

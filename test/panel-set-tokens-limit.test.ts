@@ -32,7 +32,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
-    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : defaultValue),
+    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : (defaultValue as T)),
     update: (key: string, value: unknown) => {
       store.set(key, value);
       return Promise.resolve();

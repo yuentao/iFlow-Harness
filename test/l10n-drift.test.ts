@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+// @ts-expect-error - JS 脚本无声明文件，测试配置未包含 scripts 的 .d.ts
 import { buildArtifacts, readSource } from "../scripts/gen-l10n.mjs";
 
 type Value = string | { host: string; webview: string };

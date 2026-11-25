@@ -78,7 +78,7 @@ describe("WireRingBuffer", () => {
     let cyclic: unknown;
     cyclic = { self: null };
     (cyclic as { self: unknown }).self = cyclic;
-    expect(() => buf.tap("out", cyclic)).not.toThrow();
+    expect(() => buf.tap("out", cyclic as Record<string, unknown>)).not.toThrow();
     expect(buf.size).toBe(1);
     expect(() => buf.dump()).not.toThrow();
   });

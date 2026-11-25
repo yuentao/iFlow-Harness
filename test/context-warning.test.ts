@@ -5,7 +5,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
-import type { PanelServices } from "../src/panel/panel.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 import type { SessionUsageUi } from "../shared/messages.js";
 
@@ -14,7 +13,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
-    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : defaultValue),
+    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : (defaultValue as T)),
     update: (key: string, value: unknown) => {
       store.set(key, value);
       return Promise.resolve();

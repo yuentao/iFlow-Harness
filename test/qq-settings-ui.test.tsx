@@ -50,10 +50,10 @@ const VALUE: QqSettingsValue = {
 
 let root: Root;
 let container: HTMLDivElement;
-let onChange: ReturnType<typeof vi.fn>;
-let onTestConnection: ReturnType<typeof vi.fn>;
-let onUnbind: ReturnType<typeof vi.fn>;
-let onUserAction: ReturnType<typeof vi.fn>;
+let onChange: ReturnType<typeof vi.fn<(patch: QqSettingsPatch) => void>>;
+let onTestConnection: ReturnType<typeof vi.fn<() => void>>;
+let onUnbind: ReturnType<typeof vi.fn<() => void>>;
+let onUserAction: ReturnType<typeof vi.fn<(openid: string, action: "approve" | "reject") => void>>;
 
 /**
  * 端到端往返用的最小 IO：设置值存在内存里，secret 一律空。
@@ -185,10 +185,10 @@ function pressKey(el: HTMLElement, key: string, init: KeyboardEventInit = {}): v
 }
 
 beforeEach(() => {
-  onChange = vi.fn();
-  onTestConnection = vi.fn();
-  onUnbind = vi.fn();
-  onUserAction = vi.fn();
+  onChange = vi.fn<(patch: QqSettingsPatch) => void>();
+  onTestConnection = vi.fn<() => void>();
+  onUnbind = vi.fn<() => void>();
+  onUserAction = vi.fn<(openid: string, action: "approve" | "reject") => void>();
 });
 
 afterEach(() => {

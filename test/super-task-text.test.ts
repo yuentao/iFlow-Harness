@@ -250,7 +250,7 @@ describe("previewSuperTaskBlocks", () => {
     // 块边界截断：给出去的块都是完整的（不补省略号，避免看起来像半句）。
     expect(preview.cutText).toBe(false);
     expect(preview.blocks).toHaveLength(2);
-    expect(preview.blocks[1]?.inlines[0]?.text).not.toContain("…");
+    expect((preview.blocks[1] as unknown as { inlines?: Array<{ text?: string }> })?.inlines?.[0]?.text).not.toContain("…");
   });
 
   it("第一块就超预算时在句子边界处切一刀", () => {
@@ -260,7 +260,7 @@ describe("previewSuperTaskBlocks", () => {
     expect(preview.truncated).toBe(true);
     expect(preview.cutText).toBe(true);
     expect(preview.blocks).toHaveLength(1);
-    const text = preview.blocks[0]?.inlines[0]?.text ?? "";
+    const text = (preview.blocks[0] as unknown as { inlines?: Array<{ text?: string }> })?.inlines?.[0]?.text ?? "";
     expect(text.length).toBeLessThanOrEqual(61);
     expect(text.endsWith("…")).toBe(true);
   });

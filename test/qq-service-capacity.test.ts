@@ -164,8 +164,8 @@ function inbound(text: string, msgId = "m-task"): InboundMessage {
   };
 }
 
-function question(header: string): { header: string; question: string; options: string[] } {
-  return { header, question: `请选择${header}`, options: ["A", "B"] };
+function question(header: string): { header: string; question: string; options: Array<{ label: string }> } {
+  return { header, question: `请选择${header}`, options: ["A", "B"] as unknown as Array<{ label: string }> };
 }
 
 async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -207,7 +207,7 @@ function internals(service: QqService): {
   return service as unknown as ReturnType<typeof internals>;
 }
 
-type QqRemoteQuestionLike = { header: string; question: string; options?: string[] };
+type QqRemoteQuestionLike = { header: string; question: string; options?: Array<{ label: string }> };
 
 // ---------------------------------------------------------------------------
 // S2：提问占位先于 await，答案按占位精确消费

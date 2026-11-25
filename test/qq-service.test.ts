@@ -4,7 +4,6 @@ import type { QqConfig } from "../src/qq/config.js";
 import type { QqPendingUserInput } from "../src/qq/pending-users.js";
 import {
   QqService,
-  QQ_APPROVAL_TIMEOUT_MS,
   QQ_DEFAULT_RETENTION_DAYS,
   QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS,
   QQ_RESULT_CHANGED_WHILE_DELIVERING,
@@ -30,6 +29,7 @@ import {
   type QqTask,
   type QqTaskChannel,
   type QqTaskStatus,
+  type QqResultDetail,
 } from "../shared/qq-task.js";
 
 // ---------------------------------------------------------------------------
@@ -682,7 +682,7 @@ describe("QqService — 终态与结果回传", () => {
   });
 
   it("compact 档不回摘要正文；standard 档截断；detailed 档分片且含改动明细", async () => {
-    const compact = makeService({ config: { resultDetail: "compact" } });
+    const compact = makeService({ config: { resultDetail: "compact" as QqResultDetail } });
     compact.host.dispatchTask = async (input) => {
       compact.dispatches.push(input);
       return { superSessionId: "d-compact" };
@@ -711,7 +711,7 @@ describe("QqService — 终态与结果回传", () => {
     expect(standardText).not.toContain("TAILTOKEN");
     expect(standardText.length).toBeLessThan(3_000);
 
-    const detailed = makeService({ config: { resultDetail: "detailed" } });
+    const detailed = makeService({ config: { resultDetail: "detailed" as QqResultDetail } });
     detailed.host.dispatchTask = async (input) => {
       detailed.dispatches.push(input);
       return { superSessionId: "d-full" };
@@ -808,7 +808,7 @@ describe("QqService — 终态写回与结果回包", () => {
 
   it("结果彻底送不出去时记录 deliveryError 并本地提示，不静默丢弃", async () => {
     const f = makeService({
-      config: { resultDetail: "compact" },
+      config: { resultDetail: "compact" as QqResultDetail },
       deliveryRetryDelayMs: 0,
     });
     f.host.dispatchTask = async (input) => {
@@ -1068,7 +1068,7 @@ describe("QqService — 回包可靠性缺口回归", () => {
       });
       // 同一记录重复 persist（spread 重建、字段等价）：不推快照。
       expect(qqTaskProjectionChanged(base, { ...base })).toBe(false);
-      expect(qqTaskProjectionChanged(base, { ...base, pending: { ...base.pending } })).toBe(false);
+      expect(qqTaskProjectionChanged(base, { ...base, pending: { ...base.pending! } })).toBe(false);
       // 仅 pending 变化（updatedAt / status 都不变）：必须推一次。
       expect(qqTaskProjectionChanged(base, { ...base, pending: undefined })).toBe(true);
     });
@@ -2398,8 +2398,8 @@ describe("QqService — 安全修复：审批并发与身份", () => {
     f.host.dispatchTask = async (input) => {
       f.dispatches.push(input);
       const [a, b] = await Promise.all([
-        input.onPermission({ sessionId: "s", toolName: "A" }),
-        input.onPermission({ sessionId: "s", toolName: "B" }),
+        input.onPermission({ sessionId: "s", toolName: "A", summary: "A" }),
+        input.onPermission({ sessionId: "s", toolName: "B", summary: "B" }),
       ]);
       decisions.push(a!, b!);
       return { superSessionId: "super-race" };
@@ -2420,7 +2420,7 @@ describe("QqService — 安全修复：审批并发与身份", () => {
     let decision: SuperPermissionDecision | undefined;
     f.host.dispatchTask = async (input) => {
       f.dispatches.push(input);
-      decision = await input.onPermission({ sessionId: "s", toolName: "write_file" });
+      decision = await input.onPermission({ sessionId: "s", toolName: "write_file", summary: "write_file" });
       return { superSessionId: "super-identity" };
     };
     await f.service.handleInboundMessage(inbound({ msgId: "identity-1" }));

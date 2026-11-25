@@ -774,7 +774,7 @@ const SHIPPED_TEMPLATES = [
 describe("prompt templates (prompts/)", () => {
   it("ships every template the builders reference", () => {
     for (const name of SHIPPED_TEMPLATES) {
-      expect(existsSync(path.join(here, "..", "prompts", `${name}.md`), "utf8")).toBe(true);
+      expect(existsSync(path.join(here, "..", "prompts", `${name}.md`))).toBe(true);
     }
   });
 

@@ -13,7 +13,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
-    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : defaultValue),
+    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : (defaultValue as T)),
     update: () => Promise.resolve(),
     keys: () => [...store.keys()],
     delete: () => Promise.resolve(),
@@ -157,9 +157,9 @@ describe("ChatPanel warning pill across manual compress (P0-6 action)", () => {
     expect(p.store.getState().compressing).toBe(true);
     expect(warningToasts()).toBe(1); // no re-armed pill (the 2026-10-14 flicker)
     expect(calls).toHaveLength(1);
-    expect(calls[0].prompt[0].text).toBe("/compress");
+    expect(calls[0]!.prompt[0]!.text).toBe("/compress");
 
-    calls[0].resolve({ stopReason: "end_turn" });
+    calls[0]!.resolve({ stopReason: "end_turn" });
     await flushTasks();
     expect(p.store.getState().status).toBe("idle");
     expect(p.store.getState().compressing).toBe(false);

@@ -20,8 +20,9 @@ import {
   type PendingApprovalUi,
   type PendingQuestionsUi,
   type SessionState,
-  type SuperSessionUi,
+
 } from "../shared/messages";
+import type { SuperSessionUi } from "../shared/super-agent";
 
 const mocked = vi.hoisted(() => ({
   send: vi.fn(),
