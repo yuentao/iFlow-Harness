@@ -7690,6 +7690,13 @@ export class ChatPanel implements vscode.Disposable {
   getSuperAgent(...args: Parameters<SuperAgentHost["getSuperAgent"]>): ReturnType<SuperAgentHost["getSuperAgent"]> {
     return this.superHost.getSuperAgent(...args);
   }
+  /**
+   * 派发前拿到子会话管理器（宿主侧唯一判空点：无打开工作区时回退
+   * `iflow.superAgent.defaultWorkspace`，失败按真实原因 toast）。
+   */
+  async ensureSuperAgentForDispatch(...args: Parameters<SuperAgentHost["ensureSuperAgentForDispatch"]>): ReturnType<SuperAgentHost["ensureSuperAgentForDispatch"]> {
+    return this.superHost.ensureSuperAgentForDispatch(...args);
+  }
   async ensureMcpBroker(...args: Parameters<SuperAgentHost["ensureMcpBroker"]>): ReturnType<SuperAgentHost["ensureMcpBroker"]> {
     return this.superHost.ensureMcpBroker(...args);
   }
@@ -9760,11 +9767,11 @@ export class ChatPanel implements vscode.Disposable {
       }, imageCaptions);
       const task = [contextBlock, trimmed].filter(Boolean).join("\n\n");
       const title = normalizeSuperTitle(trimmed.split("\n")[0] ?? "");
-      const manager = this.getSuperAgent();
-      if (!manager) {
-        this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
-        return false;
-      }
+      // 唯一的判空点：宿主在没有打开工作区时会回退设置里的默认工作区，
+      // 校验失败时自己按真实原因（未配置 / 非绝对路径 / 不存在 / 不是目录）
+      // 弹 toast，这里不要再补一句一刀切文案。
+      const manager = await this.ensureSuperAgentForDispatch();
+      if (!manager) return false;
       manager.spawn({ title, task, ...(attachments.length > 0 ? { attachments } : {}) });
       // 主会话此刻收不到这条消息（本分支马上 return false）：先把原文与附件
       // 缓存下来，等本回合结束后由 drainDelegatedUserTurns 以 hidden 回合补投。

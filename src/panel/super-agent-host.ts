@@ -33,6 +33,7 @@ import * as vscode from "vscode";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { AcpClient, type AcpClientCallbacks } from "../acp/client.js";
 import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, locateNodeExecutable } from "../acp/cli-locator.js";
@@ -44,6 +45,10 @@ import {
   effectiveMcpServerNamesForTrust,
 } from "../../shared/super-tool-policy.js";
 import { parseContextWindowOverrides, parseCostTable, resolveCost } from "../../shared/context-window.js";
+import {
+  resolveSuperWorkspaceRoot,
+  type SuperWorkspaceResolution,
+} from "../../shared/super-workspace.js";
 import {
   type Block,
   type ContextRefUi,
@@ -122,7 +127,7 @@ function normalizePathKey(target: string): string {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-type SuperToolCallOutcome = "dispatched" | "actions" | "rejected" | "dropped" | "failed";
+type SuperToolCallOutcome = "pending" | "dispatched" | "actions" | "rejected" | "dropped" | "failed";
 
 /** 一条待投递给主会话的子会话汇报回合（delivered-unacked 账本与队列共用）。 */
 type PendingSuperReportPrompt = {
@@ -164,6 +169,24 @@ type UnackedSuperDelivery = {
 export type SuperMergeDispatchResult =
   | { dispatched: true; mergeSessionId: string }
   | { dispatched: false; queued: boolean; reason: string };
+
+/** 一次委派派发的同步结果（{@link SuperAgentHost.dispatchSuperTasks} 的返回）。 */
+export interface SuperDispatchResult {
+  dispatched: number;
+  duplicates: number;
+  managerAvailable: boolean;
+  /**
+   * 本次派发被转到了异步链（没有打开工作区、但配置了默认工作区，需要异步
+   * `fs.stat` 校验）。为 true 时不代表失败 —— 真实结果稍后由后台链回填。
+   */
+  deferred?: boolean;
+}
+
+/** 派发结果 → 结构化工具调用的终态账本取值（两条通道共用同一口径）。 */
+export function dispatchOutcome(result: SuperDispatchResult): "dispatched" | "failed" {
+  if (!result.managerAvailable) return "failed";
+  return result.dispatched > 0 || result.duplicates > 0 ? "dispatched" : "failed";
+}
 
 /** Narrow callback surface the host needs from the panel. No panel import. */
 export interface SuperAgentHostCallbacks {
@@ -256,6 +279,18 @@ export class SuperAgentHost {
 
   // --- Migrated state (整组迁移；panel 仅保留兼容访问器) -------------------
   superAgent: SuperAgentManager | null = null;
+  /**
+   * `iflow.superAgent.defaultWorkspace` 已通过异步校验的根（无打开工作区时
+   * 的派发回退）。只有 stat 成功且确实是目录才会被写入 —— 未校验 / 校验失败
+   * 一律保持 null，绝不让一个不存在的路径进入 worktree / 附件边界。
+   */
+  defaultWorkspaceRoot: string | null = null;
+  /**
+   * 默认工作区派发的串行链：默认工作区需要异步 stat，而派发入口是同步的。
+   * 串行化保证同一份载荷的重复帧（pending → in_progress）跑在同一个账本上，
+   * 后一帧看到前一帧已写入的去重键，不会双开子会话。
+   */
+  private defaultWorkspaceDispatchChain: Promise<void> = Promise.resolve();
   mcpBroker: import("../acp/mcp-broker.js").McpBroker | null = null;
   mcpBrokerStarting: Promise<import("../acp/mcp-broker.js").McpBroker | null> | null = null;
   pendingSuperMerges: Array<{ id: string; reason: string }> = [];
@@ -973,6 +1008,10 @@ export class SuperAgentHost {
         }),
       );
       this.log.info(`super agent: restored ${restored.length} historical child session(s) for ${mainSessionId}`);
+      // 历史记录同样要能落到默认工作区上：管理器需要一个 repoRoot 才能构造。
+      // 启动阶段静默解析（不弹 toast）—— 路径没配 / 写错不该在恢复历史时打扰
+      // 用户，真正需要提示的时机是派发。
+      if (this.superRepoRoot() === null) await this.resolveSuperWorkspace();
       this.deps.getSuperAgent()?.restoreSessions(mainSessionId, restored);
       // 终态转录是旁路展示数据：读回填充详情面板。只读小 JSON、读失败静默
       // 跳过，绝不因它挡住看板恢复（与 sweepStaleWorktrees 改后台同一纪律：
@@ -1107,15 +1146,143 @@ export class SuperAgentHost {
   /**
    * 主仓根目录（worktree 的来源，也是委派附件路径的允许边界）。
    *
-   * 没有打开的工作区时返回 null：隔离目录现在建在项目内，回退到扩展自己的
-   * 安装目录会在那里堆 worktree，必须由调用方直接拒绝委派。
+   * 顺序：打开的工作区根 → 已校验的默认工作区（`iflow.superAgent.defaultWorkspace`）
+   * → null。默认工作区只在异步校验成功后才会出现在这里（见
+   * {@link resolveSuperWorkspace}），所以同步读取不会把不存在的路径交给
+   * worktree / 附件边界。
+   *
+   * 没有可用目录时返回 null，调用方必须经
+   * {@link ensureSuperAgentForDispatch} 统一判空并给出真实原因 —— 不要各自
+   * 再写一份拒绝逻辑（那正是「未配置 / 路径不存在 / 不是目录」被压成一句
+   * 话的来源）。
    */
   superRepoRoot(): string | null {
     return (
       this.services.workspaceRoot ??
       vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+      this.defaultWorkspaceRoot ??
       null
     );
+  }
+
+
+  /**
+   * 派发可用工作目录的唯一 resolver。
+   *
+   * 顺序与 {@link SuperWorkspaceResolution} 一致：
+   *   1. 打开的工作区根 → 直接返回（零 I/O，既有行为逐字节不变）；
+   *   2. 没有 → 读 `iflow.superAgent.defaultWorkspace`，用异步 `fs.stat`
+   *      确认是绝对路径、存在、是目录（陷阱 #18：绝不同步探测）；
+   *   3. 校验通过 → 缓存进 {@link superRepoRoot}，让子会话 cwd、
+   *      `--include-directories`、allowedRoots、附件边界全部同源。
+   */
+  async resolveSuperWorkspace(): Promise<SuperWorkspaceResolution> {
+    const roots: string[] = [];
+    if (this.services.workspaceRoot) roots.push(this.services.workspaceRoot);
+    for (const folder of vscode.workspace.workspaceFolders ?? []) roots.push(folder.uri.fsPath);
+    const configured = this.setting<string>("superAgent.defaultWorkspace", "");
+    const resolution = await resolveSuperWorkspaceRoot(roots, configured, async (candidate) => {
+      try {
+        const info = await stat(candidate);
+        return info.isDirectory() ? "directory" : "file";
+      } catch {
+        return "missing";
+      }
+    });
+    if (resolution.ok && resolution.source === "default-workspace") {
+      this.adoptDefaultWorkspaceRoot(resolution.root);
+    } else if (!resolution.ok) {
+      // 目录被删掉 / 设置被清空：缓存必须同步失效，否则 superRepoRoot() 会把
+      // 一个已不存在的路径交给管理器（worktree 建不出来，报错也指错方向）。
+      this.defaultWorkspaceRoot = null;
+    }
+    return resolution;
+  }
+
+
+  /** 采纳（并缓存）一个已校验的默认工作区根；根变了且没有在跑的子会话时重建管理器。 */
+  private adoptDefaultWorkspaceRoot(root: string): void {
+    if (this.defaultWorkspaceRoot === root) return;
+    const previous = this.defaultWorkspaceRoot;
+    this.defaultWorkspaceRoot = root;
+    // 管理器在首次派发时把 repoRoot 固定下来。默认工作区是用户可改的设置，
+    // 若已有管理器绑在旧根上：没有子会话就重建（安全），有子会话则保持旧根
+    // 并如实记日志 —— 中途换根会让在跑的子会话与 allowedRoots 失配。
+    if (this.superAgent) {
+      let idle = false;
+      try {
+        idle = this.superAgent.list().length === 0;
+      } catch {
+        idle = false;
+      }
+      if (idle && typeof this.superAgent.dispose === "function") {
+        const stale = this.superAgent;
+        this.superAgent = null;
+        void stale.dispose().catch(() => undefined);
+      } else {
+        this.log.warn(
+          `super agent: 默认工作区已改为 ${root}，但仍有子会话绑定旧根 ${previous ?? ""}，本次不切换`,
+        );
+        return;
+      }
+    }
+    this.log.info(`super agent: 使用默认工作区 ${root}（没有打开的工作区）`);
+  }
+
+
+  /** 默认工作区解析失败 → 带真实原因与可执行指引的 toast 文案。 */
+  private superWorkspaceRejectToast(resolution: SuperWorkspaceResolution): string {
+    if (resolution.ok) return "";
+    const configured = resolution.configured ?? "";
+    switch (resolution.reason) {
+      case "not-absolute":
+        return vscode.l10n.t(
+          "默认工作区不是绝对路径：{0}（请修改设置 iflow.superAgent.defaultWorkspace）",
+          configured,
+        );
+      case "not-found":
+        return vscode.l10n.t(
+          "默认工作区不存在：{0}（请修改设置 iflow.superAgent.defaultWorkspace）",
+          configured,
+        );
+      case "not-a-directory":
+        return vscode.l10n.t(
+          "默认工作区不是目录：{0}（请修改设置 iflow.superAgent.defaultWorkspace）",
+          configured,
+        );
+      case "not-configured":
+      default:
+        return vscode.l10n.t(
+          "没有打开的工作区，无法派发超流体：请在设置 iflow.superAgent.defaultWorkspace 中指定一个默认工作目录，或先打开一个文件夹",
+        );
+    }
+  }
+
+
+  /**
+   * 派发前拿到子会话管理器 —— **唯一**的判空 + 提示入口。
+   *
+   * 有工作区时立即返回（同步零 I/O）；没有时解析默认工作区，失败按真实原因
+   * 弹 toast 并返回 null。调用方拿到 null 时不要再自己弹拒绝文案。
+   */
+  async ensureSuperAgentForDispatch(): Promise<SuperAgentManager | null> {
+    const existing = this.deps.getSuperAgent();
+    if (existing) return existing;
+    const resolution = await this.resolveSuperWorkspace();
+    if (!resolution.ok) {
+      this.log.warn(
+        `super agent: 无法派发——默认工作区不可用（${resolution.reason}${resolution.configured ? `: ${resolution.configured}` : ""}）`,
+      );
+      this.store.sendToast("warning", this.superWorkspaceRejectToast(resolution));
+      return null;
+    }
+    const manager = this.deps.getSuperAgent();
+    if (!manager) {
+      // 解析成功却仍拿不到管理器：说明工作区根存在但管理器构造失败（异常注入）
+      this.log.warn("super agent unavailable: no workspace folder open");
+      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
+    }
+    return manager;
   }
 
 
@@ -1671,16 +1838,66 @@ export class SuperAgentHost {
    * （{@link handleSuperToolCall}）共用这一段：去重键、附件丢弃计数、
    * toast 文案都不允许两条通道各写一份 —— 同一份载荷从两条路径同时到达时，
    * `superDirectiveDedupeKey` 必须能看见同一个账本，否则会双开子会话。
+   *
+   * 有管理器时完全同步（既有行为逐字节不变）；只有「没有打开工作区、但设置
+   * 了默认工作区」这一条新路径需要异步 fs.stat，因此同步返回 `deferred`，
+   * 由后台链在解析成功后真正派发并回填结果。
    */
   dispatchSuperTasks(
     blocks: readonly SuperTaskSpec[][],
     issues: readonly string[] = [],
-  ): { dispatched: number; duplicates: number; managerAvailable: boolean } {
+    toolCallId?: string,
+  ): SuperDispatchResult {
     const manager = this.deps.getSuperAgent();
-    if (!manager) {
+    if (manager) return this.dispatchSuperTasksWith(manager, blocks, issues);
+    if (this.superRepoRoot() !== null) {
+      // 有工作区根却没有管理器：既有拒绝口径保持不变。
       this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
       return { dispatched: 0, duplicates: 0, managerAvailable: false };
     }
+    // 没有打开任何工作区：可能是「配置了默认工作区」的场景。存在性校验必须
+    // 异步，因此这里先如实返回「本次未派发」，由后台链决定派发还是给出真实
+    // 拒绝原因（未配置 / 非绝对路径 / 不存在 / 不是目录）。
+    // 先同步登记 pending：同一工具调用的后续帧据此跳过（不重复排队），
+    // completed 帧的审核也不会把「还在校验」误判成「载荷整轮没送达」。
+    if (toolCallId) this.recordSuperToolCallOutcome(toolCallId, "pending");
+    void this.dispatchSuperTasksViaDefaultWorkspace(blocks, issues, toolCallId);
+    return { dispatched: 0, duplicates: 0, managerAvailable: false, deferred: true };
+  }
+
+
+  /** 同步入口判定为 deferred 时，后台链串行解析默认工作区并派发。 */
+  private dispatchSuperTasksViaDefaultWorkspace(
+    blocks: readonly SuperTaskSpec[][],
+    issues: readonly string[],
+    toolCallId?: string,
+  ): void {
+    const run = this.defaultWorkspaceDispatchChain
+      .then(async () => {
+        const manager = await this.ensureSuperAgentForDispatch();
+        if (!manager) {
+          if (toolCallId) this.recordSuperToolCallOutcome(toolCallId, "failed");
+          return;
+        }
+        const result = this.dispatchSuperTasksWith(manager, blocks, issues);
+        if (toolCallId) this.recordSuperToolCallOutcome(toolCallId, dispatchOutcome(result));
+      })
+      .catch((error: unknown) => {
+        // 后台链绝不能冒成 unhandled rejection：onSessionUpdate 的调用方是同步
+        // 通知分发，一帧异常会把整条流打断。
+        this.log.error(`super agent: 默认工作区派发失败：${errorMessage(error)}`);
+        if (toolCallId) this.recordSuperToolCallOutcome(toolCallId, "failed");
+      });
+    this.defaultWorkspaceDispatchChain = run;
+  }
+
+
+  /** 拿到管理器之后的派发体（同步；两条派发通道共用）。 */
+  private dispatchSuperTasksWith(
+    manager: SuperAgentManager,
+    blocks: readonly SuperTaskSpec[][],
+    issues: readonly string[] = [],
+  ): SuperDispatchResult {
     if (issues.length > 0) {
       // 宿主侧可诊断日志：字段级原因里带 tasks[i]，这里整条记下来（尤其 title 必填
       // 的拒绝），便于从日志直接定位是哪个任务缺标题，而不是只有一句笼统 toast。
@@ -1859,17 +2076,18 @@ export class SuperAgentHost {
       `super agent: accepted structured ${parsed.kind} tool call (${update.toolCallId || "no-id"})`,
     );
     if (parsed.kind === "dispatch") {
-      const result = this.dispatchSuperTasks(parsed.tasks, parsed.issues);
+      const result = this.dispatchSuperTasks(parsed.tasks, parsed.issues, toolCallId);
+      if (result.deferred) {
+        // 没有打开工作区、可能回退默认工作区：结果要等异步 stat 之后才知道。
+        // 这里先不记账（记 failed 会是假账，记 dispatched 更是谎报），由
+        // dispatchSuperTasksViaDefaultWorkspace 回填同一 toolCallId 的终态。
+        return;
+      }
       // 记账必须反映真实结果，不能只因为「解析成功」就写 dispatched：
       //  - 没有管理器 → 零 spawn，记 failed（旧实现这里记 dispatched 是假账）；
       //  - 有管理器但一条都没派出去（spawn 全抛错 / 无任务）→ 记 failed；
       //  - 纯重复载荷此前确实已派发过 → 仍记 dispatched。
-      const outcome: SuperToolCallOutcome = !result.managerAvailable
-        ? "failed"
-        : result.dispatched > 0 || result.duplicates > 0
-          ? "dispatched"
-          : "failed";
-      this.recordSuperToolCallOutcome(toolCallId, outcome);
+      this.recordSuperToolCallOutcome(toolCallId, dispatchOutcome(result));
       return;
     }
     // 同一工具帧会在 pending / in_progress 两帧各带一次载荷；动作没有载荷

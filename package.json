@@ -257,6 +257,12 @@
           "maximum": 100,
           "markdownDescription": "%iflow.configuration.superAgentMaxWorktrees.description%"
         },
+        "iflow.superAgent.defaultWorkspace": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "%iflow.configuration.superAgentDefaultWorkspace.description%"
+        },
         "iflow.superAgent.childToolAllowlist": {
           "type": "array",
           "items": {
