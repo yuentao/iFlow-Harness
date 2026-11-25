@@ -2779,6 +2779,9 @@ let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSentKey = "";
 let lastSentAt = 0;
 let lastResyncAt = 0;
+/** At most one trailing resync per throttle window: a patch burst inside the
+ * window collapses onto this single timer instead of dropping the requests. */
+let resyncTimer: ReturnType<typeof setTimeout> | null = null;
 let toastSeq = 0;
 /**
  * 残留清单请求序号：`requestSuperResidueList` 每次自增，生成唯一的
@@ -2789,12 +2792,38 @@ let superResidueRequestSeq = 0;
 /** Lifetime of a WebView-local notice (UI-audit 4.9: transient, ~4s). */
 const LOCAL_TOAST_MS = 4000;
 
-/** Ask the host for a full snapshot (P-1: a blockPatch we cannot anchor). */
-function requestResync(): void {
-  const now = Date.now();
-  if (now - lastResyncAt < RESYNC_THROTTLE_MS) return;
-  lastResyncAt = now;
+/** Actually post `ready` and (re)arm the throttle window. */
+function fireResync(): void {
+  resyncTimer = null;
+  lastResyncAt = Date.now();
   vscode.postMessage({ type: "ready" });
+}
+
+/**
+ * Ask the host for a full snapshot (P-1: a blockPatch we cannot anchor).
+ *
+ * Throttle with a TRAILING edge: the first request after a quiet window fires
+ * immediately (startup behaviour unchanged). Requests that arrive inside the
+ * window no longer get silently dropped — they schedule one deferred resync at
+ * the window boundary. Without this, an unanchorable patch early in startup (or
+ * after a missed patch) left the transcript stale with no recovery. The whole
+ * burst collapses onto that single timer, so the host never sees a storm.
+ */
+function requestResync(): void {
+  const remaining = RESYNC_THROTTLE_MS - (Date.now() - lastResyncAt);
+  if (remaining <= 0) {
+    if (resyncTimer !== null) {
+      clearTimeout(resyncTimer);
+      resyncTimer = null;
+    }
+    fireResync();
+    return;
+  }
+  // Inside the window: one trailing timer is enough. Further requests ride
+  // along with it — no new timer, no extra `ready`.
+  if (resyncTimer === null) {
+    resyncTimer = setTimeout(fireResync, remaining);
+  }
 }
 
 /** Transient host notice (rate-limit retry / context-overflow compress). */
