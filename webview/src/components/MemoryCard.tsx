@@ -82,15 +82,15 @@ function FactRow({
   return (
     <li className={`group flex items-start gap-2 px-1 py-1.5 ${index > 0 ? "border-t border-border/40" : ""}`}>
       <span className="mt-2 size-1 shrink-0 rounded-full bg-primary/60" />
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        className="min-w-0 flex-1 text-left"
         aria-expanded={expanded}
         title={expanded ? t("收起全文") : t("展开全文")}
         onClick={() => setExpanded((v) => !v)}
-        className="min-w-0 flex-1 text-left text-ui-body leading-relaxed text-foreground/85 hover:text-foreground"
       >
         <span className={`break-words ${expanded ? "" : "line-clamp-2"}`}>{fact.text}</span>
-      </button>
+      </Button>
       <IconButton
         icon={<Trash2 className={ICON_INLINE} />}
         label={t("删除这条记忆")}
@@ -131,15 +131,16 @@ function MemoryFileCard({
     facts.length === 0
       ? null
       : collapsible && !factsOpen
-        ? <button
-            type="button"
+        ? <Button
+            variant="ghost"
+            size="sm"
+            className="mt-1.5"
             aria-expanded={false}
             onClick={() => setFactsOpen(true)}
-            className="mt-1.5 flex items-center gap-1.5 rounded-md px-1 py-1 text-ui-caption text-muted-foreground hover:bg-surface hover:text-foreground"
           >
             <ChevronRight className={ICON_INLINE} />
             <span>{t("{0} 条记忆", facts.length)}</span>
-          </button>
+          </Button>
         : <>
             <ul className="mt-1.5">
               {facts.slice(0, 20).map((fact, index) => (
@@ -158,15 +159,16 @@ function MemoryFileCard({
               )}
             </ul>
             {collapsible && (
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
+                className="mt-1"
                 aria-expanded={true}
                 onClick={() => setFactsOpen(false)}
-                className="mt-1 flex items-center gap-1.5 rounded-md px-1 py-1 text-ui-caption text-muted-foreground hover:bg-surface hover:text-foreground"
               >
                 <ChevronRight className={`${ICON_INLINE} rotate-90`} />
                 <span>{t("收起记忆列表")}</span>
-              </button>
+              </Button>
             )}
           </>;
   return (
