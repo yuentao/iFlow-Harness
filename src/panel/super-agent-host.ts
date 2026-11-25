@@ -229,6 +229,21 @@ export interface SuperAgentHostCallbacks {
   ): Promise<boolean>;
 }
 
+/** 5 条宿主自动回合队列的种类；单一来源，避免与优先级数组各写一份。 */
+type SuperAutoTurnKind = (typeof SuperAgentHost.SUPER_AUTO_TURN_PRIORITY)[number];
+
+/**
+ * 一条队列的「派发 + 判空」成对封装。仲裁与判空共用同一张表，新增队列时
+ * Record<Kind, ...> 在编译期强制两件事同时补齐（替代原来两处无 default 的
+ * switch 各自穷尽的约束）。
+ */
+interface SuperAutoTurnHandler {
+  /** 选中后的投递入口；真正的门控仍在各 drain 内部。 */
+  drain: (host: SuperAgentHost) => Promise<void>;
+  /** 轻量非空判断；merges 不带主会话归属，只看非空。 */
+  hasWork: (host: SuperAgentHost, owner: string | null) => boolean;
+}
+
 export class SuperAgentHost {
   constructor(private readonly deps: SuperAgentHostCallbacks) {}
 
@@ -293,6 +308,29 @@ export class SuperAgentHost {
     "corrections",
     "merges",
   ] as const;
+  /** 派发与判空的唯一映射表：两处 switch 合并于此，避免规则漂移。 */
+  private static readonly SUPER_AUTO_TURN_HANDLERS: Record<SuperAutoTurnKind, SuperAutoTurnHandler> = {
+    reports: {
+      drain: (host) => host.drainSuperReports(),
+      hasWork: (host, owner) => host.pendingSuperReportPrompts.some((item) => item.mainSessionId === owner),
+    },
+    actionReceipts: {
+      drain: (host) => host.drainSuperActionReceipts(),
+      hasWork: (host, owner) => host.pendingSuperActionReceipts.some((item) => item.mainSessionId === owner),
+    },
+    delegated: {
+      drain: (host) => host.drainDelegatedUserTurns(),
+      hasWork: (host, owner) => host.pendingDelegatedUserTurns.some((item) => item.mainSessionId === owner),
+    },
+    corrections: {
+      drain: (host) => host.drainSuperToolCallCorrections(),
+      hasWork: (host, owner) => host.pendingSuperToolCallCorrections.some((item) => item.mainSessionId === owner),
+    },
+    merges: {
+      drain: (host) => host.drainSuperMerges(),
+      hasWork: (host) => host.pendingSuperMerges.length > 0,
+    },
+  };
   superAutoTurnCursor = 0;
   mainLane: symbol | null = null;
   superHeartbeatTimer: NodeJS.Timeout | null = null;
@@ -3227,23 +3265,9 @@ export class SuperAgentHost {
       // 给过机会就往后挪：卡住的队列（error / Stop 压住 / 主会话忙 / 合并
       // 互斥）下一拍不再排在最前，其余队列因此有稳定的唤醒机会。
       this.superAutoTurnCursor = (slot + 1) % order.length;
-      switch (kind) {
-        case "reports":
-          await this.drainSuperReports();
-          break;
-        case "actionReceipts":
-          await this.drainSuperActionReceipts();
-          break;
-        case "delegated":
-          await this.drainDelegatedUserTurns();
-          break;
-        case "corrections":
-          await this.drainSuperToolCallCorrections();
-          break;
-        case "merges":
-          await this.drainSuperMerges();
-          break;
-      }
+      // 派发入口从统一映射表取；与 superAutoTurnHasWork 同一份 kind → 行为绑定。
+      const handler = SuperAgentHost.SUPER_AUTO_TURN_HANDLERS[kind];
+      await handler.drain(this);
       return; // 一条队列一拍：其余队列交给下一拍 / 回合收尾的再次仲裁。
     }
   }
@@ -3253,25 +3277,13 @@ export class SuperAgentHost {
    * 某条自动回合队列此刻是否有「属于当前主会话」的待投递项。
    *
    * 只做轻量非空判断（真正的门控 —— mainSessionFree / error / Stop / 合并互斥
-   * —— 仍留在各 drain 里，避免两处规则漂移）。合并队列不带主会话归属，只看
-   * 非空。
+   * —— 仍留在各 drain 里）。判空规则与派发入口共用 SUPER_AUTO_TURN_HANDLERS，
+   * 不再各写一份 switch；合并队列不带主会话归属，只看非空。
    */
-  superAutoTurnHasWork(
-    kind: (typeof SuperAgentHost.SUPER_AUTO_TURN_PRIORITY)[number],
-    owner: string | null,
-  ): boolean {
-    switch (kind) {
-      case "reports":
-        return this.pendingSuperReportPrompts.some((item) => item.mainSessionId === owner);
-      case "actionReceipts":
-        return this.pendingSuperActionReceipts.some((item) => item.mainSessionId === owner);
-      case "delegated":
-        return this.pendingDelegatedUserTurns.some((item) => item.mainSessionId === owner);
-      case "corrections":
-        return this.pendingSuperToolCallCorrections.some((item) => item.mainSessionId === owner);
-      case "merges":
-        return this.pendingSuperMerges.length > 0;
-    }
+  superAutoTurnHasWork(kind: SuperAutoTurnKind, owner: string | null): boolean {
+    // 脏 kind（越过类型约束的调用方）按原来的无 default switch 处理：无工作。
+    const handler: SuperAutoTurnHandler | undefined = SuperAgentHost.SUPER_AUTO_TURN_HANDLERS[kind];
+    return handler ? handler.hasWork(this, owner) : false;
   }
 
 

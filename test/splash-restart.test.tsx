@@ -66,6 +66,7 @@ function connectingState(connectEpoch = 0): SessionState {
     compressing: false,
     connectEpoch,
     superSessions: [],
+    qqTasks: [],
   };
 }
 

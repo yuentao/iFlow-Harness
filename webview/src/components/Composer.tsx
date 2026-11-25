@@ -1213,6 +1213,17 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           return next;
         });
       };
+      reader.onerror = () => {
+        // 读取失败不能留下一个 data 为空的破图占位：撤掉一个空槽并如实提示。
+        // 与 onload 对称地取「第一个空槽」——多张图并发读时，谁先落地谁占
+        // 最前面的空位，失败的那张则释放一个空位，槽数始终等于成功数。
+        setImages((prev) => {
+          const idx = prev.findIndex((img) => img.data === "");
+          if (idx < 0) return prev; // 槽位已被移除，或已被别的读取填上
+          return prev.filter((_, i) => i !== idx);
+        });
+        showNote(t("图片读取失败，已跳过"), "warning");
+      };
       reader.readAsDataURL(file);
     }
   }
@@ -1799,9 +1810,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                     open ? "border-primary/50" : "border-border hover:bg-surface-2"
                   }`}
                 >
-                  <button
-                    type="button"
-                    className="flex min-w-0 items-center gap-1.5 rounded text-left text-foreground"
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="min-w-0"
                     aria-expanded={open}
                     title={open ? t("收起") : t("展开上下文")}
                     onClick={() => setExpandedContextId(open ? null : c.id)}
@@ -1821,7 +1833,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                     <ChevronDown
                       className={`size-3 shrink-0 text-muted-foreground transition-transform duration-150 ${open ? "rotate-180" : ""}`}
                     />
-                  </button>
+                  </Button>
                   <IconButton
                     icon={<X className={ICON_INLINE} />}
                     label={t("移除")}
@@ -1833,14 +1845,15 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               );
             })}
             {contexts.length > CONTEXT_CHIP_MAX && (
-              <button
-                type="button"
-                className={`${CANVAS_CHIP} shrink-0 font-mono text-muted-foreground hover:text-foreground`}
+              <Button
+                variant="canvas"
+                size="sm"
+                className="shrink-0 font-mono"
                 title={showAllContexts ? t("收起") : t("展开全部 {0} 张上下文卡", contexts.length)}
                 onClick={() => setShowAllContexts((v) => !v)}
               >
                 {showAllContexts ? t("收起") : `+${contexts.length - CONTEXT_CHIP_MAX}`}
-              </button>
+              </Button>
             )}
           </div>
           {expandedContext && (

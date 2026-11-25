@@ -45,7 +45,7 @@ describe("Markdown streaming throttle", () => {
   });
 
   afterEach(() => {
-    if (root) act(() => root.unmount());
+    if (root) act(() => root!.unmount());
     root = null;
     container.remove();
     vi.useRealTimers();

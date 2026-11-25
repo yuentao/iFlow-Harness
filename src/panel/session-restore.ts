@@ -546,7 +546,16 @@ export class SessionRestoreService {
     const keptFileNames = new Set(kept.map((s) => this.deps.persistence.ownTranscriptFileName(s.id)));
     for (const name of await this.deps.listOwnTranscriptFileNames()) {
       if (name.endsWith(".json") && !keptFileNames.has(name)) {
-        await rm(path.join(this.deps.persistence.transcriptDir(), name), { force: true });
+        try {
+          await rm(path.join(this.deps.persistence.transcriptDir(), name), { force: true });
+        } catch (error) {
+          // ENOENT means it is already gone; any other failure (EPERM / a
+          // locked file on Windows) must not abort the remaining GC or the
+          // persistSessions call below (M6).
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            this.deps.log.warn(`failed to prune transcript ${name}: ${errorMessage(error)}`);
+          }
+        }
       }
     }
     // Same garbage collection for the Super Agent child-session archives: an
@@ -563,7 +572,13 @@ export class SessionRestoreService {
       const isBackup = name.endsWith(".corrupt");
       const archiveName = isBackup ? name.slice(0, -".corrupt".length) : name;
       if ((isBackup || archiveName.endsWith(".json")) && !keptArchiveNames.has(archiveName)) {
-        await rm(path.join(superSessionsDir(superDir), name), { force: true });
+        try {
+          await rm(path.join(superSessionsDir(superDir), name), { force: true });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            this.deps.log.warn(`failed to prune super archive ${name}: ${errorMessage(error)}`);
+          }
+        }
       }
     }
     // 转录快照按 childId 放在 transcripts/ 子目录（新文件放子目录必须显式
@@ -580,7 +595,13 @@ export class SessionRestoreService {
     const transcriptsDir = path.join(superSessionsDir(superDir), "transcripts");
     for (const name of await listSuperTranscriptFiles(superDir)) {
       if (name.endsWith("-transcript.json") && !keptTranscriptNames.has(name)) {
-        await rm(path.join(transcriptsDir, name), { force: true });
+        try {
+          await rm(path.join(transcriptsDir, name), { force: true });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            this.deps.log.warn(`failed to prune super transcript ${name}: ${errorMessage(error)}`);
+          }
+        }
       }
     }
     // M3 P0-1: same garbage collection for shadow-repo dirs — a checkpoint

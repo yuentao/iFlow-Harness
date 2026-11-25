@@ -174,7 +174,7 @@ describe("诊断汇总与时间线", () => {
       id: "a",
       title: "甲",
       diagnostics: [
-        { at: 100, kind: "tool", level: "info", message: "调用工具" },
+        { at: 100, kind: "tool_call", level: "info", message: "调用工具" },
         {
           at: 400,
           kind: "error",
@@ -188,7 +188,7 @@ describe("诊断汇总与时间线", () => {
     session({
       id: "b",
       title: "乙",
-      diagnostics: [{ at: 300, kind: "tool", level: "warn", message: "命令超时" }],
+      diagnostics: [{ at: 300, kind: "tool_call", level: "warn", message: "命令超时" }],
     }),
   ];
 
@@ -196,7 +196,7 @@ describe("诊断汇总与时间线", () => {
     const summary = summarizeSuperBoardDiagnostics(sessions);
     expect(summary.total).toBe(3);
     expect(summary.byKind).toEqual([
-      { kind: "tool", count: 2 },
+      { kind: "tool_call", count: 2 },
       { kind: "error", count: 1 },
     ]);
     expect(summary.lastError).toEqual({
@@ -231,14 +231,14 @@ describe("诊断汇总与时间线", () => {
   it("脏诊断事件不会污染聚合（非对象 / 非字符串 kind 被跳过）", () => {
     const dirty = session({
       diagnostics: [
-        null as unknown as { at: number; kind: string; level: string; message: string },
+        null as unknown as { at: number; kind: never; level: "info"; message: string },
         { at: 1, kind: 42, level: "info", message: "x" } as unknown as {
           at: number;
-          kind: string;
-          level: string;
+          kind: never;
+          level: "info";
           message: string;
         },
-        { at: 2, kind: "ok", level: "info", message: "y" },
+        { at: 2, kind: "ok", level: "info", message: "y" } as never,
       ],
     });
     const summary = summarizeSuperBoardDiagnostics([dirty]);
@@ -254,7 +254,7 @@ describe("失败分类降级", () => {
     expect(superBoardFailureKind(session({ status: "failed" }))).toBe("retryable");
     expect(superBoardFailureKind(session({ status: "awaiting_input" }))).toBe("blocked");
     expect(superBoardFailureKind(session({ status: "running" }))).toBeNull();
-    expect(superBoardFailureKind(session({ status: "failed", lastError: { kind: "weird", message: "", at: 1 } }))).toBe("retryable");
+    expect(superBoardFailureKind(session({ status: "failed", lastError: { kind: "weird", message: "", at: 1 } as never }))).toBe("retryable");
   });
 });
 
@@ -266,7 +266,7 @@ describe("纯函数纪律", () => {
         runId: "r",
         wave: 1,
         tokens: usage(10, 5, 0.001),
-        diagnostics: [{ at: 1, kind: "k", level: "info", message: "m" }],
+        diagnostics: [{ at: 1, kind: "k" as never, level: "info", message: "m" }],
       }),
       session({ id: "b", status: "completed" }),
     ];

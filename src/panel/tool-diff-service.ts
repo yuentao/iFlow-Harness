@@ -503,7 +503,7 @@ export class ToolDiffService {
       void vscode.window.showInformationMessage(vscode.l10n.t("已回退本轮对该文件的全部修改：{0}", chosen));
       this.deps.post({ type: "turnFileReverted", sessionId, userBlockId, key });
     } catch (error) {
-      vscode.window.showErrorMessage(
+      void vscode.window.showErrorMessage(
         vscode.l10n.t("回退文件修改失败：{0}", errorMessage(error)),
       );
     }
@@ -579,7 +579,7 @@ export class ToolDiffService {
       this.deps.toolReverted(toolCallId);
       void vscode.window.showInformationMessage(vscode.l10n.t("已回退：{0}", chosen));
     } catch (error) {
-      vscode.window.showErrorMessage(
+      void vscode.window.showErrorMessage(
         vscode.l10n.t("回退失败：{0}", errorMessage(error)),
       );
     }
@@ -671,7 +671,7 @@ export class ToolDiffService {
         vscode.l10n.t("已回退 {0} 处改动（保留 {1} 处）：{2}", revertedCount, keep.length - revertedCount, chosen),
       );
     } catch (error) {
-      vscode.window.showErrorMessage(
+      void vscode.window.showErrorMessage(
         vscode.l10n.t("逐块回退失败：{0}", errorMessage(error)),
       );
     }

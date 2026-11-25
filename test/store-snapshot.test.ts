@@ -33,7 +33,7 @@ function textBlock(text: string): Block {
   return { kind: "text", text };
 }
 
-function toolBlock(toolCallId: string, output: string, status = "completed"): Block {
+function toolBlock(toolCallId: string, output: string, status = "completed" as const): Block {
   return {
     kind: "tool",
     toolCallId,
@@ -584,7 +584,7 @@ describe("SessionStore.beginCompressTurn / endCompressTurn (silent /compress tur
 describe("withoutPlanModes (Plan mode removed)", () => {
   const modes = (currentModeId: string, availableModes: Array<{ id: string; name?: string; kind?: string }>) => ({
     currentModeId,
-    availableModes,
+    availableModes: availableModes as Array<{ id: string; name: string; kind?: string }>,
   });
 
   it("strips plan entries by kind or by id", () => {

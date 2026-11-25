@@ -24,7 +24,7 @@ function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T =>
-      store.has(key) ? (store.get(key) as T) : defaultValue,
+      store.has(key) ? (store.get(key) as T) : (defaultValue as T),
     update: () => Promise.resolve(),
     keys: () => [...store.keys()],
     delete: (key: string) => {
@@ -304,7 +304,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
   });
 
   it("最终汇总轮（final）把本轮 assistant 文本作为 QQ 最终答复回传，进度轮不回执", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     p.qqMainFinalAwaiters.set("T-qq", "lane-session");
     p.store.getState().blocks.push({ kind: "text", id: "baseline", text: "上一轮文本" });
@@ -370,7 +370,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
   });
 
   it("无新汇报轮时，超时 awaiter 由迟到补发兜底并摘除（R2）", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     manager.list = () => [];
     p.qqMainFinalAwaiters.set("T-qq", "lane-session");
@@ -392,7 +392,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
   });
 
   it("软阈值下仍有活跃超流体时不提前补发（不误伤正常长任务）", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     manager.list = () => [child({ id: "super-running", status: "running" })];
     p.qqMainFinalAwaiters.set("T-qq", "lane-session");
@@ -408,7 +408,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
   });
 
   it("硬上限到点但汇报轮在途 / 排队时先让路，不抢在真实最终汇报前面", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     manager.list = () => [];
     p.qqMainFinalAwaiters.set("T-qq", "lane-session");
@@ -447,7 +447,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
   });
 
   it("在途汇报轮持续卡死时让路有上限，超过后仍强制补发（真正卡死的兜底）", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     manager.list = () => [];
     p.qqMainFinalAwaiters.set("T-qq", "lane-session");
@@ -471,7 +471,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
   });
 
   it("补发缓存正文为空时用汇报正文兜底，不再只发一句占位文案", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     manager.list = () => [];
     p.qqMainFinalAwaiters.set("T-qq", "lane-session");
@@ -493,7 +493,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
   });
 
   it("同会话两个 QQ task 的子会话汇报按归属分别投递，不广播同一份汇总", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     p.qqMainFinalAwaiters.set("T-A", "lane-session");
     p.qqMainFinalAwaiters.set("T-B", "lane-session");
@@ -529,7 +529,7 @@ describe("ChatPanel · Super Agent 单车道仲裁与迟到结论", () => {
   });
 
   it("finalReport 锚点失效时经 finalFallbackText 投递，不再静默放弃滑向空缓存补发", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     p.qqMainFinalAwaiters.set("T-qq", "lane-session");
     p.store.getState().blocks.push({ kind: "text", id: "anchor", text: "上一轮旧正文" });

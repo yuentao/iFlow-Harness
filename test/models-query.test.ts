@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync, renameSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync, renameSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -19,7 +19,6 @@ import {
   resolveActiveProfileName,
   retireStaleOAuthCreds,
   sanitizeThinkingRules,
-  settingsFilePath,
   thinkingForModelRules,
   updateCliSettings,
 } from "../src/acp/models-query";

@@ -25,7 +25,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
-    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : defaultValue),
+    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : (defaultValue as T)),
     update: (key: string, value: unknown) => {
       store.set(key, value);
       return Promise.resolve();
@@ -408,8 +408,8 @@ describe("ChatPanel · 超流体归档的恢复接线", () => {
 
     const posted: { type: string; sessionId?: string; from?: number; blocks?: Block[] }[] = [];
     const original = p.postToWebview.bind(p);
-    p.postToWebview = (msg: { type: string; sessionId?: string; from?: number; blocks?: Block[] }) => {
-      posted.push(msg);
+    p.postToWebview = (msg: unknown) => {
+      posted.push(msg as { type: string; sessionId?: string; from?: number; blocks?: Block[] });
       original(msg);
     };
 

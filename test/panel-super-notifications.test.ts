@@ -34,7 +34,7 @@ function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T =>
-      store.has(key) ? (store.get(key) as T) : defaultValue,
+      store.has(key) ? (store.get(key) as T) : (defaultValue as T),
     update: () => Promise.resolve(),
     keys: () => [...store.keys()],
     delete: (key: string) => {
@@ -423,7 +423,7 @@ describe("Super Agent 完成提示：超流体 / 主会话汇报分档", () => {
     expect(notify).toHaveBeenLastCalledWith("superReport", "主会话已汇报超流体结果");
     expect(sound).toHaveBeenLastCalledWith("done");
 
-    const events = notify.mock.calls.map((call) => call[0]);
+    const events = notify.mock.calls.map((call: unknown[]) => call[0]);
     expect(events).toContain("childDone");
     expect(events).toContain("superReport");
     expect(events[0]).not.toBe(events[events.length - 1]);

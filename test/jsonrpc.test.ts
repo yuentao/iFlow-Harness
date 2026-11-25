@@ -257,14 +257,21 @@ describe("NdjsonParser", () => {
     expect(messages).toEqual([{ a: 1 }, { b: 2 }]);
   });
 
-  it("does not drop a complete line that happens to be large", () => {
-    // The guard only covers unterminated frames: a valid (if huge) NDJSON
-    // line with a trailing newline is still parsed.
+  it("drops an oversized complete line and reports error", () => {
+    // M7: the 8MB ceiling applies to complete lines too, not just
+    // unterminated frames. A >8MB line WITH a trailing newline is dropped
+    // and reported once via onError; parsing resumes at the next line.
     const big = JSON.stringify({ a: "y".repeat(8 * 1024 * 1024 + 1) });
     const messages: unknown[] = [];
-    const parser = new NdjsonParser((v) => messages.push(v));
+    const errors: string[] = [];
+    const parser = new NdjsonParser(
+      (v) => messages.push(v),
+      (e) => errors.push(e.message),
+    );
     parser.feed(`${big}\n{"b":2}\n`);
-    expect(messages).toEqual([JSON.parse(big), { b: 2 }]);
+    expect(messages).toEqual([{ b: 2 }]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("exceeds");
   });
 
   // P1: a large frame split into many network chunks (no newline within any

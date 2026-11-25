@@ -157,7 +157,7 @@ describe("QQ 接管态：awaiter 已登记时完整汇报正文仍须投递", ()
 
   it("本地汇报轮 + 中途开启接续 + 该 session 已登记 awaiter：QQ 必须收到完整正文而非只有状态语", async () => {
     const complete = vi.fn(async () => {});
-    const notifyBoundUser = vi.fn(async () => true);
+    const notifyBoundUser = vi.fn(async (_text: string) => true);
     p.qq = { service: { completeMainFinalAnswer: complete, notifyBoundUser } };
 
     // 关键触发条件：该 session 已登记 QQ awaiter → awaitedHere=true。

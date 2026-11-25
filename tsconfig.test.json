@@ -4,7 +4,11 @@
     "noEmit": true,
     "rootDir": ".",
     "outDir": null,
-    "types": ["node"]
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["vite/client", "node"]
   },
   "include": ["src", "test", "scripts", "prompts"]
 }

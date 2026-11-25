@@ -18,6 +18,8 @@ const baseSettings: HostSettingsUi = {
   autoCompressOnIdle: false,
   autoMemoryCapture: false,
   autoTitle: true,
+  superAgentMaxAttempts: 2,
+  superAgentDependencyPolicy: "block",
   efficiencyMode: "steady",
   memoryExtractTimeoutSeconds: 90,
   memoryMaintenanceEnabled: false,

@@ -128,6 +128,26 @@ const pendingWrites = new Map<string, Promise<void>>();
  */
 const lastWritten = new Map<string, string>();
 
+/**
+ * `lastWritten` 最多保留多少个目标。
+ *
+ * 它是写放大控制的内存记账，不是归档本身。不设上限的话，每个「写过但从没
+ * 走显式删除」的主会话 / 子会话都会永久占住一份完整 payload —— 在长期运行
+ * 的扩展宿主里这是无界增长。超出上限淘汰最久没写的目标：热目标（正被进度帧
+ * 反复触发的那个）永远留在缓存里，冷目标被淘汰后最多多写一次盘。
+ */
+const MAX_LAST_WRITTEN = 64;
+
+/**
+ * 写入追踪映射的当前规模（仅供测试断言回收，生产代码不调用）。
+ *
+ * `pendingWrites` 在写链收尾后必须归零、`lastWritten` 必须始终有界，这两条
+ * 不变量无法从模块外部观察，因此显式暴露计数，避免测试去戳模块私有状态。
+ */
+export function superStoreWriteTrackingSizes(): { pending: number; lastWritten: number } {
+  return { pending: pendingWrites.size, lastWritten: lastWritten.size };
+}
+
 /** 临时文件名的进程内序号（与 pid 一起保证唯一）。 */
 let tmpSeq = 0;
 
@@ -234,10 +254,37 @@ export async function writeSuperSessionArchive(
   const previous = pendingWrites.get(target) ?? Promise.resolve();
   const next = previous.then(() => writeArchiveFile(target, payload));
   // 存进链里的是「吞掉错误」的版本：一次写失败不能让后续的写全部卡死。
-  pendingWrites.set(target, next.then(() => undefined, () => undefined));
-  await next;
-  // 只有真的写成功才记账 —— 写失败不能被当成「已经落盘」。
+  const settled = next.then(() => undefined, () => undefined);
+  pendingWrites.set(target, settled);
+  try {
+    await next;
+    // 只有真的写成功才记账 —— 写失败不能被当成「已经落盘」。
+    noteLastWritten(target, payload);
+  } finally {
+    releaseWriteTarget(target, settled);
+  }
+}
+
+/**
+ * 写链收尾后回收 `pendingWrites` 条目。
+ *
+ * 只能回收「当前链尾仍是我们自己」的那一条：并发写会把它换成后一次写的
+ * 链尾，无条件 delete 会让更晚的写绕过排队，破坏按 target 串行的语义。
+ */
+function releaseWriteTarget(target: string, settled: Promise<void>): void {
+  if (pendingWrites.get(target) === settled) pendingWrites.delete(target);
+}
+
+/** 记账一次成功写入，并把 `lastWritten` 限制在 {@link MAX_LAST_WRITTEN} 条内。 */
+function noteLastWritten(target: string, payload: string): void {
+  // 命中时先删后插，让 Map 的迭代顺序反映「最近写入」，淘汰时丢掉最老的。
+  if (lastWritten.has(target)) lastWritten.delete(target);
   lastWritten.set(target, payload);
+  while (lastWritten.size > MAX_LAST_WRITTEN) {
+    const oldest = lastWritten.keys().next().value;
+    if (oldest === undefined) break;
+    lastWritten.delete(oldest);
+  }
 }
 
 /** 一次原子写：唯一临时文件 → rename 覆盖。 */
@@ -715,10 +762,15 @@ export async function writeSuperTranscriptSnapshot(
   const previous = pendingWrites.get(target) ?? Promise.resolve();
   const next = previous.then(() => writeArchiveFile(target, payload));
   // 链里存吞掉错误的版本：一次写失败不能卡死后续写。
-  pendingWrites.set(target, next.then(() => undefined, () => undefined));
-  await next;
-  // 只有真的写成功才记账。
-  lastWritten.set(target, payload);
+  const settled = next.then(() => undefined, () => undefined);
+  pendingWrites.set(target, settled);
+  try {
+    await next;
+    // 只有真的写成功才记账。
+    noteLastWritten(target, payload);
+  } finally {
+    releaseWriteTarget(target, settled);
+  }
 }
 
 /**

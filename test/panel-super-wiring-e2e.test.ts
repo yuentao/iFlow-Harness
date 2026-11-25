@@ -59,7 +59,7 @@ class FailureFakeClient {
   async prompt(_request: { sessionId: string; prompt: ContentBlock[] }): Promise<{ stopReason: string }> {
     if (this.plan === "exit") {
       // 走 onExit 失败点 → failed；错误文本含「内核退出」→ retryable。
-      this.callbacks.onExit?.(7);
+      this.callbacks.onExit?.(7, "kernel exited");
       return { stopReason: "end_turn" };
     }
     if (this.plan === "throw") throw new Error("prepare kernel crashed");

@@ -705,11 +705,11 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
 function localizeStepTitle(title: string): string {
   if (/^task$/i.test(title.trim())) return t("进程内子代理");
   let m = /^Launch agent\(([^)]*)\):\s*([\s\S]*)$/.exec(title);
-  if (m) return t("启动进程内子代理 {0}：{1}", m[1], m[2]);
+  if (m) return t("启动进程内子代理 {0}：{1}", m[1]!, m[2]!);
   m = /^Reading\s+([\s\S]+)$/.exec(title);
-  if (m) return t("读取 {0}", m[1]);
+  if (m) return t("读取 {0}", m[1]!);
   m = /^Running:\s*([\s\S]*)$/.exec(title);
-  if (m) return t("运行：{0}", m[1]);
+  if (m) return t("运行：{0}", m[1]!);
   if (/^Updating todos$/i.test(title.trim())) return t("更新任务清单");
   return title;
 }
@@ -2202,7 +2202,7 @@ function MessageListInner() {
   // transcript state, so it extracts the text rather than the webview).
   const lastUserText = useMemo(() => {
     for (let i = total - 1; i >= 0; i--) {
-      const b = state.blocks[i];
+      const b = state.blocks[i]!;
       if (b.kind === "user") return b.text;
     }
     return null;

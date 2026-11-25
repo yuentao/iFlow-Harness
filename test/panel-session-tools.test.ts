@@ -91,7 +91,7 @@ function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T =>
-      store.has(key) ? (store.get(key) as T) : defaultValue,
+      store.has(key) ? (store.get(key) as T) : (defaultValue as T),
     update: () => Promise.resolve(),
     keys: () => [...store.keys()],
     delete: (key: string) => {

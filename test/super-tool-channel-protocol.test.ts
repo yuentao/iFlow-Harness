@@ -68,7 +68,7 @@ const TYPES = {
 };
 
 function makeTool(): LoaderTool {
-  const Tool = loader.create({ base: StubBase, types: TYPES });
+  const Tool = loader.create({ base: StubBase as unknown as new (...args: unknown[]) => object, types: TYPES });
   if (!Tool) throw new Error("loader.create() returned null");
   return new Tool({});
 }

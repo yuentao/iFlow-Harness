@@ -75,11 +75,13 @@ type Internals = {
   runStartNewSession: (options?: unknown) => Promise<void>;
   pushQqState: () => void;
   store: {
-    getState: () => { sessionId: string | null; [key: string]: unknown };
+    getState: () => { sessionId: string | null; blocks: unknown[]; [key: string]: unknown };
     sessionStarted: (meta: { sessionId: string }) => void;
     replaceState: (state: unknown) => void;
     sendToast: (level: string, message: string, opts?: unknown) => number;
     dismissToast: (id: number) => void;
+    resync: () => void;
+    pushSnapshot: () => void;
   };
   postToWebview: (msg: unknown) => void;
   qqTakeoverActive: boolean;
@@ -131,11 +133,6 @@ type Internals = {
     text: string,
     stopReason: string,
     onlyTaskIds?: ReadonlySet<string>,
-  ) => Promise<void>;
-  appendQqArchiveEvent: (
-    type: string,
-    taskId?: string,
-    detail?: Record<string, unknown>,
   ) => Promise<void>;
   qqMainFinalAwaiters: Map<string, string>;
   qq?: {
@@ -396,7 +393,7 @@ describe("ChatPanel 远程接续开关", () => {
       autoMemoryCapture: false,
       nextStepSuggestions: false,
     });
-    const notifyBoundUser = vi.fn(async () => true);
+    const notifyBoundUser = vi.fn(async (_text: string) => true);
     p.qq = { service: { notifyBoundUser } };
     p.superAgent = { list: () => [] };
     p.ensureClient = async () => ({});
@@ -442,7 +439,7 @@ describe("ChatPanel 远程接续开关", () => {
       autoMemoryCapture: false,
       nextStepSuggestions: false,
     });
-    const notifyBoundUser = vi.fn(async () => true);
+    const notifyBoundUser = vi.fn(async (_text: string) => true);
     p.qq = { service: { notifyBoundUser } };
     p.superAgent = { list: () => [] };
     p.ensureClient = async () => ({});
@@ -471,7 +468,7 @@ describe("ChatPanel 远程接续开关", () => {
   });
 
   it("接管态：QQ 注入回合自身不额外投递完成提示（任务通道已有回执）", () => {
-    const notifyBoundUser = vi.fn(async () => true);
+    const notifyBoundUser = vi.fn(async (_text: string) => true);
     p.qq = { service: { notifyBoundUser } };
     p.qqTakeoverActive = true;
     p.qqInjectedTaskId = "task-qq";
@@ -482,7 +479,7 @@ describe("ChatPanel 远程接续开关", () => {
   });
 
   it("接管态 + 注入任务 id 非空：正文补投被抑制并写 takeover_report_suppressed 归档", () => {
-    const notifyBoundUser = vi.fn(async () => true);
+    const notifyBoundUser = vi.fn(async (_text: string) => true);
     p.qq = { service: { notifyBoundUser } };
     const archive = vi.spyOn(p, "appendQqArchiveEvent").mockResolvedValue(undefined);
     p.qqTakeoverActive = true;
@@ -524,7 +521,7 @@ describe("ChatPanel 远程接续开关", () => {
       autoMemoryCapture: false,
       nextStepSuggestions: false,
     });
-    const notifyBoundUser = vi.fn(async () => true);
+    const notifyBoundUser = vi.fn(async (_text: string) => true);
     p.qq = { service: { notifyBoundUser } };
     p.qqMainFinalAwaiters.clear();
     p.superAgent = { list: () => [] };
@@ -593,7 +590,7 @@ describe("ChatPanel 远程接续开关", () => {
       autoMemoryCapture: false,
       nextStepSuggestions: false,
     });
-    const notifyBoundUser = vi.fn(async () => true);
+    const notifyBoundUser = vi.fn(async (_text: string) => true);
     p.qq = { service: { notifyBoundUser } };
     p.qqMainFinalAwaiters.clear();
     p.superAgent = { list: () => [] };

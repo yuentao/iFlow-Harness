@@ -15,6 +15,8 @@ const hostSettings = vi.hoisted(() => ({
   autoCompressOnIdle: false,
   autoMemoryCapture: false,
   autoTitle: true,
+  superAgentMaxAttempts: 2,
+  superAgentDependencyPolicy: "block",
   efficiencyMode: "steady",
   memoryExtractTimeoutSeconds: 90,
   memoryMaintenanceEnabled: false,
@@ -105,7 +107,6 @@ vi.mock("../webview/src/store", () => ({
       }),
     {
       getState: () => ({
-        beginPending,
         send,
         ...chat,
         hostSettings,
@@ -958,11 +959,11 @@ describe("活跃超流体禁用会话/模型/凭据切换", () => {
       title: "子任务",
       task: "执行任务",
       status,
-      isolation: { kind: "worktree" },
+      isolation: { kind: "worktree", path: "/w" },
       createdAt: 0,
       updatedAt: 0,
       reports: [],
-    } as SuperSessionUi;
+    } as unknown as SuperSessionUi;
   }
 
   /** 最小完整投影：顶栏历史下拉、设置页 profile 行、Composer 模型下拉都要出现。 */

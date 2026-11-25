@@ -87,7 +87,7 @@ it("translates the changed-files summary", () => {
   // The help bubble opens on hover/focus only (click is inert) and is portaled
   // to document.body — jsdom cannot hover, so assert the affordance itself and
   // its initial closed state; the caveat wording ships inside the bubble.
-  expect(help.getAttribute("aria-expanded")).toBe("false");
+  expect(help!.getAttribute("aria-expanded")).toBe("false");
   expect(container.querySelector("ul button")?.getAttribute("title")).toContain("Open in editor");
 });
 it("uses honest empty wording and disappears when the session changes", () => {

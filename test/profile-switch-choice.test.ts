@@ -1000,7 +1000,7 @@ describe("ChatPanel saveAuth: 编辑配置的严格 upsert 与热更新", () => 
 
     expect(client.authenticate).not.toHaveBeenCalled();
     expect(client.dispose).not.toHaveBeenCalled();
-    expect((await readProfiles()).A.apiKey).toBe("sk-a-8888");
+    expect((await readProfiles()).A!.apiKey).toBe("sk-a-8888");
     expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
       expect.stringContaining("本次连接仍在用旧凭据"),
     );

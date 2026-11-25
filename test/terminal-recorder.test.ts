@@ -12,7 +12,7 @@ import {
 } from "../src/panel/terminal.js";
 import { extractRerunnableCommand, MAX_TOOL_INPUT_DISPLAY_CHARS } from "../shared/session-state.js";
 import { buildTerminalReport } from "../shared/context-source.js";
-import { resetStubTerminals, stubTerminals, type StubTerminal } from "./vscode-stub.js";
+import { resetStubTerminals, stubTerminals } from "./vscode-stub.js";
 
 /** Let the recorder's async consume loop drain pending microtasks/timers. */
 async function tick(): Promise<void> {
@@ -177,7 +177,7 @@ describe("TerminalRecorder", () => {
   });
 
   it("recovers buffered output on the end-only channel", async () => {
-    let endListener: ((e: ShellExecutionLike) => void) | null = null;
+    let endListener = null as ((e: ShellExecutionLike) => void) | null;
     const recorder = new TerminalRecorder({
       onEnd: (l) => {
         endListener = l;

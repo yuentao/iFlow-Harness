@@ -31,7 +31,7 @@ function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T =>
-      store.has(key) ? (store.get(key) as T) : defaultValue,
+      store.has(key) ? (store.get(key) as T) : (defaultValue as T),
     update: () => Promise.resolve(),
     keys: () => [...store.keys()],
     delete: (key: string) => {
@@ -214,7 +214,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
       status: "completed",
     }));
     p.superAgent = { list: () => [], reportPrompt: () => "", cancel };
-    const sendPrompt = vi.fn(async () => true);
+    const sendPrompt = vi.fn(async (_text: string, _images?: unknown, _files?: unknown, _contexts?: unknown, _options?: { hidden?: boolean }) => true);
     p.sendPrompt = sendPrompt as unknown as PanelInternals["sendPrompt"];
 
     p.scanSuperActions({
@@ -274,7 +274,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
       return { ok: true, reason: "cancelled" as const, status: "cancelled" as const };
     });
     p.superAgent = { list: () => [cancelled], reportPrompt: () => "REPORT-TEXT", cancel };
-    const sendPrompt = vi.fn(async () => true);
+    const sendPrompt = vi.fn(async (_text: string, _images?: unknown, _files?: unknown, _contexts?: unknown, _options?: { hidden?: boolean }) => true);
     p.sendPrompt = sendPrompt as unknown as PanelInternals["sendPrompt"];
 
     p.scanSuperActions({
@@ -326,7 +326,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
       return { ok: true, reason: "cancelled" as const, status: "cancelled" as const };
     });
     p.superAgent = { list: () => [cancelled], reportPrompt: () => "REPORT-TEXT", cancel };
-    const sendPrompt = vi.fn(async () => true);
+    const sendPrompt = vi.fn(async (_text: string, _images?: unknown, _files?: unknown, _contexts?: unknown, _options?: { hidden?: boolean }) => true);
     p.sendPrompt = sendPrompt as unknown as PanelInternals["sendPrompt"];
     // Stop 压住：回执照投，但这轮不算真正 settle。
     p.autoTurnsStoppedFor = "actions-session";
@@ -415,7 +415,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
       status: "completed",
     }));
     p.superAgent = { list: () => [], reportPrompt: () => "", cancel };
-    const sendPrompt = vi.fn(async () => true);
+    const sendPrompt = vi.fn(async (_text: string, _images?: unknown, _files?: unknown, _contexts?: unknown, _options?: { hidden?: boolean }) => true);
     p.sendPrompt = sendPrompt as unknown as PanelInternals["sendPrompt"];
     const receiptCalls = () =>
       sendPrompt.mock.calls.filter(

@@ -112,9 +112,9 @@ it("counts file creation and deletion without diff text", () => {
 it("indexes turns with recorded diffs without letting nested users split the turn", () => {
   const blocks: Block[] = [
     { kind: "user", id: "empty", text: "no edits" },
-    { kind: "assistant", text: "done" },
+    { kind: "text", text: "done" } as Block,
     { kind: "user", id: "changed", text: "edit" },
-    { kind: "subagent", entries: [{ kind: "tool", ...tool("nested") }, { kind: "user", text: "inner" }] } as Block,
+    { kind: "subagent", entries: [tool("nested"), { kind: "user", text: "inner" }] } as Block,
     { kind: "user", id: "evicted", text: "release" },
     { ...tool("gone"), diff: null, hadDiff: true, evicted: true },
     { kind: "user", id: "later", text: "another" },

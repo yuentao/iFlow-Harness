@@ -174,7 +174,7 @@ describe("接管态输入框收缩", () => {
   });
 
   it("非接管态：建议条完整显示，未收起", () => {
-    mocked.state.nextStepSuggestions = ["检查登录逻辑", "补充单元测试"];
+    mocked.state!.nextStepSuggestions = ["检查登录逻辑", "补充单元测试"];
     renderComposer();
     const bar = suggestionBar()!;
     expect(bar).not.toBeNull();
@@ -184,7 +184,7 @@ describe("接管态输入框收缩", () => {
   });
 
   it("接管态：建议条以 CSS 过渡收起（max-h-0 / opacity-0 / mb-0），DOM 保留", () => {
-    mocked.state.nextStepSuggestions = ["检查登录逻辑", "补充单元测试"];
+    mocked.state!.nextStepSuggestions = ["检查登录逻辑", "补充单元测试"];
     mocked.takeover = true;
     renderComposer();
     const bar = suggestionBar()!;
@@ -203,7 +203,7 @@ describe("接管态输入框收缩", () => {
   });
 
   it("接管态：「正在想下一步建议…」加载提示条一并收起", () => {
-    mocked.state.nextStepLoading = true;
+    mocked.state!.nextStepLoading = true;
     mocked.takeover = true;
     renderComposer();
     const pill = suggestionLoadingPill()!;

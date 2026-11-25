@@ -2632,7 +2632,6 @@ describe("findCliHistoryCut (locate a turn inside the CLI chatHistory)", () => {
     // Compression remap: transcript [X, Y] but the CLI only kept one "X" that
     // occurrence-maps behind Y's own surviving copy — cutting there would eat
     // Y's successor context... the safety net must refuse the cut instead.
-    const history = [user("甲"), model("a"), user("乙"), model("b")];
     // Deleting "甲" with a transcript whose later copy of "甲" maps AFTER "乙"
     // (history below) would cut into kept context → skip.
     const remap = [user("乙"), model("b"), user("甲")];
@@ -2850,7 +2849,7 @@ describe("evictBlockPayloads (webview long-session memory bound)", () => {
       payloadChars({
         kind: "subagent",
         id: "sa",
-        agentId: null,
+        agentId: null as unknown as string,
         taskToolCallId: null,
         title: "t",
         status: "completed",
@@ -3022,7 +3021,7 @@ describe("appendInjectedContext (auto-injected context card)", () => {
     ];
     const state = initialSessionState();
     beginUserPrompt(state, "hi");
-    appendInjectedContext(state, withMcp);
+    appendInjectedContext(state, withMcp as never);
     const block = state.blocks[0] as Extract<Block, { kind: "injected" }>;
     expect(block.notice).toContain("2 个 MCP 服务器、");
     expect(block.notice).toContain("1 个 MCP 服务器未连接");

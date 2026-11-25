@@ -72,7 +72,8 @@ const panelOf = (panel: ChatPanel) =>
     client: unknown;
     disposed: boolean;
     ensureClient: () => Promise<unknown>;
-    store: { getState: () => { status: string; errorMessage: string | null } };
+    restartCli: () => Promise<void>;
+    store: { getState: () => { status: string; errorMessage: string | null; connectEpoch: number } };
   };
 
 describe("ChatPanel delete-user-message transaction", () => {

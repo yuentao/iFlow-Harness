@@ -475,27 +475,16 @@ export function DiffView({
             flat ? "px-2 pb-1" : "border-t border-border/60 px-3 py-2"
           }`}
         >
-          {flat ? (
-            <Button
-              variant="canvas"
-              size="sm"
-              icon={<Check className={ICON_INLINE} />}
-              disabled={!dirty || hunkActions?.busy}
-              title={t("把标记为回退的改动恢复成修改前的内容，其余改动保留")}
-              onClick={() => hunkActions?.onApply([...keep])}
-            >
-              {t("应用标记：保留 {0} 处，回退 {1} 处", keepCount, revertCount)}
-            </Button>
-          ) : (
-            <button
-              className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
-              disabled={!dirty || hunkActions?.busy}
-              title={t("把标记为回退的改动恢复成修改前的内容，其余改动保留")}
-              onClick={() => hunkActions?.onApply([...keep])}
-            >
-              <Check className="size-3" /> {t("应用标记：保留 {0} 处，回退 {1} 处", keepCount, revertCount)}
-            </button>
-          )}
+          <Button
+            variant="canvas"
+            size="sm"
+            icon={<Check className={ICON_INLINE} />}
+            disabled={!dirty || hunkActions?.busy}
+            title={t("把标记为回退的改动恢复成修改前的内容，其余改动保留")}
+            onClick={() => hunkActions?.onApply([...keep])}
+          >
+            {t("应用标记：保留 {0} 处，回退 {1} 处", keepCount, revertCount)}
+          </Button>
           {dirty && (
             <button
               className="press inline-flex items-center gap-1 text-ui-caption text-muted-foreground transition-colors hover:text-foreground"

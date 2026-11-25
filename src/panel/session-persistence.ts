@@ -31,9 +31,10 @@
 
 import path from "node:path";
 import { existsSync, readdirSync } from "node:fs";
-import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
+import { readFile, readdir, writeFile, mkdir, rm } from "node:fs/promises";
 import type * as vscode from "vscode";
 import { errorMessage } from "../acp/jsonrpc.js";
+import { renameWithRetry } from "../acp/models-query.js";
 import {
   backfillBlockIds,
   parseTranscriptJsonl,
@@ -73,6 +74,11 @@ export interface SessionPersistenceDeps {
   /** Cap on the persisted recent-session index (owned by panel.ts). */
   readonly maxRecentSessions: number;
 }
+
+/** Per-process sequence for unique temp file names (pid + seq, same
+ * discipline as super-store.ts): two windows writing the same transcript
+ * must never share a fixed `${target}.tmp` path. */
+let tmpSeq = 0;
 
 export class SessionPersistenceService {
   /** Serializes per-session transcript file writes (P2): overlapping persists
@@ -219,10 +225,19 @@ export class SessionPersistenceService {
 
   async writeTranscriptFile(sessionId: string, payload: string): Promise<void> {
     const target = this.ownTranscriptFilePath(sessionId);
-    const tmp = `${target}.tmp`;
+    const tmp = `${target}.${process.pid.toString(36)}-${(tmpSeq++).toString(36)}.tmp`;
     await mkdir(this.transcriptDir(), { recursive: true });
-    await writeFile(tmp, payload, "utf8");
-    await rename(tmp, target);
+    try {
+      await writeFile(tmp, payload, "utf8");
+      // Atomic replace: retry transient Windows "target is busy" (EPERM /
+      // EACCES / EBUSY) instead of losing the write. Same helper/discipline
+      // as settings.json (models-query.ts) and memory/files.ts. The target
+      // is NEVER unlinked first; on failure we only remove our own tmp.
+      await renameWithRetry(tmp, target);
+    } catch (error) {
+      await rm(tmp, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   /**

@@ -49,10 +49,13 @@ function makeState(activeSessionId: string): SessionState {
     activeSessionId,
     modes: null,
     commands: [],
+    skills: [],
     models: [],
     currentModelId: null,
+    thinkLevel: "auto",
     pendingApproval: null,
     pendingQuestions: null,
+    pendingProfileSwitch: null,
     auth: {
       authenticated: true,
       needsSetup: false,
@@ -63,6 +66,8 @@ function makeState(activeSessionId: string): SessionState {
     sessions: [],
     replaying: false,
     initializing: false,
+    compressing: false,
+    qqTasks: [],
   } as SessionState;
 }
 

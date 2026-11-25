@@ -97,7 +97,7 @@ describe("api profiles (multi-config)", () => {
       A: { baseUrl: "https://a.com/v1", apiKey: "sk-a", modelName: "m-a" },
       B: { baseUrl: "https://b.com/v1", apiKey: "sk-b", modelName: "m-b" },
       "": { baseUrl: "https://c.com/v1", apiKey: "sk-c", modelName: "m-c" },
-      Broken: { baseUrl: "https://d.com/v1" },
+      Broken: { baseUrl: "https://d.com/v1" } as never,
     });
     const profiles = await loadProfiles(store);
     expect(Object.keys(profiles).sort()).toEqual(["A", "B"]);

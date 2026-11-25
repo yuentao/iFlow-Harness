@@ -177,6 +177,7 @@ type PanelInternals = {
       sessionId: string | null;
       blocks: Array<Record<string, unknown>>;
       stopReason: string | null;
+      pendingQuestions: { id: string } | null;
       errorMessage: string | null;
     };
     userPrompt: (text: string, images?: string[], files?: unknown[], origin?: "qq") => number;
@@ -604,7 +605,7 @@ describe("QQ 主渠道提问转发与回灌", () => {
   });
 
   it("注入回合里的提问转发到 QQ（含选项/多选），回答后 agent 的提问 Promise 被 resolve", async () => {
-    const forwardMain = vi.fn(async () => undefined);
+    const forwardMain = vi.fn(async (_input: { taskId: string; questions: readonly Record<string, unknown>[] }) => undefined);
     p.qq = { service: { forwardMainTaskQuestion: forwardMain } };
     p.qqInjectedTaskId = TASK.taskId;
 
@@ -638,7 +639,7 @@ describe("QQ 主渠道提问转发与回灌", () => {
   });
 
   it("本地回合的提问不转发，也不被 QQ 回答误答", async () => {
-    const forwardMain = vi.fn(async () => undefined);
+    const forwardMain = vi.fn(async (_input: { taskId: string; questions: readonly Record<string, unknown>[] }) => undefined);
     p.qq = { service: { forwardMainTaskQuestion: forwardMain } };
 
     const local = p.userQuestionsFromAgent({ questions: [{ header: "确认", question: "继续吗？" }] });
@@ -700,7 +701,7 @@ describe("QQ 主渠道提问转发与回灌", () => {
   });
 
   it("QQ 主任务派生的超流体提问转发到 QQ，并携带超流体 id 供回答回灌", async () => {
-    const forwardChild = vi.fn(async () => undefined);
+    const forwardChild = vi.fn(async (_input: { taskId: string; superSessionId: string; questions: readonly Record<string, unknown>[] }) => undefined);
     p.qq = { service: { forwardMainTaskChildQuestion: forwardChild } };
     // 派发子会话时登记的归属映射：子会话 super-1 属于 QQ 主任务 TASK。
     p.qqTaskBySuperSession.set("super-1", TASK.taskId);
@@ -833,7 +834,7 @@ describe("QQ 注入轮与最终答复轮的衔接", () => {
   });
 
   it("汇总轮空正文仍回传如实兜底并摘除 awaiter（R1，不让 QQ 停在已受理）", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     p.qqMainFinalAwaiters.set(TASK.taskId, "main-session");
     p.qqMainFinalAwaiters.set("T-other", "other-session");
@@ -854,7 +855,7 @@ describe("QQ 注入轮与最终答复轮的衔接", () => {
   });
 
   it("最终答复按归属会话回传一次并摘除记账；别会话不误投", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     p.qqMainFinalAwaiters.set(TASK.taskId, "main-session");
     p.qqMainFinalAwaiters.set("T-other", "other-session");
@@ -908,7 +909,7 @@ describe("QQ 最终答复按 task 归属投递（同会话多任务不串台）"
   });
 
   it("同会话两 task 各收自己那份结论，互不串台、不共享汇总文本", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     p.qqMainFinalAwaiters.set("T-A", "main-session");
     p.qqMainFinalAwaiters.set("T-B", "main-session");
@@ -932,7 +933,7 @@ describe("QQ 最终答复按 task 归属投递（同会话多任务不串台）"
   });
 
   it("同会话中无归属的 awaiter 走如实兜底，不共享别人的结论", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     p.qqMainFinalAwaiters.set("T-A", "main-session");
     p.qqMainFinalAwaiters.set("T-B", "main-session");
@@ -959,7 +960,7 @@ describe("QQ 最终答复按 task 归属投递（同会话多任务不串台）"
   });
 
   it("汇总轮投递后补发再命中同一 task 不重复投递", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete } };
     p.qqMainFinalAwaiters.set("T-A", "main-session");
     p.qqMainFinalAwaiters.set("T-B", "main-session");
@@ -1076,7 +1077,7 @@ describe("QQ 主会话中间正文轮同步", () => {
 
   it("最终答复只走 completeMainFinalAnswer，不再经中间正文通道重复投递", async () => {
     const deliver = vi.fn(async () => undefined);
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { deliverMainTurnText: deliver, completeMainFinalAnswer: complete } };
     p.qqMainFinalAwaiters.set(TASK.taskId, "main-session");
 
@@ -1303,7 +1304,7 @@ describe("QQ 硬上限补发抢跑回归", () => {
   const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
 
   it("补发缓存正文为空时用汇报兜底正文（第 5 参），不再只发占位文案", async () => {
-    const complete = vi.fn(async () => undefined);
+    const complete = vi.fn(async (_input: { taskId: string; text: string }) => undefined);
     p.qq = { service: { completeMainFinalAnswer: complete as never } };
     p.qqMainFinalAwaiters.set(TASK.taskId, "main-session");
     p.qqMainFinalAwaiterSince.set(TASK.taskId, Date.now() - 1_000_000);
