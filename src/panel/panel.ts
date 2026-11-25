@@ -2243,6 +2243,9 @@ export class ChatPanel implements vscode.Disposable {
     this.stopSuperHeartbeat();
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
     this.store.setSuperWaiting(false);
+    // setSuperWaiting(false) 可能幂等早退而没 flush；无条件清掉待触发的
+    // flushTimer，避免销毁后仍推一次 postSnapshot（L1）。
+    this.store.dispose();
     this.cancelAllProfileSwitches();
     this.cancelAllSuperResidueConfirms();
     this.clearPostRejectionWatchdog();
@@ -7099,8 +7102,9 @@ export class ChatPanel implements vscode.Disposable {
         void this.persistActiveTranscript();
         this.store.replaceState(newSessionState(this.store.getState()));
         // The stale currentModelId belongs to the previous endpoint — keep it
-        // out of restoreSession's fallback chain.
-        this.store.getState().currentModelId = null;
+        // out of restoreSession's fallback chain. Use the reducer-backed store
+        // port instead of mutating getState() in place (L3).
+        this.store.sessionMeta({ currentModelId: null });
         // startNewSession applies this (the NEW profile's model) via set_model.
         this.pendingSwitchModel = creds.modelName;
         this.store.markConnecting();
@@ -7150,8 +7154,8 @@ export class ChatPanel implements vscode.Disposable {
     // wait up to 3s and the new CLI boot 10-60s — feedback must be immediate.
     this.store.replaceState(newSessionState(this.store.getState()));
     // The stale currentModelId belongs to the previous endpoint — keep it out
-    // of restoreSession's fallback chain.
-    this.store.getState().currentModelId = null;
+    // of restoreSession's fallback chain. Reducer port, not in-place (L3).
+    this.store.sessionMeta({ currentModelId: null });
     // Next session start defaults to the NEW profile's configured modelName
     // (user directive) and pushes it to the CLI via set_model.
     this.pendingSwitchModel = creds.modelName;

@@ -495,7 +495,16 @@ export class JsonRpcPeer {
                 message: errorMessage(error),
               },
             }),
-        );
+        )
+        .catch((error: unknown) => {
+          // reply() → send() writes straight to stdin; a destroyed/locked
+          // stream throws synchronously. Without this terminal catch the
+          // rejected chain becomes an unhandled rejection (M5). Pure module —
+          // no vscode import; console.warn matches the notification path.
+          console.warn(
+            `[iflow-harness] failed to reply to request ${request.method}: ${errorMessage(error)}`,
+          );
+        });
       return;
     }
 

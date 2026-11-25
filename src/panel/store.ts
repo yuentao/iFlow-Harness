@@ -588,6 +588,19 @@ export class SessionStore {
   }
 
   /**
+   * Host teardown: unconditionally drop a pending flush. `setSuperWaiting(false)`
+   * early-returns when the state is already false, so it can leave a timer armed
+   * that later fires one last postSnapshot into a dying webview (L1). dispose()
+   * is idempotent and must not itself push.
+   */
+  dispose(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
+
+  /**
    * Real-time usage refresh interval while streaming. The refresh itself is a
    * pure integer fold over the blocks' token caches (the reducer keeps them
    * valid during streaming), so the cost per refresh is trivial even for long
