@@ -73,6 +73,13 @@ export const MCP_BROKER_TOKEN_HEADER = "x-iflow-mcp-broker";
 const MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 /** Cap on collected upstream HTTP response bodies. */
 const MAX_UPSTREAM_BODY_BYTES = 8 * 1024 * 1024;
+/** Cap on one buffered NDJSON/SSE line while waiting for its terminating
+ * newline. Mirrors `NdjsonParser.MAX_BUFFER_BYTES` in `jsonrpc.ts`: MCP frames
+ * are small JSON-RPC envelopes, so a line that grows past 8MB is runaway
+ * output and must be dropped instead of growing without bound. */
+const MAX_NDJSON_FRAME_BYTES = 8 * 1024 * 1024;
+/** Grace period before `server.close()` forcibly closes lingering sockets. */
+const SERVER_CLOSE_TIMEOUT_MS = 5_000;
 /** Tail of an MCP server's stderr kept for error messages. */
 const STDERR_TAIL_CHARS = 4_000;
 /** Default per-request timeout. Tool calls may legitimately run for minutes. */
@@ -172,6 +179,9 @@ interface UpstreamClient {
 interface UpstreamState {
   config: McpBrokerServerConfig;
   client: UpstreamClient | null;
+  /** Client handed to `initialize()` but not settled yet — dispose() must be
+   * able to close it; a failed handshake never reaches `client` above. */
+  connectingClient: UpstreamClient | null;
   connecting: Promise<UpstreamClient> | null;
   error: string | null;
   /** Tool declarations from the shared upstream `tools/list`, cached once.
@@ -478,6 +488,7 @@ class StdioUpstreamClient implements UpstreamClient {
     private readonly config: McpBrokerServerConfig,
     private readonly timeoutMs: number,
     private readonly defaultCwd: string | undefined,
+    private readonly log?: (level: "info" | "warn" | "error", message: string) => void,
   ) {}
 
   async initialize(): Promise<void> {
@@ -544,6 +555,12 @@ class StdioUpstreamClient implements UpstreamClient {
     child.stderr?.on("data", (chunk: string) => {
       this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL_CHARS);
     });
+    // A write to a destroyed stdin pipe raises an async 'error' on the stream
+    // itself (EPIPE), not on the ChildProcess 'error' event. Without a
+    // listener that is an uncaught exception capable of killing the host.
+    child.stdin?.on("error", (error: unknown) => {
+      this.failAll(error instanceof Error ? error : new Error(messageOf(error)));
+    });
     child.on("error", (error) => this.failAll(error));
     child.on("exit", (code, signal) => {
       this.failAll(
@@ -563,6 +580,13 @@ class StdioUpstreamClient implements UpstreamClient {
   }
 
   private onData(chunk: string): void {
+    // Drop a single oversized chunk BEFORE concatenating it: a server that
+    // floods stdout with a line that never ends must not grow `buffer` without
+    // bound (and re-scan it quadratically on every chunk).
+    if (Buffer.byteLength(chunk, "utf8") > MAX_NDJSON_FRAME_BYTES) {
+      this.reportOversizedFrame();
+      return;
+    }
     this.buffer += chunk;
     let index = this.buffer.indexOf("\n");
     while (index >= 0) {
@@ -571,6 +595,15 @@ class StdioUpstreamClient implements UpstreamClient {
       if (line) this.onLine(line);
       index = this.buffer.indexOf("\n");
     }
+    // Complete lines are drained; only a partial frame is left in `buffer`.
+    if (Buffer.byteLength(this.buffer, "utf8") > MAX_NDJSON_FRAME_BYTES) {
+      this.reportOversizedFrame();
+    }
+  }
+
+  private reportOversizedFrame(): void {
+    this.buffer = "";
+    this.log?.("warn", `MCP server "${this.config.name}" 的 NDJSON 行超过 8MB 上限，已丢弃`);
   }
 
   private onLine(line: string): void {
@@ -759,6 +792,7 @@ class SseUpstreamClient implements UpstreamClient {
   constructor(
     private readonly config: McpBrokerServerConfig,
     private readonly timeoutMs: number,
+    private readonly log?: (level: "info" | "warn" | "error", message: string) => void,
   ) {}
 
   async initialize(): Promise<void> {
@@ -844,13 +878,18 @@ class SseUpstreamClient implements UpstreamClient {
     const requestFn = target.protocol === "https:" ? httpsRequest : httpRequest;
     return new Promise<void>((resolve, reject) => {
       let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const finish = (error?: Error): void => {
         if (settled) return;
         settled = true;
+        // Every exit path (non-2xx, stream end/error, request error, bad
+        // endpoint, timeout) lands here — never leave the handshake timer
+        // armed once the promise has settled.
+        if (timer !== undefined) clearTimeout(timer);
         if (error) reject(error);
         else resolve();
       };
-      const timer = setTimeout(
+      timer = setTimeout(
         () => finish(new Error(`MCP server "${this.config.name}" 的 SSE 握手超时`)),
         this.timeoutMs,
       );
@@ -873,7 +912,17 @@ class SseUpstreamClient implements UpstreamClient {
           }
           response.setEncoding("utf8");
           response.on("data", (chunk: string) => {
+            // Same 8MB cap as the stdio frame buffer: a server that streams
+            // text without an event delimiter must not grow `buffer` forever.
+            if (Buffer.byteLength(chunk, "utf8") > MAX_NDJSON_FRAME_BYTES) {
+              this.reportOversizedFrame();
+              return;
+            }
             this.buffer += chunk;
+            if (Buffer.byteLength(this.buffer, "utf8") > MAX_NDJSON_FRAME_BYTES) {
+              this.reportOversizedFrame();
+              return;
+            }
             const { events, rest } = drainSseEvents(this.buffer);
             this.buffer = rest;
             for (const event of events) {
@@ -884,7 +933,6 @@ class SseUpstreamClient implements UpstreamClient {
                   finish(new Error(`无法解析 SSE endpoint: ${messageOf(error)}`));
                   return;
                 }
-                clearTimeout(timer);
                 finish();
               } else if (event.event === "message") {
                 this.onMessage(event.data);
@@ -899,6 +947,11 @@ class SseUpstreamClient implements UpstreamClient {
       request.end();
       this.streamRequest = request;
     });
+  }
+
+  private reportOversizedFrame(): void {
+    this.buffer = "";
+    this.log?.("warn", `MCP server "${this.config.name}" 的 SSE 帧超过 8MB 上限，已丢弃`);
   }
 
   private onMessage(data: string): void {
@@ -1078,16 +1131,18 @@ class WebSocketUpstreamClient implements UpstreamClient {
         settled = true;
         if (timer !== undefined) clearTimeout(timer);
         if (this.ws === ws) this.ws = null;
-        reject(error instanceof Error ? error : new Error(messageOf(error)));
-      };
-      timer = setTimeout(() => {
-        fail(new Error(`MCP server "${this.config.name}" 的 websocket 连接超时（${this.timeoutMs}ms）`));
+        // A failed handshake must not leak the socket: after `this.ws` is
+        // cleared, `close()` can no longer reach it.
         try {
           if (typeof ws.terminate === "function") ws.terminate();
           else ws.close();
         } catch {
           // best effort
         }
+        reject(error instanceof Error ? error : new Error(messageOf(error)));
+      };
+      timer = setTimeout(() => {
+        fail(new Error(`MCP server "${this.config.name}" 的 websocket 连接超时（${this.timeoutMs}ms）`));
       }, this.timeoutMs);
       timer.unref?.();
       attachWs(ws, "open", () => succeed());
@@ -1144,9 +1199,10 @@ function createUpstreamClient(
   timeoutMs: number,
   defaultCwd: string | undefined,
   webSocketImpl: unknown,
+  log?: (level: "info" | "warn" | "error", message: string) => void,
 ): UpstreamClient {
-  if (config.type === "stdio") return new StdioUpstreamClient(config, timeoutMs, defaultCwd);
-  if (config.type === "sse") return new SseUpstreamClient(config, timeoutMs);
+  if (config.type === "stdio") return new StdioUpstreamClient(config, timeoutMs, defaultCwd, log);
+  if (config.type === "sse") return new SseUpstreamClient(config, timeoutMs, log);
   if (config.type === "websocket") return new WebSocketUpstreamClient(config, timeoutMs, webSocketImpl);
   return new HttpUpstreamClient(config, timeoutMs);
 }
@@ -1175,6 +1231,7 @@ export class McpBroker {
   private server: Server | null = null;
   private port = 0;
   private closed = false;
+  private disposing: Promise<void> | null = null;
   private statusTimer: ReturnType<typeof setTimeout> | null = null;
 
   private constructor(
@@ -1186,6 +1243,7 @@ export class McpBroker {
       this.upstreams.set(config.name, {
         config,
         client: null,
+        connectingClient: null,
         connecting: null,
         error: null,
         tools: [],
@@ -1267,23 +1325,75 @@ export class McpBroker {
     );
   }
 
-  async dispose(): Promise<void> {
-    if (this.closed) return;
+  dispose(): Promise<void> {
+    // Reentrant: all callers share one shutdown sequence. A second dispose()
+    // never returns while the first is still tearing resources down.
+    if (!this.disposing) this.disposing = this.shutdown();
+    return this.disposing;
+  }
+
+  private async shutdown(): Promise<void> {
     this.closed = true;
     if (this.statusTimer) {
       clearTimeout(this.statusTimer);
       this.statusTimer = null;
     }
-    const closes = [...this.upstreams.values()].map(async (state) => {
-      const client = state.client;
+    const states = [...this.upstreams.values()];
+    // Close settled clients AND clients still handshaking: an in-flight
+    // ensure() has no `state.client` yet and would otherwise be leaked.
+    const clients: UpstreamClient[] = [];
+    for (const state of states) {
+      const settled = state.client;
+      const handshaking = state.connectingClient;
       state.client = null;
-      if (client) await client.close().catch(() => undefined);
-    });
-    await Promise.all(closes);
+      state.connectingClient = null;
+      if (settled) clients.push(settled);
+      if (handshaking && handshaking !== settled) clients.push(handshaking);
+    }
+    await Promise.all(clients.map((client) => client.close().catch(() => undefined)));
+    // Let in-flight handshakes settle (their client was just closed, so pending
+    // requests reject promptly) but never wait longer than the grace period.
+    const inFlight = states
+      .map((state) => state.connecting)
+      .filter((promise): promise is Promise<UpstreamClient> => Boolean(promise));
+    if (inFlight.length > 0) {
+      await Promise.race([
+        Promise.allSettled(inFlight),
+        new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, SERVER_CLOSE_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+    }
     const server = this.server;
     this.server = null;
     if (server) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        let done = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = (): void => {
+          if (done) return;
+          done = true;
+          if (timer !== undefined) clearTimeout(timer);
+          resolve();
+        };
+        // server.close() waits for every existing connection; a lingering
+        // keep-alive socket must not hang extension shutdown forever.
+        timer = setTimeout(() => {
+          try {
+            server.closeAllConnections?.();
+          } catch {
+            // best effort
+          }
+          finish();
+        }, SERVER_CLOSE_TIMEOUT_MS);
+        timer.unref?.();
+        try {
+          server.close(finish);
+        } catch {
+          finish();
+        }
+      });
     }
   }
 
@@ -1315,24 +1425,41 @@ export class McpBroker {
           this.timeoutMs,
           this.options.cwd,
           this.options.webSocketImpl,
+          this.options.log,
         );
-        // Register BEFORE initialize: a fake server may push an inbound
-        // request right after the handshake frame.
-        client.onInboundRequest((message) => this.onUpstreamRequest(name, client, message));
-        await client.initialize();
-        // Cache the shared upstream's tool declarations ONCE. A `tools/list`
-        // failure must not turn a healthy connection into a failure — keep the
-        // connection with an honest empty listing (≈0 tokens) and log it.
+        state.connectingClient = client;
         try {
-          state.tools = toolViewsFromListing(await client.request("tools/list", {}));
+          // Register BEFORE initialize: a fake server may push an inbound
+          // request right after the handshake frame.
+          client.onInboundRequest((message) => this.onUpstreamRequest(name, client, message));
+          await client.initialize();
+          // Cache the shared upstream's tool declarations ONCE. A `tools/list`
+          // failure must not turn a healthy connection into a failure — keep the
+          // connection with an honest empty listing (≈0 tokens) and log it.
+          try {
+            state.tools = toolViewsFromListing(await client.request("tools/list", {}));
+          } catch (error) {
+            this.options.log?.("warn", `MCP broker: ${name} tools/list 失败：${messageOf(error)}`);
+            state.tools = [];
+          }
+          if (this.closed) {
+            // dispose() landed during the handshake: do not adopt a client
+            // whose sibling resources were already torn down.
+            await client.close().catch(() => undefined);
+            throw new Error(`MCP broker 已关闭，无法连接 "${name}"`);
+          }
+          state.client = client;
+          state.error = null;
+          this.scheduleStatusChange();
+          return client;
         } catch (error) {
-          this.options.log?.("warn", `MCP broker: ${name} tools/list 失败：${messageOf(error)}`);
-          state.tools = [];
+          // A failed handshake must release its child process / socket. Every
+          // client's close() is idempotent, so dispose() may also call it.
+          await client.close().catch(() => undefined);
+          throw error;
+        } finally {
+          if (state.connectingClient === client) state.connectingClient = null;
         }
-        state.client = client;
-        state.error = null;
-        this.scheduleStatusChange();
-        return client;
       })()
         .catch((error: unknown) => {
           state.connecting = null;
