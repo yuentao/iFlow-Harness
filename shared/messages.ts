@@ -1053,6 +1053,13 @@ export interface SessionState {
   stopReason: StopReason | null;
   sessionId: string | null;
   modes: SessionModeState | null;
+  /**
+   * A `current_mode_update` that arrived before `_meta.modes` populated
+   * `modes`. Kept here so `setMeta` can apply the user's latest choice on top
+   * of the incoming mode list instead of backfilling a stale id; cleared as
+   * soon as a mode update is applied (directly or via setMeta).
+   */
+  pendingModeId?: string | null;
   commands: SlashCommand[];
   /**
    * Skills the CLI reported on `session/new` (`_meta.availableSkills`).
