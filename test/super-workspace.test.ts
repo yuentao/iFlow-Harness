@@ -1,16 +1,17 @@
 /**
  * 默认工作区回退（`iflow.superAgent.defaultWorkspace`）的纯决策 + 端到端降级。
  *
- * 背景：没有打开任何文件夹时派发超流体是被正确拒绝的（确实没有工作区）。
- * 现在允许配置一个默认工作区作为回退 —— 判定必须只有一个来源，且每种失败
- * 都要给出真实原因，不能用一句「没有打开的工作区」盖住「路径不存在 / 不是
- * 目录 / 写的是相对路径」。
+ * 目标语义：没有打开任何文件夹时**永远**有可用目录。优先级是
+ *   打开的 workspaceFolder → 设置值 → 内置默认目录 `~/.iflow/workspace` → 拒绝。
+ * 空值直接用内置默认；非法值（相对路径 / `~` / 普通文件）非阻断回退 + 警告；
+ * 只有 mkdir / stat 真失败才拒绝，且 toast 带真实 errno / message。
  *
- * 前四组是 `shared/super-workspace.ts` 的纯逻辑（零 VSCode、零 I/O）；
- * 最后一组用真实临时目录验证非 git 默认工作区沿用既有「仅目录隔离」降级，
- * 并在看板字段上如实标注。
+ * 前两组是 `shared/super-workspace.ts` 的纯逻辑（零 VSCode、零 I/O，内置默认
+ * 目录由参数注入）；第三组用真实临时目录验证非 git 默认工作区仍走「仅目录隔离」；
+ * 第四组验证宿主接线只有一个判空点、且各档返回与 toast 符合上述语义。
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
@@ -18,7 +19,7 @@ import {
   isAbsoluteWorkspacePath,
   planSuperWorkspaceRoot,
   resolveSuperWorkspaceRoot,
-  type SuperWorkspaceProbe,
+  type SuperWorkspaceEnsure,
 } from "../shared/super-workspace.js";
 import { SuperAgentManager } from "../src/panel/super-agent.js";
 import {
@@ -28,6 +29,19 @@ import {
 import type { AcpClient } from "../src/acp/client.js";
 import { DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS, type SuperSessionUi } from "../shared/super-agent.js";
 import { setConfigOverrides } from "./vscode-stub.js";
+
+// 只把 mkdir 做成可控的 vi.fn，默认透传真实实现。第 ⑥ 组用它注入一次真实的
+// EACCES 错误，验证「只有真失败才拒绝」且 toast 带真实 errno/message；其余用例
+// 全部走真实 fs，不被 mock 干扰。stat 保持真实实现（不存在的路径返回 ENOENT）。
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const passthrough = (name: string) =>
+    vi.fn((...args: unknown[]) => {
+      const fn = actual[name] as (...a: unknown[]) => unknown;
+      return fn(...args);
+    });
+  return { ...actual, mkdir: passthrough("mkdir") };
+});
 
 const roots: string[] = [];
 afterAll(() => {
@@ -40,10 +54,17 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
-/** 只认「已登记为目录」的路径，其余一律 missing —— 不碰磁盘。 */
-function fakeProbe(directories: readonly string[]): SuperWorkspaceProbe {
-  const set = new Set(directories);
-  return async (candidate) => (set.has(candidate) ? "directory" : "missing");
+/** 纯决策用的内置默认目录占位符（不碰磁盘；真实创建在宿主接线组验证）。 */
+const BUILTIN = "/builtin";
+
+type EnsureOutcome = Parameters<SuperWorkspaceEnsure>[0] extends string
+  ? Awaited<ReturnType<SuperWorkspaceEnsure>>
+  : never;
+
+/** 按路径返回预设结局；未登记的路径如实报「意外探测」（让漏探测变成失败）。 */
+function fakeEnsure(map: Record<string, EnsureOutcome>): SuperWorkspaceEnsure {
+  return async (candidate) =>
+    map[candidate] ?? { kind: "error", error: new Error(`unexpected ensure(${candidate})`) };
 }
 
 describe("isAbsoluteWorkspacePath", () => {
@@ -63,76 +84,143 @@ describe("isAbsoluteWorkspacePath", () => {
 });
 
 describe("planSuperWorkspaceRoot（纯决策）", () => {
-  it("有工作区根就用它，忽略默认工作区设置", () => {
-    expect(planSuperWorkspaceRoot(["/ws"], "/default")).toEqual({ kind: "workspace", root: "/ws" });
+  it("① 有 workspaceFolder → 用它，忽略设置值与内置默认目录", () => {
+    expect(planSuperWorkspaceRoot(["/ws"], "relative/dir", BUILTIN)).toEqual({
+      kind: "workspace",
+      root: "/ws",
+    });
   });
 
-  it("空白的工作区根被跳过（多根工作区里被删掉的那个）", () => {
-    expect(planSuperWorkspaceRoot(["   ", "/ws2"], null)).toEqual({ kind: "workspace", root: "/ws2" });
+  it("空白工作区根被跳过（多根工作区里被删掉的那个）", () => {
+    expect(planSuperWorkspaceRoot(["   ", "/ws2"], "/default", BUILTIN)).toEqual({
+      kind: "workspace",
+      root: "/ws2",
+    });
   });
 
-  it("没有工作区 + 合法默认工作区 → 待探测", () => {
-    expect(planSuperWorkspaceRoot([], "/default")).toEqual({ kind: "default", path: "/default" });
+  it("② 无工作区 + 设置为空 / 纯空白 → 内置默认目录候选（无回退原因）", () => {
+    for (const configured of ["", "   ", undefined]) {
+      expect(planSuperWorkspaceRoot([], configured, BUILTIN)).toEqual({
+        kind: "candidates",
+        candidates: [{ path: BUILTIN, origin: "builtin" }],
+      });
+    }
   });
 
-  it("没有工作区 + 设置为空 / 只有空白 → not-configured", () => {
-    expect(planSuperWorkspaceRoot([], "")).toEqual({ kind: "reject", reason: "not-configured" });
-    expect(planSuperWorkspaceRoot([], "   ")).toEqual({ kind: "reject", reason: "not-configured" });
-    expect(planSuperWorkspaceRoot([], undefined)).toEqual({ kind: "reject", reason: "not-configured" });
+  it("④ 无工作区 + 相对路径 → 内置默认候选带 not-absolute 回退原因", () => {
+    expect(planSuperWorkspaceRoot([], "relative/dir", BUILTIN)).toEqual({
+      kind: "candidates",
+      candidates: [
+        {
+          path: BUILTIN,
+          origin: "builtin",
+          fallback: { reason: "not-absolute", configured: "relative/dir" },
+        },
+      ],
+    });
   });
 
-  it("没有工作区 + 非绝对路径 → not-absolute（带原始值回显）", () => {
-    expect(planSuperWorkspaceRoot([], "relative/dir")).toEqual({
-      kind: "reject",
-      reason: "not-absolute",
-      configured: "relative/dir",
+  it("合法绝对路径 → 设置值优先，内置默认兜底", () => {
+    expect(planSuperWorkspaceRoot([], "/configured", BUILTIN)).toEqual({
+      kind: "candidates",
+      candidates: [
+        { path: "/configured", origin: "configured" },
+        { path: BUILTIN, origin: "builtin" },
+      ],
     });
   });
 });
 
-describe("resolveSuperWorkspaceRoot（纯决策 + 注入探测）", () => {
-  it("有工作区时不调用探测（既有行为零 I/O）", async () => {
+describe("resolveSuperWorkspaceRoot（纯决策 + 注入的异步 ensure）", () => {
+  it("有工作区时零 I/O（既有行为逐字节不变）", async () => {
     let probed = 0;
-    const probe: SuperWorkspaceProbe = async () => {
+    const ensure: SuperWorkspaceEnsure = async () => {
       probed += 1;
-      return "directory";
+      return { kind: "directory" };
     };
-    const resolution = await resolveSuperWorkspaceRoot(["/ws"], "/default", probe);
-    expect(resolution).toEqual({ ok: true, root: "/ws", source: "workspace" });
+    expect(await resolveSuperWorkspaceRoot(["/ws"], "/configured", BUILTIN, ensure)).toEqual({
+      ok: true,
+      root: "/ws",
+      source: "workspace",
+    });
     expect(probed).toBe(0);
   });
 
-  it("无工作区 + 合法目录 → 用默认工作区", async () => {
-    const resolution = await resolveSuperWorkspaceRoot([], "/default", fakeProbe(["/default"]));
-    expect(resolution).toEqual({ ok: true, root: "/default", source: "default-workspace" });
+  it("② 无工作区 + 设置为空 → 用内置默认目录并成功", async () => {
+    expect(
+      await resolveSuperWorkspaceRoot([], "", BUILTIN, fakeEnsure({ [BUILTIN]: { kind: "directory" } })),
+    ).toEqual({ ok: true, root: BUILTIN, source: "default-workspace" });
   });
 
-  it("无工作区 + 设置为空 → 拒绝，原因是 not-configured", async () => {
-    const resolution = await resolveSuperWorkspaceRoot([], "", fakeProbe([]));
-    expect(resolution).toEqual({ ok: false, reason: "not-configured" });
+  it("③ 合法但不存在的目录 → ensure 创建后使用（真实 mkdir 在宿主组验证）", async () => {
+    expect(
+      await resolveSuperWorkspaceRoot(
+        [],
+        "/configured",
+        BUILTIN,
+        fakeEnsure({ "/configured": { kind: "directory" } }),
+      ),
+    ).toEqual({ ok: true, root: "/configured", source: "default-workspace" });
   });
 
-  it("非绝对路径 / 不存在 / 是文件 → 各自真实原因", async () => {
-    expect(await resolveSuperWorkspaceRoot([], "rel/dir", fakeProbe([]))).toEqual({
-      ok: false,
-      reason: "not-absolute",
-      configured: "rel/dir",
+  it("④ 相对路径 → 非阻断回退内置默认 + not-absolute 回退原因", async () => {
+    expect(
+      await resolveSuperWorkspaceRoot([], "rel/dir", BUILTIN, fakeEnsure({ [BUILTIN]: { kind: "directory" } })),
+    ).toEqual({
+      ok: true,
+      root: BUILTIN,
+      source: "default-workspace",
+      fallback: { reason: "not-absolute", configured: "rel/dir" },
     });
-    expect(await resolveSuperWorkspaceRoot([], "/gone", fakeProbe([]))).toEqual({
-      ok: false,
-      reason: "not-found",
-      configured: "/gone",
+  });
+
+  it("⑤ 普通文件 → 非阻断回退内置默认 + not-a-directory 回退原因", async () => {
+    expect(
+      await resolveSuperWorkspaceRoot(
+        [],
+        "/a/file.txt",
+        BUILTIN,
+        fakeEnsure({ "/a/file.txt": { kind: "file" }, [BUILTIN]: { kind: "directory" } }),
+      ),
+    ).toEqual({
+      ok: true,
+      root: BUILTIN,
+      source: "default-workspace",
+      fallback: { reason: "not-a-directory", configured: "/a/file.txt" },
     });
-    const probe: SuperWorkspaceProbe = async () => "file";
-    expect(await resolveSuperWorkspaceRoot([], "/a/file.txt", probe)).toEqual({
+  });
+
+  it("⑥ 设置值 mkdir 真失败但内置默认可用 → 仍非阻断回退（附底层错误）", async () => {
+    const error = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    expect(
+      await resolveSuperWorkspaceRoot(
+        [],
+        "/configured",
+        BUILTIN,
+        fakeEnsure({ "/configured": { kind: "error", error }, [BUILTIN]: { kind: "directory" } }),
+      ),
+    ).toEqual({
+      ok: true,
+      root: BUILTIN,
+      source: "default-workspace",
+      fallback: { reason: "unavailable", configured: "/configured", cause: error },
+    });
+  });
+
+  it("⑥ 所有候选都真失败 → 才拒绝，并原样带回底层错误", async () => {
+    const error = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    expect(
+      await resolveSuperWorkspaceRoot([], "", BUILTIN, fakeEnsure({ [BUILTIN]: { kind: "error", error } })),
+    ).toEqual({
       ok: false,
-      reason: "not-a-directory",
-      configured: "/a/file.txt",
+      reason: "directory-unavailable",
+      path: BUILTIN,
+      error,
     });
   });
 });
 
-describe("默认工作区是非 git 目录 → 沿用既有目录隔离降级并如实标注", () => {
+describe("⑦ 默认工作区是非 git 目录 → 沿用既有目录隔离降级并如实标注", () => {
   it("子会话隔离为 directory、note 说明非 git 仓库，且 cwd 落在默认工作区内", async () => {
     const dir = tempDir("iflow-default-ws-");
     const sessions: SuperSessionUi[] = [];
@@ -234,20 +322,18 @@ describe("宿主接线：默认工作区是唯一的派发判空点", () => {
     host: SuperAgentHost;
     spawn: ReturnType<typeof vi.fn>;
     toasts: Toast[];
-    setManager(value: { spawn: ReturnType<typeof vi.fn> } | null): void;
   }
 
-  function makeHost(): HostHarness {
+  function makeHost(opts: { workspaceRoot?: string } = {}): HostHarness {
     const toasts: Toast[] = [];
     const spawn = vi.fn(() => ({ id: "child-1" }));
-    let manager: { spawn: ReturnType<typeof vi.fn> } | null = { spawn };
+    const manager: { spawn: ReturnType<typeof vi.fn> } | null = { spawn };
     let host!: SuperAgentHost;
     const deps = {
       log: { info: () => {}, warn: () => {}, error: () => {} },
       getContext: () => ({}) as never,
-      // 关键：没有任何打开的工作区（services.workspaceRoot 为空、
-      // vscode.workspace.workspaceFolders 在 stub 里也是 undefined）。
-      getServices: () => ({}) as { workspaceRoot?: string },
+      // 默认没有任何打开的工作区（services.workspaceRoot 缺省）。① 通过 opts 注入。
+      getServices: () => ({ workspaceRoot: opts.workspaceRoot }) as { workspaceRoot?: string },
       getStore: () =>
         ({
           getState: () => ({ sessionId: "main-1" }),
@@ -267,14 +353,7 @@ describe("宿主接线：默认工作区是唯一的派发判空点", () => {
       refreshSuperWaitHeartbeat: () => {},
     } as unknown as SuperAgentHostCallbacks;
     host = new SuperAgentHost(deps);
-    return {
-      host,
-      spawn,
-      toasts,
-      setManager: (value) => {
-        manager = value;
-      },
-    };
+    return { host, spawn, toasts };
   }
 
   async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
@@ -288,65 +367,102 @@ describe("宿主接线：默认工作区是唯一的派发判空点", () => {
 
   afterEach(() => setConfigOverrides({}));
 
-  it("无工作区 + 合法默认目录 → 同步返回 deferred，随后真正派发并采用该目录", async () => {
-    const dir = tempDir("iflow-host-default-");
-    setConfigOverrides({ "superAgent.defaultWorkspace": dir });
-    const harness = makeHost();
-
-    const result = harness.host.dispatchSuperTasks([[{ title: "默认工作区任务", task: "干活" }]]);
-    // 同步那一刻还没有管理器：如实返回「本次未派发」，而不是谎报成功。
-    expect(result.deferred).toBe(true);
-    expect(result.managerAvailable).toBe(false);
-
-    await waitFor(() => harness.spawn.mock.calls.length === 1);
-    expect(harness.host.superRepoRoot()).toBe(dir);
-    expect(harness.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "默认工作区任务" });
-    // 成功路径不应弹拒绝 toast。
-    expect(harness.toasts.some((t) => t.message.includes("无法派发"))).toBe(false);
-  });
-
-  it("无工作区 + 设置为空 → 拒绝，toast 指引去设置该键，零 spawn", async () => {
-    setConfigOverrides({ "superAgent.defaultWorkspace": "" });
-    const harness = makeHost();
-
-    const result = harness.host.dispatchSuperTasks([[{ title: "x", task: "y" }]]);
-    expect(result.deferred).toBe(true);
-    await waitFor(() => harness.toasts.length > 0);
-
-    expect(harness.spawn).not.toHaveBeenCalled();
-    expect(harness.host.superRepoRoot()).toBeNull();
-    const message = harness.toasts.at(-1)?.message ?? "";
-    expect(message).toContain("没有打开的工作区");
-    expect(message).toContain("iflow.superAgent.defaultWorkspace");
-  });
-
-  it("相对路径 / 不存在 / 是文件 → toast 带各自真实原因", async () => {
-    // 相对路径
+  it("① 有工作区 → 立即同步派发，忽略设置与内置默认，无回退警告", () => {
+    const ws = tempDir("iflow-ws-");
     setConfigOverrides({ "superAgent.defaultWorkspace": "relative/dir" });
-    const relative = makeHost();
-    relative.host.dispatchSuperTasks([[{ title: "x", task: "y" }]]);
-    await waitFor(() => relative.toasts.length > 0);
-    expect(relative.toasts.at(-1)?.message).toContain("不是绝对路径");
-    expect(relative.spawn).not.toHaveBeenCalled();
+    const h = makeHost({ workspaceRoot: ws });
+    h.host.builtinDefaultWorkspace = path.join(tempDir("iflow-builtin-ignored-"), "never");
 
-    // 不存在
-    const missingPath = path.join(tempDir("iflow-missing-"), "nope");
-    setConfigOverrides({ "superAgent.defaultWorkspace": missingPath });
-    const missing = makeHost();
-    missing.host.dispatchSuperTasks([[{ title: "x", task: "y" }]]);
-    await waitFor(() => missing.toasts.length > 0);
-    expect(missing.toasts.at(-1)?.message).toContain("不存在");
-    expect(missing.spawn).not.toHaveBeenCalled();
+    const result = h.host.dispatchSuperTasks([[{ title: "有工作区", task: "干活" }]]);
+    expect(result.managerAvailable).toBe(true);
+    expect(result.deferred).toBeUndefined();
+    expect(h.spawn).toHaveBeenCalledTimes(1);
+    expect(h.host.superRepoRoot()).toBe(ws);
+    expect(h.host.defaultWorkspaceRoot).toBeNull();
+    expect(h.toasts.some((t) => t.message.includes("默认工作区设置无效"))).toBe(false);
+  });
 
-    // 是文件不是目录
-    const fileDir = tempDir("iflow-file-ws-");
-    const filePath = path.join(fileDir, "file.txt");
+  it("② 无工作区 + 设置为空 → 用内置默认目录并成功派发，无拒绝 toast", async () => {
+    const builtin = path.join(tempDir("iflow-builtin-empty-"), "workspace");
+    setConfigOverrides({ "superAgent.defaultWorkspace": "" });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = builtin;
+
+    const result = h.host.dispatchSuperTasks([[{ title: "空设置", task: "干活" }]]);
+    expect(result.deferred).toBe(true);
+    await waitFor(() => h.spawn.mock.calls.length === 1);
+    expect(existsSync(builtin)).toBe(true);
+    expect(h.host.superRepoRoot()).toBe(builtin);
+    expect(h.toasts.some((t) => t.message.includes("无法派发") || t.message.includes("无法准备"))).toBe(false);
+  });
+
+  it("③ 合法但不存在的目录 → 自动 mkdir 后派发", async () => {
+    const configured = path.join(tempDir("iflow-config-missing-"), "nested", "workspace");
+    setConfigOverrides({ "superAgent.defaultWorkspace": configured });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = path.join(tempDir("iflow-builtin-cfg-"), "w");
+
+    const result = h.host.dispatchSuperTasks([[{ title: "不存在目录", task: "干活" }]]);
+    expect(result.deferred).toBe(true);
+    await waitFor(() => h.spawn.mock.calls.length === 1);
+    expect(existsSync(configured)).toBe(true);
+    expect(h.host.superRepoRoot()).toBe(configured);
+    expect(h.toasts.some((t) => t.message.includes("默认工作区设置无效"))).toBe(false);
+  });
+
+  it("④ 相对路径 → 回退默认 + 警告且派发成功", async () => {
+    const builtin = path.join(tempDir("iflow-builtin-rel-"), "workspace");
+    setConfigOverrides({ "superAgent.defaultWorkspace": "relative/dir" });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = builtin;
+
+    h.host.dispatchSuperTasks([[{ title: "相对路径", task: "干活" }]]);
+    await waitFor(() => h.spawn.mock.calls.length === 1);
+    expect(h.host.superRepoRoot()).toBe(builtin);
+    const warning = h.toasts.find((t) => t.level === "warning" && t.message.includes("默认工作区设置无效"));
+    expect(warning?.message).toContain("不是绝对路径");
+    expect(warning?.message).toContain(builtin);
+  });
+
+  it("⑤ 指向普通文件 → 回退默认 + 警告且派发成功", async () => {
+    const filePath = path.join(tempDir("iflow-file-ws-"), "file.txt");
     writeFileSync(filePath, "x", "utf8");
+    const builtin = path.join(tempDir("iflow-builtin-file-"), "workspace");
     setConfigOverrides({ "superAgent.defaultWorkspace": filePath });
-    const file = makeHost();
-    file.host.dispatchSuperTasks([[{ title: "x", task: "y" }]]);
-    await waitFor(() => file.toasts.length > 0);
-    expect(file.toasts.at(-1)?.message).toContain("不是目录");
-    expect(file.spawn).not.toHaveBeenCalled();
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = builtin;
+
+    h.host.dispatchSuperTasks([[{ title: "普通文件", task: "干活" }]]);
+    await waitFor(() => h.spawn.mock.calls.length === 1);
+    expect(h.host.superRepoRoot()).toBe(builtin);
+    const warning = h.toasts.find((t) => t.level === "warning" && t.message.includes("默认工作区设置无效"));
+    expect(warning?.message).toContain("不是目录");
+    expect(warning?.message).toContain(builtin);
+  });
+
+  it("⑥ mkdir 真失败 → 拒绝且 toast 含真实 errno/message，零 spawn", async () => {
+    const builtin = path.join(tempDir("iflow-builtin-fail-"), "never");
+    setConfigOverrides({ "superAgent.defaultWorkspace": "" });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = builtin;
+    const error = Object.assign(new Error("EACCES: permission denied, mkdir 'never'"), {
+      code: "EACCES",
+      errno: -13,
+      syscall: "mkdir",
+      path: builtin,
+    });
+    // 下一次 mkdir（即内置默认目录的创建）抛错；stat 仍真实返回 ENOENT。
+    vi.mocked(mkdir).mockRejectedValueOnce(error);
+
+    const result = h.host.dispatchSuperTasks([[{ title: "真失败", task: "干活" }]]);
+    expect(result.deferred).toBe(true);
+    await waitFor(() => h.toasts.length > 0);
+    expect(h.spawn).not.toHaveBeenCalled();
+    expect(h.host.superRepoRoot()).toBeNull();
+    const message = h.toasts.at(-1)?.message ?? "";
+    expect(message).toContain("无法准备超流体工作目录");
+    expect(message).toContain("EACCES");
+    expect(message).toContain("permission denied");
+    expect(message).toContain("iflow.superAgent.defaultWorkspace");
   });
 });

@@ -29,7 +29,7 @@
   "iflow.configuration.superAgentFullTrust.description": "**完全信任模式**（默认关闭）。开启后超流体直接在主仓库里运行，不另建独立副本目录，改动直接落在主仓库，并保留全部工具与全部 MCP 服务器，允许在主仓 push、开 PR、合并。**警告：完全信任模式下超流体可修改主仓文件、执行任意命令并推送/开 PR，仅在你完全信任派生任务时使用。**",
   "iflow.configuration.superAgentKeepWorktree.description": "超流体正常完成后是否保留它的工作目录。默认关闭：完成后删除工作目录，分支一律保留；开启后工作目录也一并保留，便于你接着手工修改。失败或被中断的超流体始终保留工作目录，重试能直接回到中断前的状态。修改后对下一个结束的超流体生效。",
   "iflow.configuration.superAgentMaxWorktrees.description": "磁盘上最多保留多少个已结束超流体的工作目录。超出时按最后修改时间从旧到新清理，分支一律保留待你审阅；有未提交改动的工作目录不会被清理。默认 10，范围 0–100（0 表示不限制）。",
-  "iflow.configuration.superAgentDefaultWorkspace.description": "没有打开任何文件夹时，超流体改用这个目录作为默认工作区派发（worktree 与隔离目录都建在它下面）。必须填绝对路径，且该路径必须已存在、是一个目录；不是 Git 仓库时按目录隔离运行并如实标注「只隔离了目录」。留空则在没有打开工作区时继续拒绝派发。默认工作区只影响超流体的工作目录，不会改变主会话或当前窗口的工作区。",
+  "iflow.configuration.superAgentDefaultWorkspace.description": "没有打开任何文件夹时，超流体改用这个目录作为默认工作区派发（worktree 与隔离目录都建在它下面）。留空时使用默认目录 ~/.iflow/workspace，首次派发会自动创建；填写的目录不存在也会自动创建。写相对路径、以 ~ 开头或指向已存在的普通文件时只会弹一条警告并改用默认目录，不影响派发。不是 Git 仓库时按目录隔离运行并如实标注「只隔离了目录」。默认工作区只影响超流体的工作目录，不会改变主会话或当前窗口的工作区。",
   "iflow.configuration.superAgentChildToolAllowlist.description": "按工具名限制超流体可用的内置工具，例如 `read_file`、`run_shell_command`。留空（默认）表示不限制，保持全部工具可用；填了名单就只开放名单内的工具，请把超流体需要的工具全部列全（含进程内子代理用的 `task`），漏写的工具超流体将无法使用。修改后对下一个启动的超流体生效。",
   "iflow.configuration.superAgentChildMcpServerAllowlist.description": "按服务器名限制超流体可访问的 MCP 服务器，名称以超流体看板 MCP 状态里显示的为准。留空（默认）保持现状（全部服务器）；填写后只开放名单内且实际可用的服务器，不存在的名字会被忽略。修改后对下一个启动的超流体生效。",
   "iflow.configuration.osNotifications.description": "面板不可见时是否发送系统通知：approvals（默认）仅在审批或提问需要你处理时通知，all 另外在整轮完成时通知，off 关闭。超流体的汇报不会逐条通知，只有超流体向你提问、以及全部超流体结束时才会提醒。",

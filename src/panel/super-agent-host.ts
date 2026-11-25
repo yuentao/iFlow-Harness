@@ -33,7 +33,8 @@ import * as vscode from "vscode";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { AcpClient, type AcpClientCallbacks } from "../acp/client.js";
 import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, locateNodeExecutable } from "../acp/cli-locator.js";
@@ -47,6 +48,7 @@ import {
 import { parseContextWindowOverrides, parseCostTable, resolveCost } from "../../shared/context-window.js";
 import {
   resolveSuperWorkspaceRoot,
+  type SuperWorkspaceEnsureOutcome,
   type SuperWorkspaceResolution,
 } from "../../shared/super-workspace.js";
 import {
@@ -286,7 +288,15 @@ export class SuperAgentHost {
    */
   defaultWorkspaceRoot: string | null = null;
   /**
-   * 默认工作区派发的串行链：默认工作区需要异步 stat，而派发入口是同步的。
+   * 内置默认工作区 `~/.iflow/workspace`（设置留空 / 设置值无效时的最终回退）。
+   *
+   * 由 `os.homedir()` 拼出，**不硬编码用户名**；缺失时派发前用异步 `mkdir -p`
+   * 创建。字段化只为让测试把它指向临时目录 —— 否则每个用例都会在真实家目录
+   * 里建一个目录。用户从不需要手工创建它。
+   */
+  builtinDefaultWorkspace: string = path.join(homedir(), ".iflow", "workspace");
+  /**
+   * 默认工作区派发的串行链：默认工作区需要异步 stat / mkdir，而派发入口是同步的。
    * 串行化保证同一份载荷的重复帧（pending → in_progress）跑在同一个账本上，
    * 后一帧看到前一帧已写入的去重键，不会双开子会话。
    */
@@ -1010,8 +1020,9 @@ export class SuperAgentHost {
       this.log.info(`super agent: restored ${restored.length} historical child session(s) for ${mainSessionId}`);
       // 历史记录同样要能落到默认工作区上：管理器需要一个 repoRoot 才能构造。
       // 启动阶段静默解析（不弹 toast）—— 路径没配 / 写错不该在恢复历史时打扰
-      // 用户，真正需要提示的时机是派发。
-      if (this.superRepoRoot() === null) await this.resolveSuperWorkspace();
+      // 用户，真正需要提示的时机是派发。`create:false`：恢复不是派发，不该
+      // 顺手在用户家目录里建 `~/.iflow/workspace`。
+      if (this.superRepoRoot() === null) await this.resolveSuperWorkspace({ create: false });
       this.deps.getSuperAgent()?.restoreSessions(mainSessionId, restored);
       // 终态转录是旁路展示数据：读回填充详情面板。只读小 JSON、读失败静默
       // 跳过，绝不因它挡住看板恢复（与 sweepStaleWorktrees 改后台同一纪律：
@@ -1171,24 +1182,30 @@ export class SuperAgentHost {
    *
    * 顺序与 {@link SuperWorkspaceResolution} 一致：
    *   1. 打开的工作区根 → 直接返回（零 I/O，既有行为逐字节不变）；
-   *   2. 没有 → 读 `iflow.superAgent.defaultWorkspace`，用异步 `fs.stat`
-   *      确认是绝对路径、存在、是目录（陷阱 #18：绝不同步探测）；
-   *   3. 校验通过 → 缓存进 {@link superRepoRoot}，让子会话 cwd、
+   *   2. 没有 → `iflow.superAgent.defaultWorkspace`：留空 / 空白直接用内置默认
+   *      目录；非绝对路径或指向普通文件 → **非阻断**回退内置默认（带 fallback
+   *      原因，由调用方弹一条警告 toast）；合法但不存在 → 异步 mkdir 后使用；
+   *   3. 内置默认目录 `~/.iflow/workspace` 同样按需创建；
+   *   4. 只有 mkdir / stat 真失败才返回 `ok:false`（附底层错误）；
+   *   5. 成功 → 缓存进 {@link superRepoRoot}，让子会话 cwd、
    *      `--include-directories`、allowedRoots、附件边界全部同源。
+   *
+   * 陷阱 #18：绝不同步探测 —— stat / mkdir 全部走 `node:fs/promises`。
+   * `create:false` 只用于恢复历史记录：用户没在派发的场景下不该被我们
+   * 悄悄在家目录里建目录。
    */
-  async resolveSuperWorkspace(): Promise<SuperWorkspaceResolution> {
+  async resolveSuperWorkspace(options: { create?: boolean } = {}): Promise<SuperWorkspaceResolution> {
     const roots: string[] = [];
     if (this.services.workspaceRoot) roots.push(this.services.workspaceRoot);
     for (const folder of vscode.workspace.workspaceFolders ?? []) roots.push(folder.uri.fsPath);
     const configured = this.setting<string>("superAgent.defaultWorkspace", "");
-    const resolution = await resolveSuperWorkspaceRoot(roots, configured, async (candidate) => {
-      try {
-        const info = await stat(candidate);
-        return info.isDirectory() ? "directory" : "file";
-      } catch {
-        return "missing";
-      }
-    });
+    const create = options.create !== false;
+    const resolution = await resolveSuperWorkspaceRoot(
+      roots,
+      configured,
+      this.builtinDefaultWorkspace,
+      (candidate) => this.prepareSuperWorkspaceDirectory(candidate, create),
+    );
     if (resolution.ok && resolution.source === "default-workspace") {
       this.adoptDefaultWorkspaceRoot(resolution.root);
     } else if (!resolution.ok) {
@@ -1197,6 +1214,33 @@ export class SuperAgentHost {
       this.defaultWorkspaceRoot = null;
     }
     return resolution;
+  }
+
+
+  /**
+   * 异步「确保该绝对路径是目录」：存在且是目录 → directory；存在但是普通文件
+   * → file；不存在且允许创建 → `mkdir -p` 后再 stat 确认；其余（权限 / 磁盘 /
+   * 符号链断裂……）→ 把底层错误原样带回，由调用方给出真实 errno / message。
+   */
+  private async prepareSuperWorkspaceDirectory(
+    absolutePath: string,
+    create: boolean,
+  ): Promise<SuperWorkspaceEnsureOutcome> {
+    try {
+      const info = await stat(absolutePath);
+      return info.isDirectory() ? { kind: "directory" } : { kind: "file" };
+    } catch (error) {
+      // 只有「不存在」才值得尝试创建；权限 / 其它 errno 原样上报，不猜。
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { kind: "error", error };
+    }
+    if (!create) return { kind: "error", error: new Error(`ENOENT: no such directory, '${absolutePath}'`) };
+    try {
+      await mkdir(absolutePath, { recursive: true });
+      const info = await stat(absolutePath);
+      return info.isDirectory() ? { kind: "directory" } : { kind: "file" };
+    } catch (error) {
+      return { kind: "error", error };
+    }
   }
 
 
@@ -1230,32 +1274,55 @@ export class SuperAgentHost {
   }
 
 
-  /** 默认工作区解析失败 → 带真实原因与可执行指引的 toast 文案。 */
+  /**
+   * 默认工作目录**真的**不可用（mkdir / stat 失败，或内置默认目录被占成普通
+   * 文件）→ 带真实路径与底层 errno / message 的 toast 文案。
+   *
+   * 正常流程（无打开工作区）不会再走到这里：设置留空用内置默认，设置值非法
+   * 只警告不阻断。只有磁盘 / 权限层面的真失败才拒绝派发。
+   */
   private superWorkspaceRejectToast(resolution: SuperWorkspaceResolution): string {
     if (resolution.ok) return "";
-    const configured = resolution.configured ?? "";
-    switch (resolution.reason) {
-      case "not-absolute":
-        return vscode.l10n.t(
-          "默认工作区不是绝对路径：{0}（请修改设置 iflow.superAgent.defaultWorkspace）",
-          configured,
-        );
-      case "not-found":
-        return vscode.l10n.t(
-          "默认工作区不存在：{0}（请修改设置 iflow.superAgent.defaultWorkspace）",
-          configured,
-        );
-      case "not-a-directory":
-        return vscode.l10n.t(
-          "默认工作区不是目录：{0}（请修改设置 iflow.superAgent.defaultWorkspace）",
-          configured,
-        );
-      case "not-configured":
-      default:
-        return vscode.l10n.t(
-          "没有打开的工作区，无法派发超流体：请在设置 iflow.superAgent.defaultWorkspace 中指定一个默认工作目录，或先打开一个文件夹",
-        );
+    if (resolution.reason === "not-a-directory") {
+      return vscode.l10n.t(
+        "无法准备超流体工作目录 {0}：该路径是一个文件（请修改设置 iflow.superAgent.defaultWorkspace）",
+        resolution.path,
+      );
     }
+    return vscode.l10n.t(
+      "无法准备超流体工作目录 {0}：{1}（请检查该目录的权限，或修改设置 iflow.superAgent.defaultWorkspace）",
+      resolution.path,
+      errorMessage(resolution.error),
+    );
+  }
+
+
+  /** 设置值无效、已非阻断回退到内置默认目录 → 警告 toast 文案。 */
+  private superWorkspaceFallbackToast(
+    resolution: Extract<SuperWorkspaceResolution, { ok: true }>,
+  ): string {
+    const fallback = resolution.fallback;
+    if (!fallback) return "";
+    if (fallback.reason === "not-absolute") {
+      return vscode.l10n.t(
+        "默认工作区设置无效（{0} 不是绝对路径），已改用默认目录 {1}",
+        fallback.configured,
+        resolution.root,
+      );
+    }
+    if (fallback.reason === "not-a-directory") {
+      return vscode.l10n.t(
+        "默认工作区设置无效（{0} 不是目录），已改用默认目录 {1}",
+        fallback.configured,
+        resolution.root,
+      );
+    }
+    return vscode.l10n.t(
+      "默认工作区设置不可用（{0}：{1}），已改用默认目录 {2}",
+      fallback.configured,
+      errorMessage(fallback.cause),
+      resolution.root,
+    );
   }
 
 
@@ -1271,16 +1338,29 @@ export class SuperAgentHost {
     const resolution = await this.resolveSuperWorkspace();
     if (!resolution.ok) {
       this.log.warn(
-        `super agent: 无法派发——默认工作区不可用（${resolution.reason}${resolution.configured ? `: ${resolution.configured}` : ""}）`,
+        `super agent: 无法派发——工作目录不可用（${resolution.reason}: ${resolution.path}${
+          resolution.reason === "directory-unavailable" ? ` — ${errorMessage(resolution.error)}` : ""
+        }）`,
       );
       this.store.sendToast("warning", this.superWorkspaceRejectToast(resolution));
       return null;
     }
+    if (resolution.fallback) {
+      // 设置值无效（相对路径 / ~ / 普通文件 / 不可用）：不阻断，如实告知改用了
+      // 哪个默认目录，让用户知道该去改哪一项。
+      this.log.warn(
+        `super agent: 默认工作区设置无效（${resolution.fallback.reason}: ${resolution.fallback.configured}），已改用 ${resolution.root}`,
+      );
+      this.store.sendToast("warning", this.superWorkspaceFallbackToast(resolution));
+    }
     const manager = this.deps.getSuperAgent();
     if (!manager) {
-      // 解析成功却仍拿不到管理器：说明工作区根存在但管理器构造失败（异常注入）
-      this.log.warn("super agent unavailable: no workspace folder open");
-      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
+      // 解析成功却仍拿不到管理器：工作目录可用但管理器构造失败（异常注入）。
+      this.log.warn(`super agent unavailable: manager construction failed for ${resolution.root}`);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("超流体工作目录 {0} 已就绪，但超流体管理器未能启动，请重试", resolution.root),
+      );
     }
     return manager;
   }
@@ -1850,9 +1930,15 @@ export class SuperAgentHost {
   ): SuperDispatchResult {
     const manager = this.deps.getSuperAgent();
     if (manager) return this.dispatchSuperTasksWith(manager, blocks, issues);
-    if (this.superRepoRoot() !== null) {
-      // 有工作区根却没有管理器：既有拒绝口径保持不变。
-      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
+    const resolvedRoot = this.superRepoRoot();
+    if (resolvedRoot !== null) {
+      // 工作目录已经可用却没有管理器：这是管理器构造失败，不是「没有工作区」。
+      // 不要再用那句与事实相反的固定文案。
+      this.log.error(`super agent: manager unavailable for resolved root ${resolvedRoot}`);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("超流体工作目录 {0} 已就绪，但超流体管理器未能启动，请重试", resolvedRoot),
+      );
       return { dispatched: 0, duplicates: 0, managerAvailable: false };
     }
     // 没有打开任何工作区：可能是「配置了默认工作区」的场景。存在性校验必须
