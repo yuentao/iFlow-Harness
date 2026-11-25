@@ -31,9 +31,10 @@
 
 import path from "node:path";
 import { existsSync, readdirSync } from "node:fs";
-import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
+import { readFile, readdir, writeFile, mkdir, rm } from "node:fs/promises";
 import type * as vscode from "vscode";
 import { errorMessage } from "../acp/jsonrpc.js";
+import { renameWithRetry } from "../acp/models-query.js";
 import {
   backfillBlockIds,
   parseTranscriptJsonl,
@@ -228,7 +229,11 @@ export class SessionPersistenceService {
     await mkdir(this.transcriptDir(), { recursive: true });
     try {
       await writeFile(tmp, payload, "utf8");
-      await rename(tmp, target);
+      // Atomic replace: retry transient Windows "target is busy" (EPERM /
+      // EACCES / EBUSY) instead of losing the write. Same helper/discipline
+      // as settings.json (models-query.ts) and memory/files.ts. The target
+      // is NEVER unlinked first; on failure we only remove our own tmp.
+      await renameWithRetry(tmp, target);
     } catch (error) {
       await rm(tmp, { force: true }).catch(() => undefined);
       throw error;
