@@ -2700,6 +2700,27 @@ function createMockHost(): HostApi {
         );
         return;
       }
+      if (m.type === "regenerate") {
+        // Dev/browser preview only: the real host re-runs the last user turn
+        // through the CLI. The mock has no agent backend, so acknowledge with
+        // a toast instead of leaving the button dead (see the tripwire below).
+        broadcast({ type: "toast", level: "info", message: "预览模式：已模拟重新生成（mock host）", durationMs: 2000 });
+        return;
+      }
+      if (m.type === "editAndResend") {
+        // Dev/browser preview only: the real host truncates the turn, restores
+        // its checkpoint snapshot and re-sends `text` as a fresh prompt. The
+        // mock cannot touch CLI history, so just echo a toast.
+        broadcast({ type: "toast", level: "info", message: "预览模式：已模拟编辑并重新发送（mock host）", durationMs: 2000 });
+        return;
+      }
+      if (m.type === "openLocation") {
+        // Dev/browser preview only: no editor host can open a file in the
+        // static preview (the real host sends no wire ack either), so log the
+        // request for debugging and consume it silently.
+        console.info(`[iflow] mock host: openLocation ${m.path}${m.line != null ? `:${m.line}` : ""}`);
+        return;
+      }
       // Dev/browser preview only: the real host handles every wire message,
       // but the mock implements just the subset needed for UI iteration.
       // Without a tripwire a missing handler looks like a dead button.
