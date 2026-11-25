@@ -2557,6 +2557,10 @@ export class ChatPanel implements vscode.Disposable {
     msg: Extract<WebviewToHost, { type: "stageFiles" }>,
   ): Promise<void> {
     const MAX_BASE64_LEN = 50 * 1024 * 1024 * 1.34; // ~50MB decoded + base64 slack
+    // Buffer.from(str, "base64") is lenient: illegal chars and stray padding
+    // are skipped, so malformed data used to become a truncated file that was
+    // still reported as staged. Canonical base64 (padded or unpadded) only.
+    const BASE64_PAYLOAD_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
     const sessionId = this.store.getState().sessionId ?? "adhoc";
     // A7: the layout lives in attachments.ts so the sweeper and the
     // session-delete cleanup resolve the exact same dir.
@@ -2567,6 +2571,7 @@ export class ChatPanel implements vscode.Disposable {
     for (const file of msg.files) {
       try {
         if (file.data.length > MAX_BASE64_LEN) throw new Error("attachment too large");
+        if (!BASE64_PAYLOAD_RE.test(file.data)) throw new Error("attachment data is not valid base64");
         const safeName =
           path
             .basename(file.name)
@@ -2897,7 +2902,9 @@ export class ChatPanel implements vscode.Disposable {
         await this.setSessionRoots(msg.roots);
         break;
       case "stageFiles":
-        void this.stageDroppedFiles(msg);
+        void this.stageDroppedFiles(msg).catch((error) =>
+          this.log.warn(`stageFiles failed: ${errorMessage(error)}`),
+        );
         break;
       case "pickAttachments":
         void this.pickAttachments();
@@ -5463,8 +5470,14 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  /** Re-entrancy guard for the turn-end auto-compress (one compress turn at a time). */
+  /**
+   * Legacy global override flag. Older callers/tests can still set this to
+   * suppress turn-end compression outright; the host itself no longer writes
+   * it — the real guard is the per-session set below.
+   */
   private autoCompressInFlight = false;
+  /** Per-session re-entrancy guard: one compress turn per session at a time. */
+  private readonly autoCompressSessions = new Set<string>();
 
   /**
    * Turn-end PROACTIVE compression. The overflow path in promptWithRetry is
@@ -5483,16 +5496,17 @@ export class ChatPanel implements vscode.Disposable {
    *   bar now shows NO window instead of a guessed one);
    * - only a truly idle session (streaming/connecting/init/replay windows
    *   and pending approval/question cards stay untouched);
-   * - `autoCompressInFlight` keeps one compress turn at a time; a failed
-   *   compression is logged + warned, never escalated to the error banner
-   *   (the user's next real prompt still has the reactive overflow path).
+   * - `autoCompressSessions` keeps one compress turn per session at a time (a
+   *   different session may compress concurrently); a failed compression is
+   *   logged + warned, never escalated to the error banner (the user's next
+   *   real prompt still has the reactive overflow path).
    *
    * Returns true when a `/compress` turn actually ran. Callers use this to
    * skip turn-end memory extraction: a compression turn must not trigger
    * automatic memory capture (the user's next real turn still will).
    */
   private async maybeAutoCompressOnIdle(sessionId: string): Promise<boolean> {
-    if (this.disposed || this.autoCompressInFlight || this.historySyncBusy) return false;
+    if (this.disposed || this.autoCompressInFlight || this.autoCompressSessions.has(sessionId) || this.historySyncBusy) return false;
     // Opt-in (default off): a turn-end compress adds a whole extra turn and
     // rewrites the model's context, so the user must enable it explicitly in
     // the settings panel. The reactive overflow path in promptWithRetry is
@@ -5509,7 +5523,7 @@ export class ChatPanel implements vscode.Disposable {
     // Threshold is user-configurable (`iflow.autoCompressThresholdPercent`).
     const threshold = this.autoCompressThresholdRatio();
     if (ratio < threshold) return false;
-    this.autoCompressInFlight = true;
+    this.autoCompressSessions.add(sessionId);
     const toastId = this.store.sendToast(
       "info",
       vscode.l10n.t("上下文接近上限，自动压缩会话…"),
@@ -5546,7 +5560,7 @@ export class ChatPanel implements vscode.Disposable {
       );
       this.store.endCompressTurn();
     } finally {
-      this.autoCompressInFlight = false;
+      this.autoCompressSessions.delete(sessionId);
       this.store.dismissToast(toastId);
     }
     return compressed;
