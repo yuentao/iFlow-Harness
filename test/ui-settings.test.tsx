@@ -54,6 +54,7 @@ const hostSettings = vi.hoisted(() => ({
   superAgentMaxWorktrees: 10,
   superAgentKeepWorktree: false,
   superAgentFullTrust: false,
+  superAgentDefaultWorkspace: "",
 } as HostSettingsUi));
 const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,

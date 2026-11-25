@@ -85,6 +85,7 @@ const hostSettings = vi.hoisted(() =>
     superAgentMaxWorktrees: 10,
     superAgentKeepWorktree: false,
     superAgentFullTrust: false,
+    superAgentDefaultWorkspace: "",
     // 宿主尚未把这两个字段接进 HostSettingsUi（host 侧子会话负责），这里
     // 用可选字段模拟「已接线」与「未接线」两种状态。
     superAgentMaxAttempts: undefined as number | undefined,

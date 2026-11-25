@@ -57,6 +57,7 @@ const baseSettings: HostSettingsUi = {
   superAgentMaxWorktrees: 10,
   superAgentKeepWorktree: false,
   superAgentFullTrust: false,
+  superAgentDefaultWorkspace: "",
 };
 
 beforeEach(() => {

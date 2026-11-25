@@ -1999,6 +1999,9 @@ export interface HostSettingsUi {
   /** Run child sessions in the main repository workspace with no isolation
    * (`iflow.superAgent.fullTrust`); default false. */
   superAgentFullTrust: boolean;
+  /** Default workspace directory for Superfluid dispatch when no folder is open
+   * (`iflow.superAgent.defaultWorkspace`). Empty = built-in `~/.iflow/workspace`. */
+  superAgentDefaultWorkspace: string;
 }
 
 /**
@@ -2297,6 +2300,9 @@ export type HostToWebview =
   /** Reply to `pickAttachments`: `images` are base64 attachment payloads,
    * `files` carry real disk paths (no staging needed). */
   | { type: "filesPicked"; images: { name: string; data: string; mimeType: string }[]; files: { name: string; path: string }[] }
+  /** Reply to `pickDefaultWorkspace`: the absolute directory the user picked.
+   * The host has already written it to `iflow.superAgent.defaultWorkspace`. */
+  | { type: "defaultWorkspacePicked"; path: string }
   /** Reply to `listMcpServers` / `saveMcpServers`: BOTH scopes' MCP server
    * dicts (name → config) as they stand on disk after the operation, so the
    * card can switch scope locally without another round trip. `error`
@@ -2697,6 +2703,9 @@ export type WebviewToHost =
   /** Open the OS file picker; results arrive as `filesPicked`. Images come
    * back as base64 attachment slots, other files as real disk paths. */
   | { type: "pickAttachments" }
+  /** Open the OS folder picker for `iflow.superAgent.defaultWorkspace`.
+   * The host writes the picked absolute path and replies `defaultWorkspacePicked`. */
+  | { type: "pickDefaultWorkspace" }
   /** Open a user-attached image (data URL) in VSCode's image preview. */
   | { type: "openImage"; dataUrl: string }
   /** M3: store openai-compatible credentials and authenticate a fresh session.

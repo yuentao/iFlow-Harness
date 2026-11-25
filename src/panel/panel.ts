@@ -92,6 +92,7 @@ import {
   normalizeSuperTitle,
   type SuperIntegrationMode,
 } from "../../shared/super-agent.js";
+import { isAbsoluteWorkspacePath } from "../../shared/super-workspace.js";
 import {
   awaitSuperSessionArchiveWrite,
   deleteSuperSessionArchive,
@@ -2644,6 +2645,24 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * OS folder picker → `iflow.superAgent.defaultWorkspace`. Cancellation is
+   * silent (no write, no toast); a picked absolute path is written to the
+   * setting and echoed back so the settings row shows the effective value.
+   */
+  private async pickDefaultWorkspace(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFolders: true,
+      canSelectFiles: false,
+      canSelectMany: false,
+      title: vscode.l10n.t("选择默认工作区目录"),
+    });
+    if (!picked || picked.length === 0) return;
+    const dir = picked[0]!.fsPath;
+    await this.writeUserSetting("superAgent.defaultWorkspace", dir);
+    this.postToWebview({ type: "defaultWorkspacePicked", path: dir });
+  }
+
+  /**
    * OS file picker → attachments. Images are read as base64 (the webview has
    * no fs access); other files keep their real disk paths — no temp-dir
    * staging needed because the picker guarantees an absolute path.
@@ -2960,6 +2979,9 @@ export class ChatPanel implements vscode.Disposable {
       case "pickAttachments":
         void this.pickAttachments();
         break;
+      case "pickDefaultWorkspace":
+        void this.pickDefaultWorkspace();
+        break;
       case "openImage":
         void this.openImageAttachment(msg.dataUrl);
         break;
@@ -3190,6 +3212,38 @@ export class ChatPanel implements vscode.Disposable {
         }
         if (typeof msg.superAgentFullTrust === "boolean") {
           writes.push(["superAgent.fullTrust", msg.superAgentFullTrust]);
+        }
+        // 默认工作区：空值绝不写盘（resolver 把空值解释为内置默认），相对路径 /
+        // ~ 开头 / 指向文件的路径也不写；拒绝时保留原值并提示，末尾的
+        // postHostSettings 会把生效值回推给输入框，避免出现「框里改了、设置没变」。
+        if (typeof msg.superAgentDefaultWorkspace === "string") {
+          const raw = msg.superAgentDefaultWorkspace.trim();
+          if (raw.length === 0) {
+            this.store.sendToast(
+              "info",
+              vscode.l10n.t("默认工作区不能清空；留空即使用内置默认目录 ~/.iflow/workspace，原设置未改动。"),
+            );
+          } else if (!isAbsoluteWorkspacePath(raw)) {
+            this.store.sendToast(
+              "warning",
+              vscode.l10n.t("默认工作区必须是绝对路径（{0}），已保留原设置；留空则使用内置默认目录。", raw),
+            );
+          } else {
+            let isFile = false;
+            try {
+              isFile = statSync(raw).isFile();
+            } catch {
+              // 目录尚不存在（或暂时 stat 失败）：resolver 首次派发会自动创建，照常写入。
+            }
+            if (isFile) {
+              this.store.sendToast(
+                "warning",
+                vscode.l10n.t("默认工作区指向的是文件（{0}），已保留原设置。", raw),
+              );
+            } else {
+              writes.push(["superAgent.defaultWorkspace", raw]);
+            }
+          }
         }
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
         // 周期 / 空闲阈值 / 总量预算写盘后热更新调度器（写失败时配置仍是旧值，与设置页显示一致）。
@@ -4017,6 +4071,7 @@ export class ChatPanel implements vscode.Disposable {
       ),
       superAgentKeepWorktree: this.readUserSetting<boolean>("superAgent.keepWorktree", false),
       superAgentFullTrust: this.readUserSetting<boolean>("superAgent.fullTrust", false),
+      superAgentDefaultWorkspace: this.readUserSetting<string>("superAgent.defaultWorkspace", ""),
     });
   }
 

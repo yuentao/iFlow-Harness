@@ -412,6 +412,52 @@ function NumberRow({
   );
 }
 
+/** Path row with a native folder-picker trigger. The host owns the dialog;
+ * the text field stays for manual entry / echo and keeps the existing
+ * absolute-path validation on commit. */
+function DirectoryRow({
+  label,
+  description,
+  detail,
+  value,
+  placeholder,
+  buttonLabel,
+  onCommit,
+}: {
+  label: string;
+  description: string;
+  detail?: string;
+  value: string;
+  placeholder?: string;
+  buttonLabel: string;
+  onCommit: (value: string) => void;
+}) {
+  const send = useChat((s) => s.send);
+  return (
+    <SettingRow
+      wideControl
+      label={label}
+      description={description}
+      detail={detail}
+      control={
+        <div className="flex min-w-0 items-center gap-2">
+          <CommitTextInput
+            label={label}
+            mono
+            value={value}
+            placeholder={placeholder}
+            className="min-w-0 flex-1"
+            onCommit={onCommit}
+          />
+          <Button size="sm" onClick={() => send({ type: "pickDefaultWorkspace" })}>
+            {buttonLabel}
+          </Button>
+        </div>
+      }
+    />
+  );
+}
+
 function TextRow({
   label,
   description,
@@ -832,6 +878,15 @@ function SuperAgentSection() {
           detail={t("默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的超流体从不回收。开启后工作目录会留在磁盘上，可随时手动清理。")}
           checked={settings.superAgentKeepWorktree}
           onChange={(superAgentKeepWorktree) => update({ superAgentKeepWorktree })}
+        />
+        <DirectoryRow
+          label={t("默认工作区")}
+          description={t("没有打开任何文件夹时，超流体改用这个目录作为工作区。")}
+          detail={t("填绝对路径；留空使用内置默认目录 ~/.iflow/workspace（首次派发会自动创建）。相对路径、以 ~ 开头或指向文件的路径不会写入设置。")}
+          value={settings.superAgentDefaultWorkspace}
+          placeholder="~/.iflow/workspace"
+          buttonLabel={t("选择目录")}
+          onCommit={(superAgentDefaultWorkspace) => update({ superAgentDefaultWorkspace })}
         />
       </SettingsGroup>
       <SettingsGroup title={t("安全与信任")}>

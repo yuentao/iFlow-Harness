@@ -122,6 +122,7 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   superAgentMaxWorktrees: 10,
   superAgentKeepWorktree: false,
   superAgentFullTrust: false,
+  superAgentDefaultWorkspace: "",
 };
 
 // --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------
@@ -1470,6 +1471,12 @@ function createMockHost(): HostApi {
         }
         applyUiScale(mockHostSettings.uiFontSize, mockHostSettings.uiDensity);
         broadcast({ type: "hostSettings", ...mockHostSettings });
+        return;
+      }
+      if (m.type === "pickDefaultWorkspace") {
+        // Browser preview has no native folder picker: mirror a cancelled
+        // dialog so the click stays a no-op instead of throwing.
+        broadcast({ type: "defaultWorkspacePicked", path: "" });
         return;
       }
       if (m.type === "setContextWindowOverrides") {
@@ -3196,6 +3203,12 @@ export const useChat = create<ChatStore>((set, get) => ({
     }
     if (msg.type === "qqManagedStatus") {
       set({ qqManagedStatus: msg });
+      return;
+    }
+    if (msg.type === "defaultWorkspacePicked") {
+      set((s) => ({
+        hostSettings: { ...s.hostSettings, superAgentDefaultWorkspace: msg.path },
+      }));
       return;
     }
     if (msg.type === "hostSettings") {
