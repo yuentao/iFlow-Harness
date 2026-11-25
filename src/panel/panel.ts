@@ -74,6 +74,7 @@ import { ToolDiffService } from "./tool-diff-service.js";
 import { StatusPresenter } from "./status-presenter.js";
 import { buildAddDirs, rewriteRootMentions } from "./workspace-roots.js";
 import { WorkspaceRootsService } from "./workspace-roots-service.js";
+import { SettingsWriteService } from "./settings-write-service.js";
 import { SessionPersistenceService, type PersistedTranscript } from "./session-persistence.js";
 import { CheckpointService } from "./checkpoint-service.js";
 import { SessionRestoreService, type RestoreOutcome } from "./session-restore.js";
@@ -704,11 +705,6 @@ const ONBOARDING_DISMISSED_KEY = "iflow.onboardingDismissed";
 /** globalState key: cross-window cache of the resolved node runtime
  * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
-/** globalState key: user-settings writes stashed because this window's
- * configuration registry has not loaded their declaration yet (an in-place
- * extension upgrade keeps the renderer on the previous manifest). Replayed by
- * `applyPendingSettings` once the reloaded window knows the key again. */
-const PENDING_SETTINGS_KEY = "iflow.pendingSettingsWrites";
 /** `iflow.uiFontSize` presets — kept in sync with shared/messages.ts. */
 const UI_FONT_SIZES = ["compact", "standard", "large"] as const;
 /** `iflow.uiDensity` presets — kept in sync with shared/messages.ts. */
@@ -1047,6 +1043,10 @@ export class ChatPanel implements vscode.Disposable {
    * `WorkspaceRootsService`。下方同名方法都是薄委托，供 webview 消息分派、
    * SessionRestoreService deps 与既有测试零改动调用。 */
   private readonly workspaceRootsService: WorkspaceRootsService;
+  /** 设置写入簇：`iflow.*` 读/写与未注册键暂存外迁到 `SettingsWriteService`。
+   * 下方同名方法都是薄委托，约 40 处 readUserSetting 调用、webview 消息分派、
+   * 其它服务注入的 deps、extension.ts 与既有测试契约一律不变。 */
+  private readonly settingsWriteService: SettingsWriteService;
   private connecting: Promise<void> | null = null;
   /**
    * Handshake generation counter (P0-3 restart escape). restartCli bumps it
@@ -1745,6 +1745,19 @@ export class ChatPanel implements vscode.Disposable {
     private readonly services: PanelServices = {},
   ) {
     this.log = vscode.window.createOutputChannel(vscode.l10n.t("心流·驭光"), { log: true });
+    // 设置写入簇：构造期即实例化——下方 MaintenanceScheduler 初始化会调用
+    // readUserSetting。所有 panel/VSCode 状态仍通过箭头回调在调用时读取（陷阱 #8），
+    // 这里只固定回调，不固定 store/config/globalState 快照；update() 单键合并到
+    // Global，失败 toast 由服务带出真实错误原因。
+    this.settingsWriteService = new SettingsWriteService({
+      getConfiguration: (section) => vscode.workspace.getConfiguration(section),
+      getGlobalState: () => this.context.globalState,
+      sendToast: (level, message, opts) =>
+        opts === undefined
+          ? this.store.sendToast(level, message)
+          : this.store.sendToast(level, message, opts),
+      warn: (message) => this.log.warn(message),
+    });
     // SuperAgentHost (阶段 6): construct eagerly so `this` is bound to this panel;
     // all callbacks read panel state at CALL TIME (never a stale snapshot).
     this._superHost = this.buildSuperHost();
@@ -3499,6 +3512,11 @@ export class ChatPanel implements vscode.Disposable {
     this.postToWebview({ type: "theme", kind: light ? "light" : "dark", auroraIntensity });
   }
 
+  // --- 设置写入簇 -------------------------------------------------------------
+  // panel.ts 拆分：方法体已外迁到 `SettingsWriteService`；这里保留同名薄委托，
+  // 供约 40 处 readUserSetting 调用、webview 消息分派、其它服务 deps、
+  // extension.ts 与既有测试零改动调用。
+
   /** True when the running window's configuration registry knows this key's
    * default layer. `get()` is NOT a valid probe — it also reads the user's
    * settings.json; `inspect().defaultValue` comes from the registry only.
@@ -3506,14 +3524,13 @@ export class ChatPanel implements vscode.Disposable {
    * an undefined defaultValue means the declaration is missing from this
    * window (in-place extension upgrade: the renderer keeps the old manifest
    * until the window reloads). */
-  private isUserSettingRegistered(key: string): boolean {
-    const info = vscode.workspace.getConfiguration("iflow").inspect(key);
-    return info !== undefined && info.defaultValue !== undefined;
+  isUserSettingRegistered(key: string): boolean {
+    return this.settingsWriteService.isUserSettingRegistered(key);
   }
 
   /** Current stash of settings writes waiting for their declaration. */
-  private pendingSettingsWrites(): Record<string, unknown> {
-    return { ...(this.context.globalState.get<Record<string, unknown>>(PENDING_SETTINGS_KEY) ?? {}) };
+  pendingSettingsWrites(): Record<string, unknown> {
+    return this.settingsWriteService.pendingSettingsWrites();
   }
 
   /** Read one `iflow.*` setting with the stash as the top layer.
@@ -3525,9 +3542,7 @@ export class ChatPanel implements vscode.Disposable {
    * once `applyPendingSettings` lands it on disk the stash is dropped and the
    * configuration layer takes over. */
   private readUserSetting<T>(key: string, fallback: T): T {
-    const pending = this.pendingSettingsWrites();
-    if (Object.prototype.hasOwnProperty.call(pending, key)) return pending[key] as T;
-    return vscode.workspace.getConfiguration("iflow").get<T>(key, fallback);
+    return this.settingsWriteService.readUserSetting(key, fallback);
   }
 
   /** Same read for activation-time callers outside the panel (extension.ts):
@@ -3538,34 +3553,20 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Stash one write in globalState (never on disk): it is replayed by
    * `applyPendingSettings` once the key is registered again. */
-  private async stashPendingSetting(key: string, value: unknown): Promise<void> {
-    const pending = this.pendingSettingsWrites();
-    pending[key] = value;
-    await this.context.globalState.update(PENDING_SETTINGS_KEY, pending);
+  async stashPendingSetting(key: string, value: unknown): Promise<void> {
+    await this.settingsWriteService.stashPendingSetting(key, value);
   }
 
   /** Drop one stashed write (it landed, or a fresh write superseded it). */
-  private async dropPendingSetting(key: string): Promise<void> {
-    const pending = this.pendingSettingsWrites();
-    if (!(key in pending)) return;
-    delete pending[key];
-    await this.context.globalState.update(PENDING_SETTINGS_KEY, pending);
+  async dropPendingSetting(key: string): Promise<void> {
+    await this.settingsWriteService.dropPendingSetting(key);
   }
 
   /** Replay stashed writes whose declarations this window registers now (i.e.
    * after the reload the stashing toast asked for). Keys still unregistered
    * stay stashed for the next attempt. */
   private async applyPendingSettings(): Promise<void> {
-    for (const [key, value] of Object.entries(this.pendingSettingsWrites())) {
-      if (!this.isUserSettingRegistered(key)) continue;
-      try {
-        await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
-        await this.dropPendingSetting(key);
-      } catch (error) {
-        // Keep the stash: the next window may be able to write it.
-        this.log.warn(`failed to apply stashed setting ${key}: ${errorMessage(error)}`);
-      }
-    }
+    await this.settingsWriteService.applyPendingSettings();
   }
 
   /** Write one panel-owned setting to USER settings (the scope VSCode
@@ -3576,40 +3577,7 @@ export class ChatPanel implements vscode.Disposable {
    * (a caller that has to react to a failed write uses the return value —
    * the toast is emitted here, so nobody double-toasts). */
   private async writeUserSetting(key: string, value: unknown, label?: string): Promise<boolean> {
-    if (!this.isUserSettingRegistered(key)) {
-      // An in-place upgrade leaves this window on the previous manifest, so
-      // VSCode rejects the write with "not a registered configuration". Stash
-      // it and tell the user the one action that makes it land.
-      await this.stashPendingSetting(key, value);
-      this.store.sendToast(
-        "warning",
-        vscode.l10n.t(
-          "设置「{0}」属于刚更新的扩展版本，本窗口还没加载它的定义，已暂存并立即生效；请重启 VS Code（先试重新加载窗口，仍无效则完全退出再启动）。",
-          label ?? key,
-        ),
-        {
-          sticky: true,
-          action: { actionId: "reload-window", label: vscode.l10n.t("重新加载窗口") },
-        },
-      );
-      return false;
-    }
-    try {
-      await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
-      await this.dropPendingSetting(key);
-      return true;
-    } catch (error) {
-      const detail = errorMessage(error);
-      this.log.warn(`failed to update ${key}: ${detail}`);
-      // A silent failure made the control look like it "snapped back" on its
-      // own — say which setting could not be written (the value the user sees
-      // is the one VSCode still has on disk). The rejection reason is the only
-      // clue the user has (read-only settings.json, invalid JSON, schema
-      // rejection, unknown key), so it rides along in the toast instead of
-      // staying in the Output log.
-      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}（{1}）", label ?? key, detail));
-      return false;
-    }
+    return this.settingsWriteService.writeUserSetting(key, value, label);
   }
 
   /** The capabilities the context-window-override module needs from the
