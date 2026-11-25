@@ -53,7 +53,7 @@ import type {
   McpServerStatusView,
   SessionSettings,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
 import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import {
@@ -75,6 +75,7 @@ import { StatusPresenter } from "./status-presenter.js";
 import { buildAddDirs, rewriteRootMentions } from "./workspace-roots.js";
 import { WorkspaceRootsService } from "./workspace-roots-service.js";
 import { SettingsWriteService } from "./settings-write-service.js";
+import { UsageProvenanceService, type AiMetadataStampEntry, type UsageOverridesCache } from "./usage-provenance-service.js";
 import { SessionPersistenceService, type PersistedTranscript } from "./session-persistence.js";
 import { CheckpointService } from "./checkpoint-service.js";
 import { SessionRestoreService, type RestoreOutcome } from "./session-restore.js";
@@ -153,7 +154,7 @@ import { discoverMemoryFiles } from "../memory/discovery.js";
 import { planCuration } from "../../shared/memory-curate.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
-import { normalizeModelId, parseContextWindowOverrides, parseCostTable, resolveContextWindowAuthority, resolveCostWithSource } from "../../shared/context-window.js";
+import { parseContextWindowOverrides } from "../../shared/context-window.js";
 import {
   postContextWindowOverrides,
   saveContextWindowOverrides,
@@ -1047,6 +1048,10 @@ export class ChatPanel implements vscode.Disposable {
    * 下方同名方法都是薄委托，约 40 处 readUserSetting 调用、webview 消息分派、
    * 其它服务注入的 deps、extension.ts 与既有测试契约一律不变。 */
   private readonly settingsWriteService: SettingsWriteService;
+  /** 用量来源解析：窗口/成本的五档权威链 + T-9 AI provenance 外迁到
+   * `UsageProvenanceService`。下方 `usageOverridesCache` 访问器与两个同名方法
+   * 都是薄委托，配置变更失效点、store 回调与既有测试契约零改动。 */
+  private readonly usageProvenanceService: UsageProvenanceService;
   private connecting: Promise<void> | null = null;
   /**
    * Handshake generation counter (P0-3 restart escape). restartCli bumps it
@@ -1860,6 +1865,14 @@ export class ChatPanel implements vscode.Disposable {
       post: (m) => this.postToWebview(m),
     });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m), language: vscode.env.language });
+    // 用量来源解析：字段与方法都在服务内，deps 全是调用时读取的箭头回调
+    // （陷阱 #8）。store 上面刚建好，但即便此刻尚未建好也不会被捕获 —— 唯一
+    // 调用入口是下方 store.getUsageContext 在 push 时的回调，构造期不触发。
+    this.usageProvenanceService = new UsageProvenanceService({
+      readUserSetting: <T>(key: string, fallback: T): T => this.readUserSetting(key, fallback),
+      getCurrentModelId: () => this.store.getState().currentModelId,
+      readKernelTokensLimits: () => readKernelTokensLimits(),
+    });
     // 工作区根目录管理：所有 panel 状态在调用时通过箭头回调读取（陷阱 #8），
     // 构造期只固定回调，不固定 services.workspaceRoot / workspaceFolders 快照。
     this.workspaceRootsService = new WorkspaceRootsService({
@@ -5148,140 +5161,36 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- M1: context occupancy (P0-6) + cost (P1-6) ------------------------------
 
-  /** Cached parse of the two usage settings (invalidated on config change —
-   * `resolveUsageContext` runs on EVERY store push, so re-parsing the arrays
-   * per push would waste work during streaming). */
-  private usageOverridesCache: { overrides: Record<string, number>; cost: Record<string, { input: number; output: number }> } | null = null;
+  /** Thin delegate onto the service's parsed-settings cache. The config-change
+   *  handler and existing tests keep assigning `panel.usageOverridesCache` —
+   *  the setter forwards to the service, which remains the single owner of
+   *  the in-memory state. Full contract lives in UsageProvenanceService. */
+  private get usageOverridesCache(): UsageOverridesCache | null {
+    return this.usageProvenanceService.usageOverridesCache;
+  }
+  private set usageOverridesCache(value: UsageOverridesCache | null) {
+    this.usageProvenanceService.usageOverridesCache = value;
+  }
 
-  /**
-   * T-9 in-memory provenance for values appended by the 「联网补充模型数据」
-   * flow. That flow APPENDS AI-supplied `name=value` rows into the SAME
-   * `contextWindowOverrides` / `costTable` settings as hand-typed rows, so
-   * T-8's `resolveContextWindowWithSource` / `resolveCostWithSource` can only
-   * report `user` for both (documented in shared/context-window.ts). This map
-   * is the ONLY distinction: keyed by normalized model id, it records which
-   * kind of value the AI appended, its exact value (so a later hand-edit stops
-   * being labeled ai-supplement), the citation URL and the capture time.
-   * Purely in-memory — no settings disk format is touched, so user settings
-   * stay compatible; a process restart simply drops the tags while the values
-   * remain honest user overrides.
-   */
-  private aiMetadataStamp: Map<string, {
-    window?: { value: number; sourceUrl?: string; capturedAt: number };
-    cost?: { value: { input: number; output: number }; sourceUrl?: string; capturedAt: number };
-  }> = new Map();
+  /** Thin delegate onto the service's in-memory AI provenance map. Public so
+   *  host-side internals/tests can still inspect the shared stamp instance;
+   *  the service remains its single owner. */
+  get aiMetadataStamp(): Map<string, AiMetadataStampEntry> {
+    return this.usageProvenanceService.aiMetadataStamp;
+  }
 
-  /** Record AI-supplement provenance for the rows actually appended by
-   * `planMetadataAdditions` (pre-existing user rows are never stamped). Called
-   * right before the setting writes in the metadata fetch flow. */
+  /** Thin delegate — full T-9 contract lives in UsageProvenanceService. */
   private recordAiMetadataStamp(
     entries: readonly ModelMetadataEntry[],
     sources: readonly MetadataSource[],
     additions: MetadataAdditions,
   ): void {
-    const windowKeys = new Set(additions.windows.map((line) => normalizeModelId(line.slice(0, line.indexOf("=")))));
-    const costKeys = new Set(additions.costs.map((line) => normalizeModelId(line.slice(0, line.indexOf("=")))));
-    if (windowKeys.size === 0 && costKeys.size === 0) return;
-    const capturedAt = Date.now();
-    for (const entry of entries) {
-      const key = normalizeModelId(entry.name);
-      if (!key) continue;
-      const sourceUrl = entry.source ? sources.find((s) => s.id === entry.source)?.url : undefined;
-      const stamp = this.aiMetadataStamp.get(key) ?? {};
-      if (windowKeys.has(key) && entry.contextWindow !== undefined) {
-        stamp.window = { value: entry.contextWindow, capturedAt, ...(sourceUrl ? { sourceUrl } : {}) };
-      }
-      if (costKeys.has(key) && entry.inputPrice !== undefined && entry.outputPrice !== undefined) {
-        stamp.cost = {
-          value: { input: entry.inputPrice, output: entry.outputPrice },
-          capturedAt,
-          ...(sourceUrl ? { sourceUrl } : {}),
-        };
-      }
-      if (stamp.window || stamp.cost) this.aiMetadataStamp.set(key, stamp);
-    }
+    this.usageProvenanceService.recordAiMetadataStamp(entries, sources, additions);
   }
 
-  /** Resolve the store's usage context: the five-tier authority chain
-   * (user override → active profile → settings top-level → curated table →
-   * no authority), together with the provenance of each number (T-8) and the
-   * ai-supplement relabel (T-9). Value and label come from the SAME resolver
-   * call so they can never drift. Synchronous and cheap (per push).
-   *
-   * 2026-11-22：占用条与 CLI 现在走**同一个** resolver
-   * （`shared/context-window.ts` 的 `resolveContextWindowAuthority`）——
-   * 此前占用条只认「override → 内建表」，推给 CLI 的窗口还多认「profile 档 →
-   * settings 顶层档」两档，于是同一个模型在面板显示的窗口与 CLI 用的窗口会
-   * 分叉（实测：profile tokensLimit=128000 的 auto/deepseek-v4.1-flash，占用条
-   * 显示内建表的 1,000,000）。现在占用条显示的窗口 == 推给 CLI 的
-   * `IFLOW_TOKENS_LIMIT` == `session/set_tokens_limit` 推送的值。
-   *
-   * 无依据（任何一档都没有落地数值）时**不显示分母**：占用条只显示原始 token
-   * 数，不给出一个与 CLI 不同的猜测值（旧的 32,768 兜底估算正是「一个模型
-   * 两个窗口」的残留）。 */
+  /** Thin delegate — the occupancy bar and the CLI share the service's resolver. */
   private resolveUsageContext(): UsageContext {
-    let cached = this.usageOverridesCache;
-    if (!cached) {
-      cached = {
-        overrides: parseContextWindowOverrides(this.readUserSetting<string[]>("contextWindowOverrides", [])),
-        cost: parseCostTable(this.readUserSetting<string[]>("costTable", [])),
-      };
-      this.usageOverridesCache = cached;
-    }
-    const modelId = this.store.getState().currentModelId;
-    // 内核两档（活动 profile 的 tokensLimit / settings 顶层 tokensLimit）由
-    // 内核 settings.json 提供；读取带 mtime 缓存（占用条每次推送都要用）。
-    const { profileTokensLimit, settingsTokensLimit } = readKernelTokensLimits();
-    const win = resolveContextWindowAuthority({
-      modelId,
-      overrides: cached.overrides,
-      profileTokensLimit,
-      settingsTokensLimit,
-    });
-    const cost = resolveCostWithSource(modelId, cached.cost);
-    // 有窗口才有出处：模型 id 为空时（窗口是端点级别的上限，不是某个模型的
-    // 窗口）不显示窗口，也不标来源。
-    let windowSource: ModelMetadataSource | null = modelId ? (win.source ?? null) : null;
-    let costSource: ModelMetadataSource | null = cost.source;
-    let capturedAt: number | undefined;
-    let sourceUrl: string | undefined;
-
-    const key = normalizeModelId(modelId);
-    if (key) {
-      const aiStamp = this.aiMetadataStamp.get(key);
-      // Relabel ONLY a winning "user" override whose exact value still matches
-      // what the AI flow appended. A hand-typed override — or a later hand edit
-      // of an AI value — stays / returns to `user`, never a false
-      // `ai-supplement`. T-5's contextUsed/split sources are produced
-      // downstream (estimateSessionUsage + kernel overlay) and left untouched.
-      if (aiStamp?.window && win.source === "user" && cached.overrides[key] === aiStamp.window.value) {
-        windowSource = "ai-supplement";
-        capturedAt = aiStamp.window.capturedAt;
-        if (aiStamp.window.sourceUrl) sourceUrl = aiStamp.window.sourceUrl;
-      }
-      if (aiStamp?.cost && cost.source === "user") {
-        const live = cached.cost[key];
-        if (live && live.input === aiStamp.cost.value.input && live.output === aiStamp.cost.value.output) {
-          costSource = "ai-supplement";
-          if (capturedAt === undefined) capturedAt = aiStamp.cost.capturedAt;
-          if (sourceUrl === undefined) sourceUrl = aiStamp.cost.sourceUrl;
-        }
-      }
-    }
-
-    return {
-      // 没有模型 id ⇒ 没有「这个模型的窗口」可言（profile / settings 两档与
-      // 模型无关，但那是端点级别的上限，不能当成某个模型的窗口显示）。
-      contextWindow: modelId ? (win.limit ?? null) : null,
-      // 显示出来的窗口永远是有依据的值（要么来自五档权威链），所以这里不再
-      // 有「估算」形态：宁可没有分母，也不显示一个猜测的分母。
-      estimated: false,
-      costPrice: cost.price,
-      windowSource,
-      costSource,
-      ...(capturedAt !== undefined ? { capturedAt } : {}),
-      ...(sourceUrl !== undefined ? { sourceUrl } : {}),
-    };
+    return this.usageProvenanceService.resolveUsageContext();
   }
 
   /**
