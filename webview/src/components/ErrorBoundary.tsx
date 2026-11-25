@@ -10,7 +10,9 @@ interface Props {
    * blockPatch landed) while the fallback is showing, retry rendering once.
    * Streaming white-outs are usually caused by one transient chunk of content,
    * so the next patch normally renders fine — without this the user had to
-   * close and reopen the panel tab to get the UI back.
+   * close and reopen the panel tab to get the UI back. Repeated failures of
+   * the same error are throttled (see RETRY_COOLDOWN_MS) so a permanently bad
+   * block cannot spin at the host's patch frequency.
    */
   resetKey?: unknown;
   /** "page" = full-screen fallback (root boundary); "inline" = a card that
@@ -31,26 +33,57 @@ interface State {
  * follow-up, and retries automatically when `resetKey` changes (next host
  * update) or the user presses 重试.
  */
+
+/** The host flushes blockPatch at ~80ms (12.5/s). A bad block that survives
+ * every patch used to clear-and-rethrow at that rate, flooding console.error.
+ * Throttle same-error retries/logs to one per window: a genuinely new throw,
+ * a healed render, or a manual 重试 still goes through immediately, so the
+ * self-heal ability is kept. */
+const RETRY_COOLDOWN_MS = 1500;
+const LOG_THROTTLE_MS = 1500;
+
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
+  private lastResetAt = 0;
+  private lastLogAt = 0;
+  private lastLogKey = "";
+  private consecutiveFailures = 0;
 
   static getDerivedStateFromError(error: Error): State {
     return { error };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
+    this.consecutiveFailures += 1;
+    const key = `${error.name}:${error.message}`;
+    const now = Date.now();
     // Keep the full trace in the console so the exact throw site can be
-    // reproduced from a webview-devtools screenshot next time it happens.
-    console.error("[iflow] render error:", error, info.componentStack);
-  }
-
-  componentDidUpdate(prev: Props): void {
-    if (this.state.error !== null && prev.resetKey !== this.props.resetKey) {
-      this.setState({ error: null });
+    // reproduced from a webview-devtools screenshot next time it happens —
+    // but once per signature per window, not once per host patch.
+    if (key !== this.lastLogKey || now - this.lastLogAt >= LOG_THROTTLE_MS) {
+      console.error("[iflow] render error:", error, info.componentStack);
+      this.lastLogAt = now;
+      this.lastLogKey = key;
     }
   }
 
+  componentDidUpdate(prev: Props): void {
+    if (this.state.error === null) {
+      // A retry healed the render — a future, unrelated throw retries at once.
+      this.consecutiveFailures = 0;
+      return;
+    }
+    if (prev.resetKey === this.props.resetKey) return;
+    const now = Date.now();
+    if (this.consecutiveFailures > 0 && now - this.lastResetAt < RETRY_COOLDOWN_MS) return;
+    this.lastResetAt = now;
+    this.setState({ error: null });
+  }
+
   private reset = (): void => {
+    this.consecutiveFailures = 0;
+    this.lastLogKey = "";
+    this.lastResetAt = 0;
     this.setState({ error: null });
   };
 

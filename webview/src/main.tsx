@@ -1,7 +1,8 @@
 import { createRoot } from "react-dom/client";
+import type { ReactNode } from "react";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { setupHostListener } from "./store";
+import { setupHostListener, useChat } from "./store";
 import "./styles.css";
 
 setupHostListener();
@@ -40,8 +41,25 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+/**
+ * Thin wrapper owning the page-level self-heal anchor. Previously the root
+ * boundary had no resetKey, so a page-level render throw stayed up even as
+ * the host pushed new snapshots (the inline boundary had one). Subscribing
+ * only this wrapper keeps `<App />` element identity stable across retries;
+ * ErrorBoundary throttles same-error repeats, so a permanently bad block
+ * cannot spin at the host's patch frequency.
+ */
+function RootBoundary({ children }: { children: ReactNode }) {
+  const state = useChat((s) => s.state);
+  return (
+    <ErrorBoundary variant="page" resetKey={state}>
+      {children}
+    </ErrorBoundary>
+  );
+}
+
 createRoot(document.getElementById("root")!).render(
-  <ErrorBoundary variant="page">
+  <RootBoundary>
     <App />
-  </ErrorBoundary>,
+  </RootBoundary>,
 );

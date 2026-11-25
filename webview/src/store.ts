@@ -148,6 +148,13 @@ function blip(
   osc.connect(gain).connect(ctx.destination);
   osc.start(startAt);
   osc.stop(startAt + duration + 0.02);
+  // Release the graph nodes once the oscillator finishes. Without this every
+  // cue leaves an osc+gain pair connected to the destination for the lifetime
+  // of the AudioContext, which accumulates over a long webview session.
+  osc.onended = () => {
+    osc.disconnect();
+    gain.disconnect();
+  };
 }
 
 /**
@@ -161,7 +168,7 @@ function blip(
 function unlockAudio(): void {
   try {
     audioCtx ??= new AudioContext();
-    if (audioCtx.state === "suspended") void audioCtx.resume();
+    if (audioCtx.state === "suspended") void audioCtx.resume().catch(() => {});
   } catch {
     // Audio unavailable (headless/hostile env) — the cue is best-effort.
   }
@@ -181,16 +188,33 @@ function unlockAudio(): void {
 function playCue(kind: "done" | "error" | "child"): void {
   try {
     unlockAudio();
-    if (!audioCtx) return; // AudioContext construction failed in unlockAudio
-    const t = audioCtx.currentTime + 0.01;
-    if (kind === "done") {
-      blip(audioCtx, 659.25, t, 0.14, "sine", 0.08);
-      blip(audioCtx, 783.99, t + 0.13, 0.2, "sine", 0.08);
-    } else if (kind === "child") {
-      blip(audioCtx, 587.33, t, 0.11, "sine", 0.06);
+    const ctx = audioCtx;
+    if (!ctx || ctx.state === "closed") return; // Audio unavailable / closed
+    // Scheduling while the context is "suspended" pins notes to a frozen
+    // currentTime and they never sound even after a later resume. Schedule
+    // only once the context is actually running; the gesture pre-unlock in
+    // setupHostListener normally makes this a no-op, but turn-end cues can
+    // still arrive before the first gesture inside the webview.
+    const schedule = () => {
+      try {
+        const t = ctx.currentTime + 0.01;
+        if (kind === "done") {
+          blip(ctx, 659.25, t, 0.14, "sine", 0.08);
+          blip(ctx, 783.99, t + 0.13, 0.2, "sine", 0.08);
+        } else if (kind === "child") {
+          blip(ctx, 587.33, t, 0.11, "sine", 0.06);
+        } else {
+          blip(ctx, 220, t, 0.13, "square", 0.05);
+          blip(ctx, 174.61, t + 0.15, 0.2, "square", 0.05);
+        }
+      } catch {
+        // Audio unavailable (headless/hostile env) — the cue is best-effort.
+      }
+    };
+    if (ctx.state === "suspended") {
+      void ctx.resume().then(schedule).catch(() => {});
     } else {
-      blip(audioCtx, 220, t, 0.13, "square", 0.05);
-      blip(audioCtx, 174.61, t + 0.15, 0.2, "square", 0.05);
+      schedule();
     }
   } catch {
     // Audio unavailable (headless/hostile env) — the cue is best-effort.
@@ -2676,6 +2700,10 @@ function createMockHost(): HostApi {
         );
         return;
       }
+      // Dev/browser preview only: the real host handles every wire message,
+      // but the mock implements just the subset needed for UI iteration.
+      // Without a tripwire a missing handler looks like a dead button.
+      console.warn(`[iflow] mock host: unhandled webview message: ${(m as { type?: string }).type}`);
     },
   };
 }
@@ -2987,7 +3015,12 @@ export const useChat = create<ChatStore>((set, get) => ({
     // listeners — Composer registers those itself, so no re-dispatch happens here.
     if (msg.type === "snapshot") {
       setLocale(msg.locale);
-      const state = evict(msg.state);
+      // Same normalization as the superTranscript path: old-wire snapshots can
+      // carry blocks missing required fields (e.g. a text block with no
+      // `text`), which makes BlockView's `block.text.trim()` throw at render
+      // time and bubbles up to the page-level boundary. Valid arrays keep
+      // their identity, so memoized selectors are unaffected.
+      const state = evict({ ...msg.state, blocks: sanitizeTranscriptBlocks(msg.state.blocks) });
       const superTranscripts = pruneSuperTranscripts(
         get().superTranscripts,
         state.superSessions,
@@ -3019,11 +3052,12 @@ export const useChat = create<ChatStore>((set, get) => ({
       // booted without a snapshot, missed patch, out-of-bounds tail) triggers a
       // throttled full re-sync.
       const current = get().state;
-      const blocks = applyBlockPatch(current, msg);
-      if (!blocks) {
+      const patched = applyBlockPatch(current, msg);
+      if (!patched) {
         requestResync();
         return;
       }
+      const blocks = sanitizeTranscriptBlocks(patched);
       const state: SessionState = evict({ ...msg.tail, blocks });
       const superTranscripts = pruneSuperTranscripts(
         get().superTranscripts,
