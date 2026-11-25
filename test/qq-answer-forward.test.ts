@@ -623,7 +623,7 @@ describe("主会话渠道提问提醒转发（main）", () => {
     const config = f.service.config as QqConfig & { remotePolicy: string };
     config.remotePolicy = "readonly";
     const inject = vi.fn(async () => ({ injected: true, text: "不该出现" }));
-    (f.service.host as QqServiceHost & { injectIntoMainSession?: typeof inject }).injectIntoMainSession =
+    (f.service as unknown as { host: QqServiceHost & { injectIntoMainSession?: typeof inject } }).host.injectIntoMainSession =
       inject;
     await f.service.start();
     f.delivered.length = 0;

@@ -125,8 +125,9 @@ function ensureExecutable(bin: string): void {
 }
 
 /** Run a notification binary quietly with an argv array; resolves its exit code
- * (-1 for spawn failure / kill-guard timeout). Never rejects, never throws. */
-function runQuiet(exe: string, args: string[]): Promise<number> {
+ * (-1 for spawn failure / kill-guard timeout). Never rejects, never throws.
+ * Exported for unit tests that drive the child 'exit' event directly. */
+export function runQuiet(exe: string, args: string[]): Promise<number> {
   return new Promise((resolvePromise) => {
     let child: ChildProcess;
     try {
@@ -150,7 +151,10 @@ function runQuiet(exe: string, args: string[]): Promise<number> {
       clearTimeout(guard);
       resolvePromise(-1);
     });
-    child.on("exit", (_error, code) => {
+    // Node's 'exit' signature is (code, signal). The old `(_error, code)`
+    // handler read the signal as `code`, so `typeof code === "number"` was
+    // always false and every successful toast resolved -1 (→ IDE fallback).
+    child.on("exit", (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(guard);

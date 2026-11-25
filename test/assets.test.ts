@@ -33,8 +33,13 @@ function makeService(home: string, cwd: string) {
   return { service, messages };
 }
 
-function lastMessage(messages: HostToWebview[], type: string): HostToWebview {
-  const found = [...messages].reverse().find((m) => m.type === type);
+function lastMessage<T extends HostToWebview["type"]>(
+  messages: HostToWebview[],
+  type: T,
+): Extract<HostToWebview, { type: T }> {
+  const found = [...messages]
+    .reverse()
+    .find((m) => m.type === type) as Extract<HostToWebview, { type: T }> | undefined;
   if (!found) throw new Error(`no ${type} posted`);
   return found;
 }

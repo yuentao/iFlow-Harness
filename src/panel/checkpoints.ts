@@ -318,20 +318,24 @@ export class CheckpointManager {
   }
 
   /**
-   * Turn-count retention: rewrite the kept snapshots (oldest→newest order)
-   * into a fresh ancestor-free chain, anchor the head on refs/iflow/live,
-   * then `gc --prune=now` sweeps everything the dropped turns owned
-   * exclusively. The rewrite is REQUIRED: the original commits chain via
-   * parent links, so keeping only the newest would still make every older
-   * commit reachable and gc would delete nothing. Trees are shared via
-   * content addressing, so rewritten commits cost near-zero extra space and
-   * `checkout <newSha> -- .` restores identically.
+   * Turn-count retention, phase 1: rewrite the kept snapshots (oldest→newest
+   * order) into a fresh ancestor-free chain and anchor the head on
+   * refs/iflow/live. NO gc here — the caller must persist the rewritten sha
+   * mapping to the index file FIRST, then call {@link gcSession}. Otherwise a
+   * failed index write leaves the on-disk index pointing at shas that the gc
+   * is about to delete (rollback breaks after a restart).
+   *
+   * The rewrite is REQUIRED: the original commits chain via parent links, so
+   * keeping only the newest would still make every older commit reachable
+   * and gc would delete nothing. Trees are shared via content addressing, so
+   * rewritten commits cost near-zero extra space and `checkout <newSha> --
+   * .` restores identically.
    *
    * Returns old→new sha pairs (the caller rewrites its index). Throws when a
    * kept sha is missing or any git step fails — the caller keeps the old
    * index untouched and retries next turn.
    */
-  async pruneToKeptShas(
+  async rewriteKeptShas(
     sessionId: string,
     keptShas: readonly string[],
   ): Promise<Array<{ oldSha: string; newSha: string }>> {
@@ -357,8 +361,34 @@ export class CheckpointManager {
     // Anchor first, then prune: the live ref is the only thing keeping the
     // rewritten chain alive against --prune=now.
     if (parent) await this.git(state, ["update-ref", LIVE_REF, parent]);
-    await this.git(state, ["gc", "--prune=now"], this.timeoutMs * 6);
     state.lastSha = parent;
+    return mapping;
+  }
+
+  /**
+   * Turn-count retention, phase 2: `gc --prune=now` sweeps everything the
+   * dropped turns owned exclusively. Call ONLY after the caller has safely
+   * persisted the rewritten index (see {@link rewriteKeptShas}).
+   */
+  async gcSession(sessionId: string): Promise<void> {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.disabledReason) {
+      throw new Error("checkpoint session state is no longer available");
+    }
+    await this.git(state, ["gc", "--prune=now"], this.timeoutMs * 6);
+  }
+
+  /**
+   * Convenience wrapper: rewrite + gc in one shot. Kept for callers/tests
+   * that do not own an index file to persist in between (the panel's own
+   * retention path uses the two-phase methods above instead).
+   */
+  async pruneToKeptShas(
+    sessionId: string,
+    keptShas: readonly string[],
+  ): Promise<Array<{ oldSha: string; newSha: string }>> {
+    const mapping = await this.rewriteKeptShas(sessionId, keptShas);
+    await this.gcSession(sessionId);
     return mapping;
   }
 

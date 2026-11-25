@@ -5,6 +5,7 @@
  */
 
 import { inspect } from "node:util";
+import { Buffer } from "node:buffer";
 
 export interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -371,6 +372,17 @@ export class NdjsonParser {
       // loops forever on one line.
       off = nlOff + 1;
       if (line.length === 0) continue;
+      // M7: the end-of-feed guard below only ever sees the unterminated tail,
+      // so a >8MB frame that DOES carry a trailing newline was joined and
+      // JSON.parsed in full. Reject every complete line by byte length before
+      // parse — same 8MB ceiling, same onError/drop-and-continue policy.
+      if (Buffer.byteLength(line, "utf8") > NdjsonParser.MAX_BUFFER_BYTES) {
+        this.onError?.(
+          new Error(`ndjson frame exceeds ${NdjsonParser.MAX_BUFFER_BYTES} bytes — dropped`),
+          line.substring(0, NdjsonParser.ERROR_SAMPLE_BYTES),
+        );
+        continue;
+      }
       try {
         this.onMessage(JSON.parse(line));
       } catch (error) {
@@ -378,7 +390,11 @@ export class NdjsonParser {
       }
     }
     // Compact: drop fully consumed head chunks (amortized O(1) per feed).
-    if (this.consumed > 0) {
+    // consumedOffset > 0 with consumed === 0 means all complete lines lived in
+    // the first chunk — bufferedBytes still has to be recomputed, or the
+    // end-of-feed oversized check double-reports a line the loop already
+    // dropped via the M7 complete-line check.
+    if (this.consumed > 0 || this.consumedOffset > 0) {
       this.chunks = this.chunks.slice(this.consumed);
       this.consumed = 0;
       this.bufferedBytes = 0;
@@ -432,6 +448,8 @@ export type WireTap = (direction: "out" | "in", message: Record<string, unknown>
 export class JsonRpcPeer {
   private nextId = 0;
   private readonly pending = new Map<number | string, PendingRequest>();
+  /** M4: inbound requests whose reply was accepted but not yet written. */
+  private readonly inboundPending = new Set<number | string>();
   private readonly notificationHandlers = new Map<string, NotificationHandler>();
   private readonly requestHandlers = new Map<string, RequestHandler>();
   private readonly parser: NdjsonParser;
@@ -457,6 +475,16 @@ export class JsonRpcPeer {
     this.onUnparseableLineOverride?.(error, rawLine);
   }
 
+  /** Inbound requests still awaiting a successfully written reply (M4). */
+  get pendingInboundCount(): number {
+    return this.inboundPending.size;
+  }
+
+  /** Outbound requests still awaiting a response (L5 observability). */
+  get pendingRequestCount(): number {
+    return this.pending.size;
+  }
+
   /** Feed raw text (any chunk boundary). */
   handleData(chunk: string): void {
     this.parser.feed(chunk);
@@ -474,8 +502,13 @@ export class JsonRpcPeer {
       // Incoming request from the peer (e.g. requestPermission).
       const request = msg as JsonRpcRequest;
       const handler = this.requestHandlers.get(request.method);
+      // M4: track every accepted inbound request until its reply is actually
+      // written. A destroyed/EPIPE stdin makes send() throw; without a
+      // fallback the CLI waits forever for a reply it never received while
+      // the host has already dismissed the approval/question card.
+      this.inboundPending.add(request.id);
       if (!handler) {
-        this.reply({
+        this.deliverReply(request.id, request.method, {
           jsonrpc: "2.0",
           id: request.id,
           error: { code: JsonRpcErrorCode.MethodNotFound, message: `Method not supported: ${request.method}` },
@@ -485,9 +518,14 @@ export class JsonRpcPeer {
       Promise.resolve()
         .then(() => handler(request.params))
         .then(
-          (result) => this.reply({ jsonrpc: "2.0", id: request.id, result: result ?? {} }),
+          (result) =>
+            this.deliverReply(request.id, request.method, {
+              jsonrpc: "2.0",
+              id: request.id,
+              result: result ?? {},
+            }),
           (error: unknown) =>
-            this.reply({
+            this.deliverReply(request.id, request.method, {
               jsonrpc: "2.0",
               id: request.id,
               error: {
@@ -544,7 +582,17 @@ export class JsonRpcPeer {
         }, timeoutMs);
       }
       this.pending.set(id, pending);
-      this.send(JSON.stringify(message));
+      // L5: a synchronous send failure (destroyed stdin) used to leave the
+      // pending entry — and, for timeout>0, its timer — armed. Roll both back
+      // before rethrowing so a late response cannot resolve an already-failed
+      // request and the timer cannot keep the host alive.
+      try {
+        this.send(JSON.stringify(message));
+      } catch (error) {
+        this.clearPendingTimer(pending);
+        this.pending.delete(id);
+        throw error;
+      }
     });
   }
 
@@ -570,6 +618,30 @@ export class JsonRpcPeer {
       pending.reject({ code: JsonRpcErrorCode.InternalError, message });
     }
     this.pending.clear();
+    this.inboundPending.clear();
+  }
+
+  /**
+   * Write an inbound reply and clear its tracking entry. `send` writes
+   * straight to stdin and a destroyed stream throws synchronously; the
+   * previous implementation only logged, leaving the CLI waiting forever for
+   * a reply the host thought it had delivered (M4). The fallback rejects all
+   * pending outbound requests (including the in-flight prompt) so the host
+   * turn settles instead of requiring a manual Stop.
+   */
+  private deliverReply(id: number | string, method: string, message: JsonRpcResponse): void {
+    try {
+      this.reply(message);
+    } catch (error) {
+      // Keep the M5 wording intact — existing diagnostics/tests match it.
+      console.warn(
+        `[iflow-harness] failed to reply to request ${method}: ${errorMessage(error)}`,
+      );
+      this.inboundPending.delete(id);
+      this.rejectAll(`Failed to reply to agent request ${method}: ${errorMessage(error)}`);
+      return;
+    }
+    this.inboundPending.delete(id);
   }
 
   private reply(message: JsonRpcResponse): void {

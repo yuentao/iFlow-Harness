@@ -53,7 +53,7 @@ import type {
   McpServerStatusView,
   SessionSettings,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, ModelMetadataSource, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
 import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import {
@@ -72,13 +72,10 @@ import {
 import { checkpointLabelFromText } from "../../shared/checkpoints.js";
 import { ToolDiffService } from "./tool-diff-service.js";
 import { StatusPresenter } from "./status-presenter.js";
-import {
-  buildAddDirs,
-  buildWorkspaceRootsUi,
-  normalizeSelection,
-  rewriteRootMentions,
-  workspaceRootsFrom,
-} from "./workspace-roots.js";
+import { buildAddDirs, rewriteRootMentions } from "./workspace-roots.js";
+import { WorkspaceRootsService } from "./workspace-roots-service.js";
+import { SettingsWriteService } from "./settings-write-service.js";
+import { UsageProvenanceService, type AiMetadataStampEntry, type UsageOverridesCache } from "./usage-provenance-service.js";
 import { SessionPersistenceService, type PersistedTranscript } from "./session-persistence.js";
 import { CheckpointService } from "./checkpoint-service.js";
 import { SessionRestoreService, type RestoreOutcome } from "./session-restore.js";
@@ -156,8 +153,8 @@ import {
 import { discoverMemoryFiles } from "../memory/discovery.js";
 import { planCuration } from "../../shared/memory-curate.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
-import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
-import { normalizeModelId, parseContextWindowOverrides, parseCostTable, resolveContextWindowAuthority, resolveCostWithSource } from "../../shared/context-window.js";
+import { attachmentSessionDir, base64DecodedByteLength, sweepStaleAttachmentDirs } from "./attachments.js";
+import { parseContextWindowOverrides } from "../../shared/context-window.js";
 import {
   postContextWindowOverrides,
   saveContextWindowOverrides,
@@ -657,9 +654,12 @@ class CompressTimeoutError extends Error {
     super(vscode.l10n.t("压缩超时（超过 {0} 秒），已取消压缩。", seconds));
   }
 }
-/** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
+/** Cap on the DECODED bytes of an openImage attachment (8MB raw). A
  * webview-supplied data URL is untrusted input; an oversized one must be
- * rejected before it is materialized to disk. */
+ * rejected before it is materialized to disk. Compare against
+ * `base64DecodedByteLength`, never the base64 string length — the latter
+ * over-counts by ~1/3 and would silently cap raw images at ~6MB while the
+ * toast still promises 8MB. */
 const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 /** Picked images above this size fall back to plain file attachments. */
 const ATTACHMENT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
@@ -703,21 +703,12 @@ const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
 const WORKSPACE_PROFILE_KEY = "iflow.workspaceActiveProfile";
 /** workspaceState key: the last model selected in this workspace. */
 const WORKSPACE_MODEL_KEY = "iflow.workspaceActiveModel";
-/** workspaceState key (多仓库协作): 用户为**之后新建**的会话选中的目标根集合
- * （绝对路径数组）。它只是「下一个会话的偏好」——当前会话的 CLI 上下文与 cwd
- * 一律不动，已有会话的根集合记在会话索引的 `roots` 字段里。 */
-const SESSION_ROOTS_KEY = "iflow.sessionRoots";
 /** workspaceState key: first-run wizard skipped/finished (never auto-open it
  * again in this workspace once true). */
 const ONBOARDING_DISMISSED_KEY = "iflow.onboardingDismissed";
 /** globalState key: cross-window cache of the resolved node runtime
  * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
-/** globalState key: user-settings writes stashed because this window's
- * configuration registry has not loaded their declaration yet (an in-place
- * extension upgrade keeps the renderer on the previous manifest). Replayed by
- * `applyPendingSettings` once the reloaded window knows the key again. */
-const PENDING_SETTINGS_KEY = "iflow.pendingSettingsWrites";
 /** `iflow.uiFontSize` presets — kept in sync with shared/messages.ts. */
 const UI_FONT_SIZES = ["compact", "standard", "large"] as const;
 /** `iflow.uiDensity` presets — kept in sync with shared/messages.ts. */
@@ -1052,6 +1043,18 @@ export class ChatPanel implements vscode.Disposable {
    * "Diff revert" section are thin delegates to this instance, so the
    * webview-message switch and tests keep their existing contract. */
   private readonly toolDiff: ToolDiffService;
+  /** 多仓库协作：工作区根目录管理（目标根子集、投影三态、add_dirs）外迁到
+   * `WorkspaceRootsService`。下方同名方法都是薄委托，供 webview 消息分派、
+   * SessionRestoreService deps 与既有测试零改动调用。 */
+  private readonly workspaceRootsService: WorkspaceRootsService;
+  /** 设置写入簇：`iflow.*` 读/写与未注册键暂存外迁到 `SettingsWriteService`。
+   * 下方同名方法都是薄委托，约 40 处 readUserSetting 调用、webview 消息分派、
+   * 其它服务注入的 deps、extension.ts 与既有测试契约一律不变。 */
+  private readonly settingsWriteService: SettingsWriteService;
+  /** 用量来源解析：窗口/成本的五档权威链 + T-9 AI provenance 外迁到
+   * `UsageProvenanceService`。下方 `usageOverridesCache` 访问器与两个同名方法
+   * 都是薄委托，配置变更失效点、store 回调与既有测试契约零改动。 */
+  private readonly usageProvenanceService: UsageProvenanceService;
   private connecting: Promise<void> | null = null;
   /**
    * Handshake generation counter (P0-3 restart escape). restartCli bumps it
@@ -1750,6 +1753,19 @@ export class ChatPanel implements vscode.Disposable {
     private readonly services: PanelServices = {},
   ) {
     this.log = vscode.window.createOutputChannel(vscode.l10n.t("心流·驭光"), { log: true });
+    // 设置写入簇：构造期即实例化——下方 MaintenanceScheduler 初始化会调用
+    // readUserSetting。所有 panel/VSCode 状态仍通过箭头回调在调用时读取（陷阱 #8），
+    // 这里只固定回调，不固定 store/config/globalState 快照；update() 单键合并到
+    // Global，失败 toast 由服务带出真实错误原因。
+    this.settingsWriteService = new SettingsWriteService({
+      getConfiguration: (section) => vscode.workspace.getConfiguration(section),
+      getGlobalState: () => this.context.globalState,
+      sendToast: (level, message, opts) =>
+        opts === undefined
+          ? this.store.sendToast(level, message)
+          : this.store.sendToast(level, message, opts),
+      warn: (message) => this.log.warn(message),
+    });
     // SuperAgentHost (阶段 6): construct eagerly so `this` is bound to this panel;
     // all callbacks read panel state at CALL TIME (never a stale snapshot).
     this._superHost = this.buildSuperHost();
@@ -1852,6 +1868,23 @@ export class ChatPanel implements vscode.Disposable {
       post: (m) => this.postToWebview(m),
     });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m), language: vscode.env.language });
+    // 用量来源解析：字段与方法都在服务内，deps 全是调用时读取的箭头回调
+    // （陷阱 #8）。store 上面刚建好，但即便此刻尚未建好也不会被捕获 —— 唯一
+    // 调用入口是下方 store.getUsageContext 在 push 时的回调，构造期不触发。
+    this.usageProvenanceService = new UsageProvenanceService({
+      readUserSetting: <T>(key: string, fallback: T): T => this.readUserSetting(key, fallback),
+      getCurrentModelId: () => this.store.getState().currentModelId,
+      readKernelTokensLimits: () => readKernelTokensLimits(),
+    });
+    // 工作区根目录管理：所有 panel 状态在调用时通过箭头回调读取（陷阱 #8），
+    // 构造期只固定回调，不固定 services.workspaceRoot / workspaceFolders 快照。
+    this.workspaceRootsService = new WorkspaceRootsService({
+      getWorkspaceState: () => this.context.workspaceState,
+      getState: () => this.store.getState(),
+      setWorkspaceRoots: (value) => this.store.setWorkspaceRoots(value),
+      getWorkspaceRoot: () => this.services.workspaceRoot,
+      getWorkspace: () => vscode.workspace,
+    });
     this.toolDiff = new ToolDiffService({
       log: { warn: (m) => this.log.warn(m) },
       // sessionCwd is read at call time — never pass a context-snapshot base
@@ -2243,6 +2276,9 @@ export class ChatPanel implements vscode.Disposable {
     this.stopSuperHeartbeat();
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
     this.store.setSuperWaiting(false);
+    // setSuperWaiting(false) 可能幂等早退而没 flush；无条件清掉待触发的
+    // flushTimer，避免销毁后仍推一次 postSnapshot（L1）。
+    this.store.dispose();
     this.cancelAllProfileSwitches();
     this.cancelAllSuperResidueConfirms();
     this.clearPostRejectionWatchdog();
@@ -2554,6 +2590,10 @@ export class ChatPanel implements vscode.Disposable {
     msg: Extract<WebviewToHost, { type: "stageFiles" }>,
   ): Promise<void> {
     const MAX_BASE64_LEN = 50 * 1024 * 1024 * 1.34; // ~50MB decoded + base64 slack
+    // Buffer.from(str, "base64") is lenient: illegal chars and stray padding
+    // are skipped, so malformed data used to become a truncated file that was
+    // still reported as staged. Canonical base64 (padded or unpadded) only.
+    const BASE64_PAYLOAD_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
     const sessionId = this.store.getState().sessionId ?? "adhoc";
     // A7: the layout lives in attachments.ts so the sweeper and the
     // session-delete cleanup resolve the exact same dir.
@@ -2564,6 +2604,7 @@ export class ChatPanel implements vscode.Disposable {
     for (const file of msg.files) {
       try {
         if (file.data.length > MAX_BASE64_LEN) throw new Error("attachment too large");
+        if (!BASE64_PAYLOAD_RE.test(file.data)) throw new Error("attachment data is not valid base64");
         const safeName =
           path
             .basename(file.name)
@@ -2894,7 +2935,9 @@ export class ChatPanel implements vscode.Disposable {
         await this.setSessionRoots(msg.roots);
         break;
       case "stageFiles":
-        void this.stageDroppedFiles(msg);
+        void this.stageDroppedFiles(msg).catch((error) =>
+          this.log.warn(`stageFiles failed: ${errorMessage(error)}`),
+        );
         break;
       case "pickAttachments":
         void this.pickAttachments();
@@ -3485,6 +3528,11 @@ export class ChatPanel implements vscode.Disposable {
     this.postToWebview({ type: "theme", kind: light ? "light" : "dark", auroraIntensity });
   }
 
+  // --- 设置写入簇 -------------------------------------------------------------
+  // panel.ts 拆分：方法体已外迁到 `SettingsWriteService`；这里保留同名薄委托，
+  // 供约 40 处 readUserSetting 调用、webview 消息分派、其它服务 deps、
+  // extension.ts 与既有测试零改动调用。
+
   /** True when the running window's configuration registry knows this key's
    * default layer. `get()` is NOT a valid probe — it also reads the user's
    * settings.json; `inspect().defaultValue` comes from the registry only.
@@ -3492,14 +3540,13 @@ export class ChatPanel implements vscode.Disposable {
    * an undefined defaultValue means the declaration is missing from this
    * window (in-place extension upgrade: the renderer keeps the old manifest
    * until the window reloads). */
-  private isUserSettingRegistered(key: string): boolean {
-    const info = vscode.workspace.getConfiguration("iflow").inspect(key);
-    return info !== undefined && info.defaultValue !== undefined;
+  isUserSettingRegistered(key: string): boolean {
+    return this.settingsWriteService.isUserSettingRegistered(key);
   }
 
   /** Current stash of settings writes waiting for their declaration. */
-  private pendingSettingsWrites(): Record<string, unknown> {
-    return { ...(this.context.globalState.get<Record<string, unknown>>(PENDING_SETTINGS_KEY) ?? {}) };
+  pendingSettingsWrites(): Record<string, unknown> {
+    return this.settingsWriteService.pendingSettingsWrites();
   }
 
   /** Read one `iflow.*` setting with the stash as the top layer.
@@ -3511,9 +3558,7 @@ export class ChatPanel implements vscode.Disposable {
    * once `applyPendingSettings` lands it on disk the stash is dropped and the
    * configuration layer takes over. */
   private readUserSetting<T>(key: string, fallback: T): T {
-    const pending = this.pendingSettingsWrites();
-    if (Object.prototype.hasOwnProperty.call(pending, key)) return pending[key] as T;
-    return vscode.workspace.getConfiguration("iflow").get<T>(key, fallback);
+    return this.settingsWriteService.readUserSetting(key, fallback);
   }
 
   /** Same read for activation-time callers outside the panel (extension.ts):
@@ -3524,34 +3569,20 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Stash one write in globalState (never on disk): it is replayed by
    * `applyPendingSettings` once the key is registered again. */
-  private async stashPendingSetting(key: string, value: unknown): Promise<void> {
-    const pending = this.pendingSettingsWrites();
-    pending[key] = value;
-    await this.context.globalState.update(PENDING_SETTINGS_KEY, pending);
+  async stashPendingSetting(key: string, value: unknown): Promise<void> {
+    await this.settingsWriteService.stashPendingSetting(key, value);
   }
 
   /** Drop one stashed write (it landed, or a fresh write superseded it). */
-  private async dropPendingSetting(key: string): Promise<void> {
-    const pending = this.pendingSettingsWrites();
-    if (!(key in pending)) return;
-    delete pending[key];
-    await this.context.globalState.update(PENDING_SETTINGS_KEY, pending);
+  async dropPendingSetting(key: string): Promise<void> {
+    await this.settingsWriteService.dropPendingSetting(key);
   }
 
   /** Replay stashed writes whose declarations this window registers now (i.e.
    * after the reload the stashing toast asked for). Keys still unregistered
    * stay stashed for the next attempt. */
   private async applyPendingSettings(): Promise<void> {
-    for (const [key, value] of Object.entries(this.pendingSettingsWrites())) {
-      if (!this.isUserSettingRegistered(key)) continue;
-      try {
-        await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
-        await this.dropPendingSetting(key);
-      } catch (error) {
-        // Keep the stash: the next window may be able to write it.
-        this.log.warn(`failed to apply stashed setting ${key}: ${errorMessage(error)}`);
-      }
-    }
+    await this.settingsWriteService.applyPendingSettings();
   }
 
   /** Write one panel-owned setting to USER settings (the scope VSCode
@@ -3562,40 +3593,7 @@ export class ChatPanel implements vscode.Disposable {
    * (a caller that has to react to a failed write uses the return value —
    * the toast is emitted here, so nobody double-toasts). */
   private async writeUserSetting(key: string, value: unknown, label?: string): Promise<boolean> {
-    if (!this.isUserSettingRegistered(key)) {
-      // An in-place upgrade leaves this window on the previous manifest, so
-      // VSCode rejects the write with "not a registered configuration". Stash
-      // it and tell the user the one action that makes it land.
-      await this.stashPendingSetting(key, value);
-      this.store.sendToast(
-        "warning",
-        vscode.l10n.t(
-          "设置「{0}」属于刚更新的扩展版本，本窗口还没加载它的定义，已暂存并立即生效；请重启 VS Code（先试重新加载窗口，仍无效则完全退出再启动）。",
-          label ?? key,
-        ),
-        {
-          sticky: true,
-          action: { actionId: "reload-window", label: vscode.l10n.t("重新加载窗口") },
-        },
-      );
-      return false;
-    }
-    try {
-      await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
-      await this.dropPendingSetting(key);
-      return true;
-    } catch (error) {
-      const detail = errorMessage(error);
-      this.log.warn(`failed to update ${key}: ${detail}`);
-      // A silent failure made the control look like it "snapped back" on its
-      // own — say which setting could not be written (the value the user sees
-      // is the one VSCode still has on disk). The rejection reason is the only
-      // clue the user has (read-only settings.json, invalid JSON, schema
-      // rejection, unknown key), so it rides along in the toast instead of
-      // staying in the Output log.
-      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}（{1}）", label ?? key, detail));
-      return false;
-    }
+    return this.settingsWriteService.writeUserSetting(key, value, label);
   }
 
   /** The capabilities the context-window-override module needs from the
@@ -5166,140 +5164,36 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- M1: context occupancy (P0-6) + cost (P1-6) ------------------------------
 
-  /** Cached parse of the two usage settings (invalidated on config change —
-   * `resolveUsageContext` runs on EVERY store push, so re-parsing the arrays
-   * per push would waste work during streaming). */
-  private usageOverridesCache: { overrides: Record<string, number>; cost: Record<string, { input: number; output: number }> } | null = null;
+  /** Thin delegate onto the service's parsed-settings cache. The config-change
+   *  handler and existing tests keep assigning `panel.usageOverridesCache` —
+   *  the setter forwards to the service, which remains the single owner of
+   *  the in-memory state. Full contract lives in UsageProvenanceService. */
+  private get usageOverridesCache(): UsageOverridesCache | null {
+    return this.usageProvenanceService.usageOverridesCache;
+  }
+  private set usageOverridesCache(value: UsageOverridesCache | null) {
+    this.usageProvenanceService.usageOverridesCache = value;
+  }
 
-  /**
-   * T-9 in-memory provenance for values appended by the 「联网补充模型数据」
-   * flow. That flow APPENDS AI-supplied `name=value` rows into the SAME
-   * `contextWindowOverrides` / `costTable` settings as hand-typed rows, so
-   * T-8's `resolveContextWindowWithSource` / `resolveCostWithSource` can only
-   * report `user` for both (documented in shared/context-window.ts). This map
-   * is the ONLY distinction: keyed by normalized model id, it records which
-   * kind of value the AI appended, its exact value (so a later hand-edit stops
-   * being labeled ai-supplement), the citation URL and the capture time.
-   * Purely in-memory — no settings disk format is touched, so user settings
-   * stay compatible; a process restart simply drops the tags while the values
-   * remain honest user overrides.
-   */
-  private aiMetadataStamp: Map<string, {
-    window?: { value: number; sourceUrl?: string; capturedAt: number };
-    cost?: { value: { input: number; output: number }; sourceUrl?: string; capturedAt: number };
-  }> = new Map();
+  /** Thin delegate onto the service's in-memory AI provenance map. Public so
+   *  host-side internals/tests can still inspect the shared stamp instance;
+   *  the service remains its single owner. */
+  get aiMetadataStamp(): Map<string, AiMetadataStampEntry> {
+    return this.usageProvenanceService.aiMetadataStamp;
+  }
 
-  /** Record AI-supplement provenance for the rows actually appended by
-   * `planMetadataAdditions` (pre-existing user rows are never stamped). Called
-   * right before the setting writes in the metadata fetch flow. */
+  /** Thin delegate — full T-9 contract lives in UsageProvenanceService. */
   private recordAiMetadataStamp(
     entries: readonly ModelMetadataEntry[],
     sources: readonly MetadataSource[],
     additions: MetadataAdditions,
   ): void {
-    const windowKeys = new Set(additions.windows.map((line) => normalizeModelId(line.slice(0, line.indexOf("=")))));
-    const costKeys = new Set(additions.costs.map((line) => normalizeModelId(line.slice(0, line.indexOf("=")))));
-    if (windowKeys.size === 0 && costKeys.size === 0) return;
-    const capturedAt = Date.now();
-    for (const entry of entries) {
-      const key = normalizeModelId(entry.name);
-      if (!key) continue;
-      const sourceUrl = entry.source ? sources.find((s) => s.id === entry.source)?.url : undefined;
-      const stamp = this.aiMetadataStamp.get(key) ?? {};
-      if (windowKeys.has(key) && entry.contextWindow !== undefined) {
-        stamp.window = { value: entry.contextWindow, capturedAt, ...(sourceUrl ? { sourceUrl } : {}) };
-      }
-      if (costKeys.has(key) && entry.inputPrice !== undefined && entry.outputPrice !== undefined) {
-        stamp.cost = {
-          value: { input: entry.inputPrice, output: entry.outputPrice },
-          capturedAt,
-          ...(sourceUrl ? { sourceUrl } : {}),
-        };
-      }
-      if (stamp.window || stamp.cost) this.aiMetadataStamp.set(key, stamp);
-    }
+    this.usageProvenanceService.recordAiMetadataStamp(entries, sources, additions);
   }
 
-  /** Resolve the store's usage context: the five-tier authority chain
-   * (user override → active profile → settings top-level → curated table →
-   * no authority), together with the provenance of each number (T-8) and the
-   * ai-supplement relabel (T-9). Value and label come from the SAME resolver
-   * call so they can never drift. Synchronous and cheap (per push).
-   *
-   * 2026-11-22：占用条与 CLI 现在走**同一个** resolver
-   * （`shared/context-window.ts` 的 `resolveContextWindowAuthority`）——
-   * 此前占用条只认「override → 内建表」，推给 CLI 的窗口还多认「profile 档 →
-   * settings 顶层档」两档，于是同一个模型在面板显示的窗口与 CLI 用的窗口会
-   * 分叉（实测：profile tokensLimit=128000 的 auto/deepseek-v4.1-flash，占用条
-   * 显示内建表的 1,000,000）。现在占用条显示的窗口 == 推给 CLI 的
-   * `IFLOW_TOKENS_LIMIT` == `session/set_tokens_limit` 推送的值。
-   *
-   * 无依据（任何一档都没有落地数值）时**不显示分母**：占用条只显示原始 token
-   * 数，不给出一个与 CLI 不同的猜测值（旧的 32,768 兜底估算正是「一个模型
-   * 两个窗口」的残留）。 */
+  /** Thin delegate — the occupancy bar and the CLI share the service's resolver. */
   private resolveUsageContext(): UsageContext {
-    let cached = this.usageOverridesCache;
-    if (!cached) {
-      cached = {
-        overrides: parseContextWindowOverrides(this.readUserSetting<string[]>("contextWindowOverrides", [])),
-        cost: parseCostTable(this.readUserSetting<string[]>("costTable", [])),
-      };
-      this.usageOverridesCache = cached;
-    }
-    const modelId = this.store.getState().currentModelId;
-    // 内核两档（活动 profile 的 tokensLimit / settings 顶层 tokensLimit）由
-    // 内核 settings.json 提供；读取带 mtime 缓存（占用条每次推送都要用）。
-    const { profileTokensLimit, settingsTokensLimit } = readKernelTokensLimits();
-    const win = resolveContextWindowAuthority({
-      modelId,
-      overrides: cached.overrides,
-      profileTokensLimit,
-      settingsTokensLimit,
-    });
-    const cost = resolveCostWithSource(modelId, cached.cost);
-    // 有窗口才有出处：模型 id 为空时（窗口是端点级别的上限，不是某个模型的
-    // 窗口）不显示窗口，也不标来源。
-    let windowSource: ModelMetadataSource | null = modelId ? (win.source ?? null) : null;
-    let costSource: ModelMetadataSource | null = cost.source;
-    let capturedAt: number | undefined;
-    let sourceUrl: string | undefined;
-
-    const key = normalizeModelId(modelId);
-    if (key) {
-      const aiStamp = this.aiMetadataStamp.get(key);
-      // Relabel ONLY a winning "user" override whose exact value still matches
-      // what the AI flow appended. A hand-typed override — or a later hand edit
-      // of an AI value — stays / returns to `user`, never a false
-      // `ai-supplement`. T-5's contextUsed/split sources are produced
-      // downstream (estimateSessionUsage + kernel overlay) and left untouched.
-      if (aiStamp?.window && win.source === "user" && cached.overrides[key] === aiStamp.window.value) {
-        windowSource = "ai-supplement";
-        capturedAt = aiStamp.window.capturedAt;
-        if (aiStamp.window.sourceUrl) sourceUrl = aiStamp.window.sourceUrl;
-      }
-      if (aiStamp?.cost && cost.source === "user") {
-        const live = cached.cost[key];
-        if (live && live.input === aiStamp.cost.value.input && live.output === aiStamp.cost.value.output) {
-          costSource = "ai-supplement";
-          if (capturedAt === undefined) capturedAt = aiStamp.cost.capturedAt;
-          if (sourceUrl === undefined) sourceUrl = aiStamp.cost.sourceUrl;
-        }
-      }
-    }
-
-    return {
-      // 没有模型 id ⇒ 没有「这个模型的窗口」可言（profile / settings 两档与
-      // 模型无关，但那是端点级别的上限，不能当成某个模型的窗口显示）。
-      contextWindow: modelId ? (win.limit ?? null) : null,
-      // 显示出来的窗口永远是有依据的值（要么来自五档权威链），所以这里不再
-      // 有「估算」形态：宁可没有分母，也不显示一个猜测的分母。
-      estimated: false,
-      costPrice: cost.price,
-      windowSource,
-      costSource,
-      ...(capturedAt !== undefined ? { capturedAt } : {}),
-      ...(sourceUrl !== undefined ? { sourceUrl } : {}),
-    };
+    return this.usageProvenanceService.resolveUsageContext();
   }
 
   /**
@@ -5460,8 +5354,14 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  /** Re-entrancy guard for the turn-end auto-compress (one compress turn at a time). */
+  /**
+   * Legacy global override flag. Older callers/tests can still set this to
+   * suppress turn-end compression outright; the host itself no longer writes
+   * it — the real guard is the per-session set below.
+   */
   private autoCompressInFlight = false;
+  /** Per-session re-entrancy guard: one compress turn per session at a time. */
+  private readonly autoCompressSessions = new Set<string>();
 
   /**
    * Turn-end PROACTIVE compression. The overflow path in promptWithRetry is
@@ -5480,16 +5380,17 @@ export class ChatPanel implements vscode.Disposable {
    *   bar now shows NO window instead of a guessed one);
    * - only a truly idle session (streaming/connecting/init/replay windows
    *   and pending approval/question cards stay untouched);
-   * - `autoCompressInFlight` keeps one compress turn at a time; a failed
-   *   compression is logged + warned, never escalated to the error banner
-   *   (the user's next real prompt still has the reactive overflow path).
+   * - `autoCompressSessions` keeps one compress turn per session at a time (a
+   *   different session may compress concurrently); a failed compression is
+   *   logged + warned, never escalated to the error banner (the user's next
+   *   real prompt still has the reactive overflow path).
    *
    * Returns true when a `/compress` turn actually ran. Callers use this to
    * skip turn-end memory extraction: a compression turn must not trigger
    * automatic memory capture (the user's next real turn still will).
    */
   private async maybeAutoCompressOnIdle(sessionId: string): Promise<boolean> {
-    if (this.disposed || this.autoCompressInFlight || this.historySyncBusy) return false;
+    if (this.disposed || this.autoCompressInFlight || this.autoCompressSessions.has(sessionId) || this.historySyncBusy) return false;
     // Opt-in (default off): a turn-end compress adds a whole extra turn and
     // rewrites the model's context, so the user must enable it explicitly in
     // the settings panel. The reactive overflow path in promptWithRetry is
@@ -5506,7 +5407,7 @@ export class ChatPanel implements vscode.Disposable {
     // Threshold is user-configurable (`iflow.autoCompressThresholdPercent`).
     const threshold = this.autoCompressThresholdRatio();
     if (ratio < threshold) return false;
-    this.autoCompressInFlight = true;
+    this.autoCompressSessions.add(sessionId);
     const toastId = this.store.sendToast(
       "info",
       vscode.l10n.t("上下文接近上限，自动压缩会话…"),
@@ -5543,7 +5444,7 @@ export class ChatPanel implements vscode.Disposable {
       );
       this.store.endCompressTurn();
     } finally {
-      this.autoCompressInFlight = false;
+      this.autoCompressSessions.delete(sessionId);
       this.store.dismissToast(toastId);
     }
     return compressed;
@@ -5966,7 +5867,7 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.window.showWarningMessage(vscode.l10n.t("无法打开该图片附件（数据格式异常）"));
       return;
     }
-    if (match[2]!.length > MAX_IMAGE_ATTACHMENT_BYTES) {
+    if (base64DecodedByteLength(match[2]!) > MAX_IMAGE_ATTACHMENT_BYTES) {
       void vscode.window.showWarningMessage(
         vscode.l10n.t("图片附件过大（超过 {0} MB），已拒绝打开", Math.floor(MAX_IMAGE_ATTACHMENT_BYTES / 1024 / 1024)),
       );
@@ -5984,26 +5885,24 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   // --- 多仓库协作：目标根子集 ------------------------------------------------
+  // panel.ts 拆分：方法体已外迁到 `WorkspaceRootsService`；这里保留同名薄委托，
+  // webview 消息分派 / SessionRestoreService deps / 既有测试的调用契约不变。
 
   /** 当前工作区根的单一来源（realpath + 去重 + 稳定排序，第一根保持 VSCode
    * 第一个文件夹 —— 进程 cwd 依赖它）。 */
   private workspaceRootInfos(): WorkspaceRootUi[] {
-    return workspaceRootsFrom(vscode.workspace);
+    return this.workspaceRootsService.workspaceRootInfos();
   }
 
-  /** 用户为「之后的新会话」选中的根（workspaceState 持久化，未知路径被丢弃）。 */
-  private selectedSessionRoots(roots: readonly WorkspaceRootUi[]): string[] {
-    const stored = this.context.workspaceState.get<string[]>(SESSION_ROOTS_KEY, []);
-    return normalizeSelection(stored, roots);
+  /** 用户为「之后的新会话」选中的根（workspaceState 持久化，未知路径被丢弃）。
+   * 外迁后 panel 内部已无调用者，作为兼容入口保留（非 private 以避免 TS6133）。 */
+  selectedSessionRoots(roots: readonly WorkspaceRootUi[]): string[] {
+    return this.workspaceRootsService.selectedSessionRoots(roots);
   }
 
-  /** 当前会话的 CLI 实际使用的根（存于会话索引的 `roots` 字段）。 */
-  private appliedSessionRoots(): string[] | null {
-    const state = this.store.getState();
-    const id = state.activeSessionId ?? state.sessionId;
-    if (!id) return null;
-    const summary = state.sessions.find((s) => s.id === id);
-    return summary?.roots ?? null;
+  /** 当前会话的 CLI 实际使用的根（存于会话索引的 `roots` 字段）。兼容入口同上。 */
+  appliedSessionRoots(): string[] | null {
+    return this.workspaceRootsService.appliedSessionRoots();
   }
 
   /**
@@ -6015,17 +5914,7 @@ export class ChatPanel implements vscode.Disposable {
    * 单根工作区不渲染选择器，投影写 null。
    */
   private publishWorkspaceRoots(applied?: readonly string[] | null): void {
-    const roots = this.workspaceRootInfos();
-    if (roots.length <= 1) {
-      this.store.setWorkspaceRoots(null);
-      return;
-    }
-    const selected = this.selectedSessionRoots(roots);
-    const appliedRoots =
-      applied === undefined
-        ? this.store.getState().workspaceRoots?.applied ?? this.appliedSessionRoots() ?? null
-        : applied;
-    this.store.setWorkspaceRoots(buildWorkspaceRootsUi(roots, selected, appliedRoots));
+    this.workspaceRootsService.publishWorkspaceRoots(applied);
   }
 
   /**
@@ -6033,14 +5922,7 @@ export class ChatPanel implements vscode.Disposable {
    * cwd 与 ensureClient 同源（`services.workspaceRoot` 测试钩子优先）。
    */
   private sessionAddDirs(): string[] | null {
-    const roots = this.workspaceRootInfos();
-    if (roots.length <= 1) return null;
-    const cwd =
-      this.services.workspaceRoot ??
-      roots[0]?.path ??
-      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
-      null;
-    return buildAddDirs(this.selectedSessionRoots(roots), roots, cwd);
+    return this.workspaceRootsService.sessionAddDirs();
   }
 
   /**
@@ -6053,12 +5935,7 @@ export class ChatPanel implements vscode.Disposable {
    * 语义容易被误读成「工作区丢了」），UI 也会阻止取消最后一个根。
    */
   private async setSessionRoots(roots: readonly string[]): Promise<void> {
-    const all = this.workspaceRootInfos();
-    if (all.length <= 1) return;
-    const normalized = normalizeSelection(roots, all);
-    const next = normalized.length > 0 ? normalized : all.map((r) => r.path);
-    await this.context.workspaceState.update(SESSION_ROOTS_KEY, next);
-    this.publishWorkspaceRoots();
+    await this.workspaceRootsService.setSessionRoots(roots);
   }
 
   /**
@@ -6067,10 +5944,7 @@ export class ChatPanel implements vscode.Disposable {
    * 重载不换会话，根可见范围必须保持不变，否则收紧过的会话会被悄悄放宽。
    */
   private currentSessionAddDirs(): string[] | null {
-    const all = this.workspaceRootInfos();
-    if (all.length <= 1) return null;
-    const cwd = this.services.workspaceRoot ?? all[0]?.path ?? null;
-    return buildAddDirs(this.appliedSessionRoots(), all, cwd);
+    return this.workspaceRootsService.currentSessionAddDirs();
   }
 
   /**
@@ -7099,8 +6973,9 @@ export class ChatPanel implements vscode.Disposable {
         void this.persistActiveTranscript();
         this.store.replaceState(newSessionState(this.store.getState()));
         // The stale currentModelId belongs to the previous endpoint — keep it
-        // out of restoreSession's fallback chain.
-        this.store.getState().currentModelId = null;
+        // out of restoreSession's fallback chain. Use the reducer-backed store
+        // port instead of mutating getState() in place (L3).
+        this.store.sessionMeta({ currentModelId: null });
         // startNewSession applies this (the NEW profile's model) via set_model.
         this.pendingSwitchModel = creds.modelName;
         this.store.markConnecting();
@@ -7150,8 +7025,8 @@ export class ChatPanel implements vscode.Disposable {
     // wait up to 3s and the new CLI boot 10-60s — feedback must be immediate.
     this.store.replaceState(newSessionState(this.store.getState()));
     // The stale currentModelId belongs to the previous endpoint — keep it out
-    // of restoreSession's fallback chain.
-    this.store.getState().currentModelId = null;
+    // of restoreSession's fallback chain. Reducer port, not in-place (L3).
+    this.store.sessionMeta({ currentModelId: null });
     // Next session start defaults to the NEW profile's configured modelName
     // (user directive) and pushes it to the CLI via set_model.
     this.pendingSwitchModel = creds.modelName;

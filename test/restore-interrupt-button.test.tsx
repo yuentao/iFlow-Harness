@@ -68,6 +68,7 @@ function state(overrides: Partial<SessionState> = {}): SessionState {
     nextStepSuggestions: [],
     nextStepLoading: false,
     ...overrides,
+    qqTasks: overrides.qqTasks ?? [],
   };
 }
 

@@ -71,6 +71,7 @@ function idleState(superWaiting: boolean): SessionState {
     checkpoints: [],
     nextStepSuggestions: [],
     nextStepLoading: false,
+    qqTasks: [],
   };
 }
 

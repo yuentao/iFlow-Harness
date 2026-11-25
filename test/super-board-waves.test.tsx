@@ -260,7 +260,7 @@ describe("诊断视图 · 跨子会话时间线", () => {
       title: "甲",
       status: "failed",
       diagnostics: [
-        { at: 100, kind: "tool", level: "info", message: "调用工具" },
+        { at: 100, kind: "tool_call", level: "info", message: "调用工具" },
         { at: 400, kind: "error", level: "error", message: "网关 503", detail: "重试 3 次" },
       ],
       lastError: { kind: "retryable", message: "网关 503", at: 400 },
@@ -269,7 +269,7 @@ describe("诊断视图 · 跨子会话时间线", () => {
       id: "b",
       title: "乙",
       status: "completed",
-      diagnostics: [{ at: 300, kind: "tool", level: "warn", message: "命令超时" }],
+      diagnostics: [{ at: 300, kind: "tool_call", level: "warn", message: "命令超时" }],
     }),
   ];
 

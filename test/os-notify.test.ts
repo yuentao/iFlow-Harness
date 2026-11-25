@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import path from "node:path";
 import {
   MAX_NOTIFY_CHARS,
-  OS_NOTIFY_OPEN_URI,
   buildOsascriptNotificationScript,
   buildSnoreToastArgs,
   buildTerminalNotifierArgs,

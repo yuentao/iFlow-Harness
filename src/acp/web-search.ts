@@ -179,7 +179,14 @@ function fetchText(url: string, timeoutMs: number, redirectsLeft = MAX_REDIRECTS
         res.on("error", () => done(""));
       },
     );
-    req.setTimeout(timeoutMs, () => req.destroy());
+    req.setTimeout(timeoutMs, () => {
+      // Settle before tearing down the socket: destroy() does not reliably
+      // emit 'error' on every Node version / socket state, and done() is the
+      // only guarantee this promise resolves. done() is idempotent, so the
+      // error handler below firing afterwards is harmless.
+      done("");
+      req.destroy();
+    });
     req.on("error", () => done(""));
     req.end();
   });
@@ -283,7 +290,12 @@ function fetchBytes(url: string, timeoutMs: number, redirectsLeft = MAX_REDIRECT
         res.on("error", () => done(null));
       },
     );
-    req.setTimeout(timeoutMs, () => req.destroy());
+    req.setTimeout(timeoutMs, () => {
+      // Same contract as fetchText: settle with the failure value first,
+      // then tear down the socket — never rely on destroy()'s error event.
+      done(null);
+      req.destroy();
+    });
     req.on("error", () => done(null));
     req.end();
   });

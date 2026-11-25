@@ -163,7 +163,7 @@ it.each([
 
   openLiveProgress();
 
-  const renderErrors = captured.filter(a => String(a[0]).includes("render error"));
+  const renderErrors = captured.filter((a: unknown) => String((a as unknown[])[0]).includes("render error"));
   expect(renderErrors).toHaveLength(0);
   expect(document.body.textContent).not.toContain("界面出错了");
   // 弹窗正常打开（aria-label 来自 SuperSessionLive 的 ModalShell）。

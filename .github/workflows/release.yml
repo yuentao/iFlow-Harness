@@ -31,6 +31,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check i18n single source
+        run: npm run l10n:check
+
       - name: Typecheck
         run: npm run typecheck
 

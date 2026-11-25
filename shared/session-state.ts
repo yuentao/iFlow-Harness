@@ -1019,8 +1019,9 @@ export function applySessionUpdate(
   const finish = (sub: SubAgentBlock): number | null => {
     stamp(sub);
     if (sub.status === "completed" || sub.status === "failed") closeOpenSubAgents(sub.entries, now);
-    // Refresh all ancestors once; their inclusive sum counts each leaf once.
-    for (const block of state.blocks) if (block.kind === "subagent") blockTokens(block);
+    // Refresh only the affected ancestor chain; their inclusive sum counts
+    // each leaf once without re-folding every card in the transcript.
+    refreshSubAgentTokens(state, sub.agentId);
     return findSubAgentIndex(state.blocks, sub.agentId);
   };
   if (isTask && (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update")) {
@@ -1098,8 +1099,13 @@ export function applySessionUpdate(
     case "current_mode_update":
       // Plan mode 已移除：CLI 若仍报 plan，归一到可用的非 plan 模式（见
       // withoutPlanModes）。其余未知 id 原样保留（agent 可能新增模式）。
+      // `_meta.modes` may arrive LATER than the first mode change (observed on
+      // session/new): remember the id instead of dropping it forever.
       if (state.modes) {
         state.modes = withoutPlanModes({ ...state.modes, currentModeId: update.currentModeId });
+        state.pendingModeId = null; // applied; a stale pending must not win on a later setMeta
+      } else {
+        state.pendingModeId = update.currentModeId;
       }
       return null;
     default:
@@ -1194,7 +1200,10 @@ export function snapshotEditDiff(pre: PreEditSnapshot, postContent: string | nul
 
 export interface ParsedEditArgs {
   path: string;
-  /** Edits in forward application order (old → new). */
+  /**
+   * Edits in forward application order (old → new). `expectedReplacements`
+   * is `Infinity` for `replace_all` edits (see REPLACE_ALL_EXPECTED).
+   */
   edits: Array<{ oldText: string; newText: string; expectedReplacements: number }>;
 }
 
@@ -1205,6 +1214,10 @@ const EDIT_PAIR_KEYS: Array<[old: string, new: string]> = [
   ["oldText", "newText"],
   ["old", "new"],
 ];
+
+/** Sentinel for a `replace_all` edit: every occurrence was replaced, so the
+ * reversal requires a positive match count but not an exact one. */
+const REPLACE_ALL_EXPECTED = Number.POSITIVE_INFINITY;
 
 function pickEditString(obj: Record<string, unknown>, keys: readonly string[]): string | null {
   for (const key of keys) {
@@ -1223,6 +1236,15 @@ function pickEditPair(obj: Record<string, unknown>): { oldText: string; newText:
   return null;
 }
 
+/** Per-edit replacement count: `replace_all` → Infinity, an explicit positive
+ * integer → that count, anything else → 1. Both top-level and batch-item
+ * positions are supported by MCP edit tools. */
+function pickExpectedReplacements(obj: Record<string, unknown>): number {
+  if (obj.replace_all === true) return REPLACE_ALL_EXPECTED;
+  const value = obj.expected_replacements;
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : 1;
+}
+
 /**
  * Recognize MCP edit-tool arguments (desktop-commander `edit_block`
  * `{file_path, old_string, new_string}`, `fast_edit_block`
@@ -1237,17 +1259,14 @@ export function parseEditArgs(args: unknown): ParsedEditArgs | null {
   const obj = args as Record<string, unknown>;
   const path = pickEditString(obj, EDIT_PATH_KEYS);
   if (!path) return null;
-  const expected =
-    typeof obj.expected_replacements === "number" && Number.isInteger(obj.expected_replacements) && obj.expected_replacements > 0
-      ? obj.expected_replacements
-      : 1;
+  const expected = pickExpectedReplacements(obj);
   if (Array.isArray(obj.edits)) {
     const edits: ParsedEditArgs["edits"] = [];
     for (const raw of obj.edits) {
       if (!raw || typeof raw !== "object") return null;
       const pair = pickEditPair(raw as Record<string, unknown>);
       if (!pair) return null;
-      edits.push({ ...pair, expectedReplacements: 1 });
+      edits.push({ ...pair, expectedReplacements: pickExpectedReplacements(raw as Record<string, unknown>) });
     }
     return edits.length > 0 ? { path, edits } : null;
   }
@@ -1283,7 +1302,11 @@ export function synthesizeEditDiff(parsed: ParsedEditArgs, postEdit: string): To
     if (newText === oldText) continue;
     if (newText === "") return null; // deletion: no anchor to reverse-locate
     const count = countOccurrences(oldFull, newText);
-    if (count !== expectedReplacements) return null;
+    if (expectedReplacements === REPLACE_ALL_EXPECTED) {
+      // `replace_all`: the tool replaced every occurrence, so any positive
+      // count is plausible — no anchor means we cannot reverse-locate.
+      if (count === 0) return null;
+    } else if (count !== expectedReplacements) return null;
     oldFull = oldFull.split(newText).join(oldText);
   }
   if (oldFull === postEdit) return null;
@@ -1298,6 +1321,26 @@ export function findToolBlockById(blocks: Block[], toolCallId: string): ToolBloc
       const nested = findToolBlockById(block.entries, toolCallId);
       if (nested) return nested;
     }
+  }
+  return null;
+}
+
+/**
+ * Locate a tool block anywhere in the SubAgent tree and report the TOP-LEVEL
+ * block index owning it (the P-1 patch anchor). Top-level blocks are scanned
+ * newest-first so a replayed duplicate resolves to the latest card; the recursive
+ * `findToolBlockById` reaches grandchildren and deeper instead of the old
+ * one-level `entries.find` which silently lost deep MCP-derived agents.
+ */
+function findToolBlockTopLevel(blocks: Block[], toolCallId: string): { index: number; block: ToolBlock } | null {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i]!;
+    const target = block.kind === "tool"
+      ? (block.toolCallId === toolCallId ? block : null)
+      : block.kind === "subagent"
+        ? findToolBlockById(block.entries, toolCallId)
+        : null;
+    if (target) return { index: i, block: target };
   }
   return null;
 }
@@ -1319,29 +1362,12 @@ export function isSubAgentToolCall(blocks: Block[], toolCallId: string): boolean
  * or already carries a diff.
  */
 export function attachSynthesizedDiff(state: SessionState, toolCallId: string, diff: ToolDiffUi): number | null {
-  for (let i = state.blocks.length - 1; i >= 0; i--) {
-    const block = state.blocks[i]!;
-    if (block.kind === "tool") {
-      if (block.toolCallId === toolCallId) {
-        if (block.diff !== null) return null;
-        block.diff = diff;
-        recountBlockTokens(block);
-        return i;
-      }
-    } else if (block.kind === "subagent") {
-      const nested = block.entries.find(
-        (e): e is ToolBlock => e.kind === "tool" && e.toolCallId === toolCallId,
-      );
-      if (nested) {
-        if (nested.diff !== null) return null;
-        nested.diff = diff;
-        recountBlockTokens(nested);
-        // Nested entries mutate in place; the SubAgent card rides the patch.
-        return i;
-      }
-    }
-  }
-  return null;
+  const found = findToolBlockTopLevel(state.blocks, toolCallId);
+  if (!found || found.block.diff !== null) return null;
+  found.block.diff = diff;
+  recountBlockTokens(found.block);
+  // Nested entries mutate in place; their top-level card rides the patch.
+  return found.index;
 }
 
 /**
@@ -1877,6 +1903,34 @@ function blockTokens(block: Block): number {
   return t;
 }
 
+/**
+ * Recompute token sums only on the SubAgent ancestor chain owning `agentId`
+ * (deepest first). A nested event mutates a single card's entries; the old
+ * "refresh every top-level SubAgent" walk was O(all nested blocks) per
+ * streamed frame. Sibling leaves keep their caches, so the fold is now
+ * proportional to the affected branch. Falls back to the full walk when the
+ * id cannot be located, so an exotic caller never leaves a stale ancestor sum.
+ */
+function refreshSubAgentTokens(state: SessionState, agentId: string): void {
+  const refreshChain = (blocks: Block[]): boolean => {
+    for (const block of blocks) {
+      if (block.kind !== "subagent") continue;
+      if (block.agentId === agentId || block.taskToolCallId === agentId) {
+        blockTokens(block);
+        return true;
+      }
+      if (refreshChain(block.entries)) {
+        blockTokens(block);
+        return true;
+      }
+    }
+    return false;
+  };
+  if (!refreshChain(state.blocks)) {
+    for (const block of state.blocks) if (block.kind === "subagent") blockTokens(block);
+  }
+}
+
 /** Invalidate (recompute in place) a block's token cache after the reducer
  * mutated its content. Only called from definitive change points — streaming
  * tail growth is coalesced by the store and cached lazily at turn end. */
@@ -2125,8 +2179,9 @@ export function markSubAgentStopped(state: SessionState, agentId: string, now = 
     }
   };
   closeStopped([ref.block]);
-  // Refresh all ancestors once; their inclusive sum counts each leaf once.
-  for (const block of state.blocks) if (block.kind === "subagent") blockTokens(block);
+  // Only the stopped card's chain changed (status/stopped are not token text);
+  // siblings keep their caches.
+  refreshSubAgentTokens(state, agentId);
   return findSubAgentIndex(state.blocks, agentId);
 }
 
@@ -2346,7 +2401,17 @@ export function setMeta(
   if (meta.sessionId !== undefined) state.sessionId = meta.sessionId;
   // Plan mode 已移除（2026-11-18）：CLI 仍会上报 plan，但面板不再提供它。
   // 每次写入 modes 都归一一次，旧会话 / 外部 settings 的 plan 值不会回流。
-  if (meta.modes !== undefined) state.modes = withoutPlanModes(meta.modes);
+  if (meta.modes !== undefined) {
+    let modes = meta.modes;
+    // A mode change may have arrived before `_meta.modes` (see the
+    // current_mode_update branch). Apply it on top of the incoming list so a
+    // stale meta id cannot revert the user's last choice.
+    if (modes && state.pendingModeId != null) {
+      modes = { ...modes, currentModeId: state.pendingModeId };
+      state.pendingModeId = null;
+    }
+    state.modes = withoutPlanModes(modes);
+  }
   if (meta.models !== undefined) state.models = meta.models;
   if (meta.currentModelId !== undefined) state.currentModelId = meta.currentModelId;
   if (meta.thinkLevel !== undefined) state.thinkLevel = meta.thinkLevel;
@@ -3013,28 +3078,13 @@ export function markToolHunkDecisions(
   decisions: readonly boolean[],
   partial: boolean,
 ): number | null {
-  for (let i = state.blocks.length - 1; i >= 0; i--) {
-    const block = state.blocks[i]!;
-    if (block.kind === "tool") {
-      if (block.toolCallId === toolCallId) {
-        block.hunkDecisions = [...decisions];
-        block.partiallyReverted = partial;
-        // No recount: decisions are UI metadata, the transcript text is
-        // unchanged (the FILE changed, not the block).
-        return i;
-      }
-    } else if (block.kind === "subagent") {
-      const nested = block.entries.find(
-        (e): e is ToolBlock => e.kind === "tool" && e.toolCallId === toolCallId,
-      );
-      if (nested) {
-        nested.hunkDecisions = [...decisions];
-        nested.partiallyReverted = partial;
-        return i;
-      }
-    }
-  }
-  return null;
+  const found = findToolBlockTopLevel(state.blocks, toolCallId);
+  if (!found) return null;
+  found.block.hunkDecisions = [...decisions];
+  found.block.partiallyReverted = partial;
+  // No recount: decisions are UI metadata, the transcript text is
+  // unchanged (the FILE changed, not the block).
+  return found.index;
 }
 
 // --- delete a user message (truncate transcript + CLI history) ---------------

@@ -144,8 +144,11 @@ function ErrorBanner({
     return () => window.clearTimeout(id);
   }, [copied]);
   const copyButton = (
-    <button
-      className="press inline-flex items-center gap-1 rounded underline decoration-destructive/30 underline-offset-2 transition-opacity hover:opacity-100"
+    <Button
+      variant="ghost"
+      size="sm"
+      className="underline decoration-destructive/30 underline-offset-2"
+      icon={copied ? <Check className={ICON_INLINE} /> : <Copy className={ICON_INLINE} />}
       title={copied ? t("已复制") : t("复制错误信息")}
       onClick={() => {
         void copyText(message).then(
@@ -154,17 +157,19 @@ function ErrorBanner({
         );
       }}
     >
-      {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
       {copied ? t("已复制") : t("复制")}
-    </button>
+    </Button>
   );
   const detailButton = (
-    <button
-      className="press shrink-0 rounded text-ui-caption font-medium text-destructive/90 underline decoration-destructive/30 underline-offset-2 transition-opacity hover:opacity-100"
+    <Button
+      variant="ghost"
+      size="sm"
+      className="shrink-0 underline decoration-destructive/30 underline-offset-2"
+      aria-expanded={expanded}
       onClick={() => setExpanded((v) => !v)}
     >
       {expanded ? t("收起") : t("详情")}
-    </button>
+    </Button>
   );
   // 重试 is the banner's ONE action — it wears the banner's own destructive
   // tone (soft destructive fill, same family as the 立即压缩 / 重试 actions on
@@ -201,12 +206,14 @@ function ErrorBanner({
                   <>
                     <span className="select-text">{t(advice.hint)}</span>
                     {advice.openSettingsTab && (
-                      <button
-                        className="press rounded font-semibold underline decoration-destructive/30 underline-offset-2 hover:opacity-100"
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="underline decoration-destructive/30 underline-offset-2"
                         onClick={() => onOpenSettings(advice.openSettingsTab!)}
                       >
                         {advice.openSettingsTab === "api" ? t("打开 API 设置") : t("打开运行时设置")}
-                      </button>
+                      </Button>
                     )}
                   </>
                 )}

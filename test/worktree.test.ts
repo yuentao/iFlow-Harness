@@ -1,4 +1,4 @@
-﻿import { describe, it, expect, afterAll, vi } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 
 // 本文件跑真实 git（建仓 / worktree / 分支删除），在 CI runner 与全量并发下
 // 单个用例可能跑十几秒。按文件放宽超时，不动全局 testTimeout。
@@ -493,7 +493,7 @@ describe("worktree · 只撤销自己的合并", () => {
     // 宿主这时也要合并同一个分支 → 必须让路，绝不能把用户的合并撤掉。
     const result = await mergeBranch({ repoRoot: repo, branch: "iflow/super/user-merge" });
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("merge");
+    expect((result as { error?: string }).error).toContain("merge");
 
     // 用户的合并**原封不动**：MERGE_HEAD 还在，冲突内容还在。
     expect(existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(true);

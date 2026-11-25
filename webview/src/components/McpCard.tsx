@@ -419,14 +419,14 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
     );
   }, [editing, isNew, detail, catalogForm, catalogBrowse, onHeader]);
 
-  function save() {
-    if (!entries || pending.current || loadError || editing !== null) return;
-    for (const entry of entries) {
+  function save(list: Entry[] | null = entries) {
+    if (!list || pending.current || loadError || editing !== null) return;
+    for (const entry of list) {
       const error = validateEntry(entry);
       if (error) { setEditError(error); return; }
     }
     let servers: Record<string, unknown>;
-    try { servers = entriesToServers(entries); }
+    try { servers = entriesToServers(list); }
     catch (error) { setEditError(t("名称重复：{0}", (error as Error).message)); return; }
     setEditError(null);
     setSavedFlash(false);
@@ -575,7 +575,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 >
                   {t("添加")}
                 </Button>
-                <Button variant="primary" disabled={busy || entries === null || !!loadError || saving} onClick={save}>
+                <Button variant="primary" disabled={busy || entries === null || !!loadError || saving} onClick={() => save()}>
                   {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
                 </Button>
                 {/* Button label changes are not announced; keep a dedicated live region. */}
@@ -1331,9 +1331,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           title={t("删除 MCP 服务器")}
           message={t("确定删除「{0}」吗？保存后会从内核配置里移除。", entries[confirmDelete]!.name)}
           onConfirm={() => {
-            setEntries((current) => current?.filter((_, j) => j !== confirmDelete) ?? null);
-            setSavedFlash(false);
+            const next = entries?.filter((_, j) => j !== confirmDelete) ?? null;
             setConfirmDelete(null);
+            setEntries(next);
+            save(next);
           }}
           onCancel={() => setConfirmDelete(null)}
         />

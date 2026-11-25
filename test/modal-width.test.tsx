@@ -96,8 +96,7 @@ describe("modal shell tier classes (jsdom)", () => {
       root.render(
         createElement(
           ModalShell,
-          { title: "窄弹窗", ariaLabel: "窄弹窗", onClose: () => {} },
-          createElement("div", null, "body"),
+          { title: "窄弹窗", ariaLabel: "窄弹窗", onClose: () => {}, children: createElement("div", null, "body") },
         ),
       );
     });
@@ -117,8 +116,7 @@ describe("modal shell tier classes (jsdom)", () => {
       root.render(
         createElement(
           ModalShell,
-          { title: "设置", ariaLabel: "设置", onClose: () => {}, wide: true, className: "settings-modal" },
-          createElement("div", null, "body"),
+          { title: "设置", ariaLabel: "设置", onClose: () => {}, wide: true, className: "settings-modal", children: createElement("div", null, "body") },
         ),
       );
     });

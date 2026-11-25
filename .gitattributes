@@ -1,0 +1,8 @@
+# gen-l10n.mjs emits LF bytes for both generated dictionaries. Keep the single
+# source and its generated artifacts LF on every platform so a Windows checkout
+# with core.autocrlf=true cannot turn them into CRLF and make the byte-for-byte
+# `npm run l10n:check` comparison drift.
+l10n/source.en.json text eol=lf
+l10n/bundle.l10n.en.json text eol=lf
+webview/src/i18n.ts text eol=lf
+scripts/gen-l10n.mjs text eol=lf

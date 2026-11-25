@@ -318,7 +318,7 @@ it("copies the raw TOML and reports a refused clipboard honestly", async () => {
 
   const copy = container.querySelector("button[aria-label='复制原始 TOML']")!;
   await act(async () => {
-    copy.click();
+    (copy as HTMLElement).click();
   });
   // A denied clipboard must not look like a success: the label stays and one
   // error toast is raised.
@@ -328,7 +328,7 @@ it("copies the raw TOML and reports a refused clipboard honestly", async () => {
   // A granted clipboard flips the icon to a check mark.
   writeText.mockResolvedValue(undefined);
   await act(async () => {
-    copy.click();
+    (copy as HTMLElement).click();
   });
   expect(container.querySelector("button[aria-label='已复制']")).toBeTruthy();
   expect(writeText).toHaveBeenCalledWith(RAW_TOML);

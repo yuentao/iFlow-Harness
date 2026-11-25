@@ -13,7 +13,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../webview/src/App";
-import type { SessionState, SuperSessionUi } from "../shared/messages";
+import type { SessionState } from "../shared/messages";
+import type { SuperSessionUi } from "../shared/super-agent";
 
 const send = vi.hoisted(() => vi.fn());
 const toggleFocusMode = vi.hoisted(() => vi.fn());
@@ -74,6 +75,7 @@ function idleState(overrides: Partial<SessionState> = {}): SessionState {
     nextStepSuggestions: [],
     nextStepLoading: false,
     ...overrides,
+    qqTasks: overrides.qqTasks ?? [],
   };
 }
 
