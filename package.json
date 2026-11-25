@@ -606,7 +606,9 @@
   },
   "scripts": {
     "icon": "node scripts/generate-icon.mjs",
-    "build": "npm run icon && tsc -p tsconfig.json && node esbuild.mjs && vite build webview",
+    "l10n:gen": "node scripts/gen-l10n.mjs",
+    "l10n:check": "node scripts/gen-l10n.mjs --check",
+    "build": "npm run l10n:check && npm run icon && tsc -p tsconfig.json && node esbuild.mjs && vite build webview",
     "webview:dev": "vite build webview --watch",
     "webview:serve": "node scripts/serve-webview.mjs",
     "typecheck": "npm run typecheck:host && npm run typecheck:webview",
