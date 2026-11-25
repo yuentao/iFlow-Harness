@@ -322,15 +322,21 @@ describe("宿主接线：默认工作区是唯一的派发判空点", () => {
     host: SuperAgentHost;
     spawn: ReturnType<typeof vi.fn>;
     toasts: Toast[];
+    logs: string[];
   }
 
-  function makeHost(opts: { workspaceRoot?: string } = {}): HostHarness {
+  function makeHost(opts: { workspaceRoot?: string; logs?: string[] } = {}): HostHarness {
     const toasts: Toast[] = [];
+    const logs = opts.logs ?? [];
     const spawn = vi.fn(() => ({ id: "child-1" }));
     const manager: { spawn: ReturnType<typeof vi.fn> } | null = { spawn };
     let host!: SuperAgentHost;
     const deps = {
-      log: { info: () => {}, warn: () => {}, error: () => {} },
+      log: {
+        info: (m: string) => logs.push(m),
+        warn: (m: string) => logs.push(m),
+        error: (m: string) => logs.push(m),
+      },
       getContext: () => ({}) as never,
       // 默认没有任何打开的工作区（services.workspaceRoot 缺省）。① 通过 opts 注入。
       getServices: () => ({ workspaceRoot: opts.workspaceRoot }) as { workspaceRoot?: string },
@@ -353,7 +359,7 @@ describe("宿主接线：默认工作区是唯一的派发判空点", () => {
       refreshSuperWaitHeartbeat: () => {},
     } as unknown as SuperAgentHostCallbacks;
     host = new SuperAgentHost(deps);
-    return { host, spawn, toasts };
+    return { host, spawn, toasts, logs };
   }
 
   async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
@@ -464,5 +470,163 @@ describe("宿主接线：默认工作区是唯一的派发判空点", () => {
     expect(message).toContain("EACCES");
     expect(message).toContain("permission denied");
     expect(message).toContain("iflow.superAgent.defaultWorkspace");
+  });
+
+  // --- 激活期 prefetch：无工作区判断前置到 splash 对应的启动期 ---------------
+  it("⓪ 激活期 prefetch 后首次派发同步命中（无 deferred），默认目录已建好", async () => {
+    const builtin = path.join(tempDir("iflow-prefetch-hit-"), "workspace");
+    setConfigOverrides({ "superAgent.defaultWorkspace": "" });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = builtin;
+
+    await h.host.prefetchSuperWorkspace();
+
+    expect(existsSync(builtin)).toBe(true);
+    expect(h.host.superRepoRoot()).toBe(builtin);
+    const result = h.host.dispatchSuperTasks([[{ title: "预热后", task: "干活" }]]);
+    expect(result.deferred).toBeUndefined();
+    expect(result.managerAvailable).toBe(true);
+    expect(h.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("⓪ prefetch 静默解析的 fallback 原因在首次派发补发一次警告（既有语义不变）", () => {
+    const builtin = path.join(tempDir("iflow-prefetch-fallback-"), "workspace");
+    setConfigOverrides({ "superAgent.defaultWorkspace": "relative/dir" });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = builtin;
+
+    // prefetch 阶段没有 webview：只记日志，不弹 toast。
+    void h.host.prefetchSuperWorkspace();
+    return waitFor(() => h.host.defaultWorkspaceRoot === builtin).then(() => {
+      expect(h.toasts.length).toBe(0);
+      h.host.dispatchSuperTasks([[{ title: "回退后", task: "干活" }]]);
+      h.host.dispatchSuperTasks([[{ title: "再来一次", task: "干活" }]]);
+      const warnings = h.toasts.filter(
+        (t) => t.level === "warning" && t.message.includes("默认工作区设置无效"),
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]?.message).toContain("不是绝对路径");
+      expect(warnings[0]?.message).toContain(builtin);
+    });
+  });
+
+  it("⓪ 无工作区 + create:true 会提前 mkdir（含嵌套路径）", async () => {
+    const builtin = path.join(tempDir("iflow-prefetch-create-"), "nested", "workspace");
+    setConfigOverrides({ "superAgent.defaultWorkspace": "" });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = builtin;
+    expect(existsSync(builtin)).toBe(false);
+
+    await h.host.prefetchSuperWorkspace();
+
+    expect(existsSync(builtin)).toBe(true);
+    expect(h.host.defaultWorkspaceRoot).toBe(builtin);
+  });
+
+  it("⓪ 有工作区时 prefetch 零 I/O、不建默认目录、不缓存默认根", async () => {
+    const ws = tempDir("iflow-prefetch-ws-");
+    const builtin = path.join(tempDir("iflow-prefetch-ignored-"), "never");
+    setConfigOverrides({ "superAgent.defaultWorkspace": "" });
+    const h = makeHost({ workspaceRoot: ws });
+    h.host.builtinDefaultWorkspace = builtin;
+
+    await h.host.prefetchSuperWorkspace();
+
+    expect(vi.mocked(mkdir).mock.calls.filter(([p]) => String(p) === builtin)).toHaveLength(0);
+    expect(existsSync(builtin)).toBe(false);
+    expect(h.host.superRepoRoot()).toBe(ws);
+    expect(h.host.defaultWorkspaceRoot).toBeNull();
+  });
+
+  it("⓪ prefetch 失败只记日志、不弹 toast（提示仍归派发入口）", async () => {
+    const builtin = path.join(tempDir("iflow-prefetch-fail-"), "never");
+    setConfigOverrides({ "superAgent.defaultWorkspace": "" });
+    const logs: string[] = [];
+    const h = makeHost({ logs });
+    h.host.builtinDefaultWorkspace = builtin;
+    const error = Object.assign(new Error("EACCES: permission denied, mkdir 'never'"), {
+      code: "EACCES",
+      errno: -13,
+      syscall: "mkdir",
+      path: builtin,
+    });
+    vi.mocked(mkdir).mockRejectedValueOnce(error);
+
+    await expect(h.host.prefetchSuperWorkspace()).resolves.toBeUndefined();
+
+    expect(h.toasts.length).toBe(0);
+    expect(existsSync(builtin)).toBe(false);
+    expect(logs.some((m) => m.includes("预热失败"))).toBe(true);
+    // 真实拒绝提示仍由 ensureSuperAgentForDispatch 入口给出（用例 ⑥ 已覆盖文案）。
+  });
+
+  it("⓪ prefetch 与派发并发：共享 in-flight，不重复解析 / 建目录 / 管理器", async () => {
+    const builtin = path.join(tempDir("iflow-prefetch-concurrent-"), "workspace");
+    setConfigOverrides({ "superAgent.defaultWorkspace": "" });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = builtin;
+    const resolveSpy = vi.spyOn(h.host, "resolveSuperWorkspace");
+
+    const prefetch = h.host.prefetchSuperWorkspace();
+    const result = h.host.dispatchSuperTasks([[{ title: "并发", task: "干活" }]]);
+    // prefetch 尚未 settle：派发只能同步返回 deferred，由后台链 join 同一解析。
+    expect(result.deferred).toBe(true);
+    await prefetch;
+    await waitFor(() => h.spawn.mock.calls.length === 1);
+
+    expect(resolveSpy).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(mkdir).mock.calls.filter(([p]) => String(p) === builtin)).toHaveLength(1);
+    expect(h.spawn).toHaveBeenCalledTimes(1);
+    expect(h.host.superRepoRoot()).toBe(builtin);
+  });
+
+  it("⓪ 恢复历史会话仍 create:false：不建目录、不缓存默认根、不弹 toast", async () => {
+    const builtin = path.join(tempDir("iflow-restore-create-false-"), "never");
+    setConfigOverrides({ "superAgent.defaultWorkspace": "" });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = builtin;
+    const resolveSpy = vi.spyOn(h.host, "resolveSuperWorkspace");
+
+    await h.host.resolveSuperWorkspace({ create: false });
+
+    expect(resolveSpy).toHaveBeenCalledWith({ create: false });
+    expect(existsSync(builtin)).toBe(false);
+    expect(h.host.superRepoRoot()).toBeNull();
+    expect(h.toasts.length).toBe(0);
+  });
+
+  it("⓪ 配置在运行中改动 → prefetch 结果失效，下次派发重新解析新根", async () => {
+    const first = path.join(tempDir("iflow-cfg-first-"), "workspace");
+    const second = path.join(tempDir("iflow-cfg-second-"), "workspace");
+    setConfigOverrides({ "superAgent.defaultWorkspace": first });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = path.join(tempDir("iflow-cfg-builtin-"), "w");
+
+    await h.host.prefetchSuperWorkspace();
+    expect(h.host.superRepoRoot()).toBe(first);
+
+    setConfigOverrides({ "superAgent.defaultWorkspace": second });
+    h.host.invalidateDefaultWorkspace();
+    expect(h.host.superRepoRoot()).toBeNull();
+
+    const result = h.host.dispatchSuperTasks([[{ title: "换根后", task: "干活" }]]);
+    expect(result.deferred).toBe(true);
+    await waitFor(() => h.spawn.mock.calls.length === 1);
+    expect(h.host.superRepoRoot()).toBe(second);
+  });
+
+  it("⓪ 有子会话在跑时改配置不换根（沿用 adoptDefaultWorkspaceRoot 约束）", async () => {
+    const first = path.join(tempDir("iflow-cfg-busy-"), "workspace");
+    setConfigOverrides({ "superAgent.defaultWorkspace": first });
+    const h = makeHost();
+    h.host.builtinDefaultWorkspace = path.join(tempDir("iflow-cfg-busy-builtin-"), "w");
+    await h.host.prefetchSuperWorkspace();
+    h.host.superAgent = { list: () => [{}], dispose: vi.fn(async () => []) } as never;
+
+    setConfigOverrides({ "superAgent.defaultWorkspace": path.join(tempDir("iflow-cfg-other-"), "w") });
+    h.host.invalidateDefaultWorkspace();
+
+    expect(h.host.superRepoRoot()).toBe(first);
+    expect(h.host.superAgent).not.toBeNull();
   });
 });

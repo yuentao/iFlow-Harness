@@ -25,6 +25,10 @@ export function activate(context: vscode.ExtensionContext): void {
   // iflow.warmStart; teardown rides the subscription dispose above.
   chatPanel.warmStart();
 
+  // 无打开工作区时提前静默解析并建好默认工作区目录，让首次点击派发同步命中、
+  // 不再 deferred。fire-and-forget：不阻塞激活、失败只记日志；有工作区时零 I/O。
+  chatPanel.prefetchSuperWorkspace();
+
   // A7: same one-shot background maintenance slot — sweep staged-attachment
   // temp dirs idle for over a week (no setting; temp files are ephemeral).
   chatPanel.sweepStaleAttachments();

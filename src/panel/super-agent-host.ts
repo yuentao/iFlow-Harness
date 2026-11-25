@@ -301,6 +301,26 @@ export class SuperAgentHost {
    * 后一帧看到前一帧已写入的去重键，不会双开子会话。
    */
   private defaultWorkspaceDispatchChain: Promise<void> = Promise.resolve();
+  /**
+   * 默认工作区解析的 in-flight promise 缓存（激活期 prefetch 与首次派发共享）。
+   *
+   * 派发入口是同步的，默认工作区却需要异步 stat/mkdir；把解析前置到激活期后，
+   * 用户可能在 prefetch 尚未结束时点击派发。两者必须 join **同一个** promise，
+   * 否则会双重 stat/mkdir、构造两个管理器、让子会话 cwd 不一致。任何一次解析
+   * settle 后清空缓存；配置改动也会作废它（见 {@link invalidateDefaultWorkspace}），
+   * 让下次派发重新解析。恢复历史会话走 {@link resolveSuperWorkspace} 的
+   * `create:false` 直连，不经过这里，保持原语义逐字节不变。
+   */
+  private superWorkspaceResolveInFlight: Promise<SuperWorkspaceResolution> | null = null;
+  /**
+   * 最近一次解析结果。prefetch 阶段没有 webview、静默跳过 fallback 警告；
+   * 首次派发命中已预热的管理器时用这份缓存补发，避免「设置写错却毫无提示」。
+   * `fallbackToastSent` 保证同一份解析只警告一次。
+   */
+  private lastSuperWorkspaceResolution: {
+    resolution: SuperWorkspaceResolution;
+    fallbackToastSent: boolean;
+  } | null = null;
   mcpBroker: import("../acp/mcp-broker.js").McpBroker | null = null;
   mcpBrokerStarting: Promise<import("../acp/mcp-broker.js").McpBroker | null> | null = null;
   pendingSuperMerges: Array<{ id: string; reason: string }> = [];
@@ -1178,6 +1198,98 @@ export class SuperAgentHost {
 
 
   /**
+   * 激活期静默预热默认工作区（`extension.ts` 在 warmStart 之后 fire-and-forget 调用）。
+   *
+   * 无打开工作区时提前异步解析并按需建目录（`create:true`），让首次派发同步命中、
+   * 不再 deferred；有工作区时 {@link resolveSuperWorkspace} 内部走零 I/O 分支，
+   * 不建目录、不弹提示。此刻没有 webview，失败只记日志，用户可见提示仍归
+   * {@link ensureSuperAgentForDispatch}。不预热管理器：`dispatchSuperTasks` 的
+   * `getSuperAgent()` 会在首次点击时同步按已校验的根构造，避免激活期多余副作用。
+   */
+  async prefetchSuperWorkspace(): Promise<void> {
+    if (this.disposed) return;
+    const resolution = await this.resolveSuperWorkspaceShared({ create: true });
+    if (!resolution.ok) {
+      this.log.warn(
+        `super agent: 激活期默认工作区预热失败（不影响启动，派发时会重试并给出原因）：${resolution.reason} ${resolution.path}`,
+      );
+      return;
+    }
+    if (resolution.source === "default-workspace") {
+      this.log.info(`super agent: 激活期已预热默认工作区 ${resolution.root}`);
+    }
+  }
+
+  /**
+   * prefetch 与派发共用的解析入口：join 同一个 in-flight promise，并缓存结果。
+   * 并发语义详见 {@link superWorkspaceResolveInFlight}。
+   */
+  private resolveSuperWorkspaceShared(
+    options: { create?: boolean } = {},
+  ): Promise<SuperWorkspaceResolution> {
+    if (this.superWorkspaceResolveInFlight) return this.superWorkspaceResolveInFlight;
+    const run = this.resolveSuperWorkspace(options)
+      .then((resolution) => {
+        this.lastSuperWorkspaceResolution = { resolution, fallbackToastSent: false };
+        return resolution;
+      })
+      .finally(() => {
+        // 只清自己那一份：极端交错下可能已有更新的解析占住了缓存。
+        if (this.superWorkspaceResolveInFlight === run) this.superWorkspaceResolveInFlight = null;
+      });
+    this.superWorkspaceResolveInFlight = run;
+    return run;
+  }
+
+  /** 首次派发补发 prefetch 静默跳过的 fallback 警告（同一份解析只发一次）。 */
+  private emitCachedFallbackToast(): void {
+    const cached = this.lastSuperWorkspaceResolution;
+    if (!cached || cached.fallbackToastSent) return;
+    cached.fallbackToastSent = true;
+    const { resolution } = cached;
+    // 只有「当前根确实是这次解析采纳的默认工作区」才补发：工作区用户 /
+    // 配置已变更的用户都不该收到这条与现状不符的警告。
+    if (!resolution.ok || resolution.source !== "default-workspace") return;
+    if (!resolution.fallback || this.superRepoRoot() !== resolution.root) return;
+    this.log.warn(
+      `super agent: 默认工作区设置无效（${resolution.fallback.reason}: ${resolution.fallback.configured}），已改用 ${resolution.root}`,
+    );
+    this.store.sendToast("warning", this.superWorkspaceFallbackToast(resolution));
+  }
+
+  /**
+   * `iflow.superAgent.defaultWorkspace` 在运行中被改动时由 panel 调用：
+   * 作废 prefetch / adopt 的默认工作区缓存，下次派发重新解析。
+   * 有打开工作区时默认工作区本就不参与，无需处理；沿用
+   * {@link adoptDefaultWorkspaceRoot} 的约束：有子会话在跑时保持旧根不切换。
+   */
+  invalidateDefaultWorkspace(): void {
+    if (this.services.workspaceRoot || (vscode.workspace.workspaceFolders?.length ?? 0) > 0) return;
+    const manager = this.superAgent;
+    if (manager && !this.isSuperAgentIdle(manager)) {
+      this.log.warn("super agent: 默认工作区设置已改，但仍有子会话在跑，本次不换根");
+      return;
+    }
+    this.defaultWorkspaceRoot = null;
+    this.superWorkspaceResolveInFlight = null;
+    this.lastSuperWorkspaceResolution = null;
+    if (manager) {
+      this.superAgent = null;
+      void manager.dispose().catch(() => undefined);
+    }
+  }
+
+  /** 管理器是否空闲（没有在跑的子会话）——换根 / 作废缓存的安全条件。 */
+  private isSuperAgentIdle(manager: SuperAgentManager): boolean {
+    try {
+      return manager.list().length === 0;
+    } catch {
+      return false;
+    }
+  }
+
+
+  /**
    * 派发可用工作目录的唯一 resolver。
    *
    * 顺序与 {@link SuperWorkspaceResolution} 一致：
@@ -1253,12 +1365,7 @@ export class SuperAgentHost {
     // 若已有管理器绑在旧根上：没有子会话就重建（安全），有子会话则保持旧根
     // 并如实记日志 —— 中途换根会让在跑的子会话与 allowedRoots 失配。
     if (this.superAgent) {
-      let idle = false;
-      try {
-        idle = this.superAgent.list().length === 0;
-      } catch {
-        idle = false;
-      }
+      const idle = this.isSuperAgentIdle(this.superAgent);
       if (idle && typeof this.superAgent.dispose === "function") {
         const stale = this.superAgent;
         this.superAgent = null;
@@ -1334,8 +1441,14 @@ export class SuperAgentHost {
    */
   async ensureSuperAgentForDispatch(): Promise<SuperAgentManager | null> {
     const existing = this.deps.getSuperAgent();
-    if (existing) return existing;
-    const resolution = await this.resolveSuperWorkspace();
+    if (existing) {
+      // 首次派发命中已预热的管理器：补发 prefetch 阶段静默跳过的 fallback 警告
+      // （那时没有 webview，不弹 toast；用户可见提示统一归这里）。
+      this.emitCachedFallbackToast();
+      return existing;
+    }
+    // join 激活期 prefetch 的 in-flight 解析（若有），避免并发重复 stat/mkdir。
+    const resolution = await this.resolveSuperWorkspaceShared();
     if (!resolution.ok) {
       this.log.warn(
         `super agent: 无法派发——工作目录不可用（${resolution.reason}: ${resolution.path}${
@@ -1345,14 +1458,9 @@ export class SuperAgentHost {
       this.store.sendToast("warning", this.superWorkspaceRejectToast(resolution));
       return null;
     }
-    if (resolution.fallback) {
-      // 设置值无效（相对路径 / ~ / 普通文件 / 不可用）：不阻断，如实告知改用了
-      // 哪个默认目录，让用户知道该去改哪一项。
-      this.log.warn(
-        `super agent: 默认工作区设置无效（${resolution.fallback.reason}: ${resolution.fallback.configured}），已改用 ${resolution.root}`,
-      );
-      this.store.sendToast("warning", this.superWorkspaceFallbackToast(resolution));
-    }
+    // 设置值无效（相对路径 / ~ / 普通文件 / 不可用）时如实告知改用哪个目录；
+    // 同一份解析只警告一次（emitCachedFallbackToast 内部去重）。
+    this.emitCachedFallbackToast();
     const manager = this.deps.getSuperAgent();
     if (!manager) {
       // 解析成功却仍拿不到管理器：工作目录可用但管理器构造失败（异常注入）。
@@ -1929,7 +2037,12 @@ export class SuperAgentHost {
     toolCallId?: string,
   ): SuperDispatchResult {
     const manager = this.deps.getSuperAgent();
-    if (manager) return this.dispatchSuperTasksWith(manager, blocks, issues);
+    if (manager) {
+      // prefetch 静默解析出的 fallback 原因在这里补发；有工作区用户不会命中
+      // 这条缓存（guard 在 emitCachedFallbackToast 内），行为逐字节不变。
+      this.emitCachedFallbackToast();
+      return this.dispatchSuperTasksWith(manager, blocks, issues);
+    }
     const resolvedRoot = this.superRepoRoot();
     if (resolvedRoot !== null) {
       // 工作目录已经可用却没有管理器：这是管理器构造失败，不是「没有工作区」。

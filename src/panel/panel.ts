@@ -2062,6 +2062,11 @@ export class ChatPanel implements vscode.Disposable {
             // Every mirrored setting lives in the same settings panel; a
             // direct VSCode-side edit must repaint it too.
             if (e.affectsConfiguration("iflow")) this.postHostSettings();
+            // 默认工作区在激活期被 prefetch 缓存；运行中改了设置就作废，
+            // 下次派发重新解析（沿用「有子会话在跑时不换根」的约束）。
+            if (e.affectsConfiguration("iflow.superAgent.defaultWorkspace")) {
+              this.superHost.invalidateDefaultWorkspace();
+            }
         // 记忆整理的周期 / 空闲阈值 / 总量预算是调度器参数，配置变更要热更新
         // （idleMinutes 变化会重建 tick 定时器）。
         if (
@@ -2333,6 +2338,19 @@ export class ChatPanel implements vscode.Disposable {
     if (!enabled) return;
     void this.ensureClient().catch((error) => {
       this.log.error("warm start failed", errorMessage(error));
+    });
+  }
+
+  /**
+   * 激活期静默预热默认工作区（extension.ts 在 warmStart 之后调用）。
+   *
+   * fire-and-forget：不 await、不抛到激活链。无打开工作区时提前异步建好默认目录，
+   * 让首次派发同步命中；有工作区时宿主内部零 I/O。没有 webview，失败只记日志，
+   * 用户可见提示统一留给派发入口。与派发共享 in-flight promise，避免并发重复。
+   */
+  prefetchSuperWorkspace(): void {
+    void this.superHost.prefetchSuperWorkspace().catch((error) => {
+      this.log.warn(`super agent: 默认工作区预热失败：${errorMessage(error)}`);
     });
   }
 
@@ -7696,6 +7714,10 @@ export class ChatPanel implements vscode.Disposable {
    */
   async ensureSuperAgentForDispatch(...args: Parameters<SuperAgentHost["ensureSuperAgentForDispatch"]>): ReturnType<SuperAgentHost["ensureSuperAgentForDispatch"]> {
     return this.superHost.ensureSuperAgentForDispatch(...args);
+  }
+  /** 设置改动后作废默认工作区缓存，下次派发重新解析（子会话在跑时不换根）。 */
+  invalidateDefaultWorkspace(...args: Parameters<SuperAgentHost["invalidateDefaultWorkspace"]>): ReturnType<SuperAgentHost["invalidateDefaultWorkspace"]> {
+    return this.superHost.invalidateDefaultWorkspace(...args);
   }
   async ensureMcpBroker(...args: Parameters<SuperAgentHost["ensureMcpBroker"]>): ReturnType<SuperAgentHost["ensureMcpBroker"]> {
     return this.superHost.ensureMcpBroker(...args);
