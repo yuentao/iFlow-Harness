@@ -114,6 +114,9 @@ function generate() {
   console.log(`generated webview/src/i18n.ts (${Object.keys(source).length} keys)`);
 }
 
+/** Normalize line endings so a CRLF checkout cannot cause a false drift. */
+const normalizeEol = (text) => text.replace(/\r\n/g, "\n");
+
 function check() {
   const { bundleText, i18nText } = buildArtifacts(readSource());
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-l10n-"));
@@ -128,7 +131,7 @@ function check() {
       ["webview/src/i18n.ts", i18nTmp, I18N],
     ]) {
       const actual = fs.existsSync(committed) ? fs.readFileSync(committed, "utf8") : "<missing>";
-      if (fs.readFileSync(generated, "utf8") !== actual) {
+      if (normalizeEol(fs.readFileSync(generated, "utf8")) !== normalizeEol(actual)) {
         console.error(`l10n drift detected in ${label}; run \`npm run l10n:gen\`.`);
         drifted = true;
       }
