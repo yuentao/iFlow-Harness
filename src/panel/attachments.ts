@@ -26,6 +26,25 @@ export const ATTACHMENT_TMP_ROOT = path.join(os.tmpdir(), "iflow-harness-attachm
 export const ATTACHMENT_TMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
+ * Decoded byte length of a canonical base64 payload, without allocating the
+ * decoded buffer.
+ *
+ * Base64 encodes every 3 raw bytes as 4 characters, so comparing a base64
+ * string's `length` against a byte cap over-counts by ~1/3: an 8MB byte cap
+ * checked that way actually rejects raw images above ~6MB. Size limits are
+ * documented (and shown to the user) in *raw* bytes, so any check must
+ * convert first. Handles both padded (`QQ==`) and unpadded (`QQ`) input.
+ */
+export function base64DecodedByteLength(base64: string): number {
+  const length = base64.length;
+  if (length === 0) return 0;
+  let padding = 0;
+  if (base64.charCodeAt(length - 1) === 61 /* = */) padding += 1;
+  if (length > 1 && base64.charCodeAt(length - 2) === 61 /* = */) padding += 1;
+  return Math.floor((length * 3) / 4) - padding;
+}
+
+/**
  * Per-session staging dir. The id is sanitized exactly as stageDroppedFiles
  * used to inline it (word chars / dot / dash only), so a wire-supplied
  * session id can never escape the root.

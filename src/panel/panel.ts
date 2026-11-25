@@ -153,7 +153,7 @@ import {
 import { discoverMemoryFiles } from "../memory/discovery.js";
 import { planCuration } from "../../shared/memory-curate.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
-import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
+import { attachmentSessionDir, base64DecodedByteLength, sweepStaleAttachmentDirs } from "./attachments.js";
 import { parseContextWindowOverrides } from "../../shared/context-window.js";
 import {
   postContextWindowOverrides,
@@ -654,9 +654,12 @@ class CompressTimeoutError extends Error {
     super(vscode.l10n.t("压缩超时（超过 {0} 秒），已取消压缩。", seconds));
   }
 }
-/** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
+/** Cap on the DECODED bytes of an openImage attachment (8MB raw). A
  * webview-supplied data URL is untrusted input; an oversized one must be
- * rejected before it is materialized to disk. */
+ * rejected before it is materialized to disk. Compare against
+ * `base64DecodedByteLength`, never the base64 string length — the latter
+ * over-counts by ~1/3 and would silently cap raw images at ~6MB while the
+ * toast still promises 8MB. */
 const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 /** Picked images above this size fall back to plain file attachments. */
 const ATTACHMENT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
@@ -5864,7 +5867,7 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.window.showWarningMessage(vscode.l10n.t("无法打开该图片附件（数据格式异常）"));
       return;
     }
-    if (match[2]!.length > MAX_IMAGE_ATTACHMENT_BYTES) {
+    if (base64DecodedByteLength(match[2]!) > MAX_IMAGE_ATTACHMENT_BYTES) {
       void vscode.window.showWarningMessage(
         vscode.l10n.t("图片附件过大（超过 {0} MB），已拒绝打开", Math.floor(MAX_IMAGE_ATTACHMENT_BYTES / 1024 / 1024)),
       );
