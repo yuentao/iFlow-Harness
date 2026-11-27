@@ -210,6 +210,106 @@ describe("resolveSuperEndpoint —— 端点优先级链", () => {
   });
 });
 
+describe("resolveSuperEndpoint —— 第⑤级内核默认（无 Profile 名的顶层配置）", () => {
+  const kernelTop: SuperApiProfile = {
+    baseUrl: "https://kernel-top.example/v1",
+    apiKey: "key-kernel-top",
+    modelName: "kernel-top-model",
+  };
+
+  it("只有顶层 baseUrl/apiKey、没有任何 profile 时也能解析出端点", () => {
+    // 这是原先纯函数的真缺口：readActiveEndpoint() 在 currentApiProfile 为空
+    // 时会回退到 settings 顶层 baseUrl/apiKey，而纯函数只查得到具名 Profile。
+    const endpoint = resolveSuperEndpoint({
+      profiles: {},
+      activeCredentials: null,
+      kernelDefaultEndpoint: kernelTop,
+    });
+    expect(endpoint).not.toBeNull();
+    expect(endpoint?.source).toBe("kernel-default");
+    expect(endpoint?.profileName).toBeNull();
+    expect(endpoint?.baseUrl).toBe("https://kernel-top.example/v1");
+    expect(endpoint?.apiKey).toBe("key-kernel-top");
+    expect(endpoint?.modelName).toBe("kernel-top-model");
+  });
+
+  it("顶层配置没有 modelName 时归一为 null（模型交给模型链）", () => {
+    const endpoint = resolveSuperEndpoint({
+      profiles: {},
+      activeCredentials: null,
+      kernelDefaultEndpoint: {
+        baseUrl: "https://kernel-top.example/v1",
+        apiKey: "key-kernel-top",
+        modelName: null,
+      },
+    });
+    expect(endpoint?.source).toBe("kernel-default");
+    expect(endpoint?.modelName).toBeNull();
+  });
+
+  it("具名内核指针优先于内核顶层默认", () => {
+    const endpoint = resolveSuperEndpoint(
+      endpointInput({
+        kernelProfileName: "kernel",
+        kernelDefaultEndpoint: kernelTop,
+        activeCredentials: null,
+      }),
+    );
+    expect(endpoint?.source).toBe("kernel-profile");
+    expect(endpoint?.profileName).toBe("kernel");
+    expect(endpoint?.baseUrl).toBe("https://kernel.example/v1");
+  });
+
+  it("内核顶层默认是最后一档：活动凭据仍先命中（④先于⑤）", () => {
+    const endpoint = resolveSuperEndpoint(endpointInput({ kernelDefaultEndpoint: kernelTop }));
+    expect(endpoint?.source).toBe("active-credentials");
+    expect(endpoint?.apiKey).toBe("key-active");
+  });
+
+  it("指针指向不存在的 Profile 时仍回退到内核顶层默认", () => {
+    const endpoint = resolveSuperEndpoint({
+      profiles: {},
+      taskProfileId: "missing",
+      mainProfileName: "gone",
+      activeCredentials: null,
+      kernelDefaultEndpoint: kernelTop,
+    });
+    expect(endpoint?.source).toBe("kernel-default");
+  });
+
+  it("内核顶层默认不完整（缺 baseUrl 或 apiKey）时返回 null", () => {
+    expect(
+      resolveSuperEndpoint({
+        profiles: {},
+        activeCredentials: null,
+        kernelDefaultEndpoint: { baseUrl: "", apiKey: "k", modelName: null },
+      }),
+    ).toBeNull();
+    expect(
+      resolveSuperEndpoint({
+        profiles: {},
+        activeCredentials: null,
+        kernelDefaultEndpoint: { baseUrl: "https://x.example/v1", apiKey: "  ", modelName: null },
+      }),
+    ).toBeNull();
+  });
+
+  it("内核顶层默认的前后空白会被 trim", () => {
+    const endpoint = resolveSuperEndpoint({
+      profiles: {},
+      activeCredentials: null,
+      kernelDefaultEndpoint: {
+        baseUrl: "  https://pad.example/v1  ",
+        apiKey: "  key-pad  ",
+        modelName: "  m-pad  ",
+      },
+    });
+    expect(endpoint?.baseUrl).toBe("https://pad.example/v1");
+    expect(endpoint?.apiKey).toBe("key-pad");
+    expect(endpoint?.modelName).toBe("m-pad");
+  });
+});
+
 describe("resolveSuperModel —— 模型优先级链", () => {
   it("1. 任务级 modelId 优先于一切", () => {
     const model = resolveSuperModel(

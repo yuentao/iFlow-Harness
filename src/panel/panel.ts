@@ -55,6 +55,7 @@ import type {
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, SuperProfileModelsUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
 import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER, QQ_LEASE_TAKEOVER_ACTION, QQ_LEASE_WAIT_ACTION } from "../../shared/messages.js";
+import { resolveSuperEndpoint, resolveSuperModel, type SuperApiProfile, type SuperEndpointInput } from "../../shared/super-profile.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import {
   EFFICIENCY_STEADY_PROMPT,
@@ -9703,15 +9704,91 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 收集「超流体端点解析链」的输入，交给 `shared/super-profile.ts` 的
+   * `resolveSuperEndpoint` —— 端点优先级链**只有那一份实现**，宿主不再自己
+   * 实现 ①→⑤ 的回退顺序（两处各写一套，改一处就会分叉）。
+   *
+   * 这里只负责取事实：
+   *  - `superProfileName`：本次要解析的超流体指针（`iflow.superAgentProfile`
+   *    或 webview 显式传入的名字）；
+   *  - `mainProfileName`：本工作区记录过的活动 Profile（`workspaceActiveProfile`
+   *    ）—— 与 `resolveWorkspaceHandshakeCreds` 只认这一个名字，不同；
+   *  - `profiles`：SecretStorage `iflow.profiles` 与内核 `apiProfiles` 合并，
+   *    **同名时内核优先**，与握手路径 `kernelProfileCredentials(name) ??
+   *    profiles[name]` 完全同序；
+   *  - `activeCredentials`：握手路径工作区指针之后的下一级
+   *    （`loadCredentials(secrets)`，SecretStorage 活动凭据槽）；
+   *  - `kernelProfileName` / `kernelDefaultEndpoint`：第⑤级的两小步
+   *    （内核 `currentApiProfile` 具名指针 → 内核顶层默认）。
+   */
+  private async superEndpointInput(
+    wantedProfile: string,
+    taskProfileId: string | null = null,
+  ): Promise<SuperEndpointInput> {
+    const kernelProfiles = readKernelApiProfiles();
+    const legacyProfiles = await loadProfiles(this.context.secrets);
+    const profiles: Record<string, SuperApiProfile> = {};
+    for (const [name, creds] of Object.entries(legacyProfiles)) {
+      profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
+    }
+    for (const [name, creds] of Object.entries(kernelProfiles)) {
+      profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
+    }
+    const cli = readCliSettings();
+    // ⑤a 具名内核指针：与 `readActiveEndpoint()` 的前置门保持同一条 ——
+    //   • 认证类型必须是 openai-compatible（否则内核端点整体不算数）；
+    //   • 只认内核文件里确实存在的 `apiProfiles` 条目 —— 否则 SecretStorage
+    //     里一个同名的历史 Profile 会冒充内核指针，解析出
+    //     `readActiveEndpoint()` 永远不会用的凭据。
+    const kernelActive =
+      cli?.selectedAuthType === "openai-compatible" ? cli.currentApiProfile?.trim() : undefined;
+    const kernelProfileName =
+      kernelActive && cli?.apiProfiles?.[kernelActive] ? kernelActive : null;
+    return {
+      taskProfileId,
+      superProfileName: wantedProfile,
+      mainProfileName:
+        this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim() || null,
+      kernelProfileName,
+      profiles,
+      activeCredentials: await loadCredentials(this.context.secrets).catch(() => null),
+      // ⑤b 内核顶层默认：`readActiveEndpoint()` 已经把「currentApiProfile →
+      // 顶层 baseUrl/apiKey」逐字段合并完，直接作为最后一档喂进去。
+      kernelDefaultEndpoint: readActiveEndpoint(),
+    };
+  }
+
+  /**
+   * 超流体侧「跟随主链路」时回推给 webview 的**展示名**。
+   *
+   * 只用于 UI：它与管理名（真正决定凭据的那个具名 Profile，见
+   * `resolveSuperEndpoint().profileName`）**不同源** —— 命中活动凭据或内核
+   * 顶层默认时没有任何具名 Profile 可展示，而设置页需要给用户一个能看懂的
+   * 名字。展示名只在宿主算这一份，纯模块不重复计算。
+   */
+  private async superActiveProfileDisplayName(): Promise<string> {
+    return (
+      this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim() ||
+      resolveActiveProfileName(readCliSettings(), await getActiveProfileName(this.context.secrets)) ||
+      ""
+    );
+  }
+
+  /**
    * 超流体侧「按 Profile 拉模型列表」的端点解析。
    *
+   * **优先级链只有一份实现**（`shared/super-profile.ts` 的
+   * `resolveSuperEndpoint`）：本方法只喂输入、解释结果，不再自己写一遍
+   * 回退顺序。链路与今天主会话握手/活动端点同序：
+   *   ① task `profileId` → ② `iflow.superAgentProfile` → ③
+   *   `iflow.workspaceActiveProfile`（本工作区的握手指针）→ ④ 活动凭据
+   *   （`loadCredentials`，SecretStorage 活动槽）→ ⑤ 内核 `currentApiProfile`
+   *   → 内核顶层默认（`readActiveEndpoint()`）。
+   *
    * `wanted` 是超流体侧选中的 Profile 名（`iflow.superAgentProfile`）：
-   *   • 非空 → 按名取该 Profile 的凭据。内核 settings.json 的 `apiProfiles`
-   *     是权威（面板的 API 配置就存在那里），SecretStorage 里的历史 Profile
-   *     只作补充（还没迁移过去的那些）。
-   *   • 空 → 「跟随主链路」：用主会话当前的活动凭据（工作区握手凭据 →
-   *     SecretStorage 活动凭据 → 内核活动 Profile），与方案文档第 3.1 节的
-   *     回退链一致。
+   *   • 非空 → 只认这个具名 Profile。内核 settings.json 的 `apiProfiles` 是
+   *     权威，SecretStorage 里的历史 Profile 只作补充（还没迁移过去的）。
+   *   • 空 → 「跟随主链路」，即上面 ③→⑤。
    *
    * 找不到时返回**真实原因**（不是一句泛化的「加载失败」），webview 直接
    * 展示这条文案。
@@ -9721,42 +9798,37 @@ export class ChatPanel implements vscode.Disposable {
    */
   private async resolveSuperProfileTarget(
     wanted: unknown,
+    /** 任务级 Profile 覆盖（`SuperTaskSpec.profileId`，链上第①级）。UI 的模型
+     *  列表路径没有任务语境，传 null；派发侧才用得到。 */
+    taskProfileId: string | null = null,
   ): Promise<
     { name: string; creds: OpenAiCompatCredentials } | { name: string; error: string }
   > {
     const name = typeof wanted === "string" ? wanted.trim() : "";
-    if (!name) {
-      const active =
-        (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets));
-      const endpoint = active ?? readActiveEndpoint();
-      if (!endpoint) {
-        return {
-          name: "",
-          error: vscode.l10n.t(
-            "还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。",
-          ),
-        };
-      }
-      const activeName =
-        this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim() ||
-        resolveActiveProfileName(readCliSettings(), await getActiveProfileName(this.context.secrets)) ||
-        "";
-      return {
-        name: activeName,
-        creds: {
-          baseUrl: endpoint.baseUrl,
-          apiKey: endpoint.apiKey,
-          modelName: endpoint.modelName ?? "",
-        },
-      };
-    }
-    const kernel = this.kernelProfileCredentials(name);
-    const legacy = (await loadProfiles(this.context.secrets))[name];
-    const creds = kernel ?? (legacy ? { ...legacy } : null);
-    if (!creds) {
+    const endpoint = resolveSuperEndpoint(await this.superEndpointInput(name, taskProfileId));
+    // 用户在设置页**显式点名**了一个 Profile 时，「选中项必须真实存在」是
+    // UI 契约：纯模块的指针链在名字不存在时会继续往下回退（任务级覆盖写错
+    // 名字不该瘫痪整条链路），但设置页点名的配置找不到时该看到真实原因，
+    // 而不是静默展示主链路的端点。`profileName` 就是命中的那个具名 Profile。
+    if (name && endpoint?.profileName !== name) {
       return { name, error: vscode.l10n.t("未找到 API 配置：{0}", name) };
     }
-    return { name, creds };
+    if (!endpoint) {
+      return {
+        name,
+        error: vscode.l10n.t(
+          "还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。",
+        ),
+      };
+    }
+    return {
+      name: name || (await this.superActiveProfileDisplayName()),
+      creds: {
+        baseUrl: endpoint.baseUrl,
+        apiKey: endpoint.apiKey,
+        modelName: endpoint.modelName ?? "",
+      },
+    };
   }
 
   /**
@@ -9806,13 +9878,33 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 超流体侧当前选中的模型 id：`iflow.superAgentModel` 优先；留空则用目标
-   * Profile 自带的 `modelName`（方案文档第 3.2 节回退链的第 3 级）。
+   * 超流体侧当前选中的模型 id。**模型优先级链只有一份实现**
+   * （`shared/super-profile.ts` 的 `resolveSuperModel`）：
+   *   ① 任务级 `modelId` → ② `iflow.superAgentModel` → ③ 目标 Profile 自带的
+   *   `modelName` → ④ 主 store 的 `currentModelId`。
+   *
+   * 原先宿主只实现了 ②③，①（任务覆盖）与④（跟随主会话当前模型）都缺 ——
+   * 「未配置超流体」时模型链会在 Profile 没写 modelName 时断掉，与纯逻辑层
+   * 分叉。`taskModelId` 由派发侧提供（任务级临时覆盖）；UI 的模型列表路径
+   * 没有任务语境，传 null 即按 ②→④ 解析。
+   *
+   * live 下架判定（`liveModelIds`）不在这条 UI 路径上：`SuperProfileModelsUi`
+   * 没有承载「降级原因」的字段，静默换模型会违反「降级必须显式」的纪律。
    */
-  private superSelectedModel(creds: OpenAiCompatCredentials | null): string {
-    const explicit = this.readStringSetting("superAgentModel");
-    const fallback = typeof creds?.modelName === "string" ? creds.modelName.trim() : "";
-    return explicit || fallback;
+  private superSelectedModel(
+    creds: OpenAiCompatCredentials | null,
+    taskModelId: string | null = null,
+  ): string {
+    return (
+      resolveSuperModel({
+        taskModelId,
+        superModelId: this.readStringSetting("superAgentModel"),
+        // `null` = 明确没有「Profile 自带模型名」这个候选，直接落到主会话
+        // 当前模型；空串也会被纯函数按「没有」处理。
+        profileModelName: creds?.modelName ?? null,
+        mainModelId: this.store.getState().currentModelId,
+      }).modelId ?? ""
+    );
   }
 
   /**
@@ -9867,7 +9959,7 @@ export class ChatPanel implements vscode.Disposable {
         profileName:
           typeof profileName === "string" ? profileName : this.readStringSetting("superAgentProfile"),
         models: [],
-        currentModelId: this.readStringSetting("superAgentModel"),
+        currentModelId: this.superSelectedModel(null),
         error: reason,
       };
     }

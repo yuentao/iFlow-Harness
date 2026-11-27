@@ -28,11 +28,41 @@ import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import type { SuperProfileModelsUi } from "../shared/messages.js";
+import { AUTH_SECRET_KEY, loadCredentials } from "../src/acp/auth.js";
+import { readActiveEndpoint } from "../src/acp/models-query.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
+/** 可变 SecretStorage 替身：测试可在任意时刻写入/改写（`loadCredentials`
+ *  在调用时读取，所以后写的值对下一次解析生效）。 */
+interface SecretBag {
+  map: Map<string, string>;
+  secrets: vscodeTypes.SecretStorage;
+}
+
+function makeSecretBag(initial: Record<string, string> = {}): SecretBag {
+  const map = new Map(Object.entries(initial));
+  return {
+    map,
+    secrets: {
+      get: (key: string) => Promise.resolve(map.get(key)),
+      store: (key: string, value: string) => {
+        map.set(key, value);
+        return Promise.resolve();
+      },
+      delete: (key: string) => {
+        map.delete(key);
+        return Promise.resolve();
+      },
+    } as unknown as vscodeTypes.SecretStorage,
+  };
+}
+
+function makeContext(
+  storageDir: string,
+  secretsImpl: vscodeTypes.SecretStorage = makeSecretBag().secrets,
+): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T =>
@@ -49,11 +79,7 @@ function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   };
   return {
     subscriptions: [],
-    secrets: {
-      get: () => Promise.resolve(undefined),
-      store: () => Promise.resolve(),
-      delete: () => Promise.resolve(),
-    },
+    secrets: secretsImpl,
     workspaceState: state,
     globalState: state,
     extensionUri: { fsPath: here },
@@ -92,7 +118,13 @@ type PanelInternals = {
   pushSuperProfileModels: (profileName?: unknown) => Promise<void>;
   clearSuperProfileModelsCache: () => void;
   resolveSuperProfileTarget: (wanted: unknown) => Promise<unknown>;
-  store: { sendToast: (...args: unknown[]) => number };
+  resolveWorkspaceHandshakeCreds: () => Promise<Credentials | null>;
+  superSelectedModel: (creds: Credentials | null, taskModelId?: string | null) => string;
+  store: {
+    sendToast: (...args: unknown[]) => number;
+    sessionMeta: (meta: { currentModelId?: string | null }) => void;
+    getState: () => { currentModelId: string | null };
+  };
 };
 
 /** 写入内核 `settings.json`（`apiProfiles` 是面板 API 配置的唯一权威）。
@@ -190,6 +222,8 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void
 describe("超流体链路的独立 API 配置与模型（协议与数据通道）", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
+  let context: vscodeTypes.ExtensionContext;
+  let secretBag: SecretBag;
   let storageDir: string;
   let home: string;
   let state: FakeConfigState;
@@ -213,7 +247,9 @@ describe("超流体链路的独立 API 配置与模型（协议与数据通道�
     process.env.IFLOW_HOME = home;
     state = { values: new Map(), failWith: null, updates: [] };
     installFakeConfig(state);
-    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    secretBag = makeSecretBag();
+    context = makeContext(storageDir, secretBag.secrets);
+    panel = new ChatPanel(context, { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as PanelInternals;
     posted = [];
     toasts = [];
@@ -641,5 +677,245 @@ describe("超流体链路的独立 API 配置与模型（协议与数据通道�
       "utf8",
     );
     expect(host).not.toContain("onDidChangeConfiguration");
+  });
+
+  // ── 收敛后的一致性 / 补洞用例 ────────────────────────────────────────────
+
+  const setSuperSettings = (profile: string, model: string): void => {
+    setConfigOverrides({
+      checkpoints: false,
+      efficiencyMode: "steady",
+      autoMemoryCapture: false,
+      autoTitle: false,
+      nextStepSuggestions: false,
+      superAgentProfile: profile,
+      superAgentModel: model,
+    });
+  };
+
+  /** 今天主会话实际用的凭据链（独立 oracle）：握手 → 活动凭据 → 内核活动/顶层默认。 */
+  const mainHandshakeEndpoint = async (): Promise<{
+    baseUrl: string;
+    apiKey: string;
+    modelName: string | null;
+  } | null> =>
+    (await p.resolveWorkspaceHandshakeCreds()) ??
+    (await loadCredentials(context.secrets)) ??
+    readActiveEndpoint();
+
+  const normalizeCreds = (
+    creds: { baseUrl: string; apiKey: string; modelName: string | null } | null,
+  ): Credentials | null =>
+    creds
+      ? { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName ?? "" }
+      : null;
+
+  const superTargetCreds = async (): Promise<Credentials | null> => {
+    const target = (await p.resolveSuperProfileTarget("")) as
+      | { name: string; creds: Credentials }
+      | { name: string; error: string };
+    return "creds" in target ? target.creds : null;
+  };
+
+  /** 断言「未配置超流体」时超流体端点 ≡ 主会话握手/活动端点。 */
+  const expectSuperMatchesMain = async (): Promise<Credentials | null> => {
+    const main = normalizeCreds(await mainHandshakeEndpoint());
+    expect(normalizeCreds(await superTargetCreds())).toEqual(main);
+    return main;
+  };
+
+  it("⑭ 等价：workspace 指针有 + 内核 currentApiProfile 有 → 与主会话握手一致", async () => {
+    writeKernelSettings(
+      home,
+      {
+        "ws-gw": {
+          baseUrl: "https://ws.example/v1",
+          apiKey: "sk-ws",
+          modelName: "ws-model",
+        },
+        "kernel-gw": {
+          baseUrl: "https://kernel.example/v1",
+          apiKey: "sk-kernel",
+          modelName: "kernel-model",
+        },
+      },
+      "kernel-gw",
+    );
+    await context.workspaceState.update("iflow.workspaceActiveProfile", "ws-gw");
+    const main = await expectSuperMatchesMain();
+    // 工作区记录优先于内核指针（与握手路径一致）。
+    expect(main).toEqual({ baseUrl: "https://ws.example/v1", apiKey: "sk-ws", modelName: "ws-model" });
+  });
+
+  it("⑮ 等价：workspace 指针有 + 内核 currentApiProfile 无", async () => {
+    writeKernelSettings(home, {
+      "ws-gw": { baseUrl: "https://ws.example/v1", apiKey: "sk-ws", modelName: "ws-model" },
+    });
+    await context.workspaceState.update("iflow.workspaceActiveProfile", "ws-gw");
+    const main = await expectSuperMatchesMain();
+    expect(main?.baseUrl).toBe("https://ws.example/v1");
+  });
+
+  it("⑯ 等价：workspace 指针无 + 内核 currentApiProfile 有", async () => {
+    writeKernelSettings(
+      home,
+      {
+        "kernel-gw": {
+          baseUrl: "https://kernel.example/v1",
+          apiKey: "sk-kernel",
+          modelName: "kernel-model",
+        },
+      },
+      "kernel-gw",
+    );
+    const main = await expectSuperMatchesMain();
+    expect(main).toEqual({
+      baseUrl: "https://kernel.example/v1",
+      apiKey: "sk-kernel",
+      modelName: "kernel-model",
+    });
+  });
+
+  it("⑰ 等价：workspace 无 + 内核指针无 + 只有顶层 baseUrl/apiKey（第⑤级真缺口）", async () => {
+    fs.writeFileSync(
+      path.join(home, "settings.json"),
+      JSON.stringify({
+        selectedAuthType: "openai-compatible",
+        baseUrl: "https://top.example/v1",
+        apiKey: "sk-top",
+        modelName: "top-model",
+      }),
+      "utf8",
+    );
+    const main = await expectSuperMatchesMain();
+    expect(main).toEqual({
+      baseUrl: "https://top.example/v1",
+      apiKey: "sk-top",
+      modelName: "top-model",
+    });
+  });
+
+  it("⑱ 等价：workspace 无 + 内核无 + 只有 SecretStorage 活动凭据", async () => {
+    secretBag.map.set(
+      AUTH_SECRET_KEY,
+      JSON.stringify({
+        baseUrl: "https://secret.example/v1",
+        apiKey: "sk-secret",
+        modelName: "secret-model",
+      }),
+    );
+    const main = await expectSuperMatchesMain();
+    expect(main).toEqual({
+      baseUrl: "https://secret.example/v1",
+      apiKey: "sk-secret",
+      modelName: "secret-model",
+    });
+  });
+
+  it("⑲ 等价：workspace 指针指向不存在的 Profile + 内核指针有 → 一起回落到内核", async () => {
+    writeKernelSettings(
+      home,
+      {
+        "kernel-gw": {
+          baseUrl: "https://kernel.example/v1",
+          apiKey: "sk-kernel",
+          modelName: "kernel-model",
+        },
+      },
+      "kernel-gw",
+    );
+    await context.workspaceState.update("iflow.workspaceActiveProfile", "gone-gw");
+    const main = await expectSuperMatchesMain();
+    expect(main?.baseUrl).toBe("https://kernel.example/v1");
+  });
+
+  it("⑳ 等价：完全未配置时两边都没有端点（超流体给出真实原因）", async () => {
+    const main = normalizeCreds(await mainHandshakeEndpoint());
+    expect(main).toBeNull();
+    const target = (await p.resolveSuperProfileTarget("")) as { error?: string };
+    expect(target.error).toContain("还没有配置 API 端点");
+  });
+
+  it("⑳b 等价：内核 selectedAuthType 不是 openai-compatible 时，具名内核 Profile 也不算端点", async () => {
+    fs.writeFileSync(
+      path.join(home, "settings.json"),
+      JSON.stringify({
+        selectedAuthType: "oauth",
+        currentApiProfile: "kernel-gw",
+        apiProfiles: {
+          "kernel-gw": {
+            baseUrl: "https://kernel.example/v1",
+            apiKey: "sk-kernel",
+            modelName: "kernel-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const main = normalizeCreds(await mainHandshakeEndpoint());
+    expect(main).toBeNull();
+    const target = (await p.resolveSuperProfileTarget("")) as { error?: string };
+    expect(target.error).toContain("还没有配置 API 端点");
+  });
+
+  it("㉑ 只有内核顶层 baseUrl/apiKey 时，超流体侧的模型列表也能拉到", async () => {
+    const endpoint = await startFakeEndpoint(() => ({
+      status: 200,
+      body: JSON.stringify({ data: [{ id: "model-a" }] }),
+    }));
+    try {
+      fs.writeFileSync(
+        path.join(home, "settings.json"),
+        JSON.stringify(
+          {
+            selectedAuthType: "openai-compatible",
+            baseUrl: endpoint.baseUrl,
+            apiKey: "sk-top",
+            modelName: "top-model",
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      await p.handleWebviewMessage({ type: "refreshSuperProfileModels" });
+      await waitFor(() => lastModelsPayload() !== undefined);
+      const payload = lastModelsPayload();
+      expect(payload!.error).toBeUndefined();
+      expect(payload!.models.map((m) => m.id)).toContain("model-a");
+      expect(payload!.currentModelId).toBe("top-model");
+      // 没有具名 Profile 可展示（展示名不是管理名）。
+      expect(payload!.profileName).toBe("");
+      expect(endpoint.requests[0]!.auth).toBe("Bearer sk-top");
+    } finally {
+      await endpoint.close();
+    }
+  });
+
+  it("㉒ 模型链①：任务级 modelId 覆盖设置与 Profile 模型", () => {
+    setSuperSettings("", "m-super");
+    expect(
+      p.superSelectedModel(
+        { baseUrl: "https://x.example/v1", apiKey: "k", modelName: "m-profile" },
+        "m-task",
+      ),
+    ).toBe("m-task");
+  });
+
+  it("㉓ 模型链②：iflow.superAgentModel 优先于 Profile 自带模型", () => {
+    setSuperSettings("", "m-super");
+    expect(
+      p.superSelectedModel({ baseUrl: "https://x.example/v1", apiKey: "k", modelName: "m-profile" }),
+    ).toBe("m-super");
+  });
+
+  it("㉔ 模型链④：设置与 Profile 模型都为空时回退主 store 的 currentModelId", () => {
+    setSuperSettings("", "");
+    p.store.sessionMeta({ currentModelId: "m-main" });
+    expect(p.store.getState().currentModelId).toBe("m-main");
+    expect(
+      p.superSelectedModel({ baseUrl: "https://x.example/v1", apiKey: "k", modelName: "" }),
+    ).toBe("m-main");
+    expect(p.superSelectedModel(null)).toBe("m-main");
   });
 });
