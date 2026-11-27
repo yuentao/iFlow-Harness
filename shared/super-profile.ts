@@ -21,7 +21,10 @@
  *     2. `iflow.superAgentProfile`      —— 超流体链路独立指针
  *     3. `iflow.workspaceActiveProfile` —— 主链路活动指针
  *     4. 活动凭据（`loadCredentials`）  —— workspaceState 缺失时先回退到这里
- *     5. 内核 `currentApiProfile` / 内核默认 —— 以上都不可用时再回退
+ *     5. 内核 `currentApiProfile`（具名）→ 内核**顶层默认** —— 以上都不可用
+ *        时再回退。顶层默认没有 Profile 名，宿主用 `readActiveEndpoint()` 的
+ *        结果填 `kernelDefaultEndpoint`（它已把「具名 Profile → 顶层
+ *        baseUrl/apiKey」逐字段合并完）。
  *
  *   **④⑤ 的顺序必须与子会话实际握手路径一致**：`createSuperClient` 解析凭据走
  *   `resolveWorkspaceHandshakeCreds() ?? loadCredentials(secrets)`（见
@@ -63,7 +66,10 @@
  *     `iflow.openai-compatible` 活动凭据槽，即 `loadCredentials(secrets)`）；
  *     第 5 级才是内核 `currentApiProfile` / 内核顶层默认（`readActiveEndpoint()`
  *     的后半段），是最后兜底 —— 只在工作区指针与活动凭据都不可用时生效。顺序
- *     颠倒会与握手路径分叉。
+ *     颠倒会与握手路径分叉。第 5 级由两个输入表达：`kernelProfileName`
+ *     （具名内核指针）与 `kernelDefaultEndpoint`（`readActiveEndpoint()` 合成
+ *     出的内核顶层默认）。后者**不能省**：只有顶层 baseUrl/apiKey、没有任何
+ *     Profile 时，缺了它整条链会错误地返回 null。
  *  3. **模型的「跟随主链路」语义**：见 {@link resolveSuperApiSpec} 的
  *     `profileModelName: null` 说明 —— 想让子会话沿用**主会话当前模型**（今天
  *     的实际取值）而不是主链路 Profile 的默认模型名，必须显式传 `null`。
@@ -87,8 +93,14 @@ export type SuperEndpointSource =
   | "main-profile"
   /** 活动凭据（`iflow.openai-compatible`，握手路径的下一级 `loadCredentials`）。 */
   | "active-credentials"
-  /** 内核 `currentApiProfile` / 内核默认（最后兜底）。 */
-  | "kernel-profile";
+  /** 内核 `currentApiProfile`（具名 Profile，最后兜底的第一小步）。 */
+  | "kernel-profile"
+  /**
+   * 内核**顶层默认**（`settings.json` 顶层 `baseUrl` / `apiKey`，没有任何
+   * Profile 名可指向）。对应 `readActiveEndpoint()` 的后半段：`currentApiProfile`
+   * 为空或该 Profile 不完整时，内核逐字段回退到顶层配置。
+   */
+  | "kernel-default";
 
 /** {@link resolveSuperEndpoint} 的入参（全部由宿主喂进来，本模块不读盘）。 */
 export interface SuperEndpointInput {
@@ -103,6 +115,21 @@ export interface SuperEndpointInput {
   mainProfileName?: string | null;
   /** 内核 `currentApiProfile` / 内核默认（最后兜底：工作区指针与活动凭据都不可用时）。 */
   kernelProfileName?: string | null;
+  /**
+   * 内核**顶层默认**端点（`settings.json` 顶层的 `baseUrl` / `apiKey`，
+   * 没有任何 Profile 名）。
+   *
+   * 为什么需要它：`kernelProfileName` 只能表达「内核指针指向某个具名
+   * Profile」；今天 `readActiveEndpoint()` 在 `currentApiProfile` 为空（或该
+   * Profile 缺字段）时会逐字段回退到顶层 `baseUrl` / `apiKey` —— 那一档
+   * **没有名字**，纯函数原先把这种情况表达成「什么都没有」，与握手路径分叉。
+   *
+   * 宿主按 `readActiveEndpoint()` 的结果喂进来即可：它已经把「具名内核
+   * Profile → 顶层配置」的逐字段合并做完了（`src/acp/models-query.ts`）。
+   * 顺序：具名内核指针（`kernelProfileName`）**先**，本字段**后** —— 与
+   * `readActiveEndpoint()` 的 `active?.baseUrl ?? settings.baseUrl` 同序。
+   */
+  kernelDefaultEndpoint?: SuperApiProfile | null;
   /**
    * 具名 Profile 库（宿主把 SecretStorage 与内核 `apiProfiles` 合并后的结果）。
    *
@@ -133,7 +160,12 @@ export interface SuperEndpoint {
   modelName: string | null;
   /** 命中了链上的哪一级。 */
   source: SuperEndpointSource;
-  /** 命中的具名 Profile 名（来自活动凭据时为 null）。 */
+  /**
+   * 命中的**管理名**（真正决定凭据的具名 Profile）。活动凭据
+   * （`active-credentials`）与内核顶层默认（`kernel-default`）这两种来源
+   * 没有具名 Profile，为 null —— 设置页需要的**展示名**由宿主另算，不要
+   * 拿这个字段冒充（两者不同源）。
+   */
   profileName: string | null;
 }
 
@@ -237,8 +269,29 @@ export function resolveSuperEndpoint(input: SuperEndpointInput): SuperEndpoint |
       };
     }
   }
-  // 第 5 级：内核 currentApiProfile / 内核默认（最后兜底）。
-  return fromProfile(input.kernelProfileName, "kernel-profile");
+  // 第 5 级：内核 currentApiProfile（具名 Profile）。
+  const kernelNamed = fromProfile(input.kernelProfileName, "kernel-profile");
+  if (kernelNamed) return kernelNamed;
+  // 5b：内核**顶层默认** —— 没有任何 Profile 名可指的那一档。今天
+  // `readActiveEndpoint()` 在 currentApiProfile 为空（或该 Profile 不完整）
+  // 时逐字段回退到 settings 顶层 baseUrl / apiKey；没有这个输入时纯函数只能
+  // 返回 null，与握手路径分叉。宿主把 `readActiveEndpoint()` 的结果喂进来。
+  const kernelDefault = input.kernelDefaultEndpoint;
+  if (kernelDefault) {
+    const baseUrl =
+      typeof kernelDefault.baseUrl === "string" ? kernelDefault.baseUrl.trim() : "";
+    const apiKey = typeof kernelDefault.apiKey === "string" ? kernelDefault.apiKey.trim() : "";
+    if (baseUrl && apiKey) {
+      return {
+        baseUrl,
+        apiKey,
+        modelName: normalizeModelName(kernelDefault.modelName),
+        source: "kernel-default",
+        profileName: null,
+      };
+    }
+  }
+  return null;
 }
 
 /** 模型解析命中了链上的哪一级（由高到低），或降级兜底。 */
