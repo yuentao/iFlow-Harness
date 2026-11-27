@@ -19,7 +19,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsModal } from "../webview/src/components/SettingsModal";
 import { setLocale, t } from "../webview/src/i18n";
-import type { AuthUiState, HostSettingsUi } from "../shared/messages";
+import type { AuthUiState, HostSettingsUi, SuperProfileModelsUi } from "../shared/messages";
 
 /** jsdom ships neither ResizeObserver nor scrollIntoView; the settings shell
  * only needs the members to exist. */
@@ -93,14 +93,67 @@ const hostSettings = vi.hoisted(() =>
   }) as unknown as HostSettingsUi & { superAgentMaxAttempts?: number; superAgentDependencyPolicy?: string },
 );
 
+/**
+ * 「超流体」tab 挂载时，SettingsModal 订阅的 store 表面不止 send /
+ * updateHostSetting / hostSettings：`SuperAgentSection` 还会调用
+ * `requestSuperProfileModels(superProfile)`（store.ts 的专用模型列表通道
+ * action），并读 `superProfileModelsView` 与 `state.auth.profiles`。旧 mock
+ * 只给了前三个成员，组件一挂载就抛
+ * `requestSuperProfileModels is not a function` —— 本文件的 16 个用例全部
+ * 死在这个 beforeEach 里的挂载上。这里按真实 store 的形状补齐（action 是
+ * 函数；视图默认 null = 尚未回包，组件走加载态；状态给一份最小鉴权快照）。
+ */
+const requestSuperProfileModels = vi.hoisted(() => vi.fn());
+const superProfileModelsView = vi.hoisted(() => ({
+  current: null as SuperProfileModelsUi | null,
+}));
+
 vi.mock("../webview/src/store", () => ({
   useChat: Object.assign(
     (selector: (state: {
       send: typeof send;
       updateHostSetting: typeof updateHostSetting;
       hostSettings: typeof hostSettings;
-    }) => unknown) => selector({ send, updateHostSetting, hostSettings }),
-    { getState: () => ({ send, updateHostSetting, hostSettings }) },
+      requestSuperProfileModels: typeof requestSuperProfileModels;
+      superProfileModelsView: SuperProfileModelsUi | null;
+      state: { auth: AuthUiState };
+    }) => unknown) =>
+      selector({
+        send,
+        updateHostSetting,
+        hostSettings,
+        requestSuperProfileModels,
+        superProfileModelsView: superProfileModelsView.current,
+        // SuperAgentSection 用 state.auth.profiles 作为「API 配置」下拉的
+        // 候选来源；空列表 → 只剩「跟随主会话」。
+        state: {
+          auth: {
+            authenticated: true,
+            needsSetup: false,
+            saved: null,
+            profiles: [],
+            onboardingDismissed: false,
+          },
+        },
+      }),
+    {
+      getState: () => ({
+        send,
+        updateHostSetting,
+        hostSettings,
+        requestSuperProfileModels,
+        superProfileModelsView: superProfileModelsView.current,
+        state: {
+          auth: {
+            authenticated: true,
+            needsSetup: false,
+            saved: null,
+            profiles: [],
+            onboardingDismissed: false,
+          },
+        },
+      }),
+    },
   ),
 }));
 
