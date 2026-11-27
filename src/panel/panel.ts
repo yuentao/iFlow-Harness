@@ -505,6 +505,37 @@ export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // executing
   "run_shell_command",
 ] as const;
+
+/**
+ * 宿主侧 `/init` 委派的展开意图。
+ *
+ * `/init` 是 CLI 内建命令：其 action 用 Node fs 直接创建/清空 AGENTS.md，再回交
+ * 一段明确要求「列目录、读 README、迭代深入最多 10 个文件」的分析 prompt
+ * （vendor/iflow-fork/bundle/iflow.js:5353、:5959）。主会话只保留编排工具
+ * （上方白名单），跑到分析阶段必然 tool-not-found，等于功能丢失。
+ *
+ * 子会话的 `buildTaskPrompt` 会把 task 包成散文模板（prompts/super-agent-task.md：
+ * 首行 `You are a child session: ...`），裸 `/init` 落在那里不会被 CLI 当成 slash
+ * 命令。因此委派的是**展开后的意图**，让有完整工具面的子会话真正执行初始化，
+ * 而不是把命令 token 原样转交。子会话在隔离 worktree（同一仓库）里生成
+ * AGENTS.md，变更按既有合并流程回到工作区。
+ */
+const INIT_DELEGATE_TASK =
+  "Run the /init workflow in this repository: list the files and directories, " +
+  "read the README and up to 10 key source/config files, then create an " +
+  "AGENTS.md at the repository root that documents the project purpose, " +
+  "build/test/lint commands, high-level architecture and important " +
+  "conventions. Use your file tools to write the file; do not merely describe it.";
+
+/**
+ * 命中 `/init`（可带任意参数），不命中 `/initialize`、`/init-project` 等。
+ * token 大小写不敏感：宿主比 CLI 的严格小写判断更宽容，展开意图一致。
+ */
+function parseInitCommand(text: string): { raw: string } | null {
+  const match = /^\/init(?:\s+[\s\S]*)?$/i.exec(text.trim());
+  return match ? { raw: match[0] } : null;
+}
+
 /** The main session's mode is fixed (2026-11-18). Every tool it holds
  * (`super-agent` / `todo_write` / `todo_read` / `ask_user_question`) has
  * `shouldConfirmExecute() === false` and its CLI process runs without MCP
@@ -10081,6 +10112,48 @@ export class ChatPanel implements vscode.Disposable {
     // Host-driven reports (`internal`) never delegate — a report arriving
     // while the main session is busy is dropped, not turned into a child.
     const gateState = this.store.getState();
+    // ── `/init` 产品例外：宿主直接委派 ──────────────────────────────
+    // 其它 slash 命令（含 /compress 与自定义命令）继续走下面的通用规则：
+    // 主会话内展开、忙时拒绝。唯独 `/init` 的 CLI 实现会用 fs 写工作区并回交
+    // 一段依赖工具的分析 prompt，而主会话没有读写/执行工具 —— 留在主会话
+    // 只会写出空文件再 tool-not-found。故宿主在这里先识别、直接委派给有完整
+    // 工具面的子会话：
+    //  - 不把 `/init` 原文发给主 CLI（避免它先写空文件再在主会话失败）；
+    //  - 不压 pendingDelegatedUserTurns（原文回灌会再次触发主会话同款失败）；
+    //  - task 用展开意图（子会话的 buildTaskPrompt 会包散文，裸 token 不会被
+    //    当成 slash 命令，见 INIT_DELEGATE_TASK 注释）。
+    // idle 与 streaming 都委派：忙时不能被通用 slash 早退静默吞掉。
+    const initInvocation = !internal && !hidden ? parseInitCommand(trimmed) : null;
+    if (initInvocation) {
+      if (gateState.replaying || this.historySyncBusy) {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("主会话正在生成，命令请本轮结束后重发"),
+        );
+        return false;
+      }
+      const initContextBlock = hasContexts
+        ? assembleContextSections(contexts!, (c) => this.contextSectionTitleEn(c))
+        : "";
+      const task = [
+        initContextBlock,
+        INIT_DELEGATE_TASK,
+        `Original user input: ${initInvocation.raw}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const title = normalizeSuperTitle(trimmed.split("\n")[0] ?? "") || "/init";
+      const manager = await this.ensureSuperAgentForDispatch();
+      if (!manager) return false;
+      manager.spawn({ title, task });
+      if (gateState.status === "streaming" || laneBusy) {
+        this.store.sendToast(
+          "info",
+          vscode.l10n.t("主会话正在生成，已把这条消息派发为超流体「{0}」", title),
+        );
+      }
+      return false;
+    }
     if (gateState.status === "streaming" || laneBusy) {
       if (gateState.replaying || this.historySyncBusy) {
         this.log.info("sendPrompt rejected: replay/history-sync in flight");
