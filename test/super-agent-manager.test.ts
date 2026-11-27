@@ -294,6 +294,8 @@ function makeManager(
     efficiencyMode?: "steady" | "turbo";
     /** 超流体独立模型解析（宿主接线；缺省 = 管理器回落到 currentModel）。 */
     spawnModel?: (spec: SuperTaskSpec) => Promise<string | null>;
+    /** 子会话实际命中的具名 API Profile（宿主接线；缺省 = 不回填 profileId）。 */
+    spawnProfile?: (spec: SuperTaskSpec) => Promise<string | null>;
   } = {},
 ): Harness {
   const clients: FakeClient[] = [];
@@ -344,6 +346,7 @@ function makeManager(
     },
     currentModel: () => "test-model",
     ...(options.spawnModel ? { spawnModel: options.spawnModel } : {}),
+    ...(options.spawnProfile ? { spawnProfile: options.spawnProfile } : {}),
     currentMainSessionId: () =>
       typeof mainSessionId === "function" ? mainSessionId() : mainSessionId,
     priceFor: () => ({ input: 1, output: 2 }),
@@ -1028,6 +1031,31 @@ describe("super agent · 编排", () => {
 
     expect(harness.clients[0]?.setModels).toEqual(["test-model"]);
     expect(harness.sessions[0]?.model).toBe("test-model");
+  }, 30000);
+
+  it("spawnProfile 解析出具名 Profile 时回填 profileId（与 model 成对，供看板展示）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "usage", "manual", "main-1", undefined, {
+      spawnModel: async () => "super-independent-model",
+      spawnProfile: async () => "super-gateway",
+    });
+    harness.manager.spawn({ title: "带 Profile 的任务", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    expect(harness.sessions[0]?.profileId).toBe("super-gateway");
+    expect(harness.sessions[0]?.model).toBe("super-independent-model");
+  }, 30000);
+
+  it("spawnProfile 返回 null（解析不出具名 Profile / 零配置）时 profileId 保持 undefined", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "usage", "manual", "main-1", undefined, {
+      spawnProfile: async () => null,
+    });
+    harness.manager.spawn({ title: "零配置任务", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    expect(harness.sessions[0]?.profileId).toBeUndefined();
+    expect(harness.sessions[0]).not.toHaveProperty("profileId");
   }, 30000);
 
   it("中断也保留已产生的用量（输入标记为非权威）", async () => {

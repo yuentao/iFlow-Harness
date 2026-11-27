@@ -15,6 +15,7 @@
  *    那套解析，子会话会拿到 64000 而不是 128000。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -24,6 +25,8 @@ import type * as vscodeTypes from "vscode";
 import * as vscode from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
+import { AcpClient } from "../src/acp/client.js";
+import { externalSuperWorktreeRoot } from "../src/panel/worktree.js";
 import type { SuperTaskSpec } from "../shared/super-agent.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
@@ -891,4 +894,217 @@ describe("子会话独立凭据与模型注入", () => {
       }
     }, 40000);
   });
+});
+
+/**
+ * 派发链路的窗口快照 + Profile 回填（真实链路端到端）。
+ *
+ * 这里不 mock 管理器/宿主：`ChatPanel` → `SuperAgentHost` →
+ * `SuperAgentManager` → 真 `AcpClient` → mock ACP agent 子进程全跑起来，
+ * 断言的是**宿主真正推给子会话的值**（spy 在 `AcpClient.prototype` 的
+ * `setModel` / `setTokensLimit` 上），而不是重算一遍的中间量。
+ *
+ * 可证伪（已手工验证）：
+ *  - 把宿主 `setTokensLimit` 回调里的 `stashed`（spawn 快照）分支删掉 ——
+ *    第 1 条会推主会话的 64000（而非 128000）→ 变红；第 2 条在零超流体设置
+ *    下会推主会话的 64000（而非任务级 Profile 的 200000）→ 变红。
+ *  - 把 `spawnProfile` 的 `configured` 门去掉（零配置也回填），第 3 条的
+ *    `profileId` 断言变红。
+ */
+describe("派发链路：窗口快照与 Profile 回填（端到端）", () => {
+  let panel: ChatPanel | null = null;
+  let storageDir: string;
+  let iflowHome: string;
+  let repo: string;
+  let secrets: ReturnType<typeof makeSecrets>;
+
+  /** 三个 Profile 的 baseUrl 都指向本机不可达端口：live 校验立即失败（无证据）。 */
+  const MAIN_PROFILE = { ...MAIN, baseUrl: "http://127.0.0.1:1/v1" };
+  const SUPER_PROFILE = { ...SUPER, baseUrl: "http://127.0.0.1:1/v1" };
+  const TASK_PROFILE = { ...TASK, baseUrl: "http://127.0.0.1:1/v1" };
+
+  type DispatchHost = {
+    dispatchSuperTasks: (
+      blocks: SuperTaskSpec[][],
+      issues?: string[],
+    ) => { dispatched: number; duplicates: number; managerAvailable: boolean };
+  };
+  type PanelInternals = {
+    superHost: DispatchHost;
+    store: { sessionMeta: (meta: { currentModelId?: string | null }) => void };
+  };
+
+  function initRepo(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-super-window-repo-"));
+    const g = (...args: string[]) =>
+      execFileSync("git", args, { cwd: dir, windowsHide: true, stdio: "ignore" });
+    g("init", "-q");
+    g("config", "user.name", "test");
+    g("config", "user.email", "test@example.com");
+    g("config", "core.autocrlf", "false");
+    fs.writeFileSync(path.join(dir, "a.txt"), "one\n", "utf8");
+    g("add", "-A");
+    g("commit", "-qm", "init");
+    return dir;
+  }
+
+  beforeEach(async () => {
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-super-window-storage-"));
+    iflowHome = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-super-window-home-"));
+    process.env.IFLOW_HOME = iflowHome;
+    delete process.env.IFLOW_TOKENS_LIMIT;
+    delete process.env.IFLOW_API_KEY;
+    delete process.env.IFLOW_BASE_URL;
+    (vscode.workspace as unknown as { fs: unknown }).fs = {
+      readFile: (uri: { fsPath: string }) => fs.promises.readFile(uri.fsPath),
+      writeFile: (uri: { fsPath: string }, data: Uint8Array) =>
+        fs.promises.writeFile(uri.fsPath, data),
+    };
+    // 内核 Profile：main 窗口 64000、super 128000、taskProf 200000。主会话
+    // 活动 Profile 是 main —— 「回落到主会话」就会拿到 64000。
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        selectedAuthType: "openai-compatible",
+        currentApiProfile: "main",
+        apiProfiles: { main: MAIN_PROFILE, super: SUPER_PROFILE, taskProf: TASK_PROFILE },
+      }),
+      "utf8",
+    );
+    secrets = makeSecrets();
+    repo = initRepo();
+    const ctx = makeContext(storageDir, secrets);
+    await ctx.workspaceState.update("iflow.workspaceActiveProfile", "main");
+    panel = new ChatPanel(ctx, {
+      entryOverride: mockAgent,
+      workspaceRoot: repo,
+      watchers: makeWatchers(),
+    });
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (panel) await panel.dispose();
+    panel = null;
+    delete process.env.IFLOW_HOME;
+    delete (vscode.workspace as unknown as { fs?: unknown }).fs;
+    for (const dir of [storageDir, iflowHome, repo]) {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+    // 子会话 worktree 落在主仓外的兄弟目录：尽力清掉（清理失败的残留不影响断言）。
+    try {
+      fs.rmSync(externalSuperWorktreeRoot(repo), {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 50,
+      });
+    } catch {
+      // 子进程仍持有句柄时留给临时目录清理，不让 afterEach 变红。
+    }
+  });
+
+  /** 在真实 AcpClient 上记录宿主推给子会话的模型 / 窗口。 */
+  function spyPushes(): { models: string[]; limits: number[] } {
+    const models: string[] = [];
+    const limits: number[] = [];
+    vi.spyOn(AcpClient.prototype, "setModel").mockImplementation(
+      async (_sessionId: string, modelId: string) => {
+        models.push(modelId);
+        return {};
+      },
+    );
+    vi.spyOn(AcpClient.prototype, "setTokensLimit").mockImplementation(
+      async (_sessionId: string, tokensLimit: number) => {
+        limits.push(tokensLimit);
+        return {};
+      },
+    );
+    return { models, limits };
+  }
+
+  function dispatch(spec: SuperTaskSpec): DispatchHost {
+    const internals = panel as unknown as PanelInternals;
+    const result = internals.superHost.dispatchSuperTasks([[spec]]);
+    expect(result.managerAvailable).toBe(true);
+    return internals.superHost;
+  }
+
+  it("配置超流体 Profile + 模型：set_model 后推的窗口是超流体 Profile 的 128000，不是主会话的 64000", async () => {
+    setConfigOverrides({
+      nodePath: process.execPath,
+      superAgentProfile: "super",
+      superAgentModel: "",
+      contextWindowOverrides: [],
+      "superAgent.integration": "manual",
+    });
+    const pushes = spyPushes();
+    dispatch({ title: "窗口快照", task: "干活" });
+
+    await vi.waitFor(() => expect(pushes.limits).toHaveLength(1), { timeout: 30000, interval: 50 });
+    expect(pushes.models).toEqual(["super-profile-model"]);
+    // spawn 时按超流体 Profile 算出的窗口（spawn 快照），不是主会话 currentApiProfile。
+    expect(pushes.limits).toEqual([SUPER.tokensLimit]);
+    expect(pushes.limits[0]).not.toBe(MAIN.tokensLimit);
+
+    // 看板数据：实际命中的 Profile 名与模型成对回填。
+    await vi.waitFor(
+      () => {
+        const session = panel?.superAgent?.list()[0];
+        expect(session?.profileId).toBe("super");
+        expect(session?.model).toBe("super-profile-model");
+      },
+      { timeout: 30000, interval: 50 },
+    );
+  }, 40000);
+
+  it("任务级 Profile + 模型、零超流体设置：窗口仍取 spawn 快照 200000（重算会落回主会话），profileId 回填 taskProf", async () => {
+    // 零超流体设置：宿主 setTokensLimit 的「重算」分支会走主会话 resolver
+    // （64000）；只有 spawn 快照能给出任务级 Profile 的 200000。
+    setConfigOverrides({
+      nodePath: process.execPath,
+      superAgentProfile: "",
+      superAgentModel: "",
+      contextWindowOverrides: [],
+      "superAgent.integration": "manual",
+    });
+    (panel as unknown as PanelInternals).store.sessionMeta({
+      currentModelId: "main-session-model",
+    });
+    const pushes = spyPushes();
+    dispatch({ title: "任务级窗口", task: "干活", profileId: "taskProf", modelId: "task-model" });
+
+    await vi.waitFor(() => expect(pushes.limits).toHaveLength(1), { timeout: 30000, interval: 50 });
+    expect(pushes.models).toEqual(["task-model"]);
+    expect(pushes.limits).toEqual([TASK.tokensLimit]);
+    expect(pushes.limits[0]).not.toBe(MAIN.tokensLimit);
+
+    await vi.waitFor(
+      () => expect(panel?.superAgent?.list()[0]?.profileId).toBe("taskProf"),
+      { timeout: 30000, interval: 50 },
+    );
+  }, 40000);
+
+  it("零配置：窗口与主会话一致（64000），profileId 保持 undefined（看板零变化）", async () => {
+    setConfigOverrides({
+      nodePath: process.execPath,
+      superAgentProfile: "",
+      superAgentModel: "",
+      contextWindowOverrides: [],
+      "superAgent.integration": "manual",
+    });
+    (panel as unknown as PanelInternals).store.sessionMeta({
+      currentModelId: "main-session-model",
+    });
+    const pushes = spyPushes();
+    dispatch({ title: "零配置窗口", task: "干活" });
+
+    await vi.waitFor(() => expect(pushes.limits).toHaveLength(1), { timeout: 30000, interval: 50 });
+    expect(pushes.models).toEqual(["main-session-model"]);
+    expect(pushes.limits).toEqual([MAIN.tokensLimit]);
+
+    const session = panel?.superAgent?.list()[0];
+    expect(session?.profileId).toBeUndefined();
+    expect(session?.model).toBe("main-session-model");
+  }, 40000);
 });

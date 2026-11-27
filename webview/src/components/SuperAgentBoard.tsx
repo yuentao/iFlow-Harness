@@ -3147,6 +3147,11 @@ function SuperSessionLive({
               : t("已运行 {0}", elapsedText(session, now))}
           </span>
           {session.model && <Chip tone="muted">{session.model}</Chip>}
+          {session.profileId && (
+            <Chip tone="muted" truncate title={t("API 配置")}>
+              {session.profileId}
+            </Chip>
+          )}
           <span className="ml-auto text-ui-caption text-muted-foreground">
             {historical ? t("已保存的转录") : t("实时输出")}
           </span>
