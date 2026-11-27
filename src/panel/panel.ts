@@ -11648,7 +11648,7 @@ export class ChatPanel implements vscode.Disposable {
         const firstBlock = blocks[0];
         const isCompressAttempt =
           compressNext ||
-          (firstBlock?.type === "text" && firstBlock.text.trimStart() === "/compress");
+          (firstBlock?.type === "text" && parseCompressionCommand(firstBlock.text) !== null);
         this.store.setCompressing(isCompressAttempt);
         // Fresh output flag per attempt: the gate below judges THIS attempt
         // only (a compress turn's own output must not mask an empty resend).

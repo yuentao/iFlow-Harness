@@ -112,15 +112,6 @@ const QQ_SETTINGS_SYNC_DEBOUNCE_MS = 50;
 /** 单次「失活 → 自动重启」的硬上限：绝不允许无限重启（重扫是人工兜底）。 */
 const QQ_HEALTH_RESTART_LIMIT = 1;
 /**
- * 旧工作区级 QQ 配置被用户级设置取代时的一次性提示文案。
- *
- * 6f0ec90 之前的版本把 QQ 设置写进 Workspace 作用域；读侧改为 Global 优先后
- * 这些旧值不再生效。只提示可以「重新保存一次」把它带走，不提供任何破坏性
- * 动作 —— 用户可能同时在别的窗口里用着那份工作区配置。
- */
-const QQ_SHADOWED_WORKSPACE_SETTINGS_NOTICE =
-  "检测到旧版本写入的工作区级 QQ 配置（{0} 项）已被用户级设置取代；如需保留，请在 QQ 设置页重新保存一次";
-/**
  * 任务看板投影上限。
  *
  * 任务记录本身由 `QqTaskStore` 落盘管理，这里限的是**投影到 webview 的行数**
@@ -847,7 +838,10 @@ export class QqHost {
       );
       this.store.sendToast(
         "info",
-        vscode.l10n.t(QQ_SHADOWED_WORKSPACE_SETTINGS_NOTICE, keys.length),
+        vscode.l10n.t(
+          "检测到旧版本写入的工作区级 QQ 配置（{0} 项）已被用户级设置取代；如需保留，请在 QQ 设置页重新保存一次",
+          keys.length,
+        ),
       );
     });
     try {

@@ -19,6 +19,7 @@ const mocked = vi.hoisted(() => ({
   notify: vi.fn(),
   beginPending: vi.fn(),
   state: undefined as SessionState | undefined,
+  remoteTakeover: false as boolean,
 }));
 
 const useChat = vi.hoisted(() =>
@@ -30,9 +31,15 @@ const useChat = vi.hoisted(() =>
         send: mocked.send,
         beginPending: mocked.beginPending,
         notify: mocked.notify,
+        remoteTakeover: mocked.remoteTakeover,
       }),
     {
-      getState: () => ({ state: mocked.state, send: mocked.send, notify: mocked.notify }),
+      getState: () => ({
+        state: mocked.state,
+        send: mocked.send,
+        notify: mocked.notify,
+        remoteTakeover: mocked.remoteTakeover,
+      }),
     },
   ),
 );
@@ -84,8 +91,9 @@ function makeState(overrides: Partial<SessionState> = {}): SessionState {
   };
 }
 
-function render(overrides: Partial<SessionState> = {}): void {
+function render(overrides: Partial<SessionState> = {}, remoteTakeover = false): void {
   mocked.state = makeState(overrides);
+  mocked.remoteTakeover = remoteTakeover;
   act(() => root.render(<Composer />));
 }
 
@@ -100,6 +108,7 @@ beforeEach(() => {
   mocked.send.mockReset();
   mocked.notify.mockReset();
   mocked.beginPending.mockReset();
+  mocked.remoteTakeover = false;
   class Observer {
     observe(): void {}
     unobserve(): void {}
@@ -135,6 +144,11 @@ describe("压缩上下文按钮", () => {
     expect(sent.filter((msg) => msg.type === "compressNow")).toHaveLength(1);
   });
 
+  it("title 是「压缩上下文，减少 token 占用」", () => {
+    render();
+    expect(compressButton().title).toBe("压缩上下文，减少 token 占用");
+  });
+
   it("streaming 时禁用", () => {
     render({ status: "streaming" });
     expect(compressButton().disabled).toBe(true);
@@ -160,6 +174,21 @@ describe("压缩上下文按钮", () => {
   it("needsSetup 时禁用", () => {
     const state = makeState();
     render({ auth: { ...state.auth, needsSetup: true } });
+    expect(compressButton().disabled).toBe(true);
+  });
+
+  it("initializing 时禁用", () => {
+    render({ initializing: true });
+    expect(compressButton().disabled).toBe(true);
+  });
+
+  it("replaying 时禁用", () => {
+    render({ replaying: true });
+    expect(compressButton().disabled).toBe(true);
+  });
+
+  it("remoteTakeover（远程接管）时禁用", () => {
+    render({}, true);
     expect(compressButton().disabled).toBe(true);
   });
 });

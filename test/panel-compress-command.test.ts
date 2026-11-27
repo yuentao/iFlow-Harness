@@ -92,6 +92,7 @@ describe("slash 归属与主会话压缩", () => {
   let storageDir: string;
   let calls: PromptBlock[][];
   let toasts: { level: string; message: string }[];
+  let realPromptWithRetry: PanelInternals["promptWithRetry"];
 
   beforeEach(async () => {
     setConfigOverrides({
@@ -112,6 +113,7 @@ describe("slash 归属与主会话压缩", () => {
     p.touchActiveSession = async () => {};
     p.runTurnFollowup = async () => {};
     p.maybeAutoCompressOnIdle = async () => false;
+    realPromptWithRetry = p.promptWithRetry;
     p.promptWithRetry = vi.fn(async (_c: unknown, _s: string, prompt: PromptBlock[]) => {
       calls.push(prompt);
       return { stopReason: "end_turn" };
@@ -228,5 +230,29 @@ describe("slash 归属与主会话压缩", () => {
     release({ stopReason: "end_turn" });
     await waitFor(() => p.store.getState().status === "idle");
     expect(calls).toHaveLength(1);
+  });
+
+  it("⑦ idle 发 /compact：别名同样进入 compressing 态并套用压缩超时", async () => {
+    // 其它用例 mock 掉了 promptWithRetry，会绕开 isCompressAttempt 判定；
+    // 这里跑真实实现，只在 client.prompt 出口观察宿主权威状态。
+    p.promptWithRetry = realPromptWithRetry;
+    const compressingSeen: boolean[] = [];
+    const timeoutsSeen: Array<number | undefined> = [];
+    const client = {
+      dispose: () => {},
+      prompt: vi.fn(async (_req: unknown, timeoutMs?: number) => {
+        compressingSeen.push(p.store.getState().compressing);
+        timeoutsSeen.push(timeoutMs);
+        return { stopReason: "end_turn" };
+      }),
+    };
+    p.client = client;
+    p.ensureClient = async () => client;
+
+    await p.handleWebviewMessage({ type: "sendPrompt", text: "/compact" });
+
+    expect(compressingSeen).toEqual([true]);
+    // 默认 compressTimeoutSeconds=0 → 压缩分支传 0；普通回合传 undefined。
+    expect(timeoutsSeen).toEqual([0]);
   });
 });

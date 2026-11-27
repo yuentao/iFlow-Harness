@@ -168,6 +168,7 @@
   "{0} 条命令": "{0} commands",
   "终端最近命令与输出（{0}）：": "Recent terminal commands & output ({0}):",
   "检测到 {0} 条新增错误诊断（可能由本轮编辑引入）": "{0} new error diagnostics detected (possibly introduced by this turn's edits)",
+  "检测到旧版本写入的工作区级 QQ 配置（{0} 项）已被用户级设置取代；如需保留，请在 QQ 设置页重新保存一次": "Detected {0} workspace-level QQ setting(s) written by an older version that have been superseded by user-level settings; to keep them, save them again on the QQ settings page",
   "排队修复": "Queue fix",
   "重定向地址无效": "Invalid redirect target",
   "HTTP {0}": "HTTP {0}",
