@@ -802,7 +802,10 @@ function SuperAgentSection() {
   );
   const superDependencyPolicy = settings.superAgentDependencyPolicy ?? SUPER_DEPENDENCY_POLICY_DEFAULT;
   const updateSuper = (patch: Partial<HostSettingsUi>) => update(patch);
-  const send = useChat((s) => s.send);
+  // 模型列表请求走 store 的专用 action：它自增 requestId 并记录「最近一次
+  // 请求」，回包只有与它配对才会入库（迟到的旧回包丢弃）。这里不能直接
+  // `send`，否则 webview 没有可以配对的序号，慢端点回包就会串台。
+  const requestSuperProfileModels = useChat((s) => s.requestSuperProfileModels);
   // 超流体链路的两个指针：共享的 HostSettingsUi 已经带有 `superAgentProfile` /
   // `superAgentModel`（可选，空串 = 走回退链），直接读，不再本地维护同形状类型。
   const superProfile = settings.superAgentProfile ?? "";
@@ -818,16 +821,31 @@ function SuperAgentSection() {
   // 回退链（工作区握手凭据 → SecretStorage 活动凭据 → 内核活动 Profile）解析出
   // 活动端点，所以显式传空串即可拿到对应的实时列表，webview 侧不需要另做回退。
   useEffect(() => {
-    send({ type: "refreshSuperProfileModels", profileName: superProfile });
-  }, [send, superProfile]);
-  // 迟到的旧配置回包不参与渲染：store 才是判定「列表属于当前选择」的地方
-  // （非空选择按所选名精确比对；空串选择按解析出的活动 Profile 名比对，指针
-  // 一变旧列表即作废）。这里再按 profileName 对齐一次同一份选择，纯属同源
-  // 过滤，不承担回退语义。
+    requestSuperProfileModels(superProfile);
+  }, [requestSuperProfileModels, superProfile]);
+  // 「这个列表属于当前选择」的权威判定在 store：回包必须与最近一次请求的
+  // requestId 配对（迟到的旧回包丢弃），指针一变旧列表也会作废。这里再按
+  // profileName 对齐一次同一份选择，只是同源过滤（同时覆盖宿主主动推送），
+  // 不承担回退语义。
   const modelsView =
     superModelsView && (!superProfile || superModelsView.profileName === superProfile)
       ? superModelsView
       : null;
+  // 缺口 A：端点返回 200 但一个模型都没有（且没有 error）时显式提示 ——
+  // 否则下拉只剩占位项，用户分不清是加载中还是端点真的没给模型。
+  const modelsEmpty = modelsView !== null && !modelsView.error && modelsView.models.length === 0;
+  // 缺口 B：live 列表能证明当前选择的模型已下架时显式呈现降级（被下架的模型
+  // id + 实际回退到的模型）。只提示，**绝不**据此改写用户的 superAgentModel。
+  const degradeHint =
+    modelsView?.degraded === true
+      ? modelsView.delistedModelId && modelsView.degradedModelId
+        ? t(
+            "模型 {0} 已不在当前可用列表中，实际会回退为 {1}（仅提示，不会自动修改你的设置）。",
+            modelsView.delistedModelId,
+            modelsView.degradedModelId,
+          )
+        : (modelsView.degradedReason ?? "")
+      : "";
   const profileOptions: Array<{ value: string; label: string; description?: string }> = [
     { value: "", label: t("跟随主会话") },
   ];
@@ -904,6 +922,14 @@ function SuperAgentSection() {
             <p className="-mt-2 flex items-center gap-1.5 px-4 pb-3 text-ui-caption leading-relaxed text-muted-foreground">
               <Loader2 className={`${ICON_INLINE} shrink-0 animate-spin text-primary`} />
               {t("正在连接并读取可用模型…")}
+            </p>
+          ) : degradeHint ? (
+            <p role="status" className="-mt-2 px-4 pb-3 text-ui-caption leading-relaxed text-warning">
+              {degradeHint}
+            </p>
+          ) : modelsEmpty ? (
+            <p role="status" className="-mt-2 px-4 pb-3 text-ui-caption leading-relaxed text-muted-foreground">
+              {t("该端点没有返回任何模型。请检查端点地址与密钥，或手动填写模型 id。")}
             </p>
           ) : null}
         </div>

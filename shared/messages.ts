@@ -2048,13 +2048,40 @@ export interface SuperProfileModelsUi {
   profileName: string;
   /** 该 Profile 端点实时返回的模型列表。失败（`error` 有值）时最多只含
    * 当前选中的那个模型 —— **绝不**含端点没确认过的其它模型（不回退内建
-   * 目录）。消费方以 `error` 为准判断成败，别拿列表长度当成功标志。 */
+   * 目录）。消费方以 `error` 为准判断成败，别拿列表长度当成功标志。
+   *
+   * 端点返回 200 但一个模型都没有时 `models` 为空数组且**没有** `error`：
+   * 这是「成功但空」的第三种状态，UI 必须显式提示（不能拿它冒充加载中，
+   * 也不能静默留空）。 */
   models: ModelInfoUi[];
   /** 当前选中的模型 id（`iflow.superAgentModel`，留空则用 Profile 的
    * `modelName`）。它会被补到列表头，避免下拉框空白。 */
   currentModelId: string;
   /** 失败原因（找不到该 Profile / 端点不可达）；成功时缺省。 */
   error?: string;
+  /**
+   * 请求序号：webview 每次 `refreshSuperProfileModels` 自增生成，宿主**原样
+   * 回显**。webview 只接受与最近一次请求配对的回包，迟到的旧回包一律丢弃 ——
+   * 与 `requestSuperResidueList` ↔ `superResidueList` 同款「只认最后发出的
+   * id」语义（字段名也一致）。宿主**主动推送**（配置文件被面板外改动）时
+   * 缺省：那不是回包，webview 另走 profileName 启发式双保险。
+   */
+  requestId?: number;
+  /**
+   * true = live 列表**能证明**当前选择的模型已下架，宿主按
+   * `shared/super-profile.ts` 的 `resolveSuperModel` 的显式降级结果标出来。
+   *
+   * 防误伤纪律：空 / 失败的 live 列表从不构成下架证据（端点挂了 ≠ 模型没
+   * 了），所以这里为 true 时 `models` 必然非空。UI 据此显式提示，但**绝不**
+   * 因此改写用户的 `iflow.superAgentModel` 设置。
+   */
+  degraded?: boolean;
+  /** 被判定为已下架的模型 id（仅 `degraded` 时有值）。 */
+  delistedModelId?: string;
+  /** 降级后**实际会使用**的模型 id（仅 `degraded` 时有值）。 */
+  degradedModelId?: string;
+  /** 降级原因（`resolveSuperModel` 给出的可读文案，仅 `degraded` 时有值）。 */
+  degradedReason?: string;
 }
 
 /**
@@ -2834,8 +2861,12 @@ export type WebviewToHost =
   | { type: "refreshModels" }
   /** 「超流体」设置页的模型下拉：按 Profile 实时拉取 `GET {baseUrl}/models`。
    * `profileName` 缺省 = 当前选中的超流体 Profile（`iflow.superAgentProfile`，
-   * 留空则跟随主会话的活动 Profile）。回复：`superProfileModels`。 */
-  | { type: "refreshSuperProfileModels"; profileName?: string }
+   * 留空则跟随主会话的活动 Profile）。回复：`superProfileModels`。
+   *
+   * `requestId` 由 webview 自增生成，宿主在回包里原样回显；webview 只接受与
+   * **最近一次**请求配对的回包（迟到的旧回包丢弃），根治「慢端点回包串台」。
+   * 与 `requestSuperResidueList` 的配对语义一致。 */
+  | { type: "refreshSuperProfileModels"; profileName?: string; requestId: number }
   /** Settings-page hot restart: tear the CLI child down and spawn a fresh
    * one so startup-only changes (language / mcpServers written
    * to settings.json) take effect without reloading VSCode. */

@@ -995,6 +995,8 @@
   "跟随所选 API 配置": "Follow the selected API profile",
   "找不到这个 API 配置": "API profile not found",
   "当前模型不在列表里": "Current model is not in the list",
+  "模型 {0} 已不在当前可用列表中，实际会回退为 {1}（仅提示，不会自动修改你的设置）。": "Model {0} is no longer in the available list; {1} will be used instead (informational only — your setting is not changed).",
+  "该端点没有返回任何模型。请检查端点地址与密钥，或手动填写模型 id。": "This endpoint returned no models. Check the endpoint URL and key, or enter a model id manually.",
   "超流体自己发请求时用的 API 配置。": "The API profile Superfluids use for their own requests.",
   "留空（默认）时跟随主会话当前使用的 API 配置；填了名字后，新派发的超流体改用该配置（接口地址、API Key 与默认模型），主会话不受影响。API 配置在「账户与模型」页创建。修改后对下一个派发的超流体生效，已在运行的超流体保持启动时的配置不变。": "Leave empty (default) to follow the API profile the main chat is currently using; when set, newly dispatched Superfluids use that profile (base URL, API key and model name) while the main chat keeps its own. API profiles are created on the \"Accounts & models\" page. Applies to the next Superfluid that is dispatched; Superfluids that are already running keep the profile they started with.",
   "超流体自己发请求时用的模型 id。": "The model id Superfluids use for their own requests.",

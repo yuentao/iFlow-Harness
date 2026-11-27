@@ -115,7 +115,7 @@ type PanelInternals = {
     creds: Credentials,
   ) => Promise<{ ids: string[]; error?: string }>;
   buildSuperProfileModels: (profileName?: string) => Promise<SuperProfileModelsUi>;
-  pushSuperProfileModels: (profileName?: unknown) => Promise<void>;
+  pushSuperProfileModels: (profileName?: unknown, requestId?: unknown) => Promise<void>;
   clearSuperProfileModelsCache: () => void;
   resolveSuperProfileTarget: (wanted: unknown) => Promise<unknown>;
   resolveWorkspaceHandshakeCreds: () => Promise<Credentials | null>;
@@ -917,5 +917,161 @@ describe("超流体链路的独立 API 配置与模型（协议与数据通道�
       p.superSelectedModel({ baseUrl: "https://x.example/v1", apiKey: "k", modelName: "" }),
     ).toBe("m-main");
     expect(p.superSelectedModel(null)).toBe("m-main");
+  });
+
+  // ── 请求序号（迟到回包串台的根治）────────────────────────────────────────
+
+  it("㉕ 回包原样回显请求的 requestId", async () => {
+    const endpoint = await startFakeEndpoint(() => ({
+      status: 200,
+      body: JSON.stringify({ data: [{ id: "model-a" }] }),
+    }));
+    try {
+      writeKernelSettings(home, {
+        "super-gw": { baseUrl: endpoint.baseUrl, apiKey: "sk-super-test", modelName: "model-a" },
+      });
+      setSuperSettings("super-gw", "");
+
+      await p.handleWebviewMessage({
+        type: "refreshSuperProfileModels",
+        profileName: "super-gw",
+        requestId: 42,
+      });
+      await waitFor(() => lastModelsPayload() !== undefined);
+      expect(lastModelsPayload()!.requestId).toBe(42);
+    } finally {
+      await endpoint.close();
+    }
+  });
+
+  it("㉖ 宿主内部异常的回包同样回显 requestId（下拉框不永远转圈）", async () => {
+    vi.spyOn(p, "resolveSuperProfileTarget").mockRejectedValue(new Error("模拟宿主内部错误"));
+    await p.pushSuperProfileModels("super-gw", 7);
+    const payload = lastModelsPayload();
+    expect(payload).toBeDefined();
+    expect(payload!.error).toContain("模拟宿主内部错误");
+    expect(payload!.requestId).toBe(7);
+  });
+
+  it("㉗ 宿主主动推送（无 requestId / 脏值）不伪造序号", async () => {
+    const endpoint = await startFakeEndpoint(() => ({
+      status: 200,
+      body: JSON.stringify({ data: [{ id: "model-a" }] }),
+    }));
+    try {
+      writeKernelSettings(home, {
+        "super-gw": { baseUrl: endpoint.baseUrl, apiKey: "sk-super-test", modelName: "model-a" },
+      });
+      setSuperSettings("super-gw", "");
+
+      // 配置监听器 / 设置回推走的是同一个 push（不带 requestId）。
+      await p.pushSuperProfileModels();
+      expect(lastModelsPayload()).toBeDefined();
+      expect(lastModelsPayload()!.requestId).toBeUndefined();
+
+      // 脏值（非数字）也不冒充一次请求的回包。
+      await p.pushSuperProfileModels("super-gw", "42");
+      expect(lastModelsPayload()!.requestId).toBeUndefined();
+    } finally {
+      await endpoint.close();
+    }
+  });
+
+  // ── 降级显式化（缺口 B）──────────────────────────────────────────────────
+
+  it("㉘ live 非空且不含选中模型 → 显式标记降级，并带回被下架/实际回退的模型", async () => {
+    const endpoint = await startFakeEndpoint(() => ({
+      status: 200,
+      body: JSON.stringify({ data: [{ id: "live-a" }, { id: "live-b" }] }),
+    }));
+    try {
+      writeKernelSettings(home, {
+        "super-gw": { baseUrl: endpoint.baseUrl, apiKey: "sk-super-test", modelName: "profile-default" },
+      });
+      setSuperSettings("super-gw", "gone-model");
+      p.store.sessionMeta({ currentModelId: null });
+
+      await p.handleWebviewMessage({
+        type: "refreshSuperProfileModels",
+        profileName: "super-gw",
+        requestId: 1,
+      });
+      await waitFor(() => lastModelsPayload() !== undefined);
+
+      const payload = lastModelsPayload()!;
+      expect(payload.degraded).toBe(true);
+      expect(payload.delistedModelId).toBe("gone-model");
+      // 链上更低候选都不在 live 里 → 用 live 首个模型兜底（与主会话同款）。
+      expect(payload.degradedModelId).toBe("live-a");
+      expect(payload.degradedReason).toBeTruthy();
+      // 选中的（已下架）模型仍补在列表头，下拉不空白。
+      expect(payload.models.map((m) => m.id)).toEqual(["gone-model", "live-a", "live-b"]);
+      // 只提示，不擅改用户的设置（没有任何 superAgentModel 写入）。
+      expect(state.updates.some((u) => u.key === "superAgentModel")).toBe(false);
+      expect(state.values.has("superAgentModel")).toBe(false);
+    } finally {
+      await endpoint.close();
+    }
+  });
+
+  it("㉙ live 列表为空（200 但没有任何模型）不构成下架证据：不标记降级、不带 error", async () => {
+    const endpoint = await startFakeEndpoint(() => ({
+      status: 200,
+      body: JSON.stringify({ data: [] }),
+    }));
+    try {
+      // 内核顶层默认端点（没有任何具名 Profile、也没有自带 modelName）：
+      // 查询成功但零模型时，回包的 models 才会真正为空 —— 这正是 UI
+      // 「端点没返回模型」提示要覆盖的第三种状态。
+      fs.writeFileSync(
+        path.join(home, "settings.json"),
+        JSON.stringify({
+          selectedAuthType: "openai-compatible",
+          baseUrl: endpoint.baseUrl,
+          apiKey: "sk-top",
+        }),
+        "utf8",
+      );
+      setSuperSettings("", "");
+      p.store.sessionMeta({ currentModelId: null });
+
+      await p.handleWebviewMessage({
+        type: "refreshSuperProfileModels",
+        requestId: 2,
+      });
+      await waitFor(() => lastModelsPayload() !== undefined);
+
+      const payload = lastModelsPayload()!;
+      expect(payload.error).toBeUndefined();
+      // 成功但空：models 为空（UI 据此显示「端点没返回模型」提示）。
+      expect(payload.models).toEqual([]);
+      // 空 live 绝不构成下架证据（防误伤）。
+      expect(payload.degraded).toBeUndefined();
+      expect(payload.delistedModelId).toBeUndefined();
+    } finally {
+      await endpoint.close();
+    }
+  });
+
+  it("㉚ 查询失败（端点不可达）同样不构成下架证据：不标记降级", async () => {
+    const dead = await startFakeEndpoint(() => ({ status: 200, body: "{}" }));
+    const deadBaseUrl = dead.baseUrl;
+    await dead.close();
+    writeKernelSettings(home, {
+      "super-gw": { baseUrl: deadBaseUrl, apiKey: "sk-super-test", modelName: "profile-default" },
+    });
+    setSuperSettings("super-gw", "gone-model");
+    p.store.sessionMeta({ currentModelId: null });
+
+    await p.handleWebviewMessage({
+      type: "refreshSuperProfileModels",
+      profileName: "super-gw",
+      requestId: 3,
+    });
+    await waitFor(() => lastModelsPayload() !== undefined);
+
+    const payload = lastModelsPayload()!;
+    expect(payload.error).toBeTruthy();
+    expect(payload.degraded).toBeUndefined();
   });
 });
