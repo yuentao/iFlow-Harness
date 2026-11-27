@@ -2744,6 +2744,7 @@ function createMockHost(): HostApi {
         if (!target) {
           broadcast({
             type: "superProfileModels",
+            requestId: m.requestId,
             profileName: wanted,
             models: [],
             currentModelId: (mockHostSettings.superAgentModel ?? "").trim(),
@@ -2761,7 +2762,13 @@ function createMockHost(): HostApi {
         if (currentModelId && !models.some((model) => model.id === currentModelId)) {
           models.unshift({ id: currentModelId, name: currentModelId });
         }
-        broadcast({ type: "superProfileModels", profileName: target.name, models, currentModelId });
+        broadcast({
+          type: "superProfileModels",
+          requestId: m.requestId,
+          profileName: target.name,
+          models,
+          currentModelId,
+        });
         return;
       }
       // Dev/browser preview only: the real host handles every wire message,
@@ -2853,6 +2860,13 @@ let toastSeq = 0;
  * 只接受与最近一次请求配对的回包 —— 迟到的旧回包不能覆盖新清单。
  */
 let superResidueRequestSeq = 0;
+/**
+ * 超流体模型列表请求序号：`requestSuperProfileModels` 每次自增，生成数字
+ * `requestId`。宿主把同一个 id 原样回显在 `superProfileModels` 里，webview
+ * 只接受与**最近一次**请求配对的回包 —— 迟到的旧端点列表不会冒充新选择的
+ * 结果（与 `superResidueRequestSeq` 同款「只认最后发出的 id」语义）。
+ */
+let superProfileModelsRequestSeq = 0;
 /** Lifetime of a WebView-local notice (UI-audit 4.9: transient, ~4s). */
 const LOCAL_TOAST_MS = 4000;
 
@@ -3015,10 +3029,21 @@ interface ChatStore {
    * 超流体选了别的配置时，用主会话那份列表就是错的。null = 尚未收到回包。
    *
    * 列表只对「某一次选择」有效：`iflow.superAgentProfile` 指针一变就作废
-   * （回 null → 下拉显示加载态）；回包也只在与当前选择（空串时是与活动
-   * Profile）对得上时才入库，迟到的旧端点列表不会冒充新选择的结果。
+   * （回 null → 下拉显示加载态）；回包还必须与**最近一次请求**的
+   * `requestId` 配对（见 `superProfileModelsRequestId`），迟到的旧端点列表
+   * 不会冒充新选择的结果。
    */
   superProfileModelsView: SuperProfileModelsUi | null;
+  /**
+   * 最近一次 `requestSuperProfileModels` 发出的 requestId；null = 从未请求。
+   *
+   * 这是「回包属于哪一次请求」的**权威判据**：只有 `msg.requestId` 与它相等
+   * 才入库。宿主主动推送（面板外改了设置）没有 requestId，才退回 profileName
+   * 启发式（双保险，不再是主判据）。
+   */
+  superProfileModelsRequestId: number | null;
+  /** 请求宿主按所选 API 配置重新拉取模型列表（自增 requestId）。 */
+  requestSuperProfileModels: (profileName: string) => void;
   /** Lifecycle of the settings-panel 「联网补充模型数据」 web-search fetch
    * (see `modelMetadataState`). WebView-local mirror of the host lane: the
    * button shows the spinner while `searching` and the inline error on
@@ -3112,6 +3137,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
   contextWindowOverridesView: null,
   superProfileModelsView: null,
+  superProfileModelsRequestId: null,
   modelMetadata: { state: "idle" },
   pending: null,
   promptSeq: 0,
@@ -3319,22 +3345,27 @@ export const useChat = create<ChatStore>((set, get) => ({
       return;
     }
     if (msg.type === "superProfileModels") {
-      // 「超流体」设置页模型下拉的专用通道。空串 = 跟随主会话：宿主
-      // `resolveSuperProfileTarget("")` 会按回退链解析出活动 Profile，并把
-      // 解析后的名字放在 profileName 里，所以这里不能拿它与空串比对。
-      const selected = (get().hostSettings.superAgentProfile ?? "").trim();
-      if (selected) {
-        if (msg.profileName !== selected) return;
+      // 回包配对：宿主原样回显请求序号，只认**最近一次**发出的 id —— 慢端点 /
+      // 切换配置期间迟到的旧回包一律丢弃。这条判据不依赖「能否确定活动
+      // Profile 名」，所以「名字解析不出来就放行」的洞被彻底堵上。
+      if (typeof msg.requestId === "number") {
+        if (msg.requestId !== get().superProfileModelsRequestId) return;
       } else {
-        // 空串选择没有「请求名」可以比对，于是拿鉴权快照里 active 的 Profile
-        // 名当期望值 —— 宿主解析活动 Profile 用的是同一套回退链（工作区指针 →
-        // 内核指针，见 panel.ts buildAuthLists / resolveSuperProfileTarget）。
-        // 这样「A → 跟随主会话 → A 的回包迟到」里那条回包（profileName = A、
-        // 而活动 Profile 已是别的名字）会被丢弃；两次请求乱序返回时，同一套
-        // 判定仍然成立。活动名解析不出来（列表还没到 / 宿主只给空名字）时保持
-        // 原样接收，宁可多一次刷新也不让下拉卡在加载态。
-        const activeName = (get().state?.auth.profiles.find((p) => p.active)?.name ?? "").trim();
-        if (activeName && msg.profileName && msg.profileName !== activeName) return;
+        // 宿主主动推送（面板外改了 iflow.superAgentProfile / superAgentModel，
+        // 不是回包，没有 id 可配对）：退回 profileName 启发式作双保险。
+        // 空串 = 跟随主会话：宿主 `resolveSuperProfileTarget("")` 会按回退链
+        // 解析出活动 Profile，并把解析后的名字放在 profileName 里，所以这里
+        // 不能拿它与空串比对；此时拿鉴权快照里 active 的 Profile 名当期望值
+        // （宿主解析活动 Profile 用的是同一套回退链）。名字解析不出来时照收，
+        // 宁可多一次刷新也不让下拉卡在加载态 —— 真正的迟到回包由上面的
+        // requestId 判据拦下，不靠这条启发式。
+        const selected = (get().hostSettings.superAgentProfile ?? "").trim();
+        if (selected) {
+          if (msg.profileName !== selected) return;
+        } else {
+          const activeName = (get().state?.auth.profiles.find((p) => p.active)?.name ?? "").trim();
+          if (activeName && msg.profileName && msg.profileName !== activeName) return;
+        }
       }
       set({ superProfileModelsView: msg });
       return;
@@ -3447,6 +3478,13 @@ export const useChat = create<ChatStore>((set, get) => ({
     const requestId = `webview-residue-${++superResidueRequestSeq}`;
     set({ superResidueRequestId: requestId, superResidueLoading: true });
     get().send({ type: "requestSuperResidueList", requestId });
+  },
+  requestSuperProfileModels: (profileName) => {
+    // 自增序号即「最近一次请求」的权威 id：宿主回包原样带回，只有配对的
+    // 那一条能入库（see applyHostMessage 的 superProfileModels 分支）。
+    const requestId = ++superProfileModelsRequestSeq;
+    set({ superProfileModelsRequestId: requestId });
+    get().send({ type: "refreshSuperProfileModels", profileName, requestId });
   },
   handleSuperResidueAction: (action, sessionIds) => {
     const ids = sessionIds.filter((id) => typeof id === "string" && id.length > 0);

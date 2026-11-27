@@ -58,14 +58,21 @@ const properties = manifest.contributes.configuration.properties;
 
 const send = vi.hoisted(() => vi.fn());
 const updateHostSetting = vi.hoisted(() => vi.fn());
+/** 模型列表请求的专用 action（store 负责自增 requestId 并记录最近一次请求）；
+ * UI 侧只断言它被调用、参数正确。 */
+const requestSuperProfileModels = vi.hoisted(() => vi.fn());
 /** 「按 Profile 拉模型」载荷的 mock：用例改写 `current` 模拟宿主回包（含
- * error）；null = 尚未回包（加载态）。 */
+ * error / 空列表 / 降级）；null = 尚未回包（加载态）。 */
 const superProfileModelsView = vi.hoisted(() => ({
   current: null as null | {
     profileName: string;
     models: Array<{ id: string; name: string }>;
     currentModelId: string;
     error?: string;
+    degraded?: boolean;
+    delistedModelId?: string;
+    degradedModelId?: string;
+    degradedReason?: string;
   },
 }));
 /** 共享的 `HostSettingsUi` 已带 superAgentProfile / superAgentModel（可选），
@@ -109,6 +116,7 @@ vi.mock("../webview/src/store", () => ({
       selector({
         send,
         updateHostSetting,
+        requestSuperProfileModels,
         hostSettings,
         superProfileModelsView: superProfileModelsView.current,
         state,
@@ -117,6 +125,7 @@ vi.mock("../webview/src/store", () => ({
       getState: () => ({
         send,
         updateHostSetting,
+        requestSuperProfileModels,
         hostSettings,
         superProfileModelsView: superProfileModelsView.current,
         state,
@@ -177,6 +186,7 @@ function activeProfileReply(): void {
 beforeEach(() => {
   send.mockClear();
   updateHostSetting.mockClear();
+  requestSuperProfileModels.mockClear();
   hostSettings.superAgentProfile = "";
   hostSettings.superAgentModel = "";
   activeProfileReply();
@@ -280,13 +290,15 @@ describe("超流体链路的两个指针：声明与实现对账", () => {
 
 describe("模型下拉的专用通道（按所选 API 配置拉取）", () => {
   it("挂载时按当前选择（空串 = 跟随主会话）请求模型列表", () => {
-    expect(send).toHaveBeenCalledWith({ type: "refreshSuperProfileModels", profileName: "" });
+    // 走 store 的专用 action（它自增 requestId 并记录最近一次请求），UI 不直接
+    // 拼 refreshSuperProfileModels —— 否则回包没有可配对的序号。
+    expect(requestSuperProfileModels).toHaveBeenCalledWith("");
   });
 
   it("切换 API 配置后按新配置重拉模型列表", () => {
     hostSettings.superAgentProfile = "backup";
     renderSuperTab();
-    expect(send).toHaveBeenCalledWith({ type: "refreshSuperProfileModels", profileName: "backup" });
+    expect(requestSuperProfileModels).toHaveBeenCalledWith("backup");
   });
 
   it("端点查询失败时显式呈现真实原因，不回退主会话的模型列表", () => {
@@ -325,5 +337,58 @@ describe("模型下拉的专用通道（按所选 API 配置拉取）", () => {
     superProfileModelsView.current = null;
     renderSuperTab();
     expect(container.textContent).toContain("正在连接并读取可用模型…");
+  });
+
+  it("端点返回 200 但没有任何模型时显式提示，而不是留空或一直转圈", () => {
+    superProfileModelsView.current = {
+      profileName: "gateway",
+      models: [],
+      currentModelId: "",
+    };
+    renderSuperTab();
+    expect(container.textContent).toContain("该端点没有返回任何模型");
+    // 不是加载态、也不是错误态。
+    expect(container.textContent).not.toContain("正在连接并读取可用模型…");
+  });
+
+  it("空列表提示只在「成功但空」时出现：查询失败显示的是真实错误原因", () => {
+    superProfileModelsView.current = {
+      profileName: "gateway",
+      models: [],
+      currentModelId: "",
+      error: "模型列表查询失败（不回退内置目录）：connect ECONNREFUSED",
+    };
+    renderSuperTab();
+    expect(container.textContent).not.toContain("该端点没有返回任何模型");
+    expect(container.textContent).toContain("ECONNREFUSED");
+  });
+
+  it("live 列表能证明选中模型已下架时显式提示降级（含 id 与回退目标），且不改写设置", () => {
+    superProfileModelsView.current = {
+      profileName: "gateway",
+      models: [{ id: "live-a", name: "live-a" }],
+      currentModelId: "gone-model",
+      degraded: true,
+      delistedModelId: "gone-model",
+      degradedModelId: "live-a",
+      degradedReason: "模型 gone-model 已不在当前可用列表中，已回退为 live-a",
+    };
+    renderSuperTab();
+    const text = container.textContent ?? "";
+    expect(text).toContain("gone-model");
+    expect(text).toContain("live-a");
+    expect(text).toContain("仅提示");
+    // 降级只提示：不擅改用户的 superAgentModel。
+    expect(updateHostSetting).not.toHaveBeenCalled();
+  });
+
+  it("live 为空 / 查询失败不构成下架证据：不显示任何降级提示（防误伤）", () => {
+    superProfileModelsView.current = {
+      profileName: "gateway",
+      models: [],
+      currentModelId: "",
+    };
+    renderSuperTab();
+    expect(container.textContent).not.toContain("已不在当前可用列表中");
   });
 });

@@ -3158,7 +3158,8 @@ export class ChatPanel implements vscode.Disposable {
       case "refreshSuperProfileModels":
         // 「超流体」设置页的模型下拉：按该 Profile 的 baseUrl 实时查 /models
         // （可能耗时数秒 ——  fire and forget，结果以 superProfileModels 推回）。
-        void this.pushSuperProfileModels(msg.profileName);
+        // requestId 原样回显：webview 只认最后发出的那个 id，迟到的旧回包丢弃。
+        void this.pushSuperProfileModels(msg.profileName, msg.requestId);
         break;
       case "restartCli":
         await this.restartCli();
@@ -9888,8 +9889,11 @@ export class ChatPanel implements vscode.Disposable {
    * 分叉。`taskModelId` 由派发侧提供（任务级临时覆盖）；UI 的模型列表路径
    * 没有任务语境，传 null 即按 ②→④ 解析。
    *
-   * live 下架判定（`liveModelIds`）不在这条 UI 路径上：`SuperProfileModelsUi`
-   * 没有承载「降级原因」的字段，静默换模型会违反「降级必须显式」的纪律。
+   * 本方法只解析「链上的目标模型」，**不做** live 下架判定（不传
+   * `liveModelIds`）。下架判定与显式降级在 {@link buildSuperProfileModels}
+   * 里用带 live 列表的同一份 `resolveSuperModel` 完成，并把
+   * `degraded` / `delistedModelId` / 原因带回 `SuperProfileModelsUi` ——
+   * 「降级必须显式」由 UI 提示兑现，宿主不改写用户的 `superAgentModel`。
    */
   private superSelectedModel(
     creds: OpenAiCompatCredentials | null,
@@ -9932,11 +9936,36 @@ export class ChatPanel implements vscode.Disposable {
     }
     const { ids, error } = await this.querySuperProfileModelIds(target.creds);
     const currentModelId = this.superSelectedModel(target.creds);
+    // live 下架判定只有一份实现（`shared/super-profile.ts` 的
+    // `resolveSuperModel`）：空 / 失败的 live 列表不构成下架证据（防误伤），
+    // 只有「列表非空且确实不含目标模型」才降级，且降级必须带原因。
+    // 这里只把结论**带回 UI 提示**；绝不因此改写用户的 `superAgentModel`。
+    const resolution = resolveSuperModel({
+      superModelId: this.readStringSetting("superAgentModel"),
+      profileModelName: target.creds.modelName ?? null,
+      mainModelId: this.store.getState().currentModelId,
+      liveModelIds: ids,
+    });
     const models = ids.map((id) => ({ id, name: id }));
     if (currentModelId && !models.some((m) => m.id === currentModelId)) {
       models.unshift({ id: currentModelId, name: currentModelId });
     }
-    return { profileName: target.name, models, currentModelId, error };
+    return {
+      profileName: target.name,
+      models,
+      currentModelId,
+      error,
+      ...(resolution.degraded
+        ? {
+            degraded: true,
+            ...(resolution.delistedModelId
+              ? { delistedModelId: resolution.delistedModelId }
+              : {}),
+            ...(resolution.modelId ? { degradedModelId: resolution.modelId } : {}),
+            ...(resolution.reason ? { degradedReason: resolution.reason } : {}),
+          }
+        : {}),
+    };
   }
 
   /**
@@ -9945,10 +9974,20 @@ export class ChatPanel implements vscode.Disposable {
    * **一定回一条载荷**：宿主这一侧出了预料之外的错（脏配置、文件读不了…）
    * 也不能让 webview 的下拉框永远转圈 —— 回一条空列表 + 真实原因即可。
    */
-  private async pushSuperProfileModels(profileName?: unknown): Promise<void> {
+  private async pushSuperProfileModels(
+    profileName?: unknown,
+    requestId?: unknown,
+  ): Promise<void> {
+    // 请求序号由 webview 生成，宿主只负责原样回显；脏值（非数字）按「主动
+    // 推送」处理（不带 requestId），绝不伪造一个 id 冒充另一次请求的回包。
+    const echoRequestId =
+      typeof requestId === "number" && Number.isFinite(requestId) ? requestId : undefined;
     let payload: SuperProfileModelsUi;
     try {
-      payload = await this.buildSuperProfileModels(profileName);
+      payload = {
+        ...(await this.buildSuperProfileModels(profileName)),
+        ...(echoRequestId !== undefined ? { requestId: echoRequestId } : {}),
+      };
     } catch (error) {
       const reason = vscode.l10n.t(
         "模型列表查询失败（不回退内置目录）：{0}",
@@ -9961,6 +10000,7 @@ export class ChatPanel implements vscode.Disposable {
         models: [],
         currentModelId: this.superSelectedModel(null),
         error: reason,
+        ...(echoRequestId !== undefined ? { requestId: echoRequestId } : {}),
       };
     }
     this.postToWebview({ type: "superProfileModels", ...payload });
