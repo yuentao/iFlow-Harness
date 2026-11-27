@@ -68,7 +68,7 @@
 1. 派发任务后，`src/panel/super-agent-host.ts` 的 `resolveSuperSpawnPlan(taskProfileId, taskModelId)` 调 `shared/super-profile.ts` 的 `resolveSuperApiSpec`，按「任务级覆盖（profileId / modelId）→ 超流体链路配置 → 主链路配置」解析出本任务的凭据与模型。`prepareSuperSpec` **职责不变**（补全附件与指令，得到交给子会话的最终 spec），只负责把 `profileId` / `modelId` 透传进 spec，不承载配置解析。
 2. `SuperTaskSpec` 透传两个可选字段：`profileId`、`modelId`（`shared/super-agent.ts`）。
 3. `superEndpointInput` 收集解析事实：合并 Profile 库（内核 `apiProfiles` 优先于 SecretStorage）、握手凭据（`resolveWorkspaceHandshakeCreds() ?? loadCredentials()`）、内核 `currentApiProfile`、`readActiveEndpoint()` 的内核顶层默认；`configured` 标记用户是否配置了任何超流体专属指针。
-4. `createSuperClient` 连接后，**只有解析出端点时**才推 `authenticate`（`methodId: "openai-compatible"`，`methodInfo: {apiKey, baseUrl, modelName}`）；无端点则不推，沿用 CLI 启动配置。子进程 env 里**不含任何凭据**。
+4. `createSuperClient` 连接后，**只有解析出端点时**才推 `authenticate`（`methodId: "openai-compatible"`，`methodInfo: {apiKey, baseUrl, modelName}`）；无端点则不推，沿用 CLI 启动配置。子进程 env 里**不含面板注入的任何凭据**（spawn 会继承父进程环境，若用户 shell 已设同名的 `IFLOW_*` 凭据变量仍会传入，见第 7.9 节）。
 5. 模型：管理器通过 `deps.spawnModel`（宿主实现为 `resolveSuperSpawnPlan` 的 `model.modelId`）取得目标模型，再 `session/set_model` 推送；`authenticate.modelName` 仅作基线。
 6. 令牌窗口：`configured` 为真时用 `superTokensLimitEnv`（`src/acp/cli-tokens-limit.ts`，tier 2 = 超流体端点命中的具名 Profile）；为假时沿用 `deps.tokensLimitEnv()` / `tokensLimitEnvFromSettings`。spawn 算出的窗口记入 `superClientTokensLimits`，`set_model` 成功后由 `setTokensLimit` 按同一口径推给子 CLI。
 7. 子会话 spawn，工作目录与 includeDirectories 已隔离（见 2.3）。
@@ -93,7 +93,7 @@
   - `IFLOW_SUPER_TOOL` **显式抹除该键（值为 `undefined`）**——Node 的 spawn 会跳过值为 undefined 的环境变量，子会话因此拿不到主会话的内置 `super-agent` 工具（避免无限套娃）；置 `"1"` 的是**主会话自己**；
   - `IFLOW_TOKENS_LIMIT` **经展开注入且可能不存在**（`...childTokensLimitEnv`；解析不出正整数时该键整体缺席，见 `src/acp/cli-tokens-limit.ts` 的 `cliTokensLimitEnv`）；
   - `IFLOW_SYSTEM_MD` 是**条件赋值**（仅当 `systemPromptFile` 存在时才写入）。
-  - **不含 `IFLOW_API_KEY` / `IFLOW_BASE_URL` / `IFLOW_MODEL_NAME`**：凭据只走 `authenticate` 载荷（`test/super-spawn-credentials.test.ts` 有断言锁死）。
+  - **不含 `IFLOW_API_KEY` / `IFLOW_BASE_URL` / `IFLOW_MODEL_NAME`**：指面板**构造**的 env 对象不含这三项，凭据只走 `authenticate` 载荷（`test/super-spawn-credentials.test.ts` 对构造结果有断言锁死）。注意 Node 的 spawn 会继承父进程环境：若用户 shell 里已设这些变量（或某处误注入），它们仍会进入子进程——vendor CLI 确实存在 env → settings → `refreshAuth` 的凭据通道（须同时给 `IFLOW_SELECTED_AUTH_TYPE` 才能越过门禁，见第 7.1、7.4 节），当前靠 `authenticate` 的 `methodInfo` 覆盖兼平，防御纵深见第 7.9 节。
 - **子会话 cwd 为 worktree 根、`includeDirectories` 为空**。
 - **磁盘配置未隔离**：`~/.iflow` 的 settings / Profile 是**读写同一份**。本方案不改变磁盘布局，只在「进程启动后按目标 Profile 推送凭据与模型」这一层实现逻辑隔离。
 - **OAuth 缓存防御纵深**：`createSuperClient` 连接前调用 `retireStaleOAuthCreds`（`src/acp/models-query.ts`），对已过期的 `oauth_creds.json` 只做可逆改名（`.bak`）；token 未过期 / 文件缺失 / 内容不可解析时原样不动。即便 vendor 的 `IFLOW_OAUTH_STRIP=0` 回滚，也不会让每个子会话在 authenticate 上白卡约 60s。
@@ -148,7 +148,7 @@
 ### 4.1 对现有功能 / 用户流程 / 已有配置的影响
 
 - **老用户零配置零行为变化**：未配置超流体链路时，回退链命中主链路活动 Profile 与主会话当前模型，凭据 / 模型 / 令牌窗口与今天逐字段相同（见第 7.6 节的断言）。
-- **进程隔离本就存在**：env / cwd 已隔离（见 2.3），本方案只补「凭据与模型按链路解析」这一层。
+- **进程隔离本就存在**：子会话使用独立进程、cwd 已隔离；env 由面板按需增量构造（继承父进程环境，见 2.3），本方案只补「凭据与模型按链路解析」这一层。
 - **profile 明文落盘**：现网行为（`src/acp/api-profiles.ts`），本方案不新增落盘。
 - **超流体专属指针只写 VSCode 用户设置**：`iflow.superAgentProfile` / `iflow.superAgentModel` 通过 `SettingsWriteService` 单键写入 Global，不触碰 `~/.iflow/settings.json`。
 
@@ -156,9 +156,9 @@
 
 | 方案 | 结论 | 依据 |
 | --- | --- | --- |
-| (a) env 注入 key/baseUrl/model | **不可行** | CLI 不把这些 env 当凭据：`IFLOW_API_KEY` 在 bundle 仅作启动鉴权门禁的布尔判据与一处 UI 描述字符串；`IFLOW_MODEL_NAME` 0 命中；`IFLOW_BASE_URL` 只出现在一个导出常量名里 |
+| (a) env 注入 key/baseUrl/model | **可行但不采用** | vendor CLI **确实保留** env → settings → `refreshAuth` 的凭据通道（内核用运行时拼名的环境变量读取函数取 `IFLOW_*`，字面检索找不到属检索盲区）；实测配上 `IFLOW_SELECTED_AUTH_TYPE` 后假网关能收到 env 里的 key / baseUrl / model。不用它的原因是 env 会进 `process.env`、被子会话派生的 shell 读到，且会被继承进子进程（见第 7.1、7.4 节） |
 | (b) 独立 `IFLOW_HOME` + settings.json | **不可行** | `IFLOW_HOME` 只改内核 home 解析（`Tn()`），**不改变 User settings 的路径**——内核把 settings.json 硬编码为 `join(homedir(), ".iflow", "settings.json")`（`vendor/iflow-fork/bundle/api-config-isolation-loader.cjs` 的 `userSettingsPath()`）；于是面板与内核读写不同文件；详见第 7.2.1 节 |
-| (c) **spawn 后按目标 profile 推 `authenticate` + `set_model`（采用）** | **已落地** | 通道现成（`src/acp/client.ts` 的 `authenticate` / `setModel`）；独立进程实例不串味；热重认证已证明可破 CLI 缓存；凭据不进 `process.env`，不暴露给子会话派生的 shell |
+| (c) **spawn 后按目标 profile 推 `authenticate` + `set_model`（采用）** | **已落地** | 通道现成（`src/acp/client.ts` 的 `authenticate` / `setModel`）；独立进程实例不串味；热重认证已证明可破 CLI 缓存；凭据不由面板写入 `process.env`，不主动暴露给子会话派生的 shell（继承来的同名变量属另一问题，见第 7.9 节） |
 
 ### 4.3 落盘与合规纪律（必须遵守）
 
@@ -182,7 +182,7 @@
 | `shared/super-profile.ts`（新增） | 单真值层：`resolveSuperEndpoint` / `resolveSuperModel` / `resolveSuperApiSpec`，零 VSCode / 零 IO 依赖 |
 | `shared/super-agent.ts` | `SuperTaskSpec` 加 `profileId` / `modelId`；`SuperSessionUi` 加 `profileId`；归档/恢复记录透传 |
 | `shared/messages.ts` | `HostSettingsUi` 加两个键；`SuperProfileModelsUi` 与 `refreshSuperProfileModels` / `superProfileModels` 通道（含 `requestId` / `degraded` 字段） |
-| `src/panel/super-agent-host.ts` | `superEndpointInput` / `resolveSuperSpawnPlan` / `createSuperClient`（仅推 authenticate、env 无凭据）/ `spawnModel` / `setTokensLimit`；`retireStaleOAuthCreds` 调用 |
+| `src/panel/super-agent-host.ts` | `superEndpointInput` / `resolveSuperSpawnPlan` / `createSuperClient`（仅推 authenticate、不向 env 注入凭据）/ `spawnModel` / `setTokensLimit`；`retireStaleOAuthCreds` 调用 |
 | `src/panel/super-agent.ts` | `deps.spawnModel` → `session/set_model`；白名单与归档/恢复带新字段 |
 | `src/panel/panel.ts` | 两个新键单键写入；`buildSuperProfileModels` / `pushSuperProfileModels` / `querySuperProfileModelIds`；缓存失效；`onDidChangeConfiguration` 分支；`superEndpointInput` 与宿主同口径 |
 | `src/acp/cli-tokens-limit.ts` | `resolveSuperCliTokensLimit` / `superTokensLimitEnv`（tier 2 换成超流体 Profile，不读主会话 `currentApiProfile`） |
@@ -228,7 +228,7 @@
 | 层级 | 方法 |
 | --- | --- |
 | 单元 | 纯函数单测覆盖两条回退链与「空 live 列表不算下架」；断言 `iflow.active-profile` 从未被写入 |
-| 接线 | `test/super-spawn-credentials.test.ts` 用真实子进程 mock：断言 `authenticate` 的 `methodInfo` 与 env（无凭据）符合预期 |
+| 接线 | `test/super-spawn-credentials.test.ts` 用真实子进程 mock：断言 `authenticate` 的 `methodInfo` 与面板构造的 env（不含凭据）符合预期 |
 | 集成 | 用两个不同 baseUrl 的 mock 端点跑真实 ACP，检查 wire 日志中主 / 子进程的 Authorization 与 model 各自正确 |
 | 回归 | 运行全量 vitest、类型检查与构建、`test/ui-kit-guard.test.ts`、`test/settings-declared.test.ts`；harness 校验仅在改 vendor 时执行 |
 | 手工验收 | 配置两套 Profile → 主会话发一条消息、派一个超流体 → 看板 model chip 与两个 CLI 进程的实际模型一致；切换超流体 Profile 后新任务用新配置、旧任务不变 |
@@ -241,7 +241,7 @@
 | `test/super-profile-models.test.ts` | 新增：按 Profile 实时拉列表、失败不回退内置目录、`requestId` 回显、降级标记、载荷不带 apiKey |
 | `test/super-profile-models-store.test.ts` | 新增：只接受与最近一次请求配对的回包；宿主主动推送走 `profileName` 启发式 |
 | `test/super-agent-endpoint-settings.test.tsx` | 新增：设置页两个选择项、空列表提示、降级提示 |
-| `test/super-spawn-credentials.test.ts` | 新增：子会话按自己的 Profile 推 `authenticate`、env 无凭据、未配置时与握手结果全等 |
+| `test/super-spawn-credentials.test.ts` | 新增：子会话按自己的 Profile 推 `authenticate`、构造的 env 不含凭据、未配置时与握手结果全等 |
 | `test/cli-tokens-limit-env.test.ts` | 新增 `resolveSuperCliTokensLimit` 用例 |
 | `test/panel-spawn-env.test.ts` | 「零配置零变化」与「配置后按自己的 Profile 解析」两条断言 |
 | `test/super-agent-manager.test.ts` | `currentModel` 单一回调假设改为按 `spawnModel` 注入 |
@@ -260,7 +260,7 @@
 | ② | 一期是否同时加 `profileId` 与 `modelId` | **同时加** | 用户要求 API 配置与模型都独立，缺一不可 |
 | ③ | 是否引入子会话独立 `IFLOW_HOME` | **不引入** | 会静默切换内核全局目录与记忆 / 会话 / 项目路径，且内核 User settings 不认 `IFLOW_HOME`（见第 7.2.1 节） |
 | ④ | 已运行子会话是否要求即时切换 | **不接受，下一批生效** | 避免打断长任务；已运行子会话保持 spawn 时快照 |
-| ⑤ | 是否用 env 承载凭据 / 模型 | **否决，只走 ACP `authenticate`** | env 会进入 `process.env`，子会话派生的 shell 可读；且 CLI 本就不把这几项当凭据（见第 7.1、7.4 节） |
+| ⑤ | 是否用 env 承载凭据 / 模型 | **否决，只走 ACP `authenticate`** | env 会进入 `process.env`，子会话派生的 shell 可读、并被继承进子进程；vendor CLI 的 env 通道确实存在（须同时给 `IFLOW_SELECTED_AUTH_TYPE` 才能越过 `session/new` 门禁），不用的原因是泄漏面而非不生效（见第 7.1、7.4 节） |
 
 ---
 
@@ -312,18 +312,36 @@
 | --- | --- | --- |
 | 凭据存储 | 复用内核 `~/.iflow/settings.json` 的 `apiProfiles`，不新增第二套存储 | `src/acp/api-profiles.ts`（`readKernelApiProfiles`）；`src/panel/super-agent-host.ts` 的 `superEndpointInput` |
 | 链路指针 | 两个独立指针存 VSCode 扩展设置：`iflow.superAgentProfile`（用哪个 profile）、`iflow.superAgentModel`（用哪个模型） | `package.json` → `contributes.configuration.properties`；`shared/messages.ts` 的 `HostSettingsUi` |
-| 凭据注入 | **只走** `authenticate` 的 `methodInfo`（`apiKey` / `baseUrl` / `modelName`），**明确不用 env 注入凭据** | `src/panel/super-agent-host.ts` 的 `createSuperClient`；`src/acp/client.ts` 的 `authenticate`；`test/super-spawn-credentials.test.ts` 断言 env 无凭据 |
+| 凭据注入 | **只走** `authenticate` 的 `methodInfo`（`apiKey` / `baseUrl` / `modelName`），**明确不用 env 注入凭据**（env 通道在内核里存在且实测有效，不用它是泄漏面取舍，见下方订正） | `src/panel/super-agent-host.ts` 的 `createSuperClient`；`src/acp/client.ts` 的 `authenticate`；`test/super-spawn-credentials.test.ts` 断言构造的 env 不含凭据 |
 | 模型注入 | `session/set_model`；`authenticate.modelName` **仅作基线** | `src/panel/super-agent-host.ts` 的 `spawnModel` / `resolveSuperSpawnPlan`；`src/panel/super-agent.ts` 的 `spawnModel` → `setModel` |
 | 令牌窗口 | 独立的 `resolveSuperCliTokensLimit` / `superTokensLimitEnv`；tier 2 用超流体端点命中的 Profile，**不读**主会话 `currentApiProfile` | `src/acp/cli-tokens-limit.ts`；`src/panel/super-agent-host.ts` 的 `spawnPlan.configured` 分支 |
 | 成本 | 磁盘格式不变、旧用户零迁移；OAuth / 遥测净化属独立改动（第 7.5 节） | 未新增 `~/.iflow/settings.json` 键；两个新指针只写 VSCode 用户设置 |
 
-**关于 env 的旧结论订正**：旧稿称「env + authenticate 两通道」并把 env 当作可用的凭据通道，这与实现和内核行为都不符，**已废弃**。实测：
+**关于 env 的旧结论订正**：旧稿据「`IFLOW_API_KEY` 字面仅 2 处、`IFLOW_MODEL_NAME` 0 命中」断言「凭据 / 模型从不经 env 传递」，并把 env 当作不生效的通道。该结论**已被实测推翻**，准确事实如下。
 
-- `IFLOW_API_KEY` 在 `vendor/iflow-fork/bundle/iflow.js` 仅 2 处：一处是认证方式列表里的 UI 描述字符串，一处是启动鉴权门禁 `!A&&!process.env.IFLOW_API_KEY&&!jqe()`（缺失时报错退出）。它被读取，但**只作布尔判据，不是凭据值来源**；
-- `IFLOW_MODEL_NAME` 0 命中；`IFLOW_BASE_URL` 只出现在一个导出常量名（`DEFAULT_IFLOW_BASE_URL`）里，不是 `process.env` 读取；
-- 真正决定凭据的是 `refreshAuth(authType, { apiKey: merged.apiKey, baseUrl: merged.baseUrl, ... })`，其中 `merged` 来自 settings 快照与 ACP `authenticate` 的 `methodInfo`。
+**事实一：本扩展的产品路径只用 ACP `authenticate`**。`src/` 全库不含 `IFLOW_API_KEY` / `IFLOW_BASE_URL` / `IFLOW_MODEL_NAME` / `IFLOW_SELECTED_AUTH_TYPE` 任何字面；子会话 spawn 由 `createSuperClient` 构造 env，断言不含 apiKey / baseUrl（`test/super-spawn-credentials.test.ts`）。这是**产品选择**，不是内核限制。
 
-因此「env 被消费」应准确表述为「`IFLOW_API_KEY` 被内核当作布尔门禁读取，`IFLOW_HOME` 被 home 解析读取」；**凭据 / 模型从不经 env 传递**，把它当注入手段既不生效，又会让机密进入 `process.env`、被子会话派生的 shell 读到——这是选择不用的直接原因，不是「env 0 命中」。
+**事实二：vendor CLI 仍保留一条 env → settings → `refreshAuth` 的凭据通道**。
+
+- 内核读 env 走统一的环境变量读取函数（`CT(name)`），依次尝试 `IFLOW_<name>`、`IFLOW_<SCREAMING_SNAKE(name)>`、`iflow_<name>`、`iflow_<SNAKE>`，变量名是**运行时拼接**的——所以按字面检索时 `IFLOW_API_KEY` 只有 2 处、`IFLOW_MODEL_NAME` 0 命中，这是检索手段的盲区，不代表内核不读。
+- ACP `session/new` 的真门禁：仅当 `settings.merged.selectedAuthType` 为真时才继续 `refreshAuth(selectedAuthType, {apiKey, baseUrl, modelName})`，否则直接 `throw authRequired()`。因此 env 里的 key / baseUrl / modelName **必须同时配上 `IFLOW_SELECTED_AUTH_TYPE`**（或先调 `authenticate`）才能越过门禁。
+- `initialize.isAuthenticated` = `authType ∈ {iflow, aone, openai-compatible} && !!config.getApiKey()`。
+- `authenticate` 会 `setValue("User", "selectedAuthType" / "apiKey" / ...)`，因此 `methodInfo` 会覆盖 env 合并出来的值——这是现有实现能兼平继承 env 的机制。
+
+**实测（当前 HEAD + 两个 loader 补丁）**：
+
+| 变体 | 配置与调用 | 结果 |
+| --- | --- | --- |
+| V0 | 无 env、不调 `authenticate` | `session/new` 报 `Authentication required`（`-32000`）；全程**未出现** `pleaseSetAuthMethod` |
+| V1 | 只设 `IFLOW_API_KEY` + `IFLOW_BASE_URL` + `IFLOW_MODEL_NAME`，不调 `authenticate` | **不发请求**；`session/new` 报 `Authentication required`；`initialize.isAuthenticated=false` |
+| V2 | V1 + `IFLOW_SELECTED_AUTH_TYPE=openai-compatible` | **生效**：假网关收到 `POST /v1/chat/completions`，`Bearer` 与 env 里的 key **逐字节相等**，`model` = `IFLOW_MODEL_NAME` 的值，正常 `end_turn` |
+| V3 | 不设 env，只调 `authenticate(...methodInfo)` | 生效，使用 `methodInfo` 的 key / baseUrl / modelName |
+| V4 | V3 + 临时 HOME 里放过期 `oauth_creds.json` | 生效；无 Google `tokeninfo` 探测、无约 64s 阻塞（证明 OAuth loader 有效） |
+| V5 | V2 但 key 不以 `sk-` 开头 | 生效，非 `sk-` key 原样进 `Bearer` |
+
+所有变体在预加载拦截器下均记录 `blocked: []`，零非 loopback 连接。
+
+**因此准确结论**：本扩展的**产品路径只使用 ACP `authenticate`**（`src/` 全库无这些 `IFLOW_*` 变量，子会话 env 也断言不含 apiKey / baseUrl）；但 vendor CLI 本身**仍保留**一条 env → settings → `refreshAuth` 的凭据通道，只是必须同时提供 `IFLOW_SELECTED_AUTH_TYPE`（或先 `authenticate`）才能越过 `session/new` 的 authRequired 门禁。所以「凭据只能经 `authenticate` 生效」**不是事实**，准确说法是「本产品选择只用 `authenticate`」；这一选择的原因是 env 会进 `process.env`，子会话派生的 shell 可读，存在泄漏面。
 
 ### 7.2 被否方案及原因
 
@@ -344,15 +362,18 @@
 
 ### 7.3 落地时遵守的两条硬口径
 
-1. **`authenticate` 是唯一凭据通道，且必须带子会话自己的解析结果** —— 端点来自 `resolveSuperSpawnPlan`，不再取主会话链路的载荷；env 不承载任何凭据。依据：`src/panel/super-agent-host.ts` 的 `createSuperClient` 只在 `spawnPlan.spec.endpoint` 存在时推 `authenticate`；`test/super-spawn-credentials.test.ts` 断言 `env.IFLOW_API_KEY` / `IFLOW_BASE_URL` 为 `undefined` 且环境串中不含 apiKey / baseUrl。
+1. **`authenticate` 是本产品唯一的凭据通道，且必须带子会话自己的解析结果** —— 端点来自 `resolveSuperSpawnPlan`，不再取主会话链路的载荷；面板不向 env 注入任何凭据（vendor CLI 的 env 通道仍存在，但本产品不用，见第 7.1、7.4 节）。依据：`src/panel/super-agent-host.ts` 的 `createSuperClient` 只在 `spawnPlan.spec.endpoint` 存在时推 `authenticate`；`test/super-spawn-credentials.test.ts` 断言构造出的 `env.IFLOW_API_KEY` / `IFLOW_BASE_URL` 为 `undefined` 且环境串中不含 apiKey / baseUrl。
 2. **子会话令牌窗口必须由超流体侧独立解析** —— `superTokensLimitEnv` / `resolveSuperCliTokensLimit` 的 tier 2 只读「超流体端点命中的具名 Profile」的 `tokensLimit`，绝不读内核 `currentApiProfile`；未配置超流体时才沿用主会话那套 `deps.tokensLimitEnv()`。依据：`src/acp/cli-tokens-limit.ts`；`spawnPlan.configured` 分支。
 
 ### 7.4 CLI 内核的真实读法
 
 - vendor bundle 内核**不读** `apiProfiles` / `currentApiProfile`：在 `vendor/iflow-fork/bundle/iflow.js` 全文件检索，这两个字符串均为 **0 命中**。
-- 因此 settings.json 的 `apiProfiles` 是**面板侧**的数据源；**内核侧**的凭据来自 `refreshAuth` 收到的合并值（settings 快照 + ACP `authenticate` 的 `methodInfo`），模型来自 `set_model`。
-- env 的真实角色：`IFLOW_API_KEY` 仅作启动鉴权门禁的布尔判据（另有 1 处 UI 描述字符串）；`IFLOW_HOME` 仅参与 home 解析；`IFLOW_MODEL_NAME` 不存在。**没有任何 env 承载 apiKey / baseUrl / modelName 的值。**
-- 推论：超流体侧要换网关 / 换模型，**只能**走「`authenticate` + `set_model`」这一对通道——改 settings.json 里的 profile 只影响面板侧的读取，不改变已在运行的子进程。
+- 因此 settings.json 的 `apiProfiles` 是**面板侧**的数据源；**内核侧**的凭据来自 `refreshAuth` 收到的合并值（settings 快照 + env + ACP `authenticate` 的 `methodInfo`），模型来自 `set_model`。
+- env 的真实角色（按实测，见第 7.1 节）：
+  - `IFLOW_API_KEY` / `IFLOW_BASE_URL` / `IFLOW_MODEL_NAME` **确实会被内核读取并进入凭据合并值**——读取走运行时拼名的 `CT(name)`（`IFLOW_<name>` / `IFLOW_<SCREAMING_SNAKE(name)>` / `iflow_<name>` / `iflow_<SNAKE>`），字面检索统计不到（`IFLOW_API_KEY` 字面 2 处、`IFLOW_MODEL_NAME` 0 命中即由此而来）；
+  - 但仅设这三项**不生效**：`session/new` 在 `settings.merged.selectedAuthType` 为空时直接 `throw authRequired()`，必须在 env 里再给 `IFLOW_SELECTED_AUTH_TYPE`（或先调 `authenticate`）才能走到 `refreshAuth`；
+  - `IFLOW_HOME` 只参与 home 解析（`Tn()`），与凭据无关（见第 7.2.1 节）。
+- 推论：超流体侧要换网关 / 换模型，本方案**只走**「`authenticate` + `set_model`」这一对通道——改 settings.json 里的 profile 只影响面板侧的读取，不改变已在运行的子进程；env 通道虽然在 CLI 里存在且经实测有效，但因会进入 `process.env`、被子会话派生的 shell 读到而不采用。
 
 ### 7.5 OAuth 与遥测移除
 
@@ -378,7 +399,7 @@
 - **端点**：宿主把 `kernelProfileName` / `kernelDefaultEndpoint` 置空，解析链只剩 ③ `iflow.workspaceActiveProfile` → ④ `resolveWorkspaceHandshakeCreds() ?? loadCredentials()` ——与今天子会话的凭据路径**同源同序**；
 - **模型**：`profileModelName` 显式传 `null`，模型链直接落到主 store 的 `currentModelId`（今天子会话的实际取值），不会静默换成 Profile 默认模型；
 - **令牌窗口**：走 `deps.tokensLimitEnv()`（主会话同一套解析），不走 `superTokensLimitEnv`；
-- **`authenticate` 载荷**：与主会话握手结果逐字段相同（`{apiKey, baseUrl, modelName}` 三项全等），且同样只经 `authenticate` 推送、不进 env。
+- **`authenticate` 载荷**：与主会话握手结果逐字段相同（`{apiKey, baseUrl, modelName}` 三项全等），且同样只经 `authenticate` 推送、不由面板写入 env。
 
 对应测试：`test/super-spawn-credentials.test.ts` 的「未配置超流体时，子会话与主会话握手结果全等（凭据 + 模型 + 窗口）」；`test/panel-spawn-env.test.ts` 的「未配置超流体时子会话沿用主会话同一兜底查表（零配置零变化）」。只有配置任一超流体指针后，才启用完整的 ①→⑤ 端点链与 ②→④ 模型链。
 
@@ -407,3 +428,4 @@
 - **派发时不校验 live 列表**：属明确取舍（第 7.8 节），不是遗漏；若产品要求「派发即拦截已下架模型」，需新增一次 HTTP 并补测试。
 - **已运行子会话不随设置变更**：保持 spawn 时快照；未发现「按新配置重启单个已运行子会话」的专用入口，设置改动只对下一个派发生效。
 - **`tsconfig.test.json` 既有报错**：与本方案无关，仍不在 CI 闸门内。
+- **子会话 spawn 未显式抹除继承的凭据 env（防御纵深待补）**：vendor CLI 的 env → settings → `refreshAuth` 通道确实存在（见第 7.1 节），而 Node 的 spawn 会继承父进程环境——若用户 shell 里已设 `IFLOW_API_KEY` / `IFLOW_BASE_URL` / `IFLOW_MODEL_NAME` / `IFLOW_SELECTED_AUTH_TYPE`（或未来某处误注入），它们会继承进子进程；当前靠 `authenticate` 的 `methodInfo` 覆盖兼平（`setValue("User", ...)` 优先于 env 合并值）。建议在 `createSuperClient` 构造 env 时把这四个键显式置 `undefined`（与既有 `IFLOW_SUPER_TOOL: undefined` 同手法）作防御纵深；本条只登记文档，代码改动另派任务。
