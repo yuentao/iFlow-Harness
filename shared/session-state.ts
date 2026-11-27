@@ -1503,6 +1503,37 @@ export function toAgentPromptText(text: string, commands: readonly SlashCommand[
   return "\u200B" + s;
 }
 
+// --- compression command detection ------------------------------------------
+// Vendor evidence: the built-in CLI defines the compression command in
+// `vendor/iflow-fork/bundle/iflow.js:5285` as
+//   `{ name: "compress", altNames: ["summarize", "compact"], kind: "built-in" }`
+// and only parses a prompt as a command when `prompt[0].text.trim()` starts
+// with "/". The host needs the same judgement before rewriting user input, so
+// both sides share this pure predicate instead of re-deriving it ad hoc.
+
+/** Compression command names, mirrored from the vendored CLI bundle. */
+export const COMPRESSION_COMMAND_NAMES: ReadonlySet<string> = new Set([
+  "compress",
+  "summarize",
+  "compact",
+]);
+
+/**
+ * Whether `text` invokes the CLI's compression command. Returns the canonical
+ * name `"compress"` for `/compress`, `/summarize` and `/compact` (any casing,
+ * optional trailing arguments), or `null` otherwise. Leading whitespace and
+ * newlines are tolerated because the CLI trims before its "/" check; path-like
+ * input (`/usr/bin/node`), double slashes (`//compress`) and a bare "/" with a
+ * space (`/ compress`) are not commands.
+ */
+export function parseCompressionCommand(text: string): string | null {
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith("/")) return null;
+  const firstToken = trimmed.slice(1).split(/\s+/)[0] ?? "";
+  if (firstToken === "") return null;
+  return COMPRESSION_COMMAND_NAMES.has(firstToken.toLowerCase()) ? "compress" : null;
+}
+
 export function beginUserPrompt(
   state: SessionState,
   text: string,
