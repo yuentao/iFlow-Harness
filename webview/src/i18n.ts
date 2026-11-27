@@ -1009,7 +1009,7 @@ const en: Record<string, string> = {
   "超流体自己发请求时用的 API 配置。": "The API profile Superfluids use for their own requests.",
   "留空（默认）时跟随主会话当前使用的 API 配置；填了名字后，新派发的超流体改用该配置（接口地址、API Key 与默认模型），主会话不受影响。API 配置在「账户与模型」页创建。修改后对下一个派发的超流体生效，已在运行的超流体保持启动时的配置不变。": "Leave empty (default) to follow the API profile the main chat is currently using; when set, newly dispatched Superfluids use that profile (base URL, API key and model name) while the main chat keeps its own. API profiles are created on the \"Accounts & models\" page. Applies to the next Superfluid that is dispatched; Superfluids that are already running keep the profile they started with.",
   "超流体自己发请求时用的模型 id。": "The model id Superfluids use for their own requests.",
-  "留空（默认）时使用所选 API 配置自带的模型名；下拉里是当前会话可见的模型与各 API 配置自带的模型名。修改后对下一个派发的超流体生效，已在运行的超流体保持启动时的模型不变。": "Leave empty (default) to use the model name of the selected API profile; the dropdown lists the models visible to the current chat plus the model name of each API profile. Applies to the next Superfluid that is dispatched; Superfluids that are already running keep the model they started with.",
+  "留空（默认）时使用所选 API 配置自带的模型名；下拉里是按所选 API 配置实时查询到的模型列表（端点不可达时不回退内置目录）。修改后对下一个派发的超流体生效，已在运行的超流体保持启动时的模型不变。": "Leave empty (default) to use the model name of the selected API profile; the dropdown lists models queried live from the selected API profile (no fallback to the built-in catalog). Applies to the next Superfluid that is dispatched; Superfluids that are already running keep the model they started with.",
   "后台任务与并发": "Background tasks & concurrency",
   "安全与信任": "Security & trust",
   "并发上限": "Concurrency limit",
