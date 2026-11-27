@@ -188,15 +188,65 @@ describe("子会话独立凭据与模型注入", () => {
   });
 
   function writeKernelSettings(): void {
-    fs.writeFileSync(
-      path.join(iflowHome, "settings.json"),
-      JSON.stringify({
-        selectedAuthType: "openai-compatible",
-        currentApiProfile: "main",
-        apiProfiles: { main: MAIN, super: SUPER, taskProf: TASK },
-      }),
-      "utf8",
-    );
+    writeSettings({
+      selectedAuthType: "openai-compatible",
+      currentApiProfile: "main",
+      apiProfiles: { main: MAIN, super: SUPER, taskProf: TASK },
+    });
+  }
+
+  function writeSettings(raw: Record<string, unknown>): void {
+    fs.writeFileSync(path.join(iflowHome, "settings.json"), JSON.stringify(raw), "utf8");
+  }
+
+  async function storeActiveCreds(creds: {
+    baseUrl: string;
+    apiKey: string;
+    modelName: string;
+  }): Promise<void> {
+    await secrets.store("iflow.openai-compatible", JSON.stringify(creds));
+  }
+
+  async function storeLegacyProfiles(
+    map: Record<string, { baseUrl: string; apiKey: string; modelName: string }>,
+  ): Promise<void> {
+    await secrets.store("iflow.profiles", JSON.stringify(map));
+  }
+
+  /** 纯零配置：两个超流体指针都留空（= package.json 默认值）。 */
+  function zeroConfig(): void {
+    setConfigOverrides({
+      nodePath: process.execPath,
+      superAgentProfile: "",
+      superAgentModel: "",
+      contextWindowOverrides: [],
+    });
+  }
+
+  /** spawn 一个子会话，读回 authenticate 载荷与 spawn env。 */
+  async function spawnAndCollect(
+    suffix: string,
+    overrides: { profileId?: string; modelId?: string } = {},
+  ): Promise<{ auth?: AuthDumpEntry; env: NodeJS.ProcessEnv }> {
+    const authDump = path.join(storageDir, `child-auth-${suffix}.jsonl`);
+    const envDump = path.join(storageDir, `child-env-${suffix}.json`);
+    const child = await spawnChild(authDump, envDump, overrides);
+    try {
+      return {
+        auth: readJsonl(authDump).find((entry) => entry.method === "authenticate"),
+        env: readEnv(envDump),
+      };
+    } finally {
+      await child.dispose();
+    }
+  }
+
+  /** 机密只走 ACP authenticate：子进程 env 里不得出现任何密钥 / 端点。 */
+  function expectNoSecretInEnv(env: NodeJS.ProcessEnv, secretsToHide: readonly string[]): void {
+    expect(env.IFLOW_API_KEY).toBeUndefined();
+    expect(env.IFLOW_BASE_URL).toBeUndefined();
+    const dump = JSON.stringify(env);
+    for (const secret of secretsToHide) expect(dump).not.toContain(secret);
   }
 
   function setWorkspaceProfile(name: string): void {
@@ -341,5 +391,190 @@ describe("子会话独立凭据与模型注入", () => {
     } finally {
       await child.dispose();
     }
+  }, 30000);
+
+  // ── 零配置矩阵（方案 §4.1「老用户零配置零行为变化」的逐项锁）──────────────
+  //
+  // 今天子会话的凭据链只有 `resolveWorkspaceHandshakeCreds() ??
+  // loadCredentials(secrets)`，窗口解析是面板那套 `resolveCliTokensLimit`。
+  // 下面把每种「凭据来源组合」的 authenticate 与窗口都锁成今天的行为：
+  // 内核 currentApiProfile / 内核顶层默认 **绝不**流进子会话（未配置时 ⑤ 两档
+  // 被刻意置空）；SecretStorage 活动凭据与工作区指针照旧生效。
+
+  it("零配置 · 只有内核 currentApiProfile：子会话不推 authenticate（内核指针不得冒充握手凭据），窗口仍随主会话", async () => {
+    writeSettings({
+      selectedAuthType: "openai-compatible",
+      currentApiProfile: "main",
+      apiProfiles: { main: MAIN },
+    });
+    zeroConfig();
+    // 无工作区指针、无 SecretStorage 活动凭据 —— 今天子会话什么都拿不到。
+    const { auth, env } = await spawnAndCollect("zero-kernel-pointer");
+    expect(auth).toBeUndefined();
+    // 窗口与今天一致：仍由主会话那套解析（currentApiProfile 的 tokensLimit）。
+    expect(env.IFLOW_TOKENS_LIMIT).toBe(String(MAIN.tokensLimit));
+    expectNoSecretInEnv(env, [MAIN.apiKey, MAIN.baseUrl]);
+  }, 30000);
+
+  it("零配置 · 只有内核顶层 baseUrl/apiKey：子会话不推 authenticate，窗口取顶层 tokensLimit", async () => {
+    const top = {
+      baseUrl: "https://kernel-top.example/v1",
+      apiKey: "sk-kernel-top-secret",
+      modelName: "kernel-top-model",
+    };
+    writeSettings({
+      selectedAuthType: "openai-compatible",
+      ...top,
+      tokensLimit: 200_000,
+    });
+    zeroConfig();
+    const { auth, env } = await spawnAndCollect("zero-kernel-top");
+    // 今天子会话从不读内核顶层默认（那只在主会话 / 设置页链路里）。
+    expect(auth).toBeUndefined();
+    expect(env.IFLOW_TOKENS_LIMIT).toBe("200000");
+    expectNoSecretInEnv(env, [top.apiKey, top.baseUrl]);
+  }, 30000);
+
+  it("零配置 · 只有 SecretStorage 活动凭据：子会话用它 authenticate，窗口无依据不推", async () => {
+    const active = {
+      baseUrl: "https://active.example/v1",
+      apiKey: "sk-active-secret",
+      modelName: "active-model",
+    };
+    await storeActiveCreds(active);
+    zeroConfig();
+    const { auth, env } = await spawnAndCollect("zero-active-creds");
+    expect(auth?.params.methodId).toBe("openai-compatible");
+    expect(auth?.params.methodInfo).toEqual(active);
+    // 无内核 settings、无模型键 → 没有任何窗口依据：不推（绝不猜 65k）。
+    expect(env.IFLOW_TOKENS_LIMIT).toBeUndefined();
+    expectNoSecretInEnv(env, [active.apiKey, active.baseUrl]);
+  }, 30000);
+
+  it("零配置 · 全空：不推 authenticate，也不推窗口", async () => {
+    zeroConfig();
+    const { auth, env } = await spawnAndCollect("zero-empty");
+    expect(auth).toBeUndefined();
+    expect(env.IFLOW_TOKENS_LIMIT).toBeUndefined();
+  }, 30000);
+
+  it("零配置 · 工作区指针指向不存在的 Profile 时回退到 SecretStorage 活动凭据", async () => {
+    const active = {
+      baseUrl: "https://active-fallback.example/v1",
+      apiKey: "sk-active-fallback",
+      modelName: "active-fallback-model",
+    };
+    setWorkspaceProfile("ghost");
+    await storeActiveCreds(active);
+    zeroConfig();
+    const { auth, env } = await spawnAndCollect("zero-pointer-missing");
+    // 与今天同序：握手（指针）拿不到 → 落 SecretStorage 活动槽。
+    expect(auth?.params.methodInfo).toEqual(active);
+    expectNoSecretInEnv(env, [active.apiKey, active.baseUrl]);
+  }, 30000);
+
+  it("零配置 · 工作区指针有 Profile、内核无 currentApiProfile：凭据跟指针，窗口无依据不推", async () => {
+    writeSettings({ apiProfiles: { main: MAIN } });
+    setWorkspaceProfile("main");
+    zeroConfig();
+    const { auth, env } = await spawnAndCollect("zero-pointer-no-kernel-pointer");
+    expect(auth?.params.methodInfo).toEqual({
+      apiKey: MAIN.apiKey,
+      baseUrl: MAIN.baseUrl,
+      modelName: MAIN.modelName,
+    });
+    // 没有内核指针 / 顶层 tokensLimit / 模型键 → 今天的解析也拿不到窗口。
+    expect(env.IFLOW_TOKENS_LIMIT).toBeUndefined();
+    expectNoSecretInEnv(env, [MAIN.apiKey, MAIN.baseUrl]);
+  }, 30000);
+
+  it("零配置 · 工作区指针与内核 currentApiProfile 不同：凭据跟指针，窗口仍按今天的主会话口径", async () => {
+    const other = {
+      baseUrl: "https://other.example/v1",
+      apiKey: "sk-other-secret",
+      modelName: "other-model",
+      tokensLimit: 100_000,
+    };
+    writeSettings({
+      selectedAuthType: "openai-compatible",
+      currentApiProfile: "other",
+      apiProfiles: { main: MAIN, other },
+    });
+    setWorkspaceProfile("main");
+    zeroConfig();
+    const { auth, env } = await spawnAndCollect("zero-pointer-vs-kernel");
+    // 凭据 = 工作区指针（握手路径），不是内核 currentApiProfile。
+    expect(auth?.params.methodInfo).toEqual({
+      apiKey: MAIN.apiKey,
+      baseUrl: MAIN.baseUrl,
+      modelName: MAIN.modelName,
+    });
+    // 窗口锁定今天的行为：主会话那条链读 currentApiProfile（= other）。
+    expect(env.IFLOW_TOKENS_LIMIT).toBe(String(other.tokensLimit));
+    expectNoSecretInEnv(env, [MAIN.apiKey, MAIN.baseUrl, other.apiKey, other.baseUrl]);
+  }, 30000);
+
+  it("任务级 modelId 只换模型不换凭据：窗口按子会话自己的模型解析，不复用主会话窗口", async () => {
+    // 主会话 Profile 的窗口 64000；子会话模型 gpt-4o 的内建窗口 128000。
+    writeSettings({
+      selectedAuthType: "openai-compatible",
+      currentApiProfile: "main",
+      apiProfiles: { main: MAIN },
+    });
+    const active = {
+      baseUrl: "https://active-task-model.example/v1",
+      apiKey: "sk-active-task-model",
+      modelName: "active-task-model",
+    };
+    await storeActiveCreds(active);
+    zeroConfig();
+    const { auth, env } = await spawnAndCollect("task-model-only", { modelId: "gpt-4o" });
+    // 端点链不因任务级模型覆盖而改变（仍是今天的活动凭据）。
+    expect(auth?.params.methodInfo).toEqual(active);
+    // 窗口必须跟子会话模型（gpt-4o → 内建 128000），不是主会话的 64000。
+    expect(env.IFLOW_TOKENS_LIMIT).toBe("128000");
+    expectNoSecretInEnv(env, [active.apiKey, active.baseUrl, MAIN.apiKey]);
+  }, 30000);
+
+  it("内核指针指向残缺 Profile 时，SecretStorage 同名 Profile 不得冒充内核指针", async () => {
+    // 内核 `ghost` 缺 modelName → readKernelApiProfiles 过滤掉它（不可用）；
+    // 但 readActiveEndpoint 会按字段从内核条目取 baseUrl/apiKey（内核自己的
+    // 端点，永远不碰 SecretStorage）。
+    const kernelTop = {
+      baseUrl: "https://kernel-top2.example/v1",
+      apiKey: "sk-kernel-top2",
+      modelName: "kernel-top2-model",
+    };
+    writeSettings({
+      selectedAuthType: "openai-compatible",
+      currentApiProfile: "ghost",
+      ...kernelTop,
+      apiProfiles: {
+        ghost: { baseUrl: "https://kernel-ghost.example/v1", apiKey: "sk-kernel-ghost" },
+      },
+    });
+    // SecretStorage 里一个**同名且完整**的历史 Profile：不能冒充内核指针。
+    const legacy = {
+      baseUrl: "https://legacy-ghost.example/v1",
+      apiKey: "sk-legacy-ghost",
+      modelName: "legacy-ghost-model",
+    };
+    await storeLegacyProfiles({ ghost: legacy });
+    // 配置任意超流体指针 → 启用完整 ①→⑤ 链（未配置时 ⑤ 被置空）。
+    setConfigOverrides({
+      nodePath: process.execPath,
+      superAgentProfile: "missing-super",
+      superAgentModel: "",
+      contextWindowOverrides: [],
+    });
+    const { auth, env } = await spawnAndCollect("kernel-pointer-incomplete");
+    // ⑤b 内核顶层默认（readActiveEndpoint 的字段级结果）—— 不是 legacy。
+    expect(auth?.params.methodInfo).toEqual({
+      apiKey: "sk-kernel-ghost",
+      baseUrl: "https://kernel-ghost.example/v1",
+      modelName: kernelTop.modelName,
+    });
+    expect(auth?.params.methodInfo?.apiKey).not.toBe(legacy.apiKey);
+    expectNoSecretInEnv(env, [legacy.apiKey, legacy.baseUrl]);
   }, 30000);
 });

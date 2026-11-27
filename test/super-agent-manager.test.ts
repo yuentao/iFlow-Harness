@@ -1018,6 +1018,18 @@ describe("super agent · 编排", () => {
     expect(harness.clientParams[0]).toEqual({ profileId: "task-prof", modelId: "task-model" });
   }, 30000);
 
+  it("spawnModel 解析不出模型（null）时回落到主会话当前模型，不推空模型", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "usage", "manual", "main-1", undefined, {
+      spawnModel: async () => null,
+    });
+    harness.manager.spawn({ title: "无模型可解析", task: "照常干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    expect(harness.clients[0]?.setModels).toEqual(["test-model"]);
+    expect(harness.sessions[0]?.model).toBe("test-model");
+  }, 30000);
+
   it("中断也保留已产生的用量（输入标记为非权威）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang-text");

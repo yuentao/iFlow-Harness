@@ -444,4 +444,23 @@ describe("超流体独立窗口解析（resolveSuperCliTokensLimit）", () => {
       resolveSuperCliTokensLimit({ modelId: "gpt-4o", profileName: "super", settingsPath: tablePath }),
     ).toEqual({ limit: 128000, source: "builtin-table" });
   });
+
+  it("profileName 指向不存在的 Profile 时也不回退 currentApiProfile", () => {
+    const settingsPath = settingsFile("super-ghost-profile.json", {
+      currentApiProfile: "main",
+      apiProfiles: { main: { tokensLimit: 64000 } },
+    });
+    // 「typo / 已删除的 Profile 名」不等于「跟随主会话」：tier2 只认那个
+    // 具名条目，缺失就继续往下走；没有其它依据时**不推**，绝不借用主会话窗口。
+    expect(
+      resolveSuperCliTokensLimit({
+        modelId: "totally-unknown-model",
+        profileName: "ghost",
+        settingsPath,
+      }),
+    ).toEqual({ limit: undefined, source: undefined });
+    expect(
+      superTokensLimitEnv({ modelId: "totally-unknown-model", profileName: "ghost", settingsPath }),
+    ).toEqual({});
+  });
 });
