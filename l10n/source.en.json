@@ -408,6 +408,7 @@
   "本轮对该文件有 {0} 次修改记录且内容不连续，回退将恢复到本轮开始前的内容。继续？": "This file has {0} recorded edits in this turn that do not line up sequentially. Reverting will restore the content from the start of this turn. Continue?",
   "检测到 {0} 个历史超流体残留目录（Git 工作目录 {1} 个 / 降级目录 {2} 个 / 附件 {3} 个）。继续将清空全部残留，包括未合并的 Git 工作目录——其中未提交/未合并的代码改动将永久丢失且不可恢复。请确认这些工作不再需要。": "Found {0} leftover Superfluid directories (Git working directories: {1}, degraded directories: {2}, attachments: {3}). Continuing clears all of them, including unmerged Git working directories — any uncommitted or unmerged code changes in them will be permanently lost and cannot be recovered. Confirm you no longer need this work.",
   "模型列表查询失败（不回退内置目录）：{0}": "Failed to fetch the model list (no fallback to the built-in catalog): {0}",
+  "子会话模型 {0} 已不在可用模型中，本次派发改用 {1}（不会修改你的超流体模型设置）": "The child session model {0} is no longer in the available model list; this dispatch uses {1} instead (your Superfluid model setting is unchanged)",
   "残留清单已过期，请重新获取后再操作": "The leftover list has expired; fetch it again before acting",
   "派发指令格式有误（{0}），未派出任何新任务": "The dispatch directive is malformed ({0}); no new task was dispatched",
   "派发指令没有送达，未派出任何新任务": "The dispatch directive never arrived; no new task was dispatched",
