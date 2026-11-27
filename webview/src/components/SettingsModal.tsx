@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, Sparkles, Trash2, Users } from "lucide-react";
 import type {
+  AuthProfileUi,
   AuthUiState,
   HostSettingsUi,
+  ModelInfoUi,
   ThinkingModelRuleUi,
   UiCliLanguage,
   UiOsNotifications,
@@ -32,6 +34,7 @@ import {
   LinesCommitTextArea,
   ModalShell,
   Segmented,
+  Select,
   SettingsDisclosure,
   SettingsGroup,
   Slider,
@@ -794,6 +797,29 @@ type SuperAgentRetryUi = {
  * 又会被 TS 的弱类型检测拦下，所以用交叉类型把它们一起送出去。 */
 type SuperAgentRetryPatch = Partial<HostSettingsUi> & SuperAgentRetryUi;
 
+/**
+ * 超流体链路的两个指针：`iflow.superAgentProfile`（超流体专用 API 配置名）与
+ * `iflow.superAgentModel`（超流体专用模型 id）。
+ *
+ * 与上面两个字段同理：宿主接线（`shared/messages.ts` 的 `HostSettingsUi` +
+ * `src/panel/panel.ts` 的读写）由 host 侧负责，这里用「可选扩展视图」读取：
+ * 字段还没进 `HostSettingsUi` 时回落到 manifest 声明的默认值（空串 = 走回退链，
+ * 见方案文档「默认与回退规则」），接线后字段自然出现，本文件不需要再改一次。
+ */
+type SuperAgentEndpointUi = {
+  /** `iflow.superAgentProfile`：超流体专用 API 配置名；空串 = 跟随主会话。 */
+  superAgentProfile?: string;
+  /** `iflow.superAgentModel`：超流体专用模型 id；空串 = 跟随所选配置的模型名。 */
+  superAgentModel?: string;
+};
+
+/** 写回宿主设置用的补丁类型：这两个字段尚未进 `HostSettingsUi`，用交叉类型一起送出去。 */
+type SuperAgentEndpointPatch = Partial<HostSettingsUi> & SuperAgentEndpointUi;
+
+/** 选择器兜底用的空数组：常量引用，避免每次渲染新建数组导致的无谓更新。 */
+const EMPTY_AUTH_PROFILES: AuthProfileUi[] = [];
+const EMPTY_MODEL_LIST: ModelInfoUi[] = [];
+
 /** manifest 声明的默认值：宿主接线前的兜底读数。 */
 const SUPER_MAX_ATTEMPTS_DEFAULT = 2;
 const SUPER_MAX_ATTEMPTS_MIN = 1;
@@ -816,8 +842,77 @@ function SuperAgentSection() {
   );
   const superDependencyPolicy = superRetry.superAgentDependencyPolicy ?? SUPER_DEPENDENCY_POLICY_DEFAULT;
   const updateSuper = (patch: SuperAgentRetryPatch) => update(patch);
+  // 超流体链路的两个指针：宿主把字段接进 HostSettingsUi 之前，用可选扩展视图读取
+  // 并回落到 manifest 声明的默认值（空串 = 走回退链）。
+  const superEndpoint = settings as HostSettingsUi & SuperAgentEndpointUi;
+  const superProfile = superEndpoint.superAgentProfile ?? "";
+  const superModel = superEndpoint.superAgentModel ?? "";
+  const updateEndpoint = (patch: SuperAgentEndpointPatch) => update(patch);
+  // 选项来源只用 webview 已经知道的状态：具名 API 配置（state.auth.profiles）与
+  // 当前会话可见的模型（state.models）；各配置自带的模型名也一并列出，避免模型
+  // 下拉在「配置名不是模型名」时是空的。
+  const profiles = useChat((s) => s.state?.auth.profiles ?? EMPTY_AUTH_PROFILES);
+  const models = useChat((s) => s.state?.models ?? EMPTY_MODEL_LIST);
+  const profileOptions: Array<{ value: string; label: string; description?: string }> = [
+    { value: "", label: t("跟随主会话") },
+  ];
+  for (const profile of profiles) {
+    profileOptions.push({ value: profile.name, label: profile.name, description: profile.baseUrl });
+  }
+  // 当前值对应的配置可能已被删除（或用户手改过 settings.json）：补一条占位选项，
+  // 否则下拉会显示成空白，看不出到底选了什么。
+  if (superProfile && !profiles.some((profile) => profile.name === superProfile)) {
+    profileOptions.push({ value: superProfile, label: superProfile, description: t("找不到这个 API 配置") });
+  }
+  const modelOptions: Array<{ value: string; label: string; description?: string }> = [
+    { value: "", label: t("跟随所选 API 配置") },
+  ];
+  const knownModels = new Set<string>();
+  for (const model of models) {
+    if (!model.id || knownModels.has(model.id)) continue;
+    knownModels.add(model.id);
+    modelOptions.push({ value: model.id, label: model.name || model.id, description: model.id });
+  }
+  for (const profile of profiles) {
+    if (!profile.modelName || knownModels.has(profile.modelName)) continue;
+    knownModels.add(profile.modelName);
+    modelOptions.push({ value: profile.modelName, label: profile.modelName });
+  }
+  if (superModel && !knownModels.has(superModel)) {
+    modelOptions.push({ value: superModel, label: superModel, description: t("当前模型不在列表里") });
+  }
   return (
     <div className="space-y-4">
+      <SettingsGroup title={t("API 与模型")}>
+        <SettingRow
+          wideControl
+          label={t("API 配置")}
+          description={t("超流体自己发请求时用的 API 配置。")}
+          detail={t("留空（默认）时跟随主会话当前使用的 API 配置；填了名字后，新派发的超流体改用该配置（接口地址、API Key 与默认模型），主会话不受影响。API 配置在「账户与模型」页创建。修改后对下一个派发的超流体生效，已在运行的超流体保持启动时的配置不变。")}
+          control={
+            <Select
+              ariaLabel={t("API 配置")}
+              value={superProfile}
+              options={profileOptions}
+              onChange={(superAgentProfile) => updateEndpoint({ superAgentProfile })}
+            />
+          }
+        />
+        <SettingRow
+          wideControl
+          label={t("模型")}
+          description={t("超流体自己发请求时用的模型 id。")}
+          detail={t("留空（默认）时使用所选 API 配置自带的模型名；下拉里是当前会话可见的模型与各 API 配置自带的模型名。修改后对下一个派发的超流体生效，已在运行的超流体保持启动时的模型不变。")}
+          control={
+            <Select
+              ariaLabel={t("模型")}
+              value={superModel}
+              options={modelOptions}
+              onChange={(superAgentModel) => updateEndpoint({ superAgentModel })}
+            />
+          }
+        />
+      </SettingsGroup>
       <SettingsGroup title={t("后台任务与并发")}>
         <NumberRow
           label={t("并发上限")}
