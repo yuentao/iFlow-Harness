@@ -280,6 +280,7 @@ function removeBinDirs(root) {
 const PATCH_LOADERS = [
   "oauth-strip-loader.cjs",
   "telemetry-strip-loader.cjs",
+  "internal-host-strip-loader.cjs",
 ];
 
 function countOccurrences(haystack, needle) {
