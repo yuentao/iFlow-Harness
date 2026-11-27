@@ -76,6 +76,13 @@ const chat = vi.hoisted(() => ({
   composerDraftRequest: null,
   beginPending: () => {},
   superTranscripts: {} as Record<string, unknown>,
+  /** 「超流体」tab 挂载时订阅的专用模型列表通道（store.ts 的
+   * `requestSuperProfileModels` / `superProfileModelsView`）。组件挂载即调用
+   * 该 action；缺了它，渲染 super 页会在 act() 内抛
+   * `requestSuperProfileModels is not a function`。本文件只验 full-trust 开关
+   * 语义，视图保持 null（加载态）即可。 */
+  requestSuperProfileModels: () => {},
+  superProfileModelsView: null as null | Record<string, unknown>,
 }));
 const modelMetadata = vi.hoisted(() => ({
   state: "idle" as "idle" | "searching" | "done" | "error",
