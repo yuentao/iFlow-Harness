@@ -40,10 +40,10 @@
 //      它才是 CI / 运行期的默认源,是产物快照,不是 Mod 源码仓库。
 //   4. `npm run harness` 对裁剪副本跑完整 ACP 流程验收(改 PRUNE 清单尤其
 //      必须,见 AGENTS.md 陷阱 #21)。
-//   例外(净化类 Mod):`oauth-strip-loader.cjs` 的注入不写进快照,而由本脚本
-//   的 applyLoaderPatches() 在拷贝后按其导出的 PATCHES 表做「锚点唯一 +
-//   sentinel round-trip」校验后注入;快照里的 iflow.js 保持上游原文,方便
-//   核对。锚点漂移时 vendoring 直接硬失败。
+//   例外(净化类 Mod):`oauth-strip-loader.cjs` / `telemetry-strip-loader.cjs`
+//   的注入不写进快照,而由本脚本的 applyLoaderPatches() 在拷贝后按各自导出的
+//   PATCHES 表做「锚点唯一 + sentinel round-trip」校验后注入;快照里的
+//   iflow.js 保持上游原文,方便核对。锚点漂移时 vendoring 直接硬失败。
 //   --force 不可省:版本号可能仍是 0.5.19-custom.12,幂等检查只比
 //   package.json version,同版本 ≠ 同内容(Mod 注入可不 bump 版本)。
 //   reverse/ 属分析工作区(reverse/iflow.readable.js ~23 万行可读化产物 +
@@ -279,6 +279,7 @@ function removeBinDirs(root) {
 // failing the build.
 const PATCH_LOADERS = [
   "oauth-strip-loader.cjs",
+  "telemetry-strip-loader.cjs",
 ];
 
 function countOccurrences(haystack, needle) {
