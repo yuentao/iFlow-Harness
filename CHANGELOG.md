@@ -3,6 +3,23 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [3.12.0] - 2026-11-27
+
+### 新增
+- **超流体（Super Agent）独立 API 配置与模型**：新增顶层设置 `iflow.superAgentProfile`（留空跟随主会话）与 `iflow.superAgentModel`（留空用所选配置的 `modelName`），「超流体」设置页新增「API 与模型」分组；子会话按自己解析出的端点/凭据/模型/上下文窗口运行，未配置时与旧行为逐字段等价
+- 模型下拉按所选 API 配置实时拉取，带 loading / 空列表 / 真实错误 / 下架降级提示，请求带序号防迟到回包串台
+
+### 行为变更（重要）
+- **移除内置 CLI 的 OAuth 登录分支**：内核统一走 API 认证（删除 Google tokeninfo 与 `oauth-iflow` / `oauth-aone` 分支），不再向 Google 发送 token、不再卡 60s 认证超时、不再删改 `oauth_creds.json`；**依赖 iFlow 官方 OAuth 登录的用户需改用 API 配置**。该剥离由 `IFLOW_OAUTH_STRIP` 开关兜底
+
+### 改进
+- 移除阿里侧遥测：`log.mmstat.com` 的 cna/PV、`gm.mmstat.com` 的 AI tracking、`sunfire` OTel 与 `ducky` fetchModels，由 `IFLOW_TELEMETRY_STRIP` 开关兜底
+- 派发时校验模型是否已下架（4s 上限，失败/空不降级），降级仅提示不改设置
+- 压缩上下文按钮图标由 `Minimize2` 改为 `ChevronsDownUp`（语义从「缩到角落」改为「折叠收拢」），并让 `aria-label` 与 `title` 同文
+
+### 文档
+- 方案文档校正为落地事实：env 通道结论、`IFLOW_HOME` 隔离否决、零配置等价保证、两个 loader 说明与残留清单
+
 ## [3.11.5] - 2026-11-25
 
 ### 修复
