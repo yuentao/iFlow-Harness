@@ -777,29 +777,11 @@ function DependentRow({ children }: { children: ReactNode }) {
  */
 type SuperDependencyPolicy = "block" | "continue";
 
-/**
- * Super Agent 的「最大尝试次数」与「依赖策略」两个设置。
- *
- * 宿主接线（`shared/messages.ts` 的 `HostSettingsUi` + `src/panel/panel.ts` 的
- * 读写）由 host 侧负责；这里用「可选扩展视图」读取：字段还没进 `HostSettingsUi`
- * 时回落到下面的默认值（与 package.json 的 `default` 一致），接线后字段自然出现，
- * 本文件不需要再改一次。
- */
-type SuperAgentRetryUi = {
-  /** `iflow.superAgent.maxAttempts`：失败后最多自动尝试几次（含首次）。 */
-  superAgentMaxAttempts?: number;
-  /** `iflow.superAgent.dependencyPolicy`：上游失败时下游任务怎么处理。 */
-  superAgentDependencyPolicy?: SuperDependencyPolicy;
-};
-
-/** 写回宿主设置用的补丁类型。两个字段目前还没进 `HostSettingsUi`，纯扩展类型
- * 又会被 TS 的弱类型检测拦下，所以用交叉类型把它们一起送出去。 */
-type SuperAgentRetryPatch = Partial<HostSettingsUi> & SuperAgentRetryUi;
-
 /** 选择器兜底用的空数组：常量引用，避免每次渲染新建数组导致的无谓更新。 */
 const EMPTY_AUTH_PROFILES: AuthProfileUi[] = [];
 
-/** manifest 声明的默认值：宿主接线前的兜底读数。 */
+/** 「最大尝试次数」与「依赖策略」的默认值 / 上下限，与 `package.json` 的
+ * `default` 逐字一致（共享 `HostSettingsUi` 的字段口径亦是如此）。 */
 const SUPER_MAX_ATTEMPTS_DEFAULT = 2;
 const SUPER_MAX_ATTEMPTS_MIN = 1;
 const SUPER_MAX_ATTEMPTS_MAX = 5;
@@ -812,15 +794,14 @@ const SUPER_DEPENDENCY_POLICY_DEFAULT: SuperDependencyPolicy = "block";
 function SuperAgentSection() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
-  // Super Agent 的两个新设置：宿主把字段接进 HostSettingsUi 之前，用可选扩展
-  // 视图读取并回落到 manifest 声明的默认值。
-  const superRetry = settings as HostSettingsUi & SuperAgentRetryUi;
+  // 两个字段都在共享 HostSettingsUi 里（宿主读写已接线），默认值/上下限只做
+  // 防御性兜底，与 manifest 的 default 保持一致。
   const superMaxAttempts = Math.min(
     SUPER_MAX_ATTEMPTS_MAX,
-    Math.max(SUPER_MAX_ATTEMPTS_MIN, Math.round(superRetry.superAgentMaxAttempts ?? SUPER_MAX_ATTEMPTS_DEFAULT)),
+    Math.max(SUPER_MAX_ATTEMPTS_MIN, Math.round(settings.superAgentMaxAttempts ?? SUPER_MAX_ATTEMPTS_DEFAULT)),
   );
-  const superDependencyPolicy = superRetry.superAgentDependencyPolicy ?? SUPER_DEPENDENCY_POLICY_DEFAULT;
-  const updateSuper = (patch: SuperAgentRetryPatch) => update(patch);
+  const superDependencyPolicy = settings.superAgentDependencyPolicy ?? SUPER_DEPENDENCY_POLICY_DEFAULT;
+  const updateSuper = (patch: Partial<HostSettingsUi>) => update(patch);
   const send = useChat((s) => s.send);
   // 超流体链路的两个指针：共享的 HostSettingsUi 已经带有 `superAgentProfile` /
   // `superAgentModel`（可选，空串 = 走回退链），直接读，不再本地维护同形状类型。
@@ -839,9 +820,10 @@ function SuperAgentSection() {
   useEffect(() => {
     send({ type: "refreshSuperProfileModels", profileName: superProfile });
   }, [send, superProfile]);
-  // 迟到的旧配置回包不参与渲染：store 已按所选名丢弃不匹配的回包，这里再对齐
-  // 一次 profileName，避免切换瞬间把旧端点的列表当成新选择的结果。空串选择时
-  // 宿主回包是被解析出的活动 Profile 名（不是空串），因此不参与比对。
+  // 迟到的旧配置回包不参与渲染：store 才是判定「列表属于当前选择」的地方
+  // （非空选择按所选名精确比对；空串选择按解析出的活动 Profile 名比对，指针
+  // 一变旧列表即作废）。这里再按 profileName 对齐一次同一份选择，纯属同源
+  // 过滤，不承担回退语义。
   const modelsView =
     superModelsView && (!superProfile || superModelsView.profileName === superProfile)
       ? superModelsView

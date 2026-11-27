@@ -13,8 +13,13 @@
  * 模型下拉的候选来源是独立的「按所选 API 配置实时拉取」通道
  * （webview→host `refreshSuperProfileModels`，host→webview `superProfileModels`），
  * **不是**主会话的 `state.models`——超流体选了另一个配置时，主会话那份列表属于
- * 另一个端点。这里同时锁定这条通道的消费方式（错误显式呈现、占位、按 profileName
- * 过滤迟到回包）。
+ * 另一个端点。这里锁定这条通道在 UI 侧的消费方式（错误显式呈现、占位、同源
+ * 过滤）。
+ *
+ * 注意：本文件整体 mock 了 store，只能证明 UI 怎么消费视图。「这条回包属于哪
+ * 一次选择」的权威判定（非空选择精确比对、空串跟随主会话时丢弃上一个选择的
+ * 迟到回包、指针变化作废旧列表）由 `test/super-profile-models-store.test.ts`
+ * 用真实 store 覆盖。
  *
  * 同时锁住 UI 语义：空串 = 走回退链（跟随主会话 / 跟随所选 API 配置），当前值
  * 不在候选列表里（配置被删或用户手改过 settings.json）时必须补占位选项，
@@ -308,6 +313,8 @@ describe("模型下拉的专用通道（按所选 API 配置拉取）", () => {
       currentModelId: "gateway-only",
     };
     renderSuperTab();
+    // 这里只能证明 UI 的同源过滤（store 被 mock）；真正的丢弃判定见
+    // test/super-profile-models-store.test.ts。
     const items = openMenu(modelTrigger());
     expect(items.some((item) => item.textContent?.includes("gateway-only"))).toBe(false);
     // 新配置自带的模型名已经补进候选，切换过程不会出现空白下拉。
