@@ -3013,6 +3013,10 @@ interface ChatStore {
    * 模型列表（`refreshSuperProfileModels` ↔ `superProfileModels` 专用通道）。
    * 与主会话的 `state.models`（当前连接端点的模型）是两条互不覆盖的通道 ——
    * 超流体选了别的配置时，用主会话那份列表就是错的。null = 尚未收到回包。
+   *
+   * 列表只对「某一次选择」有效：`iflow.superAgentProfile` 指针一变就作废
+   * （回 null → 下拉显示加载态）；回包也只在与当前选择（空串时是与活动
+   * Profile）对得上时才入库，迟到的旧端点列表不会冒充新选择的结果。
    */
   superProfileModelsView: SuperProfileModelsUi | null;
   /** Lifecycle of the settings-panel 「联网补充模型数据」 web-search fetch
@@ -3073,6 +3077,23 @@ interface ChatStore {
 }
 
 import { setLocale, t } from "./i18n";
+
+/**
+ * `superProfileModelsView` 的列表属于**某一次选择**：超流体 API 配置指针
+ * （`iflow.superAgentProfile`）换了名字，旧端点的列表就不再是当前选择的结果，
+ * 必须立刻作废（下拉回到加载态等新回包）。宿主回推（含外部手改 settings.json）
+ * 与本地乐观更新都按这一条判断；两边都 trim 后比较，只有新快照显式带字符串
+ * 时才算「变化」，避免缺字段的回包把列表误清。
+ */
+function superProfilePointerCleared(
+  prev: Partial<HostSettingsUi>,
+  next: Partial<HostSettingsUi>,
+): boolean {
+  return (
+    typeof next.superAgentProfile === "string" &&
+    next.superAgentProfile.trim() !== (prev.superAgentProfile ?? "").trim()
+  );
+}
 
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
@@ -3264,7 +3285,10 @@ export const useChat = create<ChatStore>((set, get) => ({
       const uiFontSize = settings.uiFontSize ?? "standard";
       const uiDensity = settings.uiDensity ?? "standard";
       applyUiScale(uiFontSize, uiDensity);
-      set((s) => ({ hostSettings: { ...s.hostSettings, ...settings, uiFontSize, uiDensity } }));
+      set((s) => ({
+        hostSettings: { ...s.hostSettings, ...settings, uiFontSize, uiDensity },
+        ...(superProfilePointerCleared(s.hostSettings, settings) ? { superProfileModelsView: null } : {}),
+      }));
       // One-shot migration: the old theme toggle stored the choice in
       // localStorage. Now it is a synced setting; hand the legacy value to
       // the host once and clear the key so it never overrides a config edit.
@@ -3299,7 +3323,19 @@ export const useChat = create<ChatStore>((set, get) => ({
       // `resolveSuperProfileTarget("")` 会按回退链解析出活动 Profile，并把
       // 解析后的名字放在 profileName 里，所以这里不能拿它与空串比对。
       const selected = (get().hostSettings.superAgentProfile ?? "").trim();
-      if (selected && msg.profileName !== selected) return;
+      if (selected) {
+        if (msg.profileName !== selected) return;
+      } else {
+        // 空串选择没有「请求名」可以比对，于是拿鉴权快照里 active 的 Profile
+        // 名当期望值 —— 宿主解析活动 Profile 用的是同一套回退链（工作区指针 →
+        // 内核指针，见 panel.ts buildAuthLists / resolveSuperProfileTarget）。
+        // 这样「A → 跟随主会话 → A 的回包迟到」里那条回包（profileName = A、
+        // 而活动 Profile 已是别的名字）会被丢弃；两次请求乱序返回时，同一套
+        // 判定仍然成立。活动名解析不出来（列表还没到 / 宿主只给空名字）时保持
+        // 原样接收，宁可多一次刷新也不让下拉卡在加载态。
+        const activeName = (get().state?.auth.profiles.find((p) => p.active)?.name ?? "").trim();
+        if (activeName && msg.profileName && msg.profileName !== activeName) return;
+      }
       set({ superProfileModelsView: msg });
       return;
     }
@@ -3459,7 +3495,12 @@ export const useChat = create<ChatStore>((set, get) => ({
     setTimeout(() => get().dismissToast(id), LOCAL_TOAST_MS);
   },
   updateHostSetting: (patch) => {
-    set((s) => ({ hostSettings: { ...s.hostSettings, ...patch } }));
+    set((s) => ({
+      hostSettings: { ...s.hostSettings, ...patch },
+      // 乐观更新也要让模型列表随选择作废：宿主回声要晚一个往返，期间不能让
+      // 上一个端点的候选列表冒充新选择的结果。
+      ...(superProfilePointerCleared(s.hostSettings, patch) ? { superProfileModelsView: null } : {}),
+    }));
     const next = get().hostSettings;
     applyUiScale(next.uiFontSize, next.uiDensity);
     get().send({ type: "setHostSettings", ...patch });
