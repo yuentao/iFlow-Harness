@@ -858,6 +858,8 @@ const en: Record<string, string> = {
   "{0} 个文件超过大小上限（50MB），已跳过": "Skipped {0} file(s) over the 50 MB limit",
   "{0} 个文件添加失败，已跳过": "Failed to add {0} file(s) — skipped",
   "停止生成": "Stop generating",
+  "停止超时：内核未响应取消请求，正在重启内核以结束本轮（对话记录已保存）": "Stopping timed out: the kernel did not answer the cancel request. Restarting the kernel to end this turn (the conversation is saved).",
+  "部分超流体进程未在 {0} 秒内回收，已在后台继续清理": "Some child-session processes were not cleaned up within {0}s; cleanup continues in the background.",
   "发送 (Enter)": "Send (Enter)",
   "当前上下文 {0} tokens（内核上报）": "Current context {0} tokens (reported by Core)",
   "当前上下文约 {0} tokens（本地估算；压缩后按压缩结果重算）": "Current context ≈ {0} tokens (local estimate; recomputed from the compaction result after compressing)",

@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
+import { SuperAgentManager } from "../src/panel/super-agent.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 import { AGENT_ATTACHMENT_HEADER } from "../shared/messages.js";
@@ -652,6 +653,14 @@ describe("ChatPanel 停止生成", () => {
     promptRequestSessionId: string | null;
     cancelSentForPrompt: boolean;
     autoTurnsStoppedFor: string | null;
+    /** 看板管理器（停止时要并行中断本主会话的活子会话）。 */
+    superAgent: {
+      cancelAll: (source: string, options?: { mainSessionId?: string | null }) => Promise<number>;
+    } | null;
+    /** 可调小的「等待回合落定」上限：测试不必真等 15s。 */
+    stopSettleTimeoutMs: number;
+    /** 停止超时后的强制执行内核重启（测试里替换成 spy）。 */
+    performCliRestart: () => Promise<void>;
     ensureClient: () => Promise<unknown>;
     captureWorkspaceSnapshot: (sessionId: string, text: string) => Promise<string | null>;
     promptWithRetry: (client: unknown, sessionId: string, prompt: unknown) => Promise<{ stopReason: string }>;
@@ -662,6 +671,7 @@ describe("ChatPanel 停止生成", () => {
     store: {
       getState: () => SessionState;
       sessionStarted: (meta: { sessionId: string }) => void;
+      sendToast: (level: string, message: string, opts?: unknown) => number;
     };
   };
 
@@ -746,5 +756,143 @@ describe("ChatPanel 停止生成", () => {
     await flush();
     expect(p.store.getState().status).toBe("idle");
     expect(p.store.getState().stopReason).toBe("cancelled");
+  });
+
+  it("子会话很多时一次停止：并行取消本会话活子会话，落定后回 idle", async () => {
+    let releasePrompt!: (value: { stopReason: string }) => void;
+    client.prompt.mockImplementation(
+      () =>
+        new Promise<{ stopReason: string }>((resolve) => {
+          releasePrompt = resolve;
+        }),
+    );
+    p.captureWorkspaceSnapshot = async () => null;
+    const cancelAll = vi.fn(async (_source: string, _options?: { mainSessionId?: string | null }) => 3);
+    p.superAgent = { cancelAll } as never;
+
+    const turn = p.handleWebviewMessage({ type: "sendPrompt", text: "调度一批超流体" });
+    await flush();
+    expect(p.store.getState().status).toBe("streaming");
+
+    await p.handleWebviewMessage({ type: "cancel" });
+    // 宿主权威的「正在停止」立刻可见（webview 只按它渲染，不再本地猜）。
+    expect(p.store.getState().cancelling).toBe(true);
+    expect(client.cancel).toHaveBeenCalledExactlyOnceWith("stop-session");
+    // 子会话按当前主会话归属并行取消（终态/别的会话由 manager 过滤）。
+    expect(cancelAll).toHaveBeenCalledTimes(1);
+    expect(cancelAll.mock.calls[0]).toEqual(["user", { mainSessionId: "stop-session" }]);
+
+    // 连点：同一停止窗口内不再发第二条 cancel，也不重跑子会话取消。
+    await p.handleWebviewMessage({ type: "cancel" });
+    expect(client.cancel).toHaveBeenCalledTimes(1);
+    expect(cancelAll).toHaveBeenCalledTimes(1);
+
+    // 假 manager 只服务于上面的取消断言；回合收尾的家务（动作围栏审计等）
+    // 需要真实 manager，这里还原，避免替身缺方法把成功路径打成 error。
+    p.superAgent = null;
+
+    releasePrompt({ stopReason: "cancelled" });
+    await turn;
+    await flush();
+    expect(p.store.getState().status).toBe("idle");
+    expect(p.store.getState().stopReason).toBe("cancelled");
+    expect(p.store.getState().cancelling).toBe(false);
+  });
+
+  it("停止点击落在回合已落定的缝隙：仍压住自动回合，且不伪造「正在停止」", async () => {
+    // 回合已经 settle（idle），下一条自动汇报尚未开跑 —— 旧实现正是在这里
+    // 因为 status !== "streaming" 而静默丢掉停止意图，紧接着的汇报又把面板
+    // 翻回「生成中」。停止意图必须无条件成立。
+    const cancelAll = vi.fn(async () => 0);
+    p.superAgent = { cancelAll } as never;
+    p.autoTurnsStoppedFor = null;
+
+    await p.handleWebviewMessage({ type: "cancel" });
+
+    expect(p.autoTurnsStoppedFor).toBe("stop-session");
+    expect(p.store.getState().cancelling ?? false).toBe(false);
+    // 没有在飞请求 → 不发 session/cancel；但子会话仍要真停。
+    expect(client.cancel).not.toHaveBeenCalled();
+    expect(cancelAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("内核不响应取消：有界超时后走可见的强制重启兜底", async () => {
+    // 请求永不 settle：模拟 cancel 被内核忽略。
+    client.prompt.mockImplementation(() => new Promise<{ stopReason: string }>(() => {}));
+    p.captureWorkspaceSnapshot = async () => null;
+    p.stopSettleTimeoutMs = 5;
+    const forced = vi.fn(async () => {});
+    p.performCliRestart = forced;
+    const toast = vi.spyOn(p.store, "sendToast");
+    p.superAgent = { cancelAll: vi.fn(async () => 0) } as never;
+
+    void p.handleWebviewMessage({ type: "sendPrompt", text: "跑个长任务" });
+    await flush();
+    await p.handleWebviewMessage({ type: "cancel" });
+    expect(p.store.getState().cancelling).toBe(true);
+
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(forced).toHaveBeenCalledTimes(1);
+    expect(
+      toast.mock.calls.some((call) => String(call[1]).includes("停止超时")),
+    ).toBe(true);
+  });
+});
+
+/**
+ * `cancelAll` 的两条本次修复契约：并行发起（不能串行等 N 倍进程回收）与
+ * 归属过滤（用户在主会话 A 点停止，不能误伤主会话 B 的超流体）。
+ *
+ * 用原型实例 + 假 `sessions`/`cancel` 做纯单元验证：真正要断言的只是
+ * 「哪些 id 被选中」和「是否在 await 之前就全部发起」，不需要真起进程树。
+ */
+describe("SuperAgentManager.cancelAll", () => {
+  type CancelAllInternals = {
+    sessions: Map<string, { id: string; status: string; mainSessionId?: string }>;
+    cancel: (id: string, source?: string) => Promise<unknown>;
+  };
+
+  function makeManager(): { manager: SuperAgentManager; internals: CancelAllInternals; cancelSpy: ReturnType<typeof vi.fn> } {
+    const manager = Object.create(SuperAgentManager.prototype) as SuperAgentManager;
+    const internals = manager as unknown as CancelAllInternals;
+    internals.sessions = new Map();
+    const cancelSpy = vi.fn(async () => ({ ok: true, reason: "cancelled", status: "cancelled" }));
+    internals.cancel = cancelSpy as unknown as CancelAllInternals["cancel"];
+    return { manager, internals, cancelSpy };
+  }
+
+  it("只取消当前主会话的活子会话（终态/别的会话跳过），且在 await 前并行发起", async () => {
+    const { manager, internals, cancelSpy } = makeManager();
+    for (const session of [
+      { id: "live-a", status: "running", mainSessionId: "main-a" },
+      { id: "live-b", status: "preparing", mainSessionId: "main-a" },
+      { id: "done-c", status: "completed", mainSessionId: "main-a" },
+      { id: "other-d", status: "running", mainSessionId: "main-b" },
+      // 无归属的旧记录按「跟随当前会话」处理（与 superBelongsToCurrentMain 同口径）。
+      { id: "legacy-e", status: "running" },
+    ]) {
+      internals.sessions.set(session.id, session);
+    }
+
+    const pending = manager.cancelAll("user", { mainSessionId: "main-a" });
+    // 并行：还没 await 就已经对全部目标发起取消（旧实现此刻只会发起第一个）。
+    expect(cancelSpy).toHaveBeenCalledTimes(3);
+    expect(cancelSpy.mock.calls.map((call) => call[0]).sort()).toEqual([
+      "legacy-e",
+      "live-a",
+      "live-b",
+    ]);
+    await expect(pending).resolves.toBe(3);
+  });
+
+  it("不传主会话时保留「全部中断」的全量语义", async () => {
+    const { manager, internals, cancelSpy } = makeManager();
+    internals.sessions.set("live-a", { id: "live-a", status: "running", mainSessionId: "main-a" });
+    internals.sessions.set("other-b", { id: "other-b", status: "running", mainSessionId: "main-b" });
+    internals.sessions.set("done-c", { id: "done-c", status: "failed", mainSessionId: "main-a" });
+
+    await expect(manager.cancelAll("user")).resolves.toBe(2);
+    expect(cancelSpy.mock.calls.map((call) => call[0]).sort()).toEqual(["live-a", "other-b"]);
   });
 });

@@ -1018,6 +1018,21 @@ export class ChatPanel implements vscode.Disposable {
   static readonly SUPER_TOOL_CALL_OUTCOME_CAP = 100;
   static readonly SUPER_TOOL_CALL_CORRECTION_CAP = 2;
 
+  /**
+   * 发出 `session/cancel` 后等待本轮落定的上限。
+   *
+   * 取消是真实动作，但内核可能卡在不可中断的等待里（自动压缩 / 已断流却仍
+   * 占着请求）——没有上限时状态永远停在 streaming，界面只能反复点。超时后
+   * 走**可见**的兜底：提示并强制重启内核（先落盘转录、按 restartRestoreId
+   * 恢复同一会话），绝不静默把状态改成 idle。
+   */
+  private static readonly STOP_SETTLE_TIMEOUT_MS = 15_000;
+  /**
+   * 批量取消活子会话的等待上限。每个子会话先落 cancelled 状态再回收进程，
+   * 这里只限制「等它们回收完」的时间：超时后回收在后台继续，如实提示一次。
+   */
+  private static readonly CHILD_CANCEL_TIMEOUT_MS = 12_000;
+
   private editorPanel: vscode.WebviewPanel | undefined;
   private client: AcpClient | null = null;
   /** One-shot guard for copying SecretStorage-only profiles into the kernel
@@ -1615,6 +1630,23 @@ export class ChatPanel implements vscode.Disposable {
   private promptRequestSessionId: string | null = null;
   /** 本轮在飞请求是否已经发过一次 `session/cancel`（同一回合内不重复发）。 */
   private cancelSentForPrompt = false;
+  /**
+   * 「正在停止」窗口的唯一计时器：发出 cancel 后等回合落定，超时就强制重启
+   * 内核（可见兜底）。null = 当前没有停止窗口。
+   */
+  private stopSettleTimer: NodeJS.Timeout | null = null;
+  /** 本停止窗口针对的主会话 id（保证迟到的定时器不会误停新会话）。 */
+  private stoppingSessionId: string | null = null;
+  /**
+   * 测试可覆盖的等待上限（生产用 {@link STOP_SETTLE_TIMEOUT_MS}）。
+   * 单元测试把它调小，就不必和真实 15s 的墙钟赛跑。
+   */
+  private stopSettleTimeoutMs = ChatPanel.STOP_SETTLE_TIMEOUT_MS;
+  /**
+   * 批量取消本会话活子会话的在飞 promise。重复点击停止共用同一轮 —— 既不
+   * 重复 cancel 同一个子会话，也不让第二次点击等第二次完整回收。
+   */
+  private childCancelPromise: Promise<void> | null = null;
   /**
    * 每会话「已注入的档位」（`iflow.efficiencyMode`）：键是 CLI 会话 id。
    *
@@ -2281,6 +2313,10 @@ export class ChatPanel implements vscode.Disposable {
     }
     this.autoTurnsStoppedFor = null;
     this.clearDeferredAutoTurnsToast();
+    // 停止窗口的迟到定时器绝不能在面板销毁后触发强制重启。
+    this.clearStopSettleTimer();
+    this.stoppingSessionId = null;
+    this.childCancelPromise = null;
     this.promptRequestSessionId = null;
     this.stopSuperHeartbeat();
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
@@ -5645,26 +5681,146 @@ export class ChatPanel implements vscode.Disposable {
     pending.resolve({ outcome: { outcome: "selected", optionId } });
   }
 
-  /** Shared complete user-stop chain: unblock cards, suppress retries/watchdog. */
+  /**
+   * Shared complete user-stop chain: unblock cards, suppress retries/watchdog.
+   *
+   * 一次点击的职责边界：
+   *  - **幂等**：已经在「正在停止」里就不再重复发 cancel / 重复取消子会话；
+   *  - **真实取消**：主会话发一次 `session/cancel`，并并行中断本主会话名下
+   *    仍在跑的超流体（用户按停止的语义是「全停」，旧实现只管主会话，子会话
+   *    继续跑、继续把汇报排进队列）；
+   *  - **宿主权威的进行态**：回合仍在 streaming 时置 `cancelling`，webview
+   *    只按它显示「正在停止…」并禁用按钮；
+   *  - **有界**：等待落定有上限，超时强制重启内核并如实提示。
+   */
   private cancelCurrentTurn(): void {
     const client = this.client;
     this.cancelAllApprovals(vscode.l10n.t("用户取消"));
     this.cancelAllPendingQuestions(vscode.l10n.t("用户取消"));
     this.cancelSeen = true;
     this.clearPostRejectionWatchdog();
-    const sessionId = this.store.getState().sessionId;
+    const state = this.store.getState();
+    const sessionId = state.sessionId;
     if (!sessionId) return;
+    // 已经在这个停止窗口里：再点一次是幂等重复 —— 不再发第二条 cancel，
+    // 也不重跑一遍子会话取消（那只会让回收更慢）。按钮仍保持「正在停止…」。
+    if (state.cancelling) return;
     // Stop means "stop". Host-driven turns (child-session reports / re-delivered
     // user messages) would otherwise start the NEXT turn the instant this one
     // settles, flipping the panel straight back to 正在生成 — a single click
     // then reads as "nothing happened" and users click again and again
     // (measured: one cancel per queued report turn). Hold those automatic
     // turns until the user sends the next message; nothing is dropped.
-    if (this.store.getState().status === "streaming") {
-      this.autoTurnsStoppedFor = this.currentMainSessionId();
-      this.announceDeferredAutoTurns();
-    }
+    //
+    // **不再以 status==="streaming" 为前提**：点击经常落在「本轮刚 settle、
+    // 下一条汇报/回执尚未开跑」的缝隙里。旧实现那时直接跳过压制，紧接着的
+    // 自动回合把面板翻回「生成中」——子会话越多，这个缝隙命中得越频繁，表现
+    // 就是「点了没反应 / 要点好几次」。停止意图是无条件的。
+    this.autoTurnsStoppedFor = this.currentMainSessionId();
+    this.announceDeferredAutoTurns();
     this.sendTurnCancel(sessionId, client);
+    void this.cancelLiveChildSessions();
+    if (state.status === "streaming") this.beginStopWindow(sessionId);
+  }
+
+  /**
+   * 中断本主会话名下仍在跑的超流体（并行、有界、重复点击共享同一轮）。
+   *
+   * 归属过滤与 `superBelongsToCurrentMain` 同口径：另一个主会话的子会话不能
+   * 被这一次点击误伤。每个子会话的 cancel 先落 `cancelled` 状态再回收进程，
+   * 所以超时只影响「等回收完」的时间，看板状态早已如实是已中断。
+   */
+  private cancelLiveChildSessions(): Promise<void> {
+    if (this.childCancelPromise) return this.childCancelPromise;
+    const manager = this.superAgent;
+    if (!manager || typeof manager.cancelAll !== "function") return Promise.resolve();
+    const owner = this.currentMainSessionId();
+    this.childCancelPromise = (async () => {
+      let timer: NodeJS.Timeout | null = null;
+      try {
+        const finished = manager.cancelAll("user", { mainSessionId: owner });
+        const timeout = new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), ChatPanel.CHILD_CANCEL_TIMEOUT_MS);
+        });
+        const result = await Promise.race([
+          finished.then((count) => ({ kind: "done" as const, count })),
+          timeout.then(() => ({ kind: "timeout" as const })),
+        ]);
+        if (result.kind === "timeout") {
+          // 真实的进程回收仍在后台继续（状态已落 cancelled）；如实告诉用户，
+          // 不把「还在回收」说成「没停」。
+          this.log.warn(
+            `super agent: child-session cleanup still running after ${ChatPanel.CHILD_CANCEL_TIMEOUT_MS / 1000}s; continuing in background`,
+          );
+          this.store.appendNotice(
+            vscode.l10n.t("部分超流体进程未在 {0} 秒内回收，已在后台继续清理", ChatPanel.CHILD_CANCEL_TIMEOUT_MS / 1000),
+          );
+        } else if (result.count > 0) {
+          this.log.info(`super agent: stopped ${result.count} live child session(s) on user Stop`);
+        }
+      } catch (error) {
+        this.log.warn(`super agent: cancelling live child sessions failed: ${errorMessage(error)}`);
+      } finally {
+        if (timer) clearTimeout(timer);
+        this.childCancelPromise = null;
+      }
+    })();
+    return this.childCancelPromise;
+  }
+
+  /** 开启宿主权威的「正在停止」窗口（见 `SessionState.cancelling`）。 */
+  private beginStopWindow(sessionId: string): void {
+    this.clearStopSettleTimer();
+    this.stoppingSessionId = sessionId;
+    this.store.setCancelling(true);
+    this.stopSettleTimer = setTimeout(() => this.onStopSettleDeadline(sessionId), this.stopSettleTimeoutMs);
+  }
+
+  /** 收掉「正在停止」窗口：回合已落定（成功 / 取消 / 失败）或会话已替换。 */
+  private endStopWindow(): void {
+    this.clearStopSettleTimer();
+    this.stoppingSessionId = null;
+    if (!this.disposed) this.store.setCancelling(false);
+  }
+
+  private clearStopSettleTimer(): void {
+    if (this.stopSettleTimer) {
+      clearTimeout(this.stopSettleTimer);
+      this.stopSettleTimer = null;
+    }
+  }
+
+  /**
+   * 停止超时兜底：cancel 已发出、内核仍未让本轮落定。
+   *
+   * 不静默把状态改成 idle（那是谎报）：先如实提示，再走内核强制重启 ——
+   * `performCliRestart` 会先落盘转录，再按 `restartRestoreId` 恢复同一会话，
+   * 被丢弃的 in-flight 请求在 catch 里因会话已替换而静默丢弃，状态回到 idle。
+   */
+  private onStopSettleDeadline(sessionId: string): void {
+    this.stopSettleTimer = null;
+    if (this.disposed) return;
+    const state = this.store.getState();
+    if (!state.cancelling) return;
+    if (
+      this.stoppingSessionId !== sessionId ||
+      state.sessionId !== sessionId ||
+      state.status !== "streaming"
+    ) {
+      this.endStopWindow();
+      return;
+    }
+    this.log.warn(
+      `stop did not settle within ${this.stopSettleTimeoutMs}ms on session ${sessionId} — forcing CLI restart`,
+    );
+    this.store.sendToast(
+      "warning",
+      vscode.l10n.t("停止超时：内核未响应取消请求，正在重启内核以结束本轮（对话记录已保存）"),
+    );
+    void this.performCliRestart().catch((error: unknown) => {
+      this.log.warn(`forced CLI restart after stop timeout failed: ${errorMessage(error)}`);
+      this.endStopWindow();
+    });
   }
 
   /**
@@ -6315,6 +6471,27 @@ export class ChatPanel implements vscode.Disposable {
       );
       return;
     }
+    await this.performCliRestart();
+  }
+
+  /**
+   * Unguarded restart core shared by {@link restartCli} and the stop-timeout
+   * fallback.
+   *
+   * The forced-stop path calls it while the panel is still `streaming` on
+   * purpose: after `session/cancel` was ignored there is no gentler escape,
+   * and this path is the one that preserves the conversation (tail persisted
+   * first, `restartRestoreId` restores the same session). The in-flight
+   * prompt rejects against the disposed client and its catch sees the
+   * replaced session id, so it drops silently instead of painting an error.
+   */
+  private async performCliRestart(): Promise<void> {
+    if (this.disposed) return;
+    // The stop window is over here: the state is about to be replaced and a
+    // late deadline must not fire against the fresh session.
+    this.clearStopSettleTimer();
+    this.stoppingSessionId = null;
+    const state = this.store.getState();
     const outgoingId = state.activeSessionId ?? state.sessionId;
     if (outgoingId) {
       // A restart must NOT drop the conversation the user is looking at: the
@@ -8418,6 +8595,7 @@ export class ChatPanel implements vscode.Disposable {
             // — the next persist point (prompt completion) will never run.
             void this.persistActiveTranscript();
             this.client = null;
+            this.endStopWindow();
             this.cancelAllApprovals(vscode.l10n.t("内核进程已退出"));
             this.cancelAllPendingQuestions(vscode.l10n.t("内核进程已退出，提问已跳过"));
             this.store.markError(vscode.l10n.t("内核进程已退出，重新打开面板可重试"));
@@ -9985,6 +10163,9 @@ export class ChatPanel implements vscode.Disposable {
       return false;
     }
     this.cancelSeen = false;
+    // 新回合开始 = 上一条停止窗口已无意义：残留的 cancelling 会把这一轮的
+    // 停止按钮锁成「正在停止…」，永远点不动。
+    this.endStopWindow();
     // Hoisted for the catch: a profile switch (hot re-auth or full restart)
     // cancels an in-flight prompt, whose rejection then lands here AFTER the
     // fresh state is already in place.
@@ -10123,6 +10304,9 @@ export class ChatPanel implements vscode.Disposable {
         return false;
       }
       this.store.promptCompleted(result.stopReason, result.usage);
+      // The turn settled (cancelled included) — the host-owned stop window is
+      // over; the Stop button must leave 「正在停止…」 on this same push.
+      this.endStopWindow();
       // QQ 最终回执：pendingCount=0 的汇报汇总轮收尾后，把本轮 assistant 文本
       // 作为等待中的 QQ 任务的真正答复回传（fire-and-forget，不挡回合收尾）。
       // 锚点失效（转录被清空/重排）时按「回合开始时的块数」切片取本轮新增文本；
@@ -10254,6 +10438,9 @@ export class ChatPanel implements vscode.Disposable {
       if (this.hasSuperWork()) this.ensureSuperHeartbeat();
     } catch (error) {
       if (!internal) this.currentTurnAttachments = null;
+      // Any failure exit also closes the stop window: an error banner must not
+      // coexist with a Stop button frozen on 「正在停止…」.
+      this.endStopWindow();
       // A3: the panel was disposed mid-flight — the store is gone, so there
       // is nothing to mark and nothing to persist.
       if (this.disposed) {

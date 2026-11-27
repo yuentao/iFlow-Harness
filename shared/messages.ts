@@ -1051,6 +1051,17 @@ export interface SessionState {
   status: AgentStatus;
   errorMessage: string | null;
   stopReason: StopReason | null;
+  /**
+   * 宿主权威的「正在停止」标记：用户按了停止，宿主已发出 `session/cancel`
+   * （并在取消本会话的活子会话），但回合尚未落定。
+   *
+   * webview 只按它把停止按钮渲染成「正在停止…」并禁用 —— 不再用本地 10s
+   * 定时器猜：旧实现的本地超时会在 `status` 仍是 streaming 时把按钮退回
+   * 「停止生成」，用户只能反复点，形成「停止 → 正在停止 → 停止」的循环。
+   * 回合真正 settle（`promptCompleted` / 失败 / 会话替换 / 强制重启）时由
+   * 宿主清回 false；缺省（undefined）等价 false。
+   */
+  cancelling?: boolean;
   sessionId: string | null;
   modes: SessionModeState | null;
   /**

@@ -298,6 +298,20 @@ export class SessionStore {
     this.flush();
   }
 
+  /**
+   * 宿主权威的「正在停止」标记（见 `SessionState.cancelling`）。
+   *
+   * 由 `cancelCurrentTurn` 置真、回合落定（`promptCompleted` / 失败 /
+   * 会话替换 / 停止超时强制重启）时清回 false。webview 只按它渲染
+   * 「正在停止…」，不再用本地计时器猜 —— 那正是「点了没反应、反复点」的
+   * 直接来源。幂等：同值不推送。
+   */
+  setCancelling(cancelling: boolean): void {
+    if ((this.state.cancelling ?? false) === cancelling) return;
+    this.state.cancelling = cancelling;
+    this.flush();
+  }
+
   /** Publish the turn-end next-step prediction. Non-blocks metadata, so it
    * rides the blockPatch tail exactly like the queue/checkpoint projections. */
   suggestNextSteps(suggestions: string[]): void {

@@ -676,6 +676,15 @@ export type SuperCancelOutcome =
   | { ok: true; reason: "already-terminal"; status: SuperStatus }
   | { ok: false; reason: "not-found" };
 
+/** `cancelAll` 的过滤选项。 */
+export interface SuperCancelAllOptions {
+  /**
+   * 只中断属于该主会话的子会话（没有归属的旧记录按「跟随当前会话」处理）。
+   * 不传 = 中断全部活着的子会话（看板「全部中断」的既有语义）。
+   */
+  mainSessionId?: string | null;
+}
+
 /** 扩展名 → MIME：复制来的图片除了落盘，也作为图片块直接给模型看。 */
 const IMAGE_MIME_BY_EXT = new Map<string, string>([
   [".png", "image/png"],
@@ -1417,11 +1426,30 @@ export class SuperAgentManager {
   }
 
   /** 中断全部子会话，返回被中断的数量。 */
-  async cancelAll(source: SuperInterruptSource = "system"): Promise<number> {
+  async cancelAll(source: SuperInterruptSource = "system", options: SuperCancelAllOptions = {}): Promise<number> {
+    // 归属过滤与 superBelongsToCurrentMain 同口径：没有归属的旧记录跟随当前
+    // 会话。用户按「停止」只能停掉当前这段对话派出的子会话，不能误伤同面板
+    // 里另一个主会话仍在跑的超流体。
+    const owner = options.mainSessionId;
     const ids = [...this.sessions.values()]
       .filter((s) => !isTerminalSuperStatus(s.status))
+      .filter((s) => {
+        if (owner === undefined) return true;
+        const sessionOwner = s.mainSessionId;
+        return !sessionOwner || sessionOwner === owner;
+      })
       .map((s) => s.id);
-    for (const id of ids) await this.cancel(id, source);
+    // **并行**取消：每个 cancel 都要等自己的进程树 teardown（Windows 上是
+    // taskkill /T，单次可达数秒）。旧实现逐个 `await`，十几个子会话就是
+    // 十几倍的回收时间，一次「停止」看起来像卡死。并行只受最慢的那一个
+    // 约束；且 cancel 内部先落 cancelled 状态再杀进程，超时只影响回收等待，
+    // 不影响状态与汇报。allSettled：单个失败不得中断其余目标。
+    const results = await Promise.allSettled(ids.map((id) => this.cancel(id, source)));
+    for (const result of results) {
+      if (result.status === "rejected") {
+        this.deps.log.warn(`超流体批量中断：单个目标失败：${errorMessage(result.reason)}`);
+      }
+    }
     return ids.length;
   }
 

@@ -57,7 +57,9 @@ const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MENTION_SEARCH_TIMEOUT_MS = 10_000;
 const CONTEXT_RESOLVE_TIMEOUT_MS = 15_000;
 const STAGE_TIMEOUT_MS = 30_000;
-const STOP_TIMEOUT_MS = 10_000;
+// 仅当宿主完全不回话时的兜底：正常路径由宿主把 cancelling 清回 false /
+// status 离开 streaming 收尾（宿主自己有 15s 的落定上限 + 强制重启兜底）。
+const STOP_TIMEOUT_MS = 30_000;
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
 
@@ -454,6 +456,8 @@ export function Composer() {
   const status = useChat((s) => s.state?.status ?? null);
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
+  /** 宿主权威的「正在停止」标记（见 SessionState.cancelling）。 */
+  const hostCancelling = useChat((s) => s.state?.cancelling ?? false);
   const needsSetup = useChat((s) => s.state?.auth.needsSetup ?? false);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
@@ -595,16 +599,26 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   }
   /** Stop the running turn once; the button spins until the turn settles. */
   function stopGeneration(): void {
-    if (stopping) return;
+    // Idempotent: while either the host-owned `cancelling` or this local
+    // optimistic flag says a stop is in flight, a repeat click is a no-op.
+    // The old code only guarded the local flag and let it expire after 10s
+    // while the turn was STILL streaming, so every click re-sent `cancel` and
+    // the button ping-ponged between 「停止生成」 and 「正在停止…」.
+    if (stopping || hostCancelling) return;
     setStopping(true);
     send({ type: "cancel" });
     if (stopTimer.current) clearTimeout(stopTimer.current);
+    // Failsafe for a host that never answers at all (e.g. an older build
+    // without `cancelling`). The normal release is the host clearing
+    // `cancelling` / the status leaving streaming — both handled below.
     stopTimer.current = setTimeout(() => {
       stopTimer.current = null;
       setStopping(false);
     }, STOP_TIMEOUT_MS);
   }
-  // The turn left streaming (cancel landed) → release the Stop spinner early.
+  // The turn left streaming (cancel landed, host settled, or a forced restart)
+  // → release the Stop spinner. Never release it on a timer while the host
+  // still reports streaming: that was the 「点了没反应」 loop.
   useEffect(() => {
     if (!canStop && stopping) {
       if (stopTimer.current) {
@@ -614,6 +628,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       setStopping(false);
     }
   }, [canStop, stopping]);
+  /** 渲染用的进行态：宿主权威标记或本地即时反馈。 */
+  const stopPending = stopping || hostCancelling;
   // ESC's window listener only depends on canStop; the ref keeps it on the
   // CURRENT stopping state instead of the render that registered it.
   const stopRef = useRef<() => void>(() => {});
@@ -2530,14 +2546,14 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             {canStop ? (
               <Button
                 variant="emphasis"
-                icon={stopping ? <Loader2 className={`${ICON_INLINE} animate-spin`} /> : <Square className={ICON_INLINE} />}
-                title={stopping ? t("正在停止…") : t("停止生成")}
-                aria-label={stopping ? t("正在停止…") : t("停止生成")}
-                aria-busy={stopping || undefined}
-                disabled={stopping}
+                icon={stopPending ? <Loader2 className={`${ICON_INLINE} animate-spin`} /> : <Square className={ICON_INLINE} />}
+                title={stopPending ? t("正在停止…") : t("停止生成")}
+                aria-label={stopPending ? t("正在停止…") : t("停止生成")}
+                aria-busy={stopPending || undefined}
+                disabled={stopPending}
                 onClick={stopGeneration}
               >
-                <span className="@max-[340px]:hidden">{stopping ? t("正在停止…") : t("停止生成")}</span>
+                <span className="@max-[340px]:hidden">{stopPending ? t("正在停止…") : t("停止生成")}</span>
               </Button>
             ) : (
               <Button
