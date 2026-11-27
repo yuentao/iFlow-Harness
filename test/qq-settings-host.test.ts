@@ -2,13 +2,27 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   QQ_SETTING_KEYS,
   applyQqSettingsPatch,
+  createShadowedOverrideNotice,
   createVscodeQqSettingsIo,
   ensureBridgeSecrets,
+  findShadowedWorkspaceKeys,
+  pickQqSettingValue,
+  readEffectiveQqSettings,
   readQqSettings,
+  type QqSettingScopes,
   type QqSettingsIo,
 } from "../src/qq/settings-host.js";
 import { QQ_SECRET_KEYS } from "../src/qq/config.js";
 import type { QqSettingsUi } from "../shared/messages.js";
+import {
+  enableConfigUpdateRecording,
+  getConfigUpdates,
+  resetConfigScopeValues,
+  resetConfigUpdates,
+  resetWorkspaceFoldersStub,
+  setConfigScopeValues,
+  setWorkspaceFolders,
+} from "./vscode-stub.js";
 import * as vscode from "vscode";
 
 /** 完整默认值（与 shared/messages.ts 的 pickQqSettingsUi 默认一致）。 */
@@ -28,6 +42,8 @@ const DEFAULTS: QqSettingsUi = {
 /** 纯内存假 IO：记录写入次数与 secret 读写，不依赖 vscode。 */
 class MemoryIo implements QqSettingsIo {
   readonly settings: Record<string, unknown>;
+  /** 可选的逐键作用域值：填了就按「Global 优先」解析（模拟真实 VSCode）。 */
+  readonly scopes = new Map<string, QqSettingScopes>();
   readonly secrets = new Map<string, string>();
   readonly writes: Record<string, unknown>[] = [];
   readonly secretReads: string[] = [];
@@ -46,6 +62,10 @@ class MemoryIo implements QqSettingsIo {
 
   readAll(): Record<string, unknown> {
     return { ...this.settings };
+  }
+
+  inspect(key: string): QqSettingScopes | undefined {
+    return this.scopes.get(key);
   }
 
   async writeAll(patch: Record<string, unknown>): Promise<void> {
@@ -579,5 +599,177 @@ describe("createVscodeQqSettingsIo", () => {
     expect(stored.get("k")).toBe("v2");
     await io.deleteSecret("k");
     expect(stored.has("k")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 读侧作用域优先级（Global 优先）
+// ---------------------------------------------------------------------------
+
+describe("pickQqSettingValue：单键生效值", () => {
+  it("Global 有值且工作区也有不同值 → 读到 Global", () => {
+    expect(
+      pickQqSettingValue({
+        globalValue: true,
+        workspaceValue: false,
+        workspaceFolderValues: [false],
+      }),
+    ).toBe(true);
+  });
+
+  it("Global 缺失、工作区有旧值 → 读到工作区（旧值不丢）", () => {
+    expect(pickQqSettingValue({ workspaceValue: "trusted" })).toBe("trusted");
+    // 多根：Global / 工作区都缺失时按根顺序回退到 folder 级旧值。
+    expect(pickQqSettingValue({ workspaceFolderValues: [undefined, "full"] })).toBe("full");
+  });
+
+  it("分层值全缺失 → 用声明默认值", () => {
+    expect(pickQqSettingValue({ defaultValue: 6 })).toBe(6);
+    expect(pickQqSettingValue(undefined)).toBeUndefined();
+  });
+
+  it("显式 false / 0 / 空串不会被当成缺失", () => {
+    expect(pickQqSettingValue({ globalValue: false, workspaceValue: true })).toBe(false);
+    expect(pickQqSettingValue({ globalValue: 0, defaultValue: 6 })).toBe(0);
+    expect(pickQqSettingValue({ globalValue: "", workspaceValue: "x" })).toBe("");
+  });
+});
+
+describe("readEffectiveQqSettings：9 键生效值", () => {
+  it("有 inspect 能力时逐键 Global 优先；无旧值时读默认值", () => {
+    const io = new MemoryIo();
+    io.scopes.set("enabled", { globalValue: true, workspaceValue: false });
+    io.scopes.set("resultDetail", { defaultValue: "full" });
+    const io2 = new MemoryIo();
+    io2.scopes.set("resultDetail", { defaultValue: "full" });
+
+    const raw = readEffectiveQqSettings(io);
+    expect(raw.enabled).toBe(true);
+    expect(readEffectiveQqSettings(io2).resultDetail).toBe("full");
+  });
+
+  it("IO 没有 inspect 能力时退回 readAll（旧 fake 兼容）", () => {
+    const io: QqSettingsIo = {
+      readAll: () => ({ enabled: true }),
+      writeAll: async () => undefined,
+      getSecret: async () => undefined,
+      setSecret: async () => undefined,
+      deleteSecret: async () => undefined,
+    };
+    expect(readEffectiveQqSettings(io)).toEqual({ enabled: true });
+    expect(findShadowedWorkspaceKeys(io)).toEqual([]);
+  });
+});
+
+describe("readQqSettings 读侧 Global 优先（真实 vscode IO）", () => {
+  const secrets = {
+    get: async () => undefined,
+    store: async () => undefined,
+    delete: async () => undefined,
+  };
+  const original = vscode.workspace.getConfiguration;
+  afterEach(() => {
+    (vscode.workspace as unknown as { getConfiguration: unknown }).getConfiguration = original;
+    resetConfigScopeValues();
+    resetWorkspaceFoldersStub();
+    resetConfigUpdates();
+  });
+
+  it("Global 有值、Workspace 也有不同值 → 读到 Global", async () => {
+    setConfigScopeValues({ enabled: { global: true, workspace: false } });
+    const io = createVscodeQqSettingsIo(secrets);
+    await expect(readQqSettings(io)).resolves.toMatchObject({ enabled: true });
+    // 合并读（原生 folder > workspace > global）仍是 false：证明优先级在本层改写。
+    expect(io.readAll().enabled).toBe(false);
+  });
+
+  it("Global 缺失、Workspace 有旧值 → 读到 Workspace（旧值不丢）", async () => {
+    setConfigScopeValues({ remotePolicy: { workspace: "trusted" } });
+    const io = createVscodeQqSettingsIo(secrets);
+    await expect(readQqSettings(io)).resolves.toMatchObject({ remotePolicy: "trusted" });
+  });
+
+  it("多根：Global / Workspace 都缺失时回退到 folder 级旧值", async () => {
+    setWorkspaceFolders([{ uri: { fsPath: "J:/root-a" } }, { uri: { fsPath: "J:/root-b" } }]);
+    setConfigScopeValues({ resultDetail: { folders: { "J:/root-b": "full" } } });
+    const io = createVscodeQqSettingsIo(secrets);
+    await expect(readQqSettings(io)).resolves.toMatchObject({ resultDetail: "full" });
+    expect(findShadowedWorkspaceKeys(io)).toEqual([]);
+  });
+
+  it("分层全缺失 → 读到声明默认值（get() 的默认层）", async () => {
+    (vscode.workspace as unknown as { getConfiguration: unknown }).getConfiguration = () => ({
+      get: (key: string) =>
+        ({ enabled: false, resultDetail: "summary" } as Record<string, unknown>)[key],
+      inspect: () => ({
+        globalValue: undefined,
+        workspaceValue: undefined,
+        workspaceFolderValue: undefined,
+      }),
+      update: async () => {
+        throw new Error("read-only");
+      },
+    });
+    const io = createVscodeQqSettingsIo(secrets);
+    await expect(readQqSettings(io)).resolves.toMatchObject({
+      enabled: false,
+      resultDetail: "summary",
+    });
+  });
+
+  it("读取 / 检测路径零写入：不调用 update，也不订阅配置变更事件", async () => {
+    enableConfigUpdateRecording();
+    const onDidChange = vi.spyOn(vscode.workspace, "onDidChangeConfiguration");
+    setConfigScopeValues({
+      enabled: { global: true, workspace: false },
+      remotePolicy: { workspace: "trusted" },
+    });
+    const io = createVscodeQqSettingsIo(secrets);
+
+    await readQqSettings(io);
+    expect(findShadowedWorkspaceKeys(io)).toEqual(["enabled"]);
+
+    expect(getConfigUpdates()).toEqual([]);
+    expect(onDidChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("findShadowedWorkspaceKeys / createShadowedOverrideNotice", () => {
+  it("列出被 Global 压住的旧工作区 / folder 级覆盖；无残留返回空", () => {
+    const io = new MemoryIo();
+    io.scopes.set("enabled", { globalValue: true, workspaceValue: false });
+    io.scopes.set("autoMerge", { globalValue: true, workspaceFolderValues: [false] });
+    io.scopes.set("remotePolicy", { globalValue: "trusted" }); // 无旧值：不算残留
+    io.scopes.set("resultDetail", { workspaceValue: "full" }); // Global 缺失：旧值仍生效
+
+    expect(findShadowedWorkspaceKeys(io)).toEqual(["enabled", "autoMerge"]);
+    expect(findShadowedWorkspaceKeys(new MemoryIo())).toEqual([]);
+  });
+
+  it("幂等：连续两次探测只提示一次；无残留时不消耗这次机会", () => {
+    const notify = vi.fn();
+    const notice = createShadowedOverrideNotice(notify);
+    const io = new MemoryIo();
+    io.scopes.set("enabled", { globalValue: true, workspaceValue: false });
+
+    // 先探一次空的：不提示，也不消耗机会。
+    expect(notice(new MemoryIo())).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+
+    expect(notice(io)).toEqual(["enabled"]);
+    expect(notice(io)).toEqual([]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(["enabled"]);
+  });
+
+  it("检测只读：不触发 writeAll / update", () => {
+    const io = new MemoryIo();
+    io.scopes.set("enabled", { globalValue: true, workspaceValue: false });
+    const notice = createShadowedOverrideNotice(() => undefined);
+
+    findShadowedWorkspaceKeys(io);
+    notice(io);
+
+    expect(io.writes).toEqual([]);
   });
 });
