@@ -42,6 +42,7 @@ import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
 import { loadCredentials, loadProfiles } from "../acp/auth.js";
 import { readKernelApiProfiles } from "../acp/api-profiles.js";
 import {
+  queryModelIds,
   readActiveEndpoint,
   readCliSettings,
   retireStaleOAuthCreds,
@@ -139,6 +140,15 @@ const SUPER_ARCHIVE_THROTTLE_MS = 800;
 const SUPER_HEARTBEAT_MS = 1_500;
 /** 已归档子会话迟到结论 toast 截断长度. */
 const SUPER_ARCHIVED_REPORT_MAX_CHARS = 480;
+
+/**
+ * 派发前 live `/models` 查询的短超时（毫秒）。
+ *
+ * 它只用来提供「模型已下架」的**证据**：超时 / 连接失败 / 非 2xx / 解析失败
+ * 一律视为「无证据」（不降级、不阻断派发），因此宁可早早放弃，也不能把子会话
+ * 的冷启动卡住。设置页那条查询是用户主动点刷新、等得起，仍用默认 10s。
+ */
+const SUPER_SPAWN_LIVE_MODELS_TIMEOUT_MS = 4_000;
 
 /** 路径比较键（Windows 文件系统大小写不敏感）。Mirrors the panel helper (阶段 6). */
 function normalizePathKey(target: string): string {
@@ -364,6 +374,12 @@ export class SuperAgentHost {
    * WeakMap：client 被回收后自动释放，不泄漏。
    */
   private readonly superClientTokensLimits = new WeakMap<AcpClient, number>();
+  /**
+   * 派发时已提示过的「下架模型 → 实际回退目标」组合（键为
+   * `delisted\u0000fallback`）。一批并行派发会各自解析出同一结论，去重后
+   * 只弹一次 toast；日志不受影响，每次仍记。
+   */
+  private readonly superSpawnDegradeNotices = new Set<string>();
   pendingSuperMerges: Array<{ id: string; reason: string }> = [];
   superMergeRunning = false;
   readonly superScan = new SuperDirectiveScanner();
@@ -2010,18 +2026,95 @@ export class SuperAgentHost {
     const endpointInput: SuperEndpointInput = configured
       ? input
       : { ...input, kernelProfileName: null, kernelDefaultEndpoint: null };
-    const spec = resolveSuperApiSpec({
+    const resolutionInput = {
       ...endpointInput,
       taskModelId: taskModelId ?? null,
       superModelId: superModelId || null,
       profileModelName: namedPointer ? undefined : null,
       mainModelId: this.store.getState().currentModelId,
-      // live 列表不在 spawn 时查询：拿不到就传 `undefined` —— **不构成下架
-      // 证据**，`resolveSuperModel` 因此绝不会降级（也绝不回退 CLI 内建的
-      // `_meta.models.availableModels`）。
-      liveModelIds: undefined,
-    });
+    };
+    // 第一遍只解「端点 + 链上的目标模型」（纯函数，无网络）：有了目标模型和
+    // 实际要用的端点，才知道该向哪个 `/models` 取证、要不要取证。
+    const baseSpec = resolveSuperApiSpec(resolutionInput);
+    // 派发时的 live 下架校验（方案 §7.8 的取舍已反转：派发也校验）。
+    //
+    // 三点纪律：
+    //   • **只在 `modelConfigured` 时查**：零配置子会话的模型就是主会话当前
+    //     模型，给它额外一跳 HTTP 既拖慢冷启动，又可能让「零配置零行为变化」
+    //     失守（§4.1）—— 主会话自己正在用的模型，下架时主会话会先报错。
+    //   • **查询失败 / 超时 / 空列表 = 无证据**：`querySpawnLiveModelIds` 返回
+    //     `undefined`，这里就不重解，`resolveSuperModel` 绝不会降级。
+    //   • 取证成功才用**同一份** `resolveSuperModel` 重解（判定只有一份实现）；
+    //     降级则显式提示，绝不静默换模型、绝不改写 `superAgentModel`。
+    let spec = baseSpec;
+    if (modelConfigured && baseSpec.endpoint && baseSpec.model.modelId) {
+      const liveModelIds = await this.querySpawnLiveModelIds(baseSpec.endpoint);
+      if (liveModelIds) spec = resolveSuperApiSpec({ ...resolutionInput, liveModelIds });
+    }
+    if (spec.model.degraded) this.noticeSpawnModelDegraded(spec.model);
     return { spec, configured, modelConfigured };
+  }
+
+  /**
+   * 派发前的一次 live `/models` 查询（`GET {baseUrl}/models`）。
+   *
+   * 纪律：
+   *   • **唯一数据源仍是实时查询**（`queryModelIds`，原生 `node:http(s)` 直连，
+   *     绝不用被代理 patch 过的全局 `fetch`；**绝不**回退 CLI 内建的
+   *     `_meta.models.availableModels`）。
+   *   • **空列表 / 超时 / 连接失败 / 非 2xx / 解析失败一律按「无证据」处理** →
+   *     返回 `undefined`：不降级、不抛错、派发照常进行（AGENTS.md 陷阱 #25）。
+   *   • **短超时**：这是派发路径上的额外一跳，宁可放弃证据也不能卡住冷启动。
+   *
+   * 已知临时性：这里**没有缓存**。设置页那份 30s 缓存（`superProfileModelsCache`
+   * 与 `querySuperProfileModelIds`）是 `ChatPanel` 的私有状态，宿主拿不到；要
+   * 共享就得让面板把它注入宿主（改 `panel.ts`，属另一次改动）。当前代价是每次
+   * 派发（`createSuperClient` 与 `spawnModel` 各复核一次）各发一次短请求。
+   */
+  private async querySpawnLiveModelIds(endpoint: {
+    baseUrl: string;
+    apiKey: string;
+    modelName?: string | null;
+  }): Promise<string[] | undefined> {
+    try {
+      const ids = await queryModelIds(
+        {
+          baseUrl: endpoint.baseUrl,
+          apiKey: endpoint.apiKey,
+          modelName: endpoint.modelName ?? null,
+        },
+        SUPER_SPAWN_LIVE_MODELS_TIMEOUT_MS,
+      );
+      // 200 但没有任何模型 = 端点异常，同样不构成「模型下架」的证据。
+      return ids.length > 0 ? ids : undefined;
+    } catch (error) {
+      this.log.info(
+        `超流体派发前查询模型列表失败（按无证据处理，照常派发）：${errorMessage(error)}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * 派发时的模型降级必须**显式**：用真实原因（被下架的模型 id + 实际回退
+   * 目标）提示用户，并**绝不**因此改写用户的 `iflow.superAgentModel`。
+   *
+   * 同一批派发（并行的多个子会话）会重复拿到同一个结论，因此同一组
+   * 「下架 → 回退」只弹一次 toast；日志每次照记，便于排查。
+   */
+  private noticeSpawnModelDegraded(model: SuperApiSpec["model"]): void {
+    const delisted = model.delistedModelId ?? "";
+    const fallback = model.modelId ?? "";
+    const message = vscode.l10n.t(
+      "子会话模型 {0} 已不在可用模型中，本次派发改用 {1}（不会修改你的超流体模型设置）",
+      delisted || "（未知）",
+      fallback || "（未知）",
+    );
+    this.log.warn(message);
+    const key = `${delisted}\u0000${fallback}`;
+    if (this.superSpawnDegradeNotices.has(key)) return;
+    this.superSpawnDegradeNotices.add(key);
+    this.store.sendToast("warning", message);
   }
 
   /** Spawn a CLI client for a child session (own process, own worktree). */

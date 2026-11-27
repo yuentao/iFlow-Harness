@@ -14,8 +14,9 @@
  *  - 窗口断言：主 profile tokensLimit=64000、超流体=128000 —— 若仍用主会话
  *    那套解析，子会话会拿到 64000 而不是 128000。
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -577,4 +578,217 @@ describe("子会话独立凭据与模型注入", () => {
     expect(auth?.params.methodInfo?.apiKey).not.toBe(legacy.apiKey);
     expectNoSecretInEnv(env, [legacy.apiKey, legacy.baseUrl]);
   }, 30000);
+
+  // ── 派发时 live 模型校验（方案 §7.8 的取舍已反转：派发也校验）─────────────
+  //
+  // 可证伪性：
+  //  - 把 `resolveSuperSpawnPlan` 里的 live 查询去掉（恢复
+  //    `liveModelIds: undefined`），第 1 条立刻变红（不降级、没有 toast、
+  //    窗口也不是降级模型的）。
+  //  - 若把「空列表 / 查询失败 / 超时」也当成下架证据，第 2 / 3 / 4 条会红
+  //    （会误降级，正是陷阱 #25 要防的）。
+  //  - 若给零配置派发也加这一跳，第 5 条会红（会多发请求）。
+  describe("派发时 live 模型校验", () => {
+    type PlanModel = {
+      modelId: string | null;
+      source: string | null;
+      degraded: boolean;
+      delistedModelId?: string;
+      reason?: string;
+    };
+    type HostInternals = {
+      resolveSuperSpawnPlan: (
+        taskProfileId: string | null,
+        taskModelId: string | null,
+      ) => Promise<{
+        spec: { endpoint: { baseUrl: string } | null; model: PlanModel };
+        configured: boolean;
+        modelConfigured: boolean;
+      }>;
+    };
+
+    /** `superHost` 是面板的私有懒加载访问器；运行时可直接取用（只读调用）。 */
+    function hostPlan(): HostInternals {
+      return (panel as unknown as { superHost: HostInternals }).superHost;
+    }
+
+    /** 记录宿主推给 UI 的 toast（用来断言「降级必须显式」）。 */
+    function spyToasts(): Array<{ level: string; message: string }> {
+      const store = (panel as unknown as {
+        store: { sendToast: (level: string, message: string, opts?: unknown) => number };
+      }).store;
+      const seen: Array<{ level: string; message: string }> = [];
+      vi.spyOn(store, "sendToast").mockImplementation((level: string, message: string) => {
+        seen.push({ level, message });
+        return seen.length;
+      });
+      return seen;
+    }
+
+    /** 假 `/models` 端点：这是测试里 live 列表的**唯一**来源。 */
+    async function startModelsServer(
+      onModels: (res: http.ServerResponse) => void,
+    ): Promise<{ baseUrl: string; requestCount: () => number; close: () => Promise<void> }> {
+      let requests = 0;
+      const server = http.createServer((req, res) => {
+        if (req.url?.endsWith("/models")) {
+          requests++;
+          onModels(res);
+          return;
+        }
+        res.statusCode = 404;
+        res.end("{}");
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("假 /models server 未监听");
+      return {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        requestCount: () => requests,
+        close: () =>
+          new Promise<void>((resolve) => {
+            server.closeAllConnections?.();
+            server.close(() => resolve());
+          }),
+      };
+    }
+
+    /** 超流体 Profile 指向假端点 + 用户点名了一个模型。 */
+    function writeLiveServerSettings(baseUrl: string, superModel: string): void {
+      writeSettings({
+        selectedAuthType: "openai-compatible",
+        apiProfiles: {
+          main: { ...MAIN },
+          superFlow: { baseUrl, apiKey: "sk-live-secret", modelName: "profile-model-x" },
+        },
+      });
+      setWorkspaceProfile("main");
+      setConfigOverrides({
+        nodePath: process.execPath,
+        superAgentProfile: "superFlow",
+        superAgentModel: superModel,
+        contextWindowOverrides: [],
+      });
+    }
+
+    it("live 非空且不含目标模型：子会话拿到降级目标，并弹出带真实原因的提示", async () => {
+      const server = await startModelsServer((res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ data: [{ id: "gpt-4o" }] }));
+      });
+      try {
+        writeLiveServerSettings(server.baseUrl, "gone-model");
+        const toasts = spyToasts();
+        const plan = await hostPlan().resolveSuperSpawnPlan(null, null);
+        expect(plan.modelConfigured).toBe(true);
+        expect(plan.spec.model.degraded).toBe(true);
+        expect(plan.spec.model.delistedModelId).toBe("gone-model");
+        // 链上其余候选（profile-model-x / 主会话模型）都不在 live 列表里 →
+        // 兜底 live[0]（同主会话兜底口径）。
+        expect(plan.spec.model.modelId).toBe("gpt-4o");
+        const message =
+          "子会话模型 gone-model 已不在可用模型中，本次派发改用 gpt-4o（不会修改你的超流体模型设置）";
+        expect(toasts.filter((t) => t.message === message)).toHaveLength(1);
+        expect(toasts.find((t) => t.message === message)?.level).toBe("warning");
+        // 降级只是提示：用户的 superAgentModel 原样保留。
+        expect(vscode.workspace.getConfiguration("iflow").get("superAgentModel")).toBe("gone-model");
+
+        // 端到端：子会话 spawn 真的按降级后的模型解析窗口
+        // （gpt-4o → 内建 128000，而不是查不到的 gone-model 的「无依据」）。
+        const { env } = await spawnAndCollect("live-degraded");
+        expect(env.IFLOW_TOKENS_LIMIT).toBe("128000");
+        // 同一结论重复解析（createSuperClient + spawnModel）只提示一次。
+        expect(toasts.filter((t) => t.message === message)).toHaveLength(1);
+      } finally {
+        await server.close();
+        vi.restoreAllMocks();
+      }
+    }, 30000);
+
+    it("live 为空列表：不构成下架证据，不降级、不提示，派发照常", async () => {
+      const server = await startModelsServer((res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ data: [] }));
+      });
+      try {
+        writeLiveServerSettings(server.baseUrl, "gone-model");
+        const toasts = spyToasts();
+        const plan = await hostPlan().resolveSuperSpawnPlan(null, null);
+        expect(plan.spec.model.degraded).toBe(false);
+        expect(plan.spec.model.modelId).toBe("gone-model");
+        expect(toasts).toEqual([]);
+        // 派发没有被阻断：子会话照常起来（模型仍是 gone-model，查不到内建窗口）。
+        const { env } = await spawnAndCollect("live-empty");
+        expect(env.IFLOW_TOKENS_LIMIT).toBeUndefined();
+      } finally {
+        await server.close();
+        vi.restoreAllMocks();
+      }
+    }, 30000);
+
+    it("live 查询失败（非 2xx）：按无证据处理 —— 不降级、不抛错、派发继续", async () => {
+      const server = await startModelsServer((res) => {
+        res.statusCode = 500;
+        res.end("boom");
+      });
+      try {
+        writeLiveServerSettings(server.baseUrl, "gone-model");
+        const toasts = spyToasts();
+        const plan = await hostPlan().resolveSuperSpawnPlan(null, null);
+        expect(plan.spec.model.degraded).toBe(false);
+        expect(plan.spec.model.modelId).toBe("gone-model");
+        expect(toasts).toEqual([]);
+        const { env } = await spawnAndCollect("live-500");
+        expect(env.IFLOW_TOKENS_LIMIT).toBeUndefined();
+      } finally {
+        await server.close();
+        vi.restoreAllMocks();
+      }
+    }, 30000);
+
+    it("live 查询超时：按无证据处理，并在短超时内放弃（不拖死派发）", async () => {
+      // 永不响应 → 走 queryModelIds 的短超时（4s）分支。
+      const server = await startModelsServer(() => {});
+      try {
+        writeLiveServerSettings(server.baseUrl, "gone-model");
+        const toasts = spyToasts();
+        const startedAt = Date.now();
+        const plan = await hostPlan().resolveSuperSpawnPlan(null, null);
+        const elapsed = Date.now() - startedAt;
+        expect(plan.spec.model.degraded).toBe(false);
+        expect(plan.spec.model.modelId).toBe("gone-model");
+        expect(toasts).toEqual([]);
+        expect(elapsed).toBeLessThan(8_000);
+      } finally {
+        await server.close();
+        vi.restoreAllMocks();
+      }
+    }, 20000);
+
+    it("零配置派发不发 live 查询：老用户零配置零行为变化", async () => {
+      const server = await startModelsServer((res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ data: [{ id: "other-model" }] }));
+      });
+      try {
+        writeSettings({
+          selectedAuthType: "openai-compatible",
+          apiProfiles: { main: { ...MAIN } },
+        });
+        setWorkspaceProfile("main");
+        zeroConfig();
+        const toasts = spyToasts();
+        const plan = await hostPlan().resolveSuperSpawnPlan(null, null);
+        expect(plan.modelConfigured).toBe(false);
+        expect(plan.spec.model.degraded).toBe(false);
+        // 端点来自握手路径（工作区指针 = main），不是假 server。
+        expect(plan.spec.endpoint?.baseUrl).toBe(MAIN.baseUrl);
+        expect(server.requestCount()).toBe(0);
+        expect(toasts).toEqual([]);
+      } finally {
+        await server.close();
+        vi.restoreAllMocks();
+      }
+    }, 30000);
+  });
 });
