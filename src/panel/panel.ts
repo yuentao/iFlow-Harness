@@ -54,7 +54,7 @@ import type {
   SessionSettings,
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
-import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
+import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER, QQ_LEASE_TAKEOVER_ACTION, QQ_LEASE_WAIT_ACTION } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import {
   EFFICIENCY_STEADY_PROMPT,
@@ -5454,6 +5454,18 @@ export class ChatPanel implements vscode.Disposable {
       // 面板构造时的 applyPendingSettings 随后把暂存值写回去。
       if (typeof toastId === "number") this.store.dismissToast(toastId);
       void vscode.commands.executeCommand("workbench.action.reloadWindow");
+      return;
+    }
+    if (actionId === QQ_LEASE_WAIT_ACTION) {
+      // QQ 租约冲突卡片的「等待」：只关 toast，不接管（默认行为）。
+      if (typeof toastId === "number") this.store.dismissToast(toastId);
+      return;
+    }
+    if (actionId === QQ_LEASE_TAKEOVER_ACTION) {
+      // QQ 租约冲突卡片的「接管」：与原 showWarningMessage 分支完全同一条
+      // forceTake + 旧窗口心跳让出流程，租约语义不变。
+      if (typeof toastId === "number") this.store.dismissToast(toastId);
+      void this.qqHost.takeoverQqLease();
       return;
     }
     if (typeof toastId === "number") this.store.dismissToast(toastId);

@@ -12,6 +12,7 @@ import type {
   InitializingReason,
   NewSessionPhase,
   SessionState,
+  ToastAction,
   ToolBlock,
 } from "../../shared/messages.js";
 import { initialSessionState } from "../../shared/messages.js";
@@ -376,7 +377,10 @@ export class SessionStore {
       displayOnly?: boolean;
       persistent?: boolean;
       sticky?: boolean;
-      action?: { actionId: string; label: string };
+      action?: ToastAction;
+      /** Multiple inline buttons on one toast (e.g. 等待 / 接管). When present
+       * the webview renders these instead of the single `action`. */
+      actions?: ToastAction[];
       /** Preview lines for a decision-card notice (see `HostToWebview` toast). */
       preview?: { text: string; scope: MemoryScope }[];
     },
@@ -393,6 +397,7 @@ export class SessionStore {
       persistent: opts?.persistent,
       sticky: opts?.sticky,
       action: opts?.action,
+      actions: opts?.actions,
       preview: opts?.preview,
     });
     return toastId;
