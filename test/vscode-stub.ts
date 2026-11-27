@@ -133,31 +133,137 @@ export class FileSystemWatcher {
 
 /** Write target for `WorkspaceConfiguration.update()`; values mirror VSCode's
  * public enum so `ConfigurationTarget.Global` is usable from the panel. The
- * stub configuration itself still has no `update()`, so a write throws unless
- * a test installs its own configuration object. */
+ * stub configuration has no `update()` unless a test opts into recording
+ * (`enableConfigUpdateRecording`), so a write throws by default — tests like
+ * `panel-busy-receipts` rely on that "write rejected" path. */
 export enum ConfigurationTarget {
   Global = 1,
   Workspace = 2,
   WorkspaceFolder = 3,
 }
 
+/** Test hook shape: 一个 `iflow.*` 键在各作用域上的覆盖值。 */
+export interface StubConfigScopeValues {
+  /** 用户级（Global）值。 */
+  global?: unknown;
+  /** 工作区级值（单根窗口的 .vscode/settings.json）。 */
+  workspace?: unknown;
+  /** 多根：按 `workspaceFolders[i].uri.fsPath` 索引的 folder 级值。 */
+  folders?: Record<string, unknown>;
+}
+
+const configScopeValues = new Map<string, StubConfigScopeValues>();
+
+const scopeKey = (key: string): string => (key.startsWith("iflow.") ? key : `iflow.${key}`);
+const shortKey = (key: string): string =>
+  key.startsWith("iflow.") ? key.slice("iflow.".length) : key;
+
+/** Test hook: 给 `inspect()` 装上分层值（global / workspace / folder）。默认全空。 */
+export function setConfigScopeValues(values: Record<string, StubConfigScopeValues>): void {
+  configScopeValues.clear();
+  for (const [key, value] of Object.entries(values)) configScopeValues.set(scopeKey(key), value);
+}
+
+/** Test hook: 清空分层值。 */
+export function resetConfigScopeValues(): void {
+  configScopeValues.clear();
+}
+
+/** 一次 `update()` 调用的记录（只有显式开启记录后才会产生）。 */
+export interface StubConfigUpdate {
+  key: string;
+  value: unknown;
+  target: ConfigurationTarget | undefined;
+  /** folder 级配置对象的 scope（`getConfiguration(section, folder.uri)`）。 */
+  scopePath?: string;
+}
+
+const configUpdates: StubConfigUpdate[] = [];
+let configUpdateRecording = false;
+
+/** Test hook: 开启 `update()` 记录。关闭时配置对象没有 `update`，写入照旧抛错。 */
+export function enableConfigUpdateRecording(): void {
+  configUpdateRecording = true;
+}
+
+/** Test hook: 取出（不清空）`update()` 记录。 */
+export function getConfigUpdates(): StubConfigUpdate[] {
+  return [...configUpdates];
+}
+
+/** Test hook: 关闭记录并清空。 */
+export function resetConfigUpdates(): void {
+  configUpdateRecording = false;
+  configUpdates.length = 0;
+}
+
 /** Configuration stub: `get()` returns the override or the default. Tests
- * inject overrides via `setConfigOverrides` (e.g. the osNotifications tier). */
+ * inject overrides via `setConfigOverrides` (e.g. the osNotifications tier);
+ * `setConfigScopeValues` additionally fills the workspace / folder layers for
+ * `inspect()` (backward compatible — all layers empty by default). */
 class WorkspaceConfiguration {
-  constructor(private readonly overrides: Record<string, unknown> = {}) {}
-  get<T>(key: string, defaultValue?: T): T {
-    return (key in this.overrides ? this.overrides[key] : defaultValue) as T;
+  /** 只在 `enableConfigUpdateRecording()` 后存在；默认没有它 → 写入抛错。 */
+  update?: (
+    key: string,
+    value: unknown,
+    target?: ConfigurationTarget,
+  ) => Promise<void>;
+
+  constructor(
+    private readonly overrides: Record<string, unknown> = {},
+    /** `getConfiguration(section, folder.uri)` 传入的 folder 级 scope。 */
+    private readonly scopePath?: string,
+  ) {
+    if (configUpdateRecording) {
+      this.update = async (key, value, target) => {
+        configUpdates.push({
+          key,
+          value,
+          target,
+          ...(this.scopePath === undefined ? {} : { scopePath: this.scopePath }),
+        });
+      };
+    }
   }
+
+  private folderValue(short: string): unknown {
+    const scopes = configScopeValues.get(scopeKey(short));
+    if (!scopes?.folders || this.scopePath === undefined) return undefined;
+    return scopes.folders[this.scopePath];
+  }
+
+  get<T>(key: string, defaultValue?: T): T {
+    const short = shortKey(key);
+    if (key in this.overrides) return this.overrides[key] as T;
+    const scopes = configScopeValues.get(scopeKey(short));
+    if (scopes) {
+      // 原生优先级（folder > workspace > global）：这是「合并后」的值，
+      // QQ 读侧的 Global 优先解析走 inspect()，两者刻意不同。
+      const effective = this.folderValue(short) ?? scopes.workspace ?? scopes.global;
+      if (effective !== undefined) return effective as T;
+    }
+    return defaultValue as T;
+  }
+
   /** Registry probe used by the panel's `isUserSettingRegistered`: the stub has
    * no manifest to consult, so every key reports a defaultValue (non-undefined
    * = "declared") unless the test marked it unregistered. */
-  inspect(key: string): { key: string; defaultValue: unknown; globalValue: unknown } {
-    const short = key.startsWith("iflow.") ? key.slice("iflow.".length) : key;
+  inspect(key: string): {
+    key: string;
+    defaultValue: unknown;
+    globalValue: unknown;
+    workspaceValue: unknown;
+    workspaceFolderValue: unknown;
+  } {
+    const short = shortKey(key);
     const unregistered = unregisteredConfigKeys.has(key) || unregisteredConfigKeys.has(short);
+    const scopes = configScopeValues.get(scopeKey(short));
     return {
       key: `iflow.${short}`,
       defaultValue: unregistered ? undefined : (short in this.overrides ? this.overrides[short] : true),
-      globalValue: this.overrides[short],
+      globalValue: scopes && "global" in scopes ? scopes.global : this.overrides[short],
+      workspaceValue: scopes?.workspace,
+      workspaceFolderValue: this.folderValue(short),
     };
   }
 }
@@ -224,7 +330,8 @@ export function resetWorkspaceFoldersStub(): void {
 
 export const workspace = {
   workspaceFolders: undefined as unknown[] | undefined,
-  getConfiguration: (_section?: string) => new WorkspaceConfiguration(configOverrides),
+  getConfiguration: (_section?: string, scope?: { fsPath?: string } | null) =>
+    new WorkspaceConfiguration(configOverrides, scope?.fsPath),
   createFileSystemWatcher: (_pattern: unknown) => new FileSystemWatcher(_pattern),
   onDidChangeConfiguration: () => new Disposable(),
   // 多仓库协作：根集合变化监听 + @ 文件搜索（默认空结果）。

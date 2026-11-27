@@ -49,6 +49,7 @@ import {
 } from "../qq/panel-host.js";
 import {
   applyQqSettingsPatch,
+  createShadowedOverrideNotice,
   createVscodeQqSettingsIo,
   readQqSettings,
   type QqSettingsIo,
@@ -110,6 +111,15 @@ const QQ_SETTINGS_RESTART_DEBOUNCE_MS = 500;
 const QQ_SETTINGS_SYNC_DEBOUNCE_MS = 50;
 /** 单次「失活 → 自动重启」的硬上限：绝不允许无限重启（重扫是人工兜底）。 */
 const QQ_HEALTH_RESTART_LIMIT = 1;
+/**
+ * 旧工作区级 QQ 配置被用户级设置取代时的一次性提示文案。
+ *
+ * 6f0ec90 之前的版本把 QQ 设置写进 Workspace 作用域；读侧改为 Global 优先后
+ * 这些旧值不再生效。只提示可以「重新保存一次」把它带走，不提供任何破坏性
+ * 动作 —— 用户可能同时在别的窗口里用着那份工作区配置。
+ */
+const QQ_SHADOWED_WORKSPACE_SETTINGS_NOTICE =
+  "检测到旧版本写入的工作区级 QQ 配置（{0} 项）已被用户级设置取代；如需保留，请在 QQ 设置页重新保存一次";
 /**
  * 任务看板投影上限。
  *
@@ -547,6 +557,13 @@ export class QqHost {
   qqChannelStarting: Promise<void> | null = null;
   /** 健康检查驱动的自动重启次数（上限 {@link QQ_HEALTH_RESTART_LIMIT}）。 */
   qqHealthRestarts = 0;
+  /**
+   * 「旧工作区级 QQ 配置已被用户级设置取代」的**一次性**提示器（每窗口一次）。
+   *
+   * 懒建：闭包在首次调用时才捕获 `this`，构造期不依赖回调就绪。只读检测，
+   * 不迁移、不写盘、不删旧值。
+   */
+  private qqShadowedOverrideNotice: ((io: QqSettingsIo) => string[]) | null = null;
   /** 设置事件合并定时器（一次补丁逐键写配置会连发多轮事件）。 */
   qqSettingsSyncTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -792,6 +809,10 @@ export class QqHost {
     // 待审核记录与通道是否启用无关：启动时先推一次，面板打开即可看到历史。
     void this.pushQqPendingUsers();
     if (this.qqStarting) return this.qqStarting;
+    // 读配置之前先做一次**只读**的作用域探测：旧版本（6f0ec90 之前）写在
+    // 工作区级的 QQ 配置已被用户级设置压住，提示用户重存一次即可带走它。
+    // 不迁移、不写盘、每窗口只提示一次。
+    this.noticeShadowedQqWorkspaceSettings();
     const task = this.doStartQq()
       .catch(async (error: unknown) => {
         const detail = errorMessage(error);
@@ -808,6 +829,32 @@ export class QqHost {
       });
     this.qqStarting = task;
     return task;
+  }
+
+  /**
+   * 一次性提示：旧版本写入的工作区级 QQ 配置已被用户级设置取代。
+   *
+   * 读侧改为 Global 优先后，6f0ec90 之前落在 Workspace 作用域的值不再生效，
+   * 换工作区时行为会变（正是用户报告的「必须重存一次」）。这里只**检测 +
+   * 提示**：不迁移、不写盘、不删旧值，也不弹带破坏性动作的按钮。每窗口
+   * 只提示一次（{@link createShadowedOverrideNotice} 去重）。
+   */
+  private noticeShadowedQqWorkspaceSettings(): void {
+    if (this.disposed) return;
+    this.qqShadowedOverrideNotice ??= createShadowedOverrideNotice((keys) => {
+      this.log.info(
+        `QQ 设置：检测到 ${keys.length} 项被用户级设置取代的工作区级覆盖（${keys.join("、")}），读取以用户级为准`,
+      );
+      this.store.sendToast(
+        "info",
+        vscode.l10n.t(QQ_SHADOWED_WORKSPACE_SETTINGS_NOTICE, keys.length),
+      );
+    });
+    try {
+      this.qqShadowedOverrideNotice(this.qqIo());
+    } catch (error) {
+      this.log.warn(`QQ 设置作用域探测失败：${errorMessage(error)}`);
+    }
   }
 
   /**
@@ -1031,12 +1078,12 @@ export class QqHost {
    * 内存置 enabled → 停扫码 → 重建官方通道 → 首次绑定把 enabled 落盘 →
    * 推已连接回执。
    *
-   * **顺序是刻意的**：`writeAll` 走 Workspace 作用域，会触发
-   * `onDidChangeConfiguration` 的 QQ 监听；若先落盘再启动，监听会在
-   * `this.qq` 还没赋值时并发发起一次启动，而首次绑定时白名单通常还是空的，
-   * 那一次启动会被 `allowlist_empty` 拦下（现在降为 warning，但并发启动
-   * 本身仍会制造两套现场）。先启动则监听看到的是同一份运行中的配置，
-   * `shouldRestartOnPatch` 判定无需重启。
+   * **顺序是刻意的**：`writeAll` 走 Global 作用域（6f0ec90 起；写入后会顺手
+   * 清掉同键的存量 Workspace 覆盖），会触发 `onDidChangeConfiguration` 的 QQ
+   * 监听；若先落盘再启动，监听会在 `this.qq` 还没赋值时并发发起一次启动，
+   * 而首次绑定时白名单通常还是空的，那一次启动会被 `allowlist_empty` 拦下
+   * （现在降为 warning，但并发启动本身仍会制造两套现场）。先启动则监听看到
+   * 的是同一份运行中的配置，`shouldRestartOnPatch` 判定无需重启。
    */
   async onQqBotBound(creds: Parameters<typeof storeQqBotCredentials>[1], config: QqConfig): Promise<void> {
     try {
