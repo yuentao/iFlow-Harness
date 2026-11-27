@@ -1,8 +1,8 @@
 # 主会话与超流体独立 API 配置与模型方案
 
-> 文档状态：**功能方案（提议）**，尚未实现。本文描述目标架构与实施建议，`推荐` / `建议` 字样均表示待落地方向，不代表现网行为。
+> 文档状态：**功能方案（提议）**，尚未实现。本文描述目标架构与实施建议，`推荐` / `建议` 字样均表示待落地方向，不代表现网行为。第 7 节补记了落地前的实测结论与已拍板的实现决策。
 > 适用对象：VSCode 扩展「心流·驭光」（iFlow Harness）。
-> 编写依据：对当前代码库的只读取证 + 三份调研结论。所有 `file:line` 引用均可回溯到源码，行号以本分支代码为准。
+> 编写依据：对当前代码库的只读取证 + 三份调研结论。文中 `file:line` 引用尽量给到可回溯的锚点，但**行号以实现时的实际代码为准**（跨提交 / 跨分支会漂移），落地前须按当时的代码重新定位。
 
 ---
 
@@ -10,12 +10,12 @@
 
 - **主会话（Main Session）**：面板中的顶层 ACP 会话，是编排者，直接面向用户聊天。
 - **超流体 / 子会话（Super Agent / Child Session）**：每个派发任务一个独立 CLI 进程，拥有独立 worktree、独立 ACP client，但当前与主会话**共用同一份 `~/.iflow` 配置与凭据**。
-- **Profile**：一组 API 连接参数，包含 baseUrl、apiKey、modelName 三个字段（`src/acp/auth.ts:15`），分「具名 Profile」与「活动凭据」两类。
+- **Profile**：一组 API 连接参数，包含 baseUrl、apiKey、modelName 三个字段（`src/acp/auth.ts:15`），分「具名 Profile」与「活动凭据」两类。面板侧的**权威存储是内核 `~/.iflow/settings.json` 的 `apiProfiles`**（`src/acp/api-profiles.ts:4-7`），不是 VSCode SecretStorage。
 - **活动指针**：决定「当前用哪个 Profile」的引用，当前仅有一条有效链；另有一个跨窗口全局指针被刻意停用。
 
 ### 要解决的问题
 
-今天主会话与超流体虽然进程隔离，但凭据与模型来自同一处：子会话 spawn 时先解析工作区握手凭据（`resolveWorkspaceHandshakeCreds`），缺失时回退到已加载凭据（`loadCredentials`）（`src/panel/super-agent-host.ts:1941-1942`）；模型取自 `deps` 的 `currentModel` 方法，其值为 store 的 `currentModelId`（`src/panel/super-agent-host.ts:1722`）。因此**主会话切换 Profile / 模型会连带改变新派发子会话的配置**，无法做到「主用一个网关、超流体用另一个网关」或「两者用不同模型」。本方案的目标就是让两条链路各自持有独立的「活动 Profile 指针 + 模型选择」，同时保持老用户零配置零行为变化。
+今天主会话与超流体虽然进程隔离，但凭据与模型来自同一处：子会话 spawn 时先解析工作区握手凭据（`resolveWorkspaceHandshakeCreds`），缺失时回退到已加载凭据（`loadCredentials`）（`src/panel/super-agent-host.ts:1940-1947`）；模型取自 `deps` 的 `currentModel` 方法，其值为 store 的 `currentModelId`（`src/panel/super-agent-host.ts:1722`）。因此**主会话切换 Profile / 模型会连带改变新派发子会话的配置**，无法做到「主用一个网关、超流体用另一个网关」或「两者用不同模型」。本方案的目标就是让两条链路各自持有独立的「活动 Profile 指针 + 模型选择」，同时保持老用户零配置零行为变化。
 
 ---
 
@@ -27,7 +27,7 @@
 | --- | --- | --- |
 | API Profile（baseUrl / apiKey / modelName） | 现有具名 Profile + 活动 Profile 指针 `iflow.workspaceActiveProfile`（workspaceState） | 新增独立指针 `iflow.superAgentProfile`（存 Global，值为 Profile 名）；apiKey/baseUrl/modelName 从**同一份** Profile 定义按名读取，不新建第二套凭据存储 |
 | 模型选择 | 权威为 store 的 `currentModelId`（`src/panel/panel.ts` 大量读取，如 `:1872`、`:1941`） | 新增可选 `iflow.superAgentModel`（存 Global，模型 id；留空则回退 Profile 的 `modelName`） |
-| 上下文窗口额度 | `tokensLimitEnv`（`src/panel/panel.ts:8517`）按主链路活动 Profile 解析 | 同一函数按「本子会话链路」解析（见第 2 节） |
+| 上下文窗口额度 | `tokensLimitEnv`（`src/panel/panel.ts:8529`）按主链路活动 Profile 解析 | 同一函数按「本子会话链路」解析（见第 2 节） |
 | 任务级覆盖 | 不适用 | `SuperTaskSpec` 新增两个可选字段：profileId、modelId，用于单个任务临时指定（见第 2 节） |
 
 ### 1.2 配置入口与 UI
@@ -35,16 +35,17 @@
 | 入口 | 位置 | 本方案动作 |
 | --- | --- | --- |
 | 设置按钮 | `webview/src/App.tsx:129`（`onOpenSettings`，打开设置弹窗的 tab，取值 api 或 runtime）、`:995`（`setSettingsTab`，切到 api tab） | 不变 |
-| 设置弹窗 tab 定义 | `webview/src/components/SettingsModal.tsx:64`（`SettingsTab` 定义 api 与 super 两个取值）、`:116` / `:244`（api tab → `ApiConfigSection`）、`:252`（super tab → `SuperAgentSection`，组件定义 `:807`） | 「账户与模型」tab 继续显示**主链路**配置；「超流体」tab 内新增两个选择项：超流体 Profile、超流体模型 |
+| 设置弹窗 tab 定义 | `webview/src/components/SettingsModal.tsx:64`（`SettingsTab` 定义 api / super 等 9 个取值）、`:116` / `:244`（api tab → `ApiConfigSection`）、`:252`（super tab → `SuperAgentSection`，组件定义 `:807`） | 「账户与模型」tab 继续显示**主链路**配置；「超流体」tab 内新增两个选择项：超流体 Profile、超流体模型 |
 | API Profile 管理 | `SettingsModal.tsx:1348`（`ApiConfigSection`）、`:1713`（通过 `send` 发送 activateProfile 消息，携带 name） | 保持/新建会话卡 `ProfileSwitchCard.tsx` 不改；不要复制第二套 profile 快速切换器（`App.tsx` 已废弃旧实现） |
 | 模型下拉 | `webview/src/components/Composer.tsx` 的模型菜单（约 `:1098` 起的 `modelMenuOpen` / `filteredModels` 逻辑） | 主会话模型选择不变；超流体模型选择放在「超流体」tab，不改 Composer |
 | 控件规范 | `webview/src/components/ui.tsx` 控件 kit | 新增选择项必须走 kit；`test/ui-kit-guard.test.ts` 禁原生控件（仅 `ui.tsx` 与 Composer 一处 textarea 例外）、禁用文字大小与圆角的任意像素值写法 |
 
 ### 1.3 管理原则
 
-1. **共用 Profile 定义，不共用活动指针**：两套链路从同一份 Profile 库（SecretStorage + 内核 `apiProfiles`）按名取值，但各自记住「我当前用哪个」。
-2. **不新增 SecretStorage key**：凭据仍从既有 `iflow.openai-compatible`（活动凭据，`src/acp/auth.ts:27`）、`iflow.profiles`（具名 Profile，`:66`）读取。
-3. **明文落盘风险（已知现网行为，须标注）**：具名 Profile 的 apiKey 实际以明文写入内核 `~/.iflow/settings.json`（`src/acp/api-profiles.ts:48-68` 的 `writeKernelApiProfile`，经 `updateCliSettings` 落盘）。这是现网既有行为，本方案**不新增落盘、不恶化该风险**；是否接受见文末待拍板项 ①。
+1. **共用 Profile 定义，不共用活动指针**：两套链路从同一份 Profile 库按名取值，但各自记住「我当前用哪个」。该 Profile 库的**权威存储是内核 `~/.iflow/settings.json` 的 `apiProfiles`**（`src/acp/api-profiles.ts:4-7`）；VSCode SecretStorage 只保留热重认证缓存与一次性迁移源。
+2. **不新增 SecretStorage key，也不新建第二份凭据存储**：凭据仍从内核 `apiProfiles` 读取（面板侧入口是 `src/acp/api-profiles.ts:23` 的 `readKernelApiProfiles`）；SecretStorage 侧既有的 `iflow.openai-compatible`（活动凭据，`src/acp/auth.ts:27`）、`iflow.profiles`（具名 Profile，`:66`）继续保留为热重认证缓存与一次性迁移源（`src/acp/api-profiles.ts:108` 的 `migrateKernelApiProfiles`），不作为权威读源。
+3. **明文落盘风险（已知现网行为，须标注）**：具名 Profile 的 apiKey 实际以明文写入内核 `~/.iflow/settings.json`（`src/acp/api-profiles.ts:48-70` 的 `writeKernelApiProfile`，写入落在 `:67` 的 `updateCliSettings`）。这是现网既有行为，本方案**不新增落盘、不恶化该风险**；是否接受见文末待拍板项 ①。
+4. **已知过期注释（须标注，勿据此改实现）**：`src/acp/auth.ts:1-9` 的头部注释仍写着凭据「stored in VSCode SecretStorage — never in plain settings or on disk」，与现状（API Key 明文落 `~/.iflow/settings.json` 的 `apiProfiles`）矛盾。该注释已过期，修订归属实现任务，本文不改源码。
 
 ---
 
@@ -54,15 +55,15 @@
 
 - 消费端点：`readActiveEndpoint`（`src/acp/models-query.ts:447`）→ `queryModelIds`（`:522`，向基础地址下的 models 端点发起 GET 请求，使用原生 `node:http(s)`）。
 - 提示词补全：`completeInternalPrompt`（`src/panel/panel.ts:4593`）。
-- 模型校验：`validateModelForPush`（`src/panel/panel.ts:9207`）。
-- 切换 Profile：热重认证 `reconnectWithCredentials` → `activateProfile`（`src/panel/panel.ts:7236` / `:7079`），模型即时通过 `set_model` 生效。
+- 模型校验：`validateModelForPush`（`src/panel/panel.ts:9219`）。
+- 切换 Profile：热重认证 `reconnectWithCredentials` → `activateProfile`（`src/panel/panel.ts:7248` / `:7091`），模型即时通过 `set_model` 生效。
 - 活动 Profile 解析：`resolveActiveProfileName`（`src/acp/models-query.ts:219`），基于内核 `currentApiProfile` + workspaceState `iflow.workspaceActiveProfile`。
 
 ### 2.2 超流体链路（本方案新增接线）
 
 调用流程按顺序描述如下：
 
-1. 派发任务后由 `prepareSuperSpec` 解析配置，优先级为：任务级覆盖（profileId / modelId）→ 超流体链路配置 → 主链路配置。
+1. 派发任务后按「任务级覆盖（profileId / modelId）→ 超流体链路配置 → 主链路配置」解析出本任务的凭据与模型。`prepareSuperSpec` **已存在且职责不同**（补全附件与指令，得到交给子会话的最终 spec，`src/panel/super-agent-host.ts:1488`），不重建同名概念：解析链要么**扩展现有 `SuperTaskSpec` 类型**（`shared/super-agent.ts:1399`）加字段，要么另起新名字（如 `resolveSuperSpecConfig`）承载。
 2. `SuperTaskSpec` 透传两个可选字段：profileId、modelId。
 3. `createSuperClient` 按解析结果选取 Profile：先调用 `authenticate` 推送端点参数（基础地址、apiKey、模型名，见 `client.ts:219`），再调用 `set_model` 推送解析出的模型 id（`client.ts:252`，新增 live 校验）。
 4. `tokensLimitEnv` 按本链路解析上下文额度。
@@ -70,19 +71,24 @@
 
 关键点：
 
-- **独立 client 实例**：每个 `createSuperClient` 是一个独立 CLI 进程实例，子进程级 `authenticate` / `set_model` **不会串味到主会话**。主会话已证明无条件重推 `authenticate` 可破 CLI `isAuthenticated` 缓存（`src/panel/panel.ts:7236` 起的热重认证路径），子会话沿用同一机制。
-- **接线位置**：`src/panel/super-agent-host.ts` 的 `createSuperClient`（凭据装配见 `:1941-1947`）与 `src/panel/super-agent.ts` 的 `setModel`（`:2944`）/ `newSession`（`:2902`）。现成通道在 `src/acp/client.ts:219-221`（authenticate）与 `:252-253`（set_model）。
-- **给 `createSuperClient` 增加「本子会话凭据与模型」入参**，由 `prepareSuperSpec` 计算后传入，避免在各处散落解析。
+- **独立 client 实例**：每个 `createSuperClient` 是一个独立 CLI 进程实例，子进程级 `authenticate` / `set_model` **不会串味到主会话**。主会话已证明无条件重推 `authenticate` 可破 CLI `isAuthenticated` 缓存（`src/panel/panel.ts:7248` 起的热重认证路径），子会话沿用同一机制。
+- **接线位置**：`src/panel/super-agent-host.ts` 的 `createSuperClient`（凭据装配见 `:1940-1947`）与 `src/panel/super-agent.ts` 的 `setModel`（`:2944`）/ `newSession`（`:2902`）。现成通道在 `src/acp/client.ts:219-221`（authenticate）与 `:252-253`（set_model）。
+- **给 `createSuperClient` 增加「本子会话凭据与模型」入参**，由上述解析链计算后传入，避免在各处散落解析。
 - **任务书不含配置**：`buildTaskPrompt`（`src/panel/super-agent.ts:5242`）把任务包成以「你是子会话」开头的提示词散文。Profile / model **不要写进任务书**，它们只走宿主接线。
 - **子会话 live 校验（新增）**：当前 `newSession` 不传模型、不读 `_meta.models`（`src/panel/super-agent.ts:2902`），无 live 校验，失败仅告警（`:2952`）。本方案在 `set_model` 前按第 3 节规则做一次 live 的 /models 查询校验。
 - **数据结构调整**：
   - `SuperTaskSpec`（`shared/super-agent.ts:1399`）新增两个可选字段：profileId、modelId。
   - `SuperSessionUi`（`shared/super-agent.ts:567`）新增可选字段 profileId（已有 model 字段，`:586`）。
-  - 工具白名单解析（`normalizeDisallowedTools` `:339`、`disallowed_tools` 注入 `:2892-2899`）、归档/恢复（`archived` map `:951`、`findArchived` `:1126`、`restoreSessions` `:1150`）需带上新字段。
+  - 工具白名单解析（`normalizeDisallowedTools` `src/panel/super-agent.ts:339`、`disallowed_tools` 注入 `:2899`）、归档/恢复（`archived` map `:951`、`findArchived` `:1126`、`restoreSessions` `:1150`）需带上新字段。这三处归档/恢复实现属于 **`src/panel/super-agent.ts`**，**不在** `shared/super-agent.ts`（后者不含 `archived` / `findArchived` / `restoreSessions`）。
 
 ### 2.3 隔离边界现状
 
-- **进程与目录已隔离**：主会话 spawn env 在 `src/panel/panel.ts:8648` 起，子会话 spawn env 在 `src/panel/super-agent-host.ts:1909-1927`（涉及 `IFLOW_HARNESS`、`IFLOW_HARNESS_CONTEXT_FILE`、`IFLOW_SUPER_CHILD`、`IFLOW_SUPER_TOOL`、`IFLOW_TOKENS_LIMIT`、`IFLOW_SYSTEM_MD` 等环境变量；其中启用标志置 1，工具标志置空）；子会话 cwd 为 worktree 根、`includeDirectories` 为空。
+- **进程与目录已隔离**：主会话 spawn env 在 `src/panel/panel.ts:8660` 起，子会话 spawn env 在 `src/panel/super-agent-host.ts:1908-1927`。涉及 `IFLOW_HARNESS`、`IFLOW_HARNESS_CONTEXT_FILE`、`IFLOW_SUPER_CHILD`、`IFLOW_SUPER_TOOL`、`IFLOW_TOKENS_LIMIT`、`IFLOW_SYSTEM_MD` 等环境变量，四者的实际口径各不相同：
+  - `IFLOW_SUPER_CHILD` 置 `"1"`（`src/panel/super-agent-host.ts:1916`）。
+  - `IFLOW_SUPER_TOOL` **显式抹除该键（值为 `undefined`）**（`:1921`）——Node 的 spawn 会跳过值为 undefined 的环境变量，子会话因此拿不到主会话的内置 `super-agent` 工具（避免无限套娃）；置 `"1"` 的是**主会话自己**（`src/panel/panel.ts:8685`），不是空串。
+  - `IFLOW_SYSTEM_MD` 是**条件赋值**（`:1927`，仅当 `systemPromptFile` 存在时才写入）。
+  - `IFLOW_TOKENS_LIMIT` **经展开注入且可能不存在**（`:1925` 的 `...childTokensLimitEnv`；解析不出正整数时该键整体缺席，见 `src/acp/cli-tokens-limit.ts:176-177`）。
+  - 子会话 cwd 为 worktree 根、`includeDirectories` 为空。
 - **配置未隔离**：`~/.iflow` 的 settings / 凭据 / Profile 是**读写同一份**。本方案不改变磁盘布局，只在「进程启动后按目标 Profile 推送凭据与模型」这一层实现逻辑隔离。
 
 ---
@@ -124,7 +130,7 @@
 ### 3.4 硬性禁止项（避免互相覆盖）
 
 - **禁止写 `iflow.active-profile`**：这是跨窗口全局指针，现有代码刻意不写（说明见 `src/panel/panel.ts:732`；`ACTIVE_PROFILE_KEY` 定义于 `src/acp/auth.ts:67`），本方案继续遵守，否则主 / 子切换会互相覆盖。
-- **禁止把超流体配置塞进 `iflow.profiles`**：一次性迁移会写进内核 `apiProfiles`，与重名守卫（`migrateKernelApiProfiles` 的 `taken` 判定，`src/acp/api-profiles.ts`）冲突。
+- **禁止把超流体配置塞进 `iflow.profiles`**：一次性迁移会写进内核 `apiProfiles`，与重名守卫（`migrateKernelApiProfiles` 的 `taken` 判定，`src/acp/api-profiles.ts:108`）冲突。
 
 ---
 
@@ -134,28 +140,28 @@
 
 - **老用户零配置零行为变化**：未配置超流体链路时，回退链命中主链路活动 Profile 与模型，行为与今天完全一致。
 - **进程隔离本就存在**：env / cwd 已隔离（见 2.3），本方案只补「凭据与模型按链路解析」这一层。
-- **profile 明文落盘**：现网行为（`src/acp/api-profiles.ts:48-68`），本方案不新增落盘。
+- **profile 明文落盘**：现网行为（`src/acp/api-profiles.ts:48-70`），本方案不新增落盘。
 
 ### 4.2 注入方案取舍（为什么选「spawn 后推送」）
 
 | 方案 | 结论 | 依据 |
 | --- | --- | --- |
 | (a) env 注入 key/baseUrl/model | **不可行** | CLI 不认这些 env；`IFLOW_API_KEY` 仅作布尔判据，真 key 来自 settings.json |
-| (b) 独立 `IFLOW_HOME` + settings.json | **半可行但不达目标** | 扩展侧认 IFLOW_HOME，但 CLI 内核 User settings 路径硬编码 homedir（`vendor/iflow-fork/bundle/api-config-isolation-loader.cjs` 开头注释 + `STRIP_KEYS` 约 `:101`），且不认 IFLOW_HOME；指向 worktree 外会绕过隔离 |
+| (b) 独立 `IFLOW_HOME` + settings.json | **不可行** | `IFLOW_HOME` 只改内核 `.iflow` 根目录解析（tmp / commands / memory / oauth 等目录），**不改变 User settings 的路径**——内核把 settings.json 硬编码为 `join(homedir(), ".iflow", "settings.json")`（`vendor/iflow-fork/bundle/api-config-isolation-loader.cjs` 开头注释 + `userSettingsPath()`），于是面板与内核读写不同文件；详见第 7.2.1 节 |
 | (c) **spawn 后按目标 profile 推 `authenticate` + `set_model`（推荐）** | **采用** | 通道现成（`src/acp/client.ts:219-221` / `:252-253`）；独立进程实例不串味；热重认证已证明可破 CLI 缓存 |
 
 ### 4.3 落盘与合规纪律（必须遵守）
 
 | 写入对象 | 唯一允许路径 | 禁止 |
 | --- | --- | --- |
-| 内核 `~/.iflow/settings.json` | `updateCliSettings`（单键合并写入，参数含补丁、文件与选项；`src/acp/models-query.ts:375`：Object.assign 单键合并 + 唯一 tmp + `renameWithRetrySync`，**从不 unlink**）及其包装（`src/acp/api-profiles.ts` 中 `writeKernelApiProfile` / `setKernelActiveProfile` / `deleteKernelApiProfile` / 迁移函数） | 裸 `fs.writeFile`、读全量 JSON 改后整写回、先 `unlink` 再 `rename`（历史丢键回归，见 `src/acp/models-query.ts:407-416` 注释与 `test/models-query.test.ts:171-269`） |
+| 内核 `~/.iflow/settings.json` | `updateCliSettings`（单键合并写入，参数含补丁、文件与选项；`src/acp/models-query.ts:375`：Object.assign 单键合并 + 唯一 tmp + `renameWithRetrySync`，**从不 unlink**）及其包装（`src/acp/api-profiles.ts` 中 `writeKernelApiProfile` `:48` / `setKernelActiveProfile` `:89` / `deleteKernelApiProfile` `:74` / `migrateKernelApiProfiles` `:108`） | 裸 `fs.writeFile`、读全量 JSON 改后整写回、先 `unlink` 再 `rename`（历史丢键回归，见 `src/acp/models-query.ts:407-416` 注释与 `test/models-query.test.ts:171-269`） |
 | VSCode `iflow.*` 设置 | `SettingsWriteService.writeUserSetting`：通过 `getConfiguration` 取得 iflow 配置后按单键 update（目标为 Global）（`src/panel/settings-write-service.ts:143` / `:179`，纪律声明 `:7-16`） | 同上；settings.json 是用户可编辑文件 |
 
 写入失败**必须携带真实错误 toast**（只读 / JSON 损坏 / Settings Sync 冲突 / 旧 vsix），不得退化为泛化提示。
 
 ### 4.4 新增设置键的连锁影响
 
-- `test/settings-declared.test.ts`：新增 2 个键会使 `ALL_KEYS` 快照（当前 43 项，声明见 `:12`、数组 `:41`）变为 45，须显式更新；两份 nls（`package.nls.json` / `package.nls.zh-cn.json`）键集合必须完全一致。
+- `test/settings-declared.test.ts`：新增 2 个键会使 `ALL_KEYS` 快照（当前 **55** 项，数组声明于 `:41`）变为 **57**，须显式更新；两份 nls（`package.nls.json` / `package.nls.zh-cn.json`）键集合必须完全一致。该文件 `:12` 的说明注释仍写着「全部 43 个 iflow.* 设置」，属过期注释，实现期一并订正。
 - l10n：面板文案以中文为源语言，登记 `l10n/source.en.json` 后运行 l10n 生成脚本，生成 `l10n/bundle.l10n.en.json` 与 `webview/src/i18n.ts`；漂移由 `test/l10n-drift.test.ts` / `test/l10n-key-coverage.test.ts` 校验。
 - vendor bundle **不改**，因此**不需要**运行 harness 校验；若改 vendor 必须同步 fork 快照并运行 harness 校验。
 
@@ -163,10 +169,10 @@
 
 | 模块 | 动作 |
 | --- | --- |
-| `shared/super-agent.ts` | `SuperTaskSpec` 加两个可选字段 profileId、modelId；`SuperSessionUi` 加可选字段 profileId；白名单、归档/恢复带字段 |
+| `shared/super-agent.ts` | `SuperTaskSpec` 加两个可选字段 profileId、modelId；`SuperSessionUi` 加可选字段 profileId |
 | `shared/super-profile.ts`（新建） | 放 `resolveSuperEndpoint` / `resolveSuperModel` 纯函数（零 VSCode 依赖） |
-| `src/panel/super-agent-host.ts` | `createSuperClient` 加凭据与模型入参；按 spec 推 `authenticate`；`onDidChangeConfiguration` 加两个新键分支 |
-| `src/panel/super-agent.ts` | `setModel` 接入 live 校验；`prepareSuperSpec` 解析链 |
+| `src/panel/super-agent-host.ts` | `createSuperClient` 加凭据与模型入参；按 spec 推 `authenticate`；`prepareSuperSpec`（`:1488`）保持现有「补全附件与指令」职责，配置解析另起名字承载（不重建同名概念）；`onDidChangeConfiguration` 加两个新键分支 |
+| `src/panel/super-agent.ts` | `setModel`（`:2944`）接入 live 校验；工具白名单（`normalizeDisallowedTools` `:339`、`disallowed_tools` 注入 `:2899`）与归档/恢复（`archived` `:951`、`findArchived` `:1126`、`restoreSessions` `:1150`）带新字段——这三处实现都在本文件，不在 `shared/super-agent.ts` |
 | `src/panel/panel.ts` | `tokensLimitEnv` 按链路解析；主会话路径不动 |
 | `package.json` / nls / l10n | 声明 2 个新键、补双语文案、运行 l10n 生成脚本 |
 | `webview/src/components/SettingsModal.tsx` | 「超流体」tab 加两个选择项（走 ui kit） |
@@ -192,7 +198,7 @@
 | `resolveSuperEndpoint` | 解析入参（Profile 名与链路上下文） | 基础地址、apiKey、模型名三项组成的端点信息 | 优先级与第 3.1 节表格一一对应 |
 | `resolveSuperModel` | 解析入参，以及 live /models 查询得到的模型 id 列表 | 模型 id、是否降级、降级原因 | 优先级与第 3.2 节表格一一对应 |
 
-- Profile 本体仍存既有 SecretStorage + 内核 `apiProfiles`，按 `iflow.superAgentProfile` 名读取；apiKey/baseUrl/modelName 不复制、不另存。
+- Profile 本体仍存内核 `apiProfiles`（面板侧入口 `src/acp/api-profiles.ts:23` 的 `readKernelApiProfiles`），按 `iflow.superAgentProfile` 名读取；apiKey/baseUrl/modelName 不复制、不另存。
 - `SuperTaskSpec` 新增字段均为**可选**，缺省时走回退链。
 
 ### 5.2 实现步骤（四期）
@@ -200,8 +206,8 @@
 | 期 | 范围 | 交付 |
 | --- | --- | --- |
 | ① 纯逻辑 | `shared/super-agent.ts` 加字段；新建 `shared/super-profile.ts` 放 `resolveSuperEndpoint` / `resolveSuperModel` | 两个纯函数 + 单测（覆盖两条回退链、空 live 列表不算下架） |
-| ② 设置 / nls / l10n / UI | 声明 2 个新键；`settings-declared.test.ts` 快照 43→45；补齐 `package.nls.json` / `package.nls.zh-cn.json`；`l10n/source.en.json` 登记后运行 l10n 生成脚本；「超流体」tab 加两个选择项 | 设置可配置、文案无漂移、UI kit 合规 |
-| ③ 宿主接线 | `prepareSuperSpec` / `createSuperClient` / `setModel` / `tokensLimitEnv` / 子会话 live 校验；`onDidChangeConfiguration` 新键分支 | 两套链路真正独立工作 |
+| ② 设置 / nls / l10n / UI | 声明 2 个新键；`settings-declared.test.ts` 快照 55→57；补齐 `package.nls.json` / `package.nls.zh-cn.json`；`l10n/source.en.json` 登记后运行 l10n 生成脚本；「超流体」tab 加两个选择项 | 设置可配置、文案无漂移、UI kit 合规 |
+| ③ 宿主接线 | 配置解析链 / `createSuperClient` / `setModel` / `tokensLimitEnv` / 子会话 live 校验；`onDidChangeConfiguration` 新键分支 | 两套链路真正独立工作 |
 | ④ 测试 / 文档 / 版本号 | 全量回归 + typecheck + build；本文归档；CHANGELOG 顶部唯一来源 + `package.json.version` 同步（release 分支执行） | 可发布 |
 
 ### 5.3 验证方式
@@ -222,7 +228,7 @@
 | `test/cli-tokens-limit-env.test.ts:209` 起 | `tokensLimitEnv` 按链路解析后更新断言 |
 | `test/super-agent-manager.test.ts:331` | `currentModel` 单一回调假设改为按 spec 注入 |
 | `test/models-query.test.ts:171-269` | 保持丢键回归锁，新增写入路径不得绕过 |
-| `fixtures/probe-super-agent.mjs` | 探针跟随新接线 |
+| `test/fixtures/probe-super-agent.mjs` | 探针跟随新接线 |
 
 ---
 
@@ -241,26 +247,82 @@
 
 ## 附录 A：关键代码引用索引
 
+> 本索引覆盖第 0–6 节的方案描述；第 7 节的实测结论自带各自的 `file:line` 锚点，不重复收录。行号以实现时的实际代码为准。
+
 | 主题 | 位置 |
 | --- | --- |
 | Profile 结构 / 凭据 Secret key | `src/acp/auth.ts:15`、`:27`、`:66`、`:67` |
-| 具名 Profile 明文落盘 | `src/acp/api-profiles.ts:48-68`（`writeKernelApiProfile`） |
+| Profile 权威存储（内核 settings.json `apiProfiles`） | `src/acp/api-profiles.ts:4-7`（文件头注释）、`:23`（`readKernelApiProfiles`） |
+| 具名 Profile 明文落盘 | `src/acp/api-profiles.ts:48-70`（`writeKernelApiProfile`，写入在 `:67`） |
 | 活动 Profile 解析 | `src/acp/models-query.ts:219`（`resolveActiveProfileName`） |
 | 内核设置单键合并写入 | `src/acp/models-query.ts:375`（`updateCliSettings`） |
 | 主会话端点 / 模型查询 | `src/acp/models-query.ts:447`、`:522` |
-| 主会话热重认证 | `src/panel/panel.ts:7236`（`reconnectWithCredentials`）、`:7079`（`activateProfile`） |
+| 主会话热重认证 | `src/panel/panel.ts:7248`（`reconnectWithCredentials`）、`:7091`（`activateProfile`） |
+| 主会话模型校验 | `src/panel/panel.ts:9219`（`validateModelForPush`） |
+| live 模型查询 | `src/panel/panel.ts:9547-9566`（`queryLiveModelsDetailed`） |
+| 内部提示词补全 | `src/panel/panel.ts:4593`（`completeInternalPrompt`） |
+| 上下文额度解析 | `src/panel/panel.ts:8529`（`tokensLimitEnv`）、`src/panel/super-agent-host.ts:1901`（`childTokensLimitEnv`）、`src/acp/cli-tokens-limit.ts:119-121` / `:206-207` |
 | 跨窗口全局指针刻意停用 | `src/panel/panel.ts:732` |
-| 主会话 spawn env | `src/panel/panel.ts:8648` 起 |
-| 子会话 spawn env | `src/panel/super-agent-host.ts:1909-1927` |
-| 子会话凭据装配 | `src/panel/super-agent-host.ts:1941-1942` |
+| 主会话 spawn env | `src/panel/panel.ts:8660` 起（`IFLOW_SUPER_TOOL = "1"` 在 `:8685`） |
+| 子会话 spawn env | `src/panel/super-agent-host.ts:1908-1927`（`IFLOW_SUPER_CHILD` 置 1 在 `:1916`；`IFLOW_SUPER_TOOL` 显式抹除在 `:1921`；`IFLOW_TOKENS_LIMIT` 展开注入在 `:1925`；`IFLOW_SYSTEM_MD` 条件赋值在 `:1927`） |
+| 子会话凭据装配 | `src/panel/super-agent-host.ts:1940-1947` |
 | 子会话模型来源 | `src/panel/super-agent-host.ts:1722`（`currentModel`） |
+| 子会话 spec 补全 | `src/panel/super-agent-host.ts:1488`（`prepareSuperSpec`，职责=补全附件 / 指令） |
 | `authenticate` / `set_model` 通道 | `src/acp/client.ts:219-221`、`:252-253` |
 | 子会话 setModel / newSession | `src/panel/super-agent.ts:2944`、`:2902`；失败仅 warn `:2952` |
 | 任务书封装 | `src/panel/super-agent.ts:5242`（`buildTaskPrompt`） |
 | 任务 / 会话数据结构 | `shared/super-agent.ts:1399`（`SuperTaskSpec`）、`:567` / `:586`（`SuperSessionUi`） |
+| 归档 / 恢复 / 白名单实现 | `src/panel/super-agent.ts:951`（`archived`）、`:1126`（`findArchived`）、`:1150`（`restoreSessions`）、`:339`（`normalizeDisallowedTools`）、`:2899`（`disallowed_tools` 注入） |
 | 设置写入纪律 | `src/panel/settings-write-service.ts:7-16`、`:143`、`:179` |
-| CLI 内核不认 IFLOW_HOME | `vendor/iflow-fork/bundle/api-config-isolation-loader.cjs`（开头注释、`STRIP_KEYS` 约 `:101`） |
+| CLI 内核不认 IFLOW_HOME | `vendor/iflow-fork/bundle/api-config-isolation-loader.cjs`（开头注释、`userSettingsPath()`、`STRIP_KEYS` 约 `:101`） |
 | 模型双变量 / 下架陷阱 | `AGENTS.md:170`（#23）、`:172`（#25） |
-| 设置键快照锁 | `test/settings-declared.test.ts:12`、`:41` |
+| 设置键快照锁 | `test/settings-declared.test.ts:41`（`ALL_KEYS` 数组，55 项）；`:12` 为过期注释（仍写 43） |
+| `iflow.*` 设置项总数 | `package.json` → `contributes.configuration.properties` 实测 55 项；新增 2 个超流体键后为 57 |
 | 兜底查表共享断言（待反转） | `test/panel-spawn-env.test.ts:215` |
 | UI tab / 组件 | `webview/src/components/SettingsModal.tsx:64`、`:116`、`:244`、`:252`、`:807`、`:1348`、`:1713`；`webview/src/App.tsx:129`、`:995` |
+
+---
+
+## 7. 实现决策与实测结论（2026-11-27 核验）
+
+> 本节记录落地前的实测结论与已拍板的实现决策，与上文「提议」部分并存：上文描述目标形态，本节记录哪些结论已被代码实测证实、哪些方案已被否决、以及实现期必须遵守的硬口径。
+
+### 7.1 采纳方案：存储与注入分离
+
+**结论**：超流体侧**不新建凭据库**，复用已有 `apiProfiles` 中的 profile；用**两个独立指针**（超流体用哪个 profile、哪个模型）存 VSCode 扩展设置；由面板在子会话 spawn 的 env 里注入凭据与模型，并把 `client.authenticate` 的载荷换成**同一套**值。
+
+| 维度 | 决策 | 依据（可回溯锚点） |
+| --- | --- | --- |
+| 凭据存储 | 复用内核 `~/.iflow/settings.json` 的 `apiProfiles`，不新增第二套存储 | `src/acp/api-profiles.ts:4-7`（面板是 `apiProfiles` 的唯一作者）、`:23`（`readKernelApiProfiles`） |
+| 链路指针 | 两个独立指针存 VSCode 扩展设置：`iflow.superAgentProfile`（用哪个 profile）、`iflow.superAgentModel`（用哪个模型） | 新增 2 个 `iflow.*` 设置（`package.json` → `contributes.configuration.properties`，当前 55 项 → 57 项） |
+| 注入通道（env） | 面板在子会话 spawn 的 env 里注入 `IFLOW_API_KEY` / `IFLOW_BASE_URL` / `IFLOW_MODEL_NAME` / `IFLOW_SELECTED_AUTH_TYPE=openai-compatible` | `src/panel/super-agent-host.ts:1908` 的 `spawnEnv` 字面量 |
+| 注入通道（载荷） | `client.authenticate` 的 `methodInfo` 换成**同一套** baseUrl / apiKey / modelName | `src/panel/super-agent-host.ts:1944-1947`；通道定义 `src/acp/client.ts:219-221` |
+| 成本 | 零 vendor 改动、零磁盘格式变更、旧用户零迁移 | 未触及 `vendor/iflow-fork/bundle/*`，未新增 `settings.json` 键 |
+
+「存储」与「注入」分离的含义：面板负责**选值**（从 `apiProfiles` 按名取）与**搬运**（送进子会话的 env 与 `authenticate` 载荷），内核只认注入进来的那一套值。
+
+### 7.2 被否方案及原因
+
+#### 7.2.1 `IFLOW_HOME` 隔离 —— 不可行
+
+- **事实**：`IFLOW_HOME` 只影响内核 `.iflow` 根目录的解析（tmp / commands / memory / oauth 等子目录），**不改变 User settings 的路径**——内核把 settings.json 硬编码为 `join(homedir(), ".iflow", "settings.json")`（`vendor/iflow-fork/bundle/api-config-isolation-loader.cjs` 开头注释；同文件 `userSettingsPath()`）。
+- **后果**：子会话若指向独立 `IFLOW_HOME`，面板侧与内核侧会读写**不同的 settings.json**，本方案「复用同一份 `apiProfiles`」的前提直接失效。
+- **同一 bundle 内部就存在口径分裂**（可佐证「会读错文件」不是理论风险）：vendor 里的 MOD `multimodal-model-loader.cjs:34-37` 按 `IFLOW_HOME` 优先解析 `settings.json`，而内核本体仍写 homedir 那一份。
+
+#### 7.2.2 在 settings.json 里新增并列 `superApiProfiles` / `superCurrentApiProfile`
+
+- **不会被 loader 误伤**：`vendor/iflow-fork/bundle/api-config-isolation-loader.cjs:101` 的 `STRIP_KEYS` 列表里**没有**这两个键，因此不会像 `apiProfiles` / `currentApiProfile` 那样被「磁盘为准」规则保护。
+- **但拿不到「磁盘为准」**：非 STRIP 键走子进程启动快照优先的路径——内核的 `saveSettings` 整文件回写时用的是子进程启动时的快照，面板后写的值会被子会话整文件回写**回滚**。
+- **修不动**：要让它也享受「磁盘为准」，必须把新键加进 vendor 的 `STRIP_KEYS`，与「本方案不改 vendor」直接冲突。
+
+### 7.3 两条必须写进实现的硬口径
+
+1. **`authenticate` 载荷优先级高于 env** —— env 与 authenticate 必须给**同一套**值，否则子会话会拿到主会话凭据。
+   - 依据：子会话当前推的 `authenticate` 载荷来自主会话链路（`src/panel/super-agent-host.ts:1940-1947`），而主会话自己的 spawn env 也带着同一套凭据面（`src/panel/panel.ts:8660` 起）。两侧一旦不一致，子会话就会在「env 是超流体的、载荷是主会话的」时取到主会话凭据。
+2. **`childTokensLimitEnv` 必须由超流体侧独立解析，不能沿用主会话那套** —— `childTokensLimitEnv`（`src/panel/super-agent-host.ts:1901`）走 `src/acp/cli-tokens-limit.ts` 读内核 `currentApiProfile` / `apiProfiles`（`src/acp/cli-tokens-limit.ts:119-121`、`:206-207`）来解析 modelName 与令牌上限；沿用主会话那套会按主会话的活动 profile 算出错误的上下文窗口。
+
+### 7.4 CLI 内核的真实读法
+
+- vendor bundle 内核**不读** `apiProfiles` / `currentApiProfile`：在 `vendor/iflow-fork/bundle/iflow.js` 全文件检索，这两个字符串均为 **0 命中**。
+- 因此 settings.json 的 `apiProfiles` 是**面板侧**的数据源；**内核侧**靠 `IFLOW_*` env 与 ACP `authenticate` 载荷拿凭据与模型。
+- 推论：超流体侧要换网关 / 换模型，**不能**靠「改 settings.json 里的 profile」——那是面板读的那一份；必须走「env + `authenticate` 载荷」这一对注入通道。
