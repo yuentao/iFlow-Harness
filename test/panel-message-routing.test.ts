@@ -23,7 +23,8 @@ const panelSource = fs.readFileSync(path.join(here, "..", "src", "panel", "panel
  * 新增的 setSessionRoots = 84 个，再加设置页上下文窗口覆写
  * setContextWindowOverrides = 85 个，再加「立即整理记忆」curateMemoryNow = 86 个，
  * 再加默认工作区目录选择 pickDefaultWorkspace = 87 个，
- * 再加底部「压缩上下文」按钮 compressNow = 88 个。 */
+ * 再加底部「压缩上下文」按钮 compressNow = 88 个，
+ * 再加「超流体」设置页按 Profile 拉模型列表 refreshSuperProfileModels = 89 个。 */
 const EXPECTED_CASES = [
   "ready", "sendPrompt", "queueAction", "resolveContext", "stopSubagent", "superAgent",
   "superRetryWave", "superRetryFailed", "requestSuperResidueList", "superResidueHandle",
@@ -33,7 +34,7 @@ const EXPECTED_CASES = [
   "revertTurnFile", "openDiff", "runInTerminal", "searchFiles", "setSessionRoots", "stageFiles",
   "pickAttachments", "pickDefaultWorkspace", "openImage", "saveAuth", "clearAuth", "activateProfile", "deleteProfile",
   "setOnboardingDismissed", "loadSession", "deleteSession", "setSessionFlags", "renameSession",
-  "refreshAuth", "refreshModels", "restartCli", "openSettings", "setHostSettings",
+  "refreshAuth", "refreshModels", "refreshSuperProfileModels", "restartCli", "openSettings", "setHostSettings",
   "setContextWindowOverrides",
   "listMcpServers", "saveMcpServers", "mcpStatus", "fetchModelMetadata", "cancelModelMetadata",
   "listAssets", "readAsset", "saveAsset", "createAsset", "deleteAsset", "generateAsset",
@@ -53,7 +54,7 @@ const DOMAIN_CASES = {
     "setThink", "openLocation", "openExternal", "runInTerminal", "searchFiles", "setSessionRoots", "stageFiles",
     "pickAttachments", "pickDefaultWorkspace", "openImage", "saveAuth", "clearAuth", "activateProfile", "deleteProfile",
     "setOnboardingDismissed", "loadSession", "deleteSession", "setSessionFlags", "renameSession",
-    "refreshAuth", "refreshModels", "restartCli", "openSettings", "setHostSettings",
+    "refreshAuth", "refreshModels", "refreshSuperProfileModels", "restartCli", "openSettings", "setHostSettings",
     "setContextWindowOverrides",
     "listMcpServers", "saveMcpServers", "mcpStatus", "fetchModelMetadata", "cancelModelMetadata",
     "listAssets", "readAsset", "saveAsset", "createAsset", "deleteAsset", "generateAsset",
@@ -98,8 +99,8 @@ describe("阶段 7 · Webview 消息路由分域等价性", () => {
   const routerBody = methodBody("private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {");
   const routerCases = caseLabels(routerBody);
 
-  it("薄入口的 case 清单 == 重构前的 83 个 + 后续新增（setSessionRoots、setContextWindowOverrides、curateMemoryNow、pickDefaultWorkspace、compressNow）", () => {
-    expect(routerCases).toHaveLength(88);
+  it("薄入口的 case 清单 == 重构前的 83 个 + 后续新增（setSessionRoots、setContextWindowOverrides、curateMemoryNow、pickDefaultWorkspace、compressNow、refreshSuperProfileModels）", () => {
+    expect(routerCases).toHaveLength(89);
     expect(sorted(routerCases)).toEqual(sorted(EXPECTED_CASES));
   });
 
@@ -126,7 +127,8 @@ describe("阶段 7 · Webview 消息路由分域等价性", () => {
     // 设置页的上下文窗口覆写又新增 setContextWindowOverrides，计数再 +1；
     // 记忆页「整理记忆」按钮 / `/memory-curate` 指令新增 curateMemoryNow，再 +1；
     // 默认工作区目录选择新增 pickDefaultWorkspace，再 +1；
-    // 底部「压缩上下文」按钮新增 compressNow，再 +1。
-    expect(new Set(routerCases).size).toBe(88);
+    // 底部「压缩上下文」按钮新增 compressNow，再 +1；
+    // 「超流体」设置页按 Profile 拉模型列表新增 refreshSuperProfileModels，再 +1。
+    expect(new Set(routerCases).size).toBe(89);
   });
 });

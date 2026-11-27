@@ -53,7 +53,7 @@ import type {
   McpServerStatusView,
   SessionSettings,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, SuperProfileModelsUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
 import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER, QQ_LEASE_TAKEOVER_ACTION, QQ_LEASE_WAIT_ACTION } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import {
@@ -747,6 +747,10 @@ const UI_FONT_SIZES = ["compact", "standard", "large"] as const;
 /** `iflow.uiDensity` presets — kept in sync with shared/messages.ts. */
 const UI_DENSITIES = ["compact", "standard", "comfortable"] as const;
 
+/** 超流体链路的模型列表缓存存活时长（毫秒）。同一端点短时间内不重复请求
+ * /models；端点切换（缓存 key 变了）自然不命中，另外写入时还会显式清空。 */
+const SUPER_PROFILE_MODELS_CACHE_TTL_MS = 30_000;
+
 /** settings.json is user-editable — fall back to the default on a stale value. */
 function asUiFontSize(value: unknown): (typeof UI_FONT_SIZES)[number] {
   return UI_FONT_SIZES.includes(value as (typeof UI_FONT_SIZES)[number])
@@ -1071,6 +1075,13 @@ export class ChatPanel implements vscode.Disposable {
    * settings.json (the migration itself is idempotent; this only keeps the
    * per-snapshot auth build from re-reading/re-writing the file). */
   private authProfilesMigrated = false;
+  /** 超流体链路的模型列表短缓存：key = 端点 baseUrl，value = 查询时间 +
+   * 所用 apiKey + 模型 id 列表。同一端点短时间内不重复请求 /models；端点
+   * 切换（key 变了）自然不命中，另外换 key 的同一端点也会失效。 */
+  private readonly superProfileModelsCache = new Map<
+    string,
+    { at: number; apiKey: string; models: string[] }
+  >();
   private store: SessionStore;
   /** F3 Phase 1: global/project memory files (read/edit, not the CLI agent). */
   private readonly memory: MemoryService;
@@ -2132,6 +2143,11 @@ export class ChatPanel implements vscode.Disposable {
             if (e.affectsConfiguration("iflow.superAgent.defaultWorkspace")) {
               this.superHost.invalidateDefaultWorkspace();
             }
+            // 超流体 Profile 在 VSCode 侧被直接改掉时，模型列表缓存必须失效
+            // （否则下拉里还是上一个端点的列表）。
+            if (e.affectsConfiguration("iflow.superAgentProfile")) {
+              this.clearSuperProfileModelsCache();
+            }
         // 记忆整理的周期 / 空闲阈值 / 总量预算是调度器参数，配置变更要热更新
         // （idleMinutes 变化会重建 tick 定时器）。
         if (
@@ -2854,6 +2870,7 @@ export class ChatPanel implements vscode.Disposable {
       case "renameSession":
       case "refreshAuth":
       case "refreshModels":
+      case "refreshSuperProfileModels":
       case "restartCli":
       case "openSettings":
       case "setHostSettings":
@@ -3128,6 +3145,11 @@ export class ChatPanel implements vscode.Disposable {
         // the store pushes a snapshot when the fresh list lands).
         void this.refreshLiveModels();
         break;
+      case "refreshSuperProfileModels":
+        // 「超流体」设置页的模型下拉：按该 Profile 的 baseUrl 实时查 /models
+        // （可能耗时数秒 ——  fire and forget，结果以 superProfileModels 推回）。
+        void this.pushSuperProfileModels(msg.profileName);
+        break;
       case "restartCli":
         await this.restartCli();
         break;
@@ -3321,6 +3343,19 @@ export class ChatPanel implements vscode.Disposable {
             }
           }
         }
+        // 超流体链路的独立指针与模型（`iflow.superAgentProfile` /
+        // `iflow.superAgentModel`）：与主链路各持一份「我当前用哪个」。
+        // 两者留空都是合法语义（跟随主链路活动 Profile / 用 Profile 自带的
+        // modelName），因此空串必须照写 —— 否则用户取消不了选择。
+        if (typeof msg.superAgentProfile === "string") {
+          writes.push(["superAgentProfile", msg.superAgentProfile.trim()]);
+        }
+        if (typeof msg.superAgentModel === "string") {
+          writes.push(["superAgentModel", msg.superAgentModel.trim()]);
+        }
+        // 写入前的超流体 Profile：写完再比一次，用来判断端点是否切换
+        // （切换 → 旧的模型列表缓存必须失效）。
+        const previousSuperProfile = this.readUserSetting<string>("superAgentProfile", "").trim();
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
         // 周期 / 空闲阈值 / 总量预算写盘后热更新调度器（写失败时配置仍是旧值，与设置页显示一致）。
         if (
@@ -3348,6 +3383,12 @@ export class ChatPanel implements vscode.Disposable {
         // instead of waiting for the configuration listener round trip.
         if (msg.auroraIntensity !== undefined) this.postTheme();
         this.postHostSettings();
+        // 超流体 Profile 变了 → 目标端点可能变了：旧的模型列表缓存必须失效，
+        // 并把新端点的实时列表推给 webview（异步，不阻塞上面的设置回显）。
+        if (this.readUserSetting<string>("superAgentProfile", "").trim() !== previousSuperProfile) {
+          this.clearSuperProfileModelsCache();
+          void this.pushSuperProfileModels();
+        }
         break;
       }
       case "setContextWindowOverrides": {
@@ -4148,6 +4189,9 @@ export class ChatPanel implements vscode.Disposable {
       superAgentKeepWorktree: this.readUserSetting<boolean>("superAgent.keepWorktree", false),
       superAgentFullTrust: this.readUserSetting<boolean>("superAgent.fullTrust", false),
       superAgentDefaultWorkspace: this.readUserSetting<string>("superAgent.defaultWorkspace", ""),
+      // 超流体链路的独立指针与模型：留空 = 跟随主链路（回退链）。
+      superAgentProfile: this.readUserSetting<string>("superAgentProfile", ""),
+      superAgentModel: this.readUserSetting<string>("superAgentModel", ""),
     });
   }
 
@@ -9630,6 +9674,155 @@ export class ChatPanel implements vscode.Disposable {
       models.unshift({ id: currentModelId, name: currentModelId });
     }
     this.store.sessionMeta({ models: this.withThinking(models) });
+  }
+
+  /**
+   * 超流体侧「按 Profile 拉模型列表」的端点解析。
+   *
+   * `wanted` 是超流体侧选中的 Profile 名（`iflow.superAgentProfile`）：
+   *   • 非空 → 按名取该 Profile 的凭据。内核 settings.json 的 `apiProfiles`
+   *     是权威（面板的 API 配置就存在那里），SecretStorage 里的历史 Profile
+   *     只作补充（还没迁移过去的那些）。
+   *   • 空 → 「跟随主链路」：用主会话当前的活动凭据（工作区握手凭据 →
+   *     SecretStorage 活动凭据 → 内核活动 Profile），与方案文档第 3.1 节的
+   *     回退链一致。
+   *
+   * 找不到时返回**真实原因**（不是一句泛化的「加载失败」），webview 直接
+   * 展示这条文案。
+   */
+  private async resolveSuperProfileTarget(
+    wanted: string,
+  ): Promise<
+    { name: string; creds: OpenAiCompatCredentials } | { name: string; error: string }
+  > {
+    const name = wanted.trim();
+    if (!name) {
+      const active =
+        (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets));
+      const endpoint = active ?? readActiveEndpoint();
+      if (!endpoint) {
+        return {
+          name: "",
+          error: vscode.l10n.t(
+            "还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。",
+          ),
+        };
+      }
+      const activeName =
+        this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim() ||
+        resolveActiveProfileName(readCliSettings(), await getActiveProfileName(this.context.secrets)) ||
+        "";
+      return {
+        name: activeName,
+        creds: {
+          baseUrl: endpoint.baseUrl,
+          apiKey: endpoint.apiKey,
+          modelName: endpoint.modelName ?? "",
+        },
+      };
+    }
+    const kernel = this.kernelProfileCredentials(name);
+    const legacy = (await loadProfiles(this.context.secrets))[name];
+    const creds = kernel ?? (legacy ? { ...legacy } : null);
+    if (!creds) {
+      return { name, error: vscode.l10n.t("未找到 API 配置：{0}", name) };
+    }
+    return { name, creds };
+  }
+
+  /**
+   * 实时拉取某个端点的模型 id 列表（`GET {baseUrl}/models`）。
+   *
+   * 两条硬纪律：
+   *   • **唯一数据源是实时查询**。CLI 上报的 `_meta.models.availableModels`
+   *     是硬编码目录，绝不可作为回退 —— 端点不可达就返回空列表。
+   *   • **走原生 `node:http(s)` 直连**（`queryModelIds`）。扩展宿主被代理
+   *     agent patch 过，全局 `fetch` 遇到 SOCKS / 无 scheme 代理会抛
+   *     "Invalid URL protocol"，哪怕目标 URL 完全合法。
+   *
+   * 失败只记日志并返回空数组 + 真实原因（不抛错）；失败结果**不进缓存**，
+   * 这样端点恢复后下一次刷新就能拿到真列表。
+   */
+  private async querySuperProfileModelIds(
+    creds: OpenAiCompatCredentials,
+  ): Promise<{ ids: string[]; error?: string }> {
+    const key = creds.baseUrl.trim();
+    const cached = this.superProfileModelsCache.get(key);
+    if (
+      cached &&
+      cached.apiKey === creds.apiKey &&
+      Date.now() - cached.at < SUPER_PROFILE_MODELS_CACHE_TTL_MS
+    ) {
+      return { ids: [...cached.models] };
+    }
+    let ids: string[];
+    try {
+      ids = await queryModelIds({
+        baseUrl: creds.baseUrl,
+        apiKey: creds.apiKey,
+        modelName: creds.modelName,
+      });
+    } catch (error) {
+      const detail = errorMessage(error);
+      const reason = vscode.l10n.t("模型列表查询失败（不回退内置目录）：{0}", detail);
+      this.log.warn(reason);
+      return { ids: [], error: reason };
+    }
+    this.superProfileModelsCache.set(key, { at: Date.now(), apiKey: creds.apiKey, models: [...ids] });
+    return { ids };
+  }
+
+  /**
+   * 超流体侧当前选中的模型 id：`iflow.superAgentModel` 优先；留空则用目标
+   * Profile 自带的 `modelName`（方案文档第 3.2 节回退链的第 3 级）。
+   */
+  private superSelectedModel(creds: OpenAiCompatCredentials | null): string {
+    const explicit = this.readUserSetting<string>("superAgentModel", "").trim();
+    return explicit || creds?.modelName?.trim() || "";
+  }
+
+  /**
+   * 组装「超流体侧按 Profile 的模型列表」载荷。
+   *
+   * 端点不可达 → `models` 为空数组并带 `error`（绝不回退内建目录）；当前
+   * 选中的模型会被补到列表头，避免下拉框渲染成空白。
+   */
+  private async buildSuperProfileModels(profileName?: string): Promise<SuperProfileModelsUi> {
+    const wanted =
+      profileName !== undefined
+        ? profileName
+        : this.readUserSetting<string>("superAgentProfile", "");
+    const target = await this.resolveSuperProfileTarget(wanted);
+    if ("error" in target) {
+      return {
+        profileName: target.name,
+        models: [],
+        currentModelId: this.superSelectedModel(null),
+        error: target.error,
+      };
+    }
+    const { ids, error } = await this.querySuperProfileModelIds(target.creds);
+    const currentModelId = this.superSelectedModel(target.creds);
+    const models = ids.map((id) => ({ id, name: id }));
+    if (currentModelId && !models.some((m) => m.id === currentModelId)) {
+      models.unshift({ id: currentModelId, name: currentModelId });
+    }
+    return { profileName: target.name, models, currentModelId, error };
+  }
+
+  /** 把「超流体侧按 Profile 的模型列表」推给 webview。 */
+  private async pushSuperProfileModels(profileName?: string): Promise<void> {
+    const payload = await this.buildSuperProfileModels(profileName);
+    this.postToWebview({ type: "superProfileModels", ...payload });
+  }
+
+  /**
+   * 清空超流体模型列表缓存。端点切换（`iflow.superAgentProfile` 改了名字）
+   * 时调用：缓存 key 虽然含 baseUrl，但同一个 Profile 换端点时 key 也可能
+   * 相同，所以这里显式清空，保证「切换后绝不命中旧端点的列表」。
+   */
+  private clearSuperProfileModelsCache(): void {
+    this.superProfileModelsCache.clear();
   }
 
   /**
