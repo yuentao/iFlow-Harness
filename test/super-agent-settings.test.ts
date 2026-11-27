@@ -19,7 +19,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsModal } from "../webview/src/components/SettingsModal";
 import { setLocale, t } from "../webview/src/i18n";
-import type { AuthUiState, HostSettingsUi, SuperProfileModelsUi } from "../shared/messages";
+import type { AuthUiState } from "../shared/messages";
+import type { StoreMock } from "./helpers/store-mock";
 
 /** jsdom ships neither ResizeObserver nor scrollIntoView; the settings shell
  * only needs the members to exist. */
@@ -47,115 +48,36 @@ const nlsZh = JSON.parse(readFileSync(join(REPO_ROOT, "package.nls.zh-cn.json"),
 
 const properties = manifest.contributes.configuration.properties;
 
-const send = vi.hoisted(() => vi.fn());
-const updateHostSetting = vi.hoisted(() => vi.fn());
-const hostSettings = vi.hoisted(() =>
-  ({
-    nextStepSuggestions: true,
-    autoCompressOnIdle: false,
-    autoMemoryCapture: false,
-    autoTitle: true,
-    efficiencyMode: "steady",
-    memoryExtractTimeoutSeconds: 90,
-    nextStepTimeoutSeconds: 25,
-    compressTimeoutSeconds: 0,
-    autoCompressThresholdPercent: 95,
-    restoreLastSession: false,
-    autoOpenPanel: false,
-    warmStart: true,
-    soundFeedback: true,
-    osNotifications: "approvals",
-    language: "",
-    theme: "auto",
-    auroraIntensity: 35,
-    uiFontSize: "standard",
-    uiDensity: "standard",
-    nodePath: "",
-    checkpoints: true,
-    checkpointMaxFiles: 50_000,
-    checkpointMaxFileMB: 300,
-    checkpointDir: "",
-    checkpointMaxTurns: 0,
-    checkpointMaxSizeMB: 0,
-    contextWindowOverrides: [],
-    costTable: [],
-    thinkingModelRules: [],
-    superAgentMaxConcurrent: 5,
-    superAgentIntegration: "merge",
-    superAgentMaxWorktrees: 10,
-    superAgentKeepWorktree: false,
-    superAgentFullTrust: false,
-    superAgentDefaultWorkspace: "",
-    // 宿主尚未把这两个字段接进 HostSettingsUi（host 侧子会话负责），这里
-    // 用可选字段模拟「已接线」与「未接线」两种状态。
-    superAgentMaxAttempts: undefined as number | undefined,
-    superAgentDependencyPolicy: undefined as string | undefined,
-  }) as unknown as HostSettingsUi & { superAgentMaxAttempts?: number; superAgentDependencyPolicy?: string },
-);
-
 /**
- * 「超流体」tab 挂载时，SettingsModal 订阅的 store 表面不止 send /
- * updateHostSetting / hostSettings：`SuperAgentSection` 还会调用
- * `requestSuperProfileModels(superProfile)`（store.ts 的专用模型列表通道
- * action），并读 `superProfileModelsView` 与 `state.auth.profiles`。旧 mock
- * 只给了前三个成员，组件一挂载就抛
- * `requestSuperProfileModels is not a function` —— 本文件的 16 个用例全部
- * 死在这个 beforeEach 里的挂载上。这里按真实 store 的形状补齐（action 是
- * 函数；视图默认 null = 尚未回包，组件走加载态；状态给一份最小鉴权快照）。
+ * 这里改用共享工厂 `test/helpers/store-mock.ts`。它按 ChatStore 的**完整表面**
+ * （全部 action + 全部视图）建 mock，所以「组件新订阅了 store 成员但 mock 没同
+ * 步」不会再把本文件一次性带红——0cbaee9 给 store 加了
+ * `requestSuperProfileModels` / `superProfileModelsView` 时，旧 mock 只给了
+ * send / updateHostSetting / hostSettings，超流体页一挂载就抛
+ * `requestSuperProfileModels is not a function`，本文件 16 个用例全死在这个
+ * beforeEach 的挂载上。
+ *
+ * `vi.mock` 的工厂会被提升到 import 之前（早于本节代码），所以只能动态 import
+ * 工厂；要拿 vi.fn / 改视图就用 `vi.hoisted` 槽位接住工厂实例。完整用法见
+ * helper 顶部注释。
  */
-const requestSuperProfileModels = vi.hoisted(() => vi.fn());
-const superProfileModelsView = vi.hoisted(() => ({
-  current: null as SuperProfileModelsUi | null,
-}));
+const storeMock = vi.hoisted(() => ({ current: null as unknown as StoreMock }));
+vi.mock("../webview/src/store", async () => {
+  const { createStoreMock } = await import("./helpers/store-mock");
+  const mock = createStoreMock();
+  storeMock.current = mock;
+  return mock;
+});
 
-vi.mock("../webview/src/store", () => ({
-  useChat: Object.assign(
-    (selector: (state: {
-      send: typeof send;
-      updateHostSetting: typeof updateHostSetting;
-      hostSettings: typeof hostSettings;
-      requestSuperProfileModels: typeof requestSuperProfileModels;
-      superProfileModelsView: SuperProfileModelsUi | null;
-      state: { auth: AuthUiState };
-    }) => unknown) =>
-      selector({
-        send,
-        updateHostSetting,
-        hostSettings,
-        requestSuperProfileModels,
-        superProfileModelsView: superProfileModelsView.current,
-        // SuperAgentSection 用 state.auth.profiles 作为「API 配置」下拉的
-        // 候选来源；空列表 → 只剩「跟随主会话」。
-        state: {
-          auth: {
-            authenticated: true,
-            needsSetup: false,
-            saved: null,
-            profiles: [],
-            onboardingDismissed: false,
-          },
-        },
-      }),
-    {
-      getState: () => ({
-        send,
-        updateHostSetting,
-        hostSettings,
-        requestSuperProfileModels,
-        superProfileModelsView: superProfileModelsView.current,
-        state: {
-          auth: {
-            authenticated: true,
-            needsSetup: false,
-            saved: null,
-            profiles: [],
-            onboardingDismissed: false,
-          },
-        },
-      }),
-    },
-  ),
-}));
+/** import 阶段工厂已执行完；取到的是与组件共用的同一批 vi.fn / 视图对象。 */
+const { send, updateHostSetting } = storeMock.current.actions;
+/**
+ * 宿主设置的可变引用：本文件用「原地改字段 + 重新 render」模拟宿主回推。
+ * 工厂默认值即真实 store 的 DEFAULT_HOST_SETTINGS（含 superAgentMaxAttempts: 2 /
+ * superAgentDependencyPolicy: "block"）；beforeEach 会把这两个键置回 undefined，
+ * 继续验证「宿主尚未接线时的防御性兜底」。
+ */
+const hostSettings = storeMock.current.store.hostSettings;
 
 const BASIC_AUTH = {
   authenticated: true,
