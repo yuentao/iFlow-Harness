@@ -149,6 +149,19 @@ describe("压缩上下文按钮", () => {
     expect(compressButton().title).toBe("压缩上下文，减少 token 占用");
   });
 
+  it("图标是折叠语义（ChevronsDownUp），不再是「缩到角落」的箭头", () => {
+    render();
+    const button = compressButton();
+    // lucide 把图标名写进 class（lucide-<kebab-name>），用它锁语义，
+    // 不去断言易碎的 SVG path 字符串。
+    const icon = button.querySelector("svg.lucide-chevrons-down-up");
+    expect(icon).toBeTruthy();
+    // 尺寸必须落在 ICON_INLINE 档（size-3.5），不写死任意值。
+    expect(icon!.getAttribute("class")).toContain("size-3.5");
+    // 旧图标 Minimize2（两枚斜箭头缩到角落）读起来像「最小化窗口」，必须消失。
+    expect(button.querySelector("svg.lucide-minimize-2")).toBeNull();
+  });
+
   it("streaming 时禁用", () => {
     render({ status: "streaming" });
     expect(compressButton().disabled).toBe(true);
