@@ -1417,8 +1417,8 @@ export interface SuperTaskSpec {
    * 任务级 API Profile 覆盖（**单次任务临时指定**，优先级最高）。
    *
    * 缺省 = 走超流体链路的解析链：`iflow.superAgentProfile` → 主链路活动
-   * Profile → 内核 `currentApiProfile` → 活动凭据。解析规则见
-   * `shared/super-profile.ts` 的 `resolveSuperEndpoint`。
+   * Profile → 活动凭据（`loadCredentials`） → 内核 `currentApiProfile` /
+   * 内核默认。解析规则见 `shared/super-profile.ts` 的 `resolveSuperEndpoint`。
    */
   profileId?: string;
   /**
