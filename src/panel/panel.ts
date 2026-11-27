@@ -1234,6 +1234,16 @@ export class ChatPanel implements vscode.Disposable {
       // site (the panel owns the cold-start lookup-key fallbacks).
       tokensLimitEnv: () => this.tokensLimitEnv(),
       readUserSetting: (key, fallback) => this.readUserSetting(key, fallback),
+      // 子会话派发前的 live `/models` 取证复用设置页那条查询 —— **同一份**
+      // 30s TTL 缓存（key = normalizeModelsUrl(baseUrl)，逐次比对 apiKey）。
+      // 不另建缓存、不引入第二个数据源：同批并行派发的多个子会话因此只发
+      // 一次真实请求。modelName 只参与请求构造，不影响缓存键。
+      querySuperModelIds: (creds) =>
+        this.querySuperProfileModelIds({
+          baseUrl: creds.baseUrl,
+          apiKey: creds.apiKey,
+          modelName: "",
+        }),
       chunkText: (content) => ChatPanel.chunkText(content),
       sendPrompt: (text, images, files, contexts, options) => this.sendPrompt(text, images, files, contexts, options),
     });
