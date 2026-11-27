@@ -22,23 +22,25 @@ const mocked = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,
 }));
 
-const useChat = vi.hoisted(() =>
-  Object.assign(
-    <T,>(selector: (s: Record<string, unknown>) => T) =>
-      selector({
-        state: mocked.state,
-        pending: mocked.pending,
-        send: mocked.send,
-        beginPending: mocked.beginPending,
-        notify: mocked.notify,
-      }),
-    {
-      getState: () => ({ state: mocked.state, send: mocked.send, notify: mocked.notify }),
-    },
-  ),
-);
-
-vi.mock("../webview/src/store", () => ({ useChat }));
+vi.mock("../webview/src/store", async () => {
+  const { createStoreMock } = await import("./helpers/store-mock");
+  const mock = createStoreMock();
+  // 工厂兜住 ChatStore 全表面；本文件只覆盖可变会话、pending 与断言用 action。
+  const live = () =>
+    ({
+      ...mock.store,
+      state: mocked.state,
+      pending: mocked.pending,
+      send: mocked.send,
+      beginPending: mocked.beginPending,
+      notify: mocked.notify,
+    }) as unknown as import("./helpers/store-mock").StoreMockState;
+  const useChat = Object.assign(
+    <T,>(selector: (s: ReturnType<typeof live>) => T): T => selector(live()),
+    { getState: live },
+  );
+  return { ...mock, useChat, getState: live };
+});
 vi.mock("../webview/src/i18n", () => ({
   t: (s: string, ...args: Array<string | number>) => {
     let out = s;

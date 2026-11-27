@@ -6,13 +6,13 @@ import { PendingCards } from "../webview/src/components/PendingCards";
 import type { PendingApprovalUi, PendingQuestionsUi } from "../shared/messages";
 
 const send = vi.hoisted(() => vi.fn());
-const useChat = vi.hoisted(() =>
-  Object.assign(
-    (selector: (state: { send: typeof send }) => unknown) => selector({ send }),
-    { getState: () => ({ send }) },
-  ),
-);
-vi.mock("../webview/src/store", () => ({ useChat }));
+vi.mock("../webview/src/store", async () => {
+  const { createStoreMock } = await import("./helpers/store-mock");
+  const mock = createStoreMock();
+  // 断言仍落在文件级 send 上；把它接到工厂 store，其余全表面由工厂兜住。
+  mock.store.send = send;
+  return mock;
+});
 vi.mock("../webview/src/i18n", () => ({
   t: (s: string, ...args: Array<string | number>) => {
     let out = s;

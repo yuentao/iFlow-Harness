@@ -22,29 +22,25 @@ const mocked = vi.hoisted(() => ({
   remoteTakeover: false as boolean,
 }));
 
-const useChat = vi.hoisted(() =>
-  Object.assign(
-    <T,>(selector: (s: Record<string, unknown>) => T) =>
-      selector({
-        state: mocked.state,
-        pending: null,
-        send: mocked.send,
-        beginPending: mocked.beginPending,
-        notify: mocked.notify,
-        remoteTakeover: mocked.remoteTakeover,
-      }),
-    {
-      getState: () => ({
-        state: mocked.state,
-        send: mocked.send,
-        notify: mocked.notify,
-        remoteTakeover: mocked.remoteTakeover,
-      }),
-    },
-  ),
-);
-
-vi.mock("../webview/src/store", () => ({ useChat }));
+vi.mock("../webview/src/store", async () => {
+  const { createStoreMock } = await import("./helpers/store-mock");
+  const mock = createStoreMock();
+  // 工厂兜住 ChatStore 全表面；本文件只覆盖可变会话、接管态与断言用 action。
+  const live = () =>
+    ({
+      ...mock.store,
+      state: mocked.state,
+      send: mocked.send,
+      beginPending: mocked.beginPending,
+      notify: mocked.notify,
+      remoteTakeover: mocked.remoteTakeover,
+    }) as unknown as import("./helpers/store-mock").StoreMockState;
+  const useChat = Object.assign(
+    <T,>(selector: (s: ReturnType<typeof live>) => T): T => selector(live()),
+    { getState: live },
+  );
+  return { ...mock, useChat, getState: live };
+});
 vi.mock("../webview/src/i18n", () => ({
   t: (s: string, ...args: Array<string | number>) => {
     let out = s;
