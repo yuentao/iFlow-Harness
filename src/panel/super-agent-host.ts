@@ -1942,8 +1942,14 @@ export class SuperAgentHost {
     const cli = readCliSettings();
     const kernelActive =
       cli?.selectedAuthType === "openai-compatible" ? cli.currentApiProfile?.trim() : undefined;
+    // 只认**完整**的内核 Profile（`readKernelApiProfiles` 已过滤缺字段的条目）：
+    // 若只用 `cli.apiProfiles?.[name]` 判存在，一个「缺少 apiKey/modelName」的
+    // 内核条目也会通过门控，随后合并表里只剩 SecretStorage 的同名历史 Profile
+    // —— 它就会冒充内核指针、解析出 `readActiveEndpoint()` 永远不会用的凭据。
+    // 内核条目残缺时交给 ⑤b：`readActiveEndpoint()` 按内核文件自身语义逐字段
+    // 回退（它自己会校验 baseUrl/apiKey），全程不碰 SecretStorage。
     const kernelProfileName =
-      kernelActive && cli?.apiProfiles?.[kernelActive] ? kernelActive : null;
+      kernelActive && Object.hasOwn(kernelProfiles, kernelActive) ? kernelActive : null;
     return {
       taskProfileId,
       superProfileName: this.readStringSetting("superAgentProfile") || null,
@@ -1966,15 +1972,21 @@ export class SuperAgentHost {
   /**
    * 解析「这个子会话该用的端点 + 模型」—— 单真值层 `shared/super-profile.ts`。
    *
-   * `configured` 表示用户配置了任何超流体专属指针（任务级 Profile 覆盖 /
+   * `configured` 表示用户配置了任何超流体专属**指针**（任务级 Profile 覆盖 /
    * `iflow.superAgentProfile` / `iflow.superAgentModel`）。调用方据此决定：
    * 未配置时**完全沿用今天的行为**（同一个握手凭据、同一个主会话模型、
    * 同一套主会话窗口解析），保证老用户零配置零变化。
+   *
+   * `modelConfigured` 表示子会话的**模型**可能不是主会话当前模型（`configured`
+   * 成立，或任务级 `modelId` 覆盖）。窗口解析必须用它而不是 `configured`：
+   * 任务级 `modelId` 只换模型、不换凭据（端点链仍与今天同序，不启用内核 ⑤），
+   * 但窗口必须按子会话自己的模型解析 —— 否则会出现「模型是替代的、窗口是
+   * 主会话的」这种自相矛盾。
    */
   private async resolveSuperSpawnPlan(
     taskProfileId: string | null,
     taskModelId: string | null,
-  ): Promise<{ spec: SuperApiSpec; configured: boolean }> {
+  ): Promise<{ spec: SuperApiSpec; configured: boolean; modelConfigured: boolean }> {
     const input = await this.superEndpointInput(taskProfileId);
     const superModelId = this.readStringSetting("superAgentModel");
     const configured = Boolean(
@@ -1982,6 +1994,8 @@ export class SuperAgentHost {
         input.superProfileName ||
         superModelId,
     );
+    const modelConfigured =
+      configured || (typeof taskModelId === "string" && taskModelId.trim().length > 0);
     // 模型链第③级「目标 Profile 自带的 modelName」只在用户**点名了 Profile**
     // （任务级覆盖或超流体 Profile）时参与；未点名时显式传 `null`，让模型链
     // 落到主 store 的 `currentModelId` —— 这正是今天子会话的取值，否则完全
@@ -2007,7 +2021,7 @@ export class SuperAgentHost {
       // `_meta.models.availableModels`）。
       liveModelIds: undefined,
     });
-    return { spec, configured };
+    return { spec, configured, modelConfigured };
   }
 
   /** Spawn a CLI client for a child session (own process, own worktree). */
@@ -2076,7 +2090,7 @@ export class SuperAgentHost {
     const contextWindowOverrides = parseContextWindowOverrides(
       this.setting<string[]>("contextWindowOverrides", []),
     );
-    const childTokensLimitEnv = spawnPlan.configured
+    const childTokensLimitEnv = spawnPlan.modelConfigured
       ? superTokensLimitEnv({
           // tier 1/4 按**子会话自己的模型**查表；tier 2 按超流体端点命中的
           // 具名 Profile 取 tokensLimit —— 绝不读主会话 `currentApiProfile`。
@@ -2129,7 +2143,10 @@ export class SuperAgentHost {
       },
       params.callbacks,
     );
-    if (spawnTokensLimit !== undefined) {
+    // 只有走了超流体口径（模型 / 凭据被覆盖）的 client 才留 spawn 快照：
+    // 零配置路径的 set_model 必须与今天相同（届时按当时的设置重算），快照
+    // 会让它回放 spawn 时的旧数。
+    if (spawnPlan.modelConfigured && spawnTokensLimit !== undefined) {
       this.superClientTokensLimits.set(client, spawnTokensLimit);
     }
     // 防御纵深：即使 vendor 的 `IFLOW_OAUTH_STRIP=0` 回滚，已过期的 OAuth
