@@ -168,4 +168,25 @@ describe("ChatPanel warning pill across manual compress (P0-6 action)", () => {
     expect(warningToasts()).toBe(1);
     expect(dismissSpy.mock.calls).toEqual([[0]]);
   });
+
+  it("底部压缩按钮走同一路径：用同一 toastId 收掉警告 pill 并起一轮 /compress", async () => {
+    occupancyHigh();
+    await flushTasks();
+    expect(warningToasts()).toBe(1);
+
+    void p.handleWebviewMessage({ type: "compressNow" });
+    await flushTasks();
+
+    expect(p.store.getState().status).toBe("streaming");
+    expect(p.store.getState().compressing).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.prompt[0]!.text).toBe("/compress");
+    // 常驻 pill 用同一个 toastId 收掉（与 toastAction 路径同口径）。
+    expect(dismissSpy.mock.calls).toEqual([[0]]);
+
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await flushTasks();
+    expect(p.store.getState().status).toBe("idle");
+    expect(warningToasts()).toBe(1);
+  });
 });

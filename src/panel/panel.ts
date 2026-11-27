@@ -122,6 +122,7 @@ import {
   isAgentOutputUpdate,
   isSubAgentToolCall,
   newSessionState,
+  parseCompressionCommand,
   parseEditArgs,
   renameSessionSummary,
   SESSION_LABEL_MAX,
@@ -2798,6 +2799,7 @@ export class ChatPanel implements vscode.Disposable {
       case "queueAction":
       case "resolveContext":
       case "cancel":
+      case "compressNow":
       case "newSession":
       case "setModel":
       case "setThink":
@@ -2951,6 +2953,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "cancel":
         this.cancelCurrentTurn();
+        break;
+      case "compressNow":
+        void this.compressNowFromComposer();
         break;
       case "newSession":
         await this.startNewSession();
@@ -5430,20 +5435,32 @@ export class ChatPanel implements vscode.Disposable {
    * collapsible CompressionBlock. `dismissToastId` removes the warning pill
    * that carried this action, right as the compress turn opens.
    */
-  private async runCompressTurn(dismissToastId?: number): Promise<void> {
-    if (this.historySyncBusy) return;
+  /**
+   * 主动压缩一轮的结果。调用方（底部「压缩上下文」按钮）据此补一条面向
+   * 用户的原因提示；警告 pill 的入口只关心是否真的跑起来。
+   */
+  private async runCompressTurn(
+    dismissToastId?: number,
+  ): Promise<"ok" | "empty" | "busy" | "not-ready" | `error:${string}`> {
+    if (this.historySyncBusy) return "not-ready";
     const state = this.store.getState();
-    if (state.initializing || state.status === "streaming") return;
+    // Stop 窗口里绝不抢跑：cancel 已发出、回合尚未落定，此时再发 prompt 会
+    // 与正在取消的请求并发。
+    if (state.cancelling || state.initializing || state.status === "streaming") return "busy";
     const sessionId = state.sessionId;
-    if (!sessionId) return;
+    if (!sessionId) return "not-ready";
+    if (!state.blocks.some((block) => block.kind === "user")) return "empty";
     const client = await this.ensureClient().catch(() => null);
-    if (!client || this.disposed || this.client !== client) return;
-    if (this.store.getState().sessionId !== sessionId) return;
+    if (!client || this.disposed || this.client !== client) return "not-ready";
+    if (this.store.getState().sessionId !== sessionId) return "not-ready";
     // State-machine flip and pill removal move together, immediately before
     // beginCompressTurn's flush: no push can observe the half-dismissed
     // intermediate (the 2026-10-14 flicker).
     this.contextWarnActive = false;
-    if (typeof dismissToastId === "number") this.store.dismissToast(dismissToastId);
+    if (typeof dismissToastId === "number") {
+      this.store.dismissToast(dismissToastId);
+      if (this.contextWarnToastId === dismissToastId) this.contextWarnToastId = null;
+    }
     // Stream the session for the duration of the turn: without this the
     // whole `/compress` runs inside `idle` and the webview's 正在压缩 pill
     // never renders (2026-10-14 report). Status flips via the reducer; the
@@ -5452,8 +5469,9 @@ export class ChatPanel implements vscode.Disposable {
     try {
       const result = await this.promptWithRetry(client, sessionId, [{ type: "text", text: "/compress" }]);
       if (this.store.getState().sessionId === sessionId) this.store.promptCompleted(result.stopReason, result.usage);
+      return "ok";
     } catch (error) {
-      if (this.disposed || this.store.getState().sessionId !== sessionId) return;
+      if (this.disposed || this.store.getState().sessionId !== sessionId) return "not-ready";
       this.log.warn(`manual compress failed: ${errorMessage(error)}`);
       this.store.sendToast(
         "warning",
@@ -5464,6 +5482,74 @@ export class ChatPanel implements vscode.Disposable {
       // The turn is over on the failure path too — leaving 状态 streaming
       // would strand the panel in a phantom generating state.
       this.store.endCompressTurn();
+      return `error:${errorMessage(error)}`;
+    }
+  }
+
+  /** 底部「压缩上下文」按钮的单飞锁：连点只发一轮。 */
+  private compressTurnActive = false;
+
+  /**
+   * 底部「压缩上下文」按钮：主动发起一轮 `/compress`（与上下文警告 pill 的
+   * 「立即压缩」共用 runCompressTurn）。webview 只负责禁用态与 1.5s 防抖，
+   * 真正的守卫都在这里 —— 所有拒绝都带真实原因，绝不静默吞掉点击。
+   */
+  private async compressNowFromComposer(): Promise<void> {
+    if (this.disposed || this.compressTurnActive) return;
+    // 同步占锁（第一个 await 之前）：连点 / pill + 按钮同时触发只跑一轮。
+    this.compressTurnActive = true;
+    try {
+      const state = this.store.getState();
+      // Stop 窗口里不抢跑：cancel 已发出，回合尚未落定。
+      if (state.cancelling) return;
+      if (state.initializing || state.replaying) {
+        this.store.sendToast("warning", vscode.l10n.t("会话尚未就绪，暂时无法压缩"));
+        return;
+      }
+      if (state.auth.needsSetup) {
+        this.store.sendToast("warning", vscode.l10n.t("会话尚未就绪，暂时无法压缩"));
+        return;
+      }
+      if (this.historySyncBusy) {
+        this.store.sendToast("warning", vscode.l10n.t("正在同步会话历史，请稍后再压缩"));
+        return;
+      }
+      if (!state.sessionId) {
+        this.store.sendToast("warning", vscode.l10n.t("会话尚未就绪，暂时无法压缩"));
+        return;
+      }
+      if (state.status === "streaming" || state.compressing) {
+        this.store.sendToast("warning", vscode.l10n.t("主会话正在生成，等本轮结束后再压缩"));
+        return;
+      }
+      if (!state.blocks.some((block) => block.kind === "user")) {
+        this.store.sendToast("info", vscode.l10n.t("暂无可压缩的对话内容"));
+        return;
+      }
+      // 上一轮 Stop 留下的 cancelSeen 会让 promptWithRetry 在顶部直接判
+      // cancelled（用户看到「点压缩没反应」）。用户此刻明确要求压缩，清掉它。
+      this.cancelSeen = false;
+      // 常驻的上下文警告 pill 用同一个 toastId 收掉（runCompressTurn 内部与
+      // 状态翻转同步执行，不会闪回）。
+      const outcome = await this.runCompressTurn(this.contextWarnToastId ?? undefined);
+      if (outcome === "empty") {
+        this.store.sendToast("info", vscode.l10n.t("暂无可压缩的对话内容"));
+      } else if (outcome === "busy") {
+        this.store.sendToast("warning", vscode.l10n.t("主会话正在生成，等本轮结束后再压缩"));
+      } else if (outcome === "not-ready") {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t(
+            this.historySyncBusy
+              ? "正在同步会话历史，请稍后再压缩"
+              : "会话尚未就绪，暂时无法压缩",
+          ),
+        );
+      }
+      // `error:…` 已在 runCompressTurn 内部按「压缩失败：{0}」提示真实错误，
+      // 这里不重复弹第二条。
+    } finally {
+      this.compressTurnActive = false;
     }
   }
 
@@ -9952,7 +10038,9 @@ export class ChatPanel implements vscode.Disposable {
     // A `/compress` turn is housekeeping, not conversation: it must not
     // trigger automatic memory extraction. Auto-compression after a real turn
     // is covered separately by maybeAutoCompressOnIdle's return value.
-    const isCompressTurn = !hasContexts && trimmed === "/compress";
+    // 别名（`/compact`、`/summarize`，大小写不敏感、可带尾随参数）同属压缩
+    // 命令 —— 用共享判定，别在这里再写一遍字符串比较。
+    const isCompressTurn = !hasContexts && parseCompressionCommand(trimmed) !== null;
     // A3: the panel was disposed (window close / extension reload) — the
     // store is gone, so there is nothing to send.
     if (this.disposed) return false;
@@ -10003,6 +10091,25 @@ export class ChatPanel implements vscode.Disposable {
       // 把它留在队列里等空闲时重投。绝不能把它派发成子会话（汇报得投给
       // 主会话），也绝不能悄悄丢掉（丢了主会话就永远读不到孩子的结果）。
       if (hidden) return false;
+      // slash 命令绝不能走委派：CLI 只在 `prompt[0].text.trim()` 以 "/" 开头时
+      // 解析命令，而本分支会把它包进子会话 task / 补投散文 —— `/compress` 于是
+      // 变成一段交给子会话的普通文本（压缩不执行），自定义命令同理。
+      // 最小且不乱丢输入的方案：明确告知「本轮结束后重发」，不 spawn、不压
+      // 补投队列（补投协议会把它当普通用户消息，仍然是错的）。
+      if (!hasContexts && parseCompressionCommand(trimmed)) {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("主会话正在生成，等本轮结束后再压缩"),
+        );
+        return false;
+      }
+      if (trimmed.trimStart().startsWith("/")) {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("主会话正在生成，命令请本轮结束后重发"),
+        );
+        return false;
+      }
       // A merge request must run in the MAIN workspace, so delegating it to
       // an isolated child session would be wrong (the child's worktree has
       // its own branch). Refuse and say why instead of doing something else.
@@ -10145,10 +10252,26 @@ export class ChatPanel implements vscode.Disposable {
     // 图片在模型眼里只是没有名字的内联块：清单必须紧贴在正文之前，模型才
     // 能把「第 2 张」对应到用户的说明。没有说明时不插入任何占位段落。
     const imageCaptionBlock = hasImageCaptions ? buildImageCaptionPrompt(imageCaptions) : "";
-    const promptText =
-      [superDigest, agentContextBlock, imageCaptionBlock, typedText]
-        .filter(Boolean)
-        .join("\n\n") + attachmentBlock;
+    // CLI 只把 `prompt[0].text.trim()` 以 "/" 开头的那一份 prompt 当作命令解析
+    // （vendor bundle）。看板摘要 / 上下文块 / 图片说明 / 附件清单因此绝不能
+    // 拼在命令正文之前 —— 否则 `/compress`、`/compact` 乃至自定义命令都会
+    // 退化成普通正文（被编排模型当成任务派给子会话）。slash 回合把纯命令放进
+    // prompt[0]，其余内容（restBlock）作为**后续**文本块追加；普通回合维持
+    // 既有顺序，零波及。
+    //
+    // 已知且可接受：自定义命令命中时 CLI 会用展开模板**整份替换** prompt，
+    // 后续块（看板摘要 / 上下文）会被丢弃 —— 这是用户命令自身的语义。
+    //
+    // `typedText` 已经过 toAgentPromptText：未知 "/" 文本会被补一个零宽空格
+    // （trimStart 不会去掉它），因此这里的判断只对真实命令 / 路径成立。
+    const restBlock = [superDigest, agentContextBlock, imageCaptionBlock]
+      .filter(Boolean)
+      .join("\n\n");
+    const slashFirst = !internal && !hidden && typedText.trimStart().startsWith("/");
+    // 附件块自带前导空行；作为独立文本块时收掉行首空白（附件协议头本身不变，
+    // 删除消息流程仍按 AGENT_ATTACHMENT_HEADER 原文定位）。
+    const slashRestBlock = [restBlock, attachmentBlock.trimStart()].filter(Boolean).join("\n\n");
+    const promptText = [restBlock, typedText].filter(Boolean).join("\n\n") + attachmentBlock;
     // C3/C9: the webview's busy lock cannot guard the command channels
     // (`iflow.askSelection`, `@iflow` participant). A prompt during a session
     // reset would hit the about-to-be-discarded sessionId; two overlapping
@@ -10264,7 +10387,11 @@ export class ChatPanel implements vscode.Disposable {
           });
         }
       }
-      const prompt: ContentBlock[] = [{ type: "text", text: promptText }];
+      const prompt: ContentBlock[] = slashFirst
+        ? [{ type: "text", text: typedText }]
+        : [{ type: "text", text: promptText }];
+      // slash 回合：看板摘要 / 上下文 / 图片说明 / 附件清单跟随在命令之后。
+      if (slashFirst && slashRestBlock) prompt.push({ type: "text", text: slashRestBlock });
       for (const img of images ?? []) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
@@ -10546,7 +10673,7 @@ export class ChatPanel implements vscode.Disposable {
     // 的纯 prompt（与正常发送时 typedText 的口径一致）。
     const regenText = normalizeUserPromptText(lastUserText);
     if (!regenText) return;
-    const isCompressTurn = regenText === "/compress";
+    const isCompressTurn = parseCompressionCommand(regenText) !== null;
     this.cancelSeen = false;
     // 用户主动发起的一轮同样算「继续」：解除 Stop 对自动回合的压制。
     this.autoTurnsStoppedFor = null;
@@ -10610,15 +10737,31 @@ export class ChatPanel implements vscode.Disposable {
           regenAgentText = rewriteRootMentions(regenAgentText, mentionRoots, mentionCwd);
         }
       }
-      const prompt: ContentBlock[] = [
-        {
-          type: "text",
-          text:
-            [regenDigest, regenHasCaptions ? buildImageCaptionPrompt(regenCaptions) : "", regenAgentText]
-              .filter(Boolean)
-              .join("\n\n") + regenAttachmentBlock,
-        },
-      ];
+      // 与 sendPrompt 同一 slash 语义：CLI 只解析 `prompt[0].text.trim()` 以
+      // "/" 开头的那一份 prompt，重生成一条命令轮（`/compress` 等）时看板摘要
+      // 与图片说明必须让位到后续块，否则命令退化成普通正文。
+      // 无 user 块时本方法已在上面早退（`!lastUserText` → return），因此这里
+      // 一定拿得到原文，不存在「没有可重放的命令」的分支。
+      const regenSlashFirst = regenAgentText.trimStart().startsWith("/");
+      const regenRestBlock = [
+        regenDigest,
+        regenHasCaptions ? buildImageCaptionPrompt(regenCaptions) : "",
+        regenAttachmentBlock.trimStart(),
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const prompt: ContentBlock[] = regenSlashFirst
+        ? [{ type: "text", text: regenAgentText }]
+        : [
+            {
+              type: "text",
+              text:
+                [regenDigest, regenHasCaptions ? buildImageCaptionPrompt(regenCaptions) : "", regenAgentText]
+                  .filter(Boolean)
+                  .join("\n\n") + regenAttachmentBlock,
+            },
+          ];
+      if (regenSlashFirst && regenRestBlock) prompt.push({ type: "text", text: regenRestBlock });
       for (const img of regenImages) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
