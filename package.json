@@ -279,6 +279,16 @@
           "default": [],
           "markdownDescription": "%iflow.configuration.superAgentChildMcpServerAllowlist.description%"
         },
+        "iflow.superAgentProfile": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "%iflow.configuration.superAgentProfile.description%"
+        },
+        "iflow.superAgentModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "%iflow.configuration.superAgentModel.description%"
+        },
         "iflow.qq.enabled": {
           "type": "boolean",
           "default": false,
