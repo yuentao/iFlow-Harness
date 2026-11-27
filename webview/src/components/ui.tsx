@@ -2763,8 +2763,10 @@ function ToastCard({ toast, dismiss }: { toast: ToastItem; dismiss: (id: number)
  * invalid HTML and used to swallow the whole action. */
 function ToastPill({ toast, suppressCompressAction }: { toast: ToastItem; suppressCompressAction?: boolean }) {
   const dismiss = useChat((s) => s.dismissToast);
+  const hasActions = (toast.actions?.length ?? 0) > 0 || Boolean(toast.action);
   const clickable =
-    toast.sticky || !(toast.countdownDeadline !== undefined || toast.displayOnly || toast.persistent || toast.action);
+    toast.sticky ||
+    !(toast.countdownDeadline !== undefined || toast.displayOnly || toast.persistent || hasActions);
   // Host-owned waits (displayOnly + no action — e.g. 「正在等待 N 个子会话汇报」
   // and the auto-compress turn) are pure status lines sitting on top of the
   // transcript, and they never go away while the work runs, so they end up
@@ -2779,7 +2781,7 @@ function ToastPill({ toast, suppressCompressAction }: { toast: ToastItem; suppre
   // Actionable toasts (countdown retry / 立即压缩 / sticky decisions) are
   // deliberately excluded: their click target must never vanish under the
   // pointer.
-  const yieldable = !clickable && toast.displayOnly === true && !toast.action;
+  const yieldable = !clickable && toast.displayOnly === true && !hasActions;
   const [yielded, setYielded] = useState(false);
   const yieldWrap = useRef<HTMLDivElement | null>(null);
   const yieldBox = useRef<{ left: number; top: number; right: number; bottom: number } | null>(null);
@@ -2826,31 +2828,38 @@ function ToastPill({ toast, suppressCompressAction }: { toast: ToastItem; suppre
     </>
   );
   // M1 P0-6: an inline action (e.g. 立即压缩) rides its own button; the
-  // compress action is suppressed while a turn owns the session.
-  const actionHidden = suppressCompressAction && toast.action?.actionId === "compress";
+  // compress action is suppressed while a turn owns the session. A toast may
+  // carry several actions (QQ lease 等待 / 接管): `actions` wins over `action`.
+  const inlineActions = toast.actions?.length ? toast.actions : toast.action ? [toast.action] : [];
   // The action wears the pill's tone: a neutral grey chip on an amber notice
   // reads as an unrelated control (the 立即压缩 button on the context warning).
-  const actionVariant: ButtonVariant = toast.sticky
+  // Per-action `variant` hints (e.g. 等待 = secondary, 接管 = warning-soft) let
+  // a multi-choice card distinguish the safe default from the real action.
+  const defaultActionVariant: ButtonVariant = toast.sticky
     ? "primary"
     : toast.level === "warning"
       ? "warning-soft"
       : toast.level === "error"
         ? "danger-soft"
         : "secondary";
-  const actionButton =
-    toast.action &&
-    !actionHidden && (
-      <Button
-        variant={actionVariant}
-        size="sm"
-        className={actionVariant === "secondary" ? "border-current/45 font-medium opacity-90 hover:opacity-100" : ""}
-        onClick={() =>
-          useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })
-        }
-      >
-        {toast.action.label}
-      </Button>
-    );
+  const actionButtons = inlineActions
+    .filter((action) => !(suppressCompressAction && action.actionId === "compress"))
+    .map((action) => {
+      const variant = action.variant ?? defaultActionVariant;
+      return (
+        <Button
+          key={action.actionId}
+          variant={variant}
+          size="sm"
+          className={variant === "secondary" ? "border-current/45 font-medium opacity-90 hover:opacity-100" : ""}
+          onClick={() =>
+            useChat.getState().send({ type: "toastAction", actionId: action.actionId, toastId: toast.toastId })
+          }
+        >
+          {action.label}
+        </Button>
+      );
+    });
   const pill = (
     <FloatPill
       tone={tone}
@@ -2868,7 +2877,7 @@ function ToastPill({ toast, suppressCompressAction }: { toast: ToastItem; suppre
       ) : (
         <span className="flex min-w-0 items-center gap-1.5 text-left">{body}</span>
       )}
-      {actionButton}
+      {actionButtons}
       {toast.sticky ? (
         <IconButton icon={<X className={ICON_INLINE} />} label={t("关闭")} size="sm" onClick={() => dismiss(toast.id)} />
       ) : null}

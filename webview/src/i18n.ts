@@ -1632,11 +1632,11 @@ const en: Record<string, string> = {
   "审批/提问/计划阻塞时，或整轮完成时发送。": "Sent when an approval, question or plan blocks, or when a turn completes.",
   "内核：在后台运行的 iFlow 服务进程；重启后会重新加载记忆、技能与 MCP 服务器。": "Core: the iFlow service process running in the background; restarting it reloads memory, skills and MCP servers.",
   "QQ 机器人已在另一个窗口运行，本窗口已等待": "The QQ bot is already running in another window; this window is waiting",
-  "QQ 机器人已在另一个窗口运行：本窗口默认等待。若要由本窗口接管，请点「接管」。": "The QQ bot is already running in another window. This window will wait by default; click \"Take over\" to switch to this window.",
   "等待": "Wait",
   "接管（将停止另一窗口的机器人）": "Take over (stops the bot in the other window)",
   "QQ 机器人接管失败，租约已被其它窗口更新，请重试": "Failed to take over the QQ bot — the lease was updated by another window; try again",
   "QQ 通道已由另一个窗口接管": "The QQ channel has been taken over by another window",
+  "检测到 QQ 机器人（appId：{0}，窗口：{1}）已被占用，本窗口未启动。": "Detected that the QQ bot (appId: {0}, window: {1}) is already occupied; this window did not start.",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

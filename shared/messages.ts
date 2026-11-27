@@ -2207,6 +2207,20 @@ export function pickQqSettingsUi(
  */
 export const MEMORY_CURATE_COMPOSER_ID_BASE = 1_000_000;
 
+/** Inline button carried by a toast. `actionId` is echoed back in the
+ * `toastAction` WebviewToHost message for the host to dispatch on; `variant`
+ * is an optional tone hint (the webview falls back to the pill's level). */
+export interface ToastAction {
+  actionId: string;
+  label: string;
+  variant?: "primary" | "secondary" | "warning-soft" | "danger-soft";
+}
+
+/** Action ids of the QQ single-active lease conflict card. Shared so the
+ * host's toast producer and the panel's `toastAction` dispatcher cannot drift. */
+export const QQ_LEASE_WAIT_ACTION = "qq-lease-wait";
+export const QQ_LEASE_TAKEOVER_ACTION = "qq-lease-takeover";
+
 export type HostToWebview =
   | { type: "turnChanges"; sessionId: string; userBlockId: string; requestId: string; records: TurnChangeUi[]; unavailable: boolean }
   /** A single file's turn changes were reverted; refetch the turn records. */
@@ -2295,7 +2309,12 @@ export type HostToWebview =
        * the host performs the action and owns pill removal (persistent
        * semantics unchanged — a non-persistent action pill still
        * auto-dismisses). */
-      action?: { actionId: string; label: string };
+      action?: ToastAction;
+      /** Multiple inline actions (e.g. 等待 / 接管 on the QQ lease conflict
+       * card). When present the webview renders a button row and `actions`
+       * takes precedence over the single `action`. Each click still sends
+       * `toastAction` with its own actionId. */
+      actions?: ToastAction[];
       /** Preview lines for a decision-card notice (auto-memory candidates): the
        * card shows WHAT would be written before the review dialog opens. The
        * host caps the list; absence keeps the plain pill rendering. */
@@ -2884,8 +2903,9 @@ export type WebviewToHost =
    * pending state locally, so a late result has nothing to fill into. */
   | { type: "cancelEnhance"; requestId: number }
   /** M1 P0-6: a toast's inline action button was clicked (see the `toast`
-   * message's `action`). The host dispatches on `actionId` (e.g. "compress"
-   * drives the /compress bridge) and dismisses the pill. */
+   * message's `action` / `actions`). The host dispatches on `actionId` (e.g.
+   * "compress" drives the /compress bridge, "qq-lease-takeover" takes over
+   * the QQ lease) and dismisses the pill. */
   | { type: "toastAction"; actionId: string; toastId?: number }
   /** The user ticked/unticked one item of a TaskList card (`PlanBlock`).
    * `blockId` is the stable block id (P4), `index` the entry position; the

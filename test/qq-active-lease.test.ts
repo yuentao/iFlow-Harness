@@ -2,7 +2,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
+import { ChatPanel } from "../src/panel/panel.js";
 import { QqHost, type QqHostCallbacks } from "../src/panel/qq-host.js";
+import { QQ_LEASE_TAKEOVER_ACTION, QQ_LEASE_WAIT_ACTION } from "../shared/messages.js";
 import {
   QQ_LEASE_KEY,
   QQ_LEASE_TTL_MS,
@@ -11,6 +13,17 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TAKEOVER_LABEL = "接管（将停止另一窗口的机器人）";
+const WAIT_LABEL = "等待";
+
+/** A toast captured from the QqHost's `getStore().sendToast` stub. */
+type CapturedToast = {
+  level: string;
+  message: string;
+  opts?: {
+    persistent?: boolean;
+    actions?: { actionId: string; label: string; variant?: string }[];
+  };
+};
 
 /**
  * 两个假窗口共用同一个 backing Map —— 模拟 VSCode globalState 跨窗口共享。
@@ -70,6 +83,7 @@ function makeHost(
   memento: vscode.Memento,
   ownerId: string,
   posted: unknown[] = [],
+  toasts: CapturedToast[] = [],
 ): QqHost {
   const io = {
     readAll: () => ({ enabled: true, allowedUsers: [] }),
@@ -86,7 +100,11 @@ function makeHost(
     getStore: () => ({
       getState: () => ({}),
       pushSnapshot: () => undefined,
-      sendToast: () => 1,
+      sendToast: (level: string, message: string, opts?: CapturedToast["opts"]) => {
+        toasts.push({ level, message, opts });
+        return toasts.length;
+      },
+      dismissToast: () => undefined,
     }) as never,
     isDisposed: () => false,
     getClient: () => null,
@@ -126,9 +144,33 @@ function installFakeStart(host: QqHost, calls: string[]) {
   });
 }
 
+/**
+ * 直接调用 panel.ts 的 toastAction 分发器，用最小 `this` 顶替整块面板。
+ * 这样「点卡片按钮」走的是真实生产分支，却不需要构造 ChatPanel 的一堆服务。
+ */
+type ToastDispatchThis = {
+  store: { dismissToast: (id: number) => void };
+  qqHost: { takeoverQqLease: () => Promise<void> };
+};
+const dispatchToastAction = (
+  ChatPanel.prototype as unknown as {
+    handleToastAction: (this: ToastDispatchThis, actionId: string, toastId?: number) => void;
+  }
+).handleToastAction;
+
+function clickToast(actionId: string, takeover: () => Promise<void>): number[] {
+  const dismissed: number[] = [];
+  dispatchToastAction.call(
+    { store: { dismissToast: (id) => dismissed.push(id) }, qqHost: { takeoverQqLease: takeover } },
+    actionId,
+    42,
+  );
+  return dismissed;
+}
+
 async function flushTakeover(): Promise<void> {
-  // showWarningMessage().then(...) 走微任务；forceTake + 再次 startQqIfEnabled
-  // 里还有若干 await，给几轮定时器让它们落定。
+  // takeoverQqLease 里 forceTake + 再次 startQqIfEnabled 有若干 await，
+  // 给几轮定时器让它们落定。
   for (let i = 0; i < 6; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
@@ -139,17 +181,17 @@ afterEach(() => {
 });
 
 describe("QQ 单活租约 · 宿主侧多窗口", () => {
-  it("先持有者保留：后来者 YIELDED 且绝不调 doStartQq", async () => {
+  it("先持有者保留：后来者 YIELDED 不启动，冲突发面板 toast（非原生弹窗）", async () => {
     const backing = new Map<string, unknown>();
     const a = makeHost(makeMemento(backing), "window-a");
     const postedB: unknown[] = [];
-    const b = makeHost(makeMemento(backing), "window-b", postedB);
+    const toastsB: CapturedToast[] = [];
+    const b = makeHost(makeMemento(backing), "window-b", postedB, toastsB);
     const callsA: string[] = [];
     const callsB: string[] = [];
     const startA = installFakeStart(a, callsA);
     const startB = installFakeStart(b, callsB);
-    // 默认「等待」：stub 的 showWarningMessage 返回 undefined。
-    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
+    const warningSpy = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
 
     try {
       await a.startQqIfEnabled();
@@ -164,6 +206,19 @@ describe("QQ 单活租约 · 宿主侧多窗口", () => {
       );
       expect(startA).toHaveBeenCalledTimes(1);
       expect(startB).not.toHaveBeenCalled();
+
+      // 冲突提示改为面板 toast：带 appId / 窗口、常驻、两个 action。
+      expect(warningSpy).not.toHaveBeenCalled();
+      const conflict = toastsB.find((t) => t.level === "warning" && t.message.includes("未启动"));
+      expect(conflict).toBeDefined();
+      expect(conflict!.message).toContain("fake-app-id");
+      expect(conflict!.message).toContain("window-a");
+      expect(conflict!.opts?.persistent).toBe(true);
+      expect(conflict!.opts?.actions?.map((a) => a.actionId)).toEqual([
+        QQ_LEASE_TAKEOVER_ACTION,
+        QQ_LEASE_WAIT_ACTION,
+      ]);
+      expect(conflict!.opts?.actions?.map((a) => a.label)).toEqual([TAKEOVER_LABEL, WAIT_LABEL]);
     } finally {
       await a.stopQq();
       await b.stopQq();
@@ -212,7 +267,31 @@ describe("QQ 单活租约 · 宿主侧多窗口", () => {
     }
   });
 
-  it("点「接管」：新窗口抢主，被接管方静默 stopQq 且不写 iflow.qq.enabled", async () => {
+  it("点「等待」：只关 toast，不触发 forceTake，租约仍归先启动者", async () => {
+    const backing = new Map<string, unknown>();
+    const a = makeHost(makeMemento(backing), "window-a");
+    const b = makeHost(makeMemento(backing), "window-b");
+    const callsA: string[] = [];
+    const callsB: string[] = [];
+    installFakeStart(a, callsA);
+    installFakeStart(b, callsB);
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
+    const takeover = vi.fn(async () => { await b.takeoverQqLease(); });
+
+    try {
+      await a.startQqIfEnabled();
+      await b.startQqIfEnabled();
+      expect(clickToast(QQ_LEASE_WAIT_ACTION, takeover)).toEqual([42]);
+      expect(takeover).not.toHaveBeenCalled();
+      expect(callsB).toEqual([]);
+      expect((backing.get(QQ_LEASE_KEY) as QqLease).ownerId).toBe("window-a");
+    } finally {
+      await a.stopQq();
+      await b.stopQq();
+    }
+  });
+
+  it("点「接管」：走 forceTake，旧方仍靠心跳 stopQq 且不写 iflow.qq.enabled", async () => {
     const backing = new Map<string, unknown>();
     const memA = makeMemento(backing);
     const memB = makeMemento(backing);
@@ -224,12 +303,21 @@ describe("QQ 单活租约 · 宿主侧多窗口", () => {
     installFakeStart(a, callsA);
     installFakeStart(b, callsB);
     vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(TAKEOVER_LABEL as never);
+    const takeover = vi.fn(async () => { await b.takeoverQqLease(); });
 
     try {
       await a.startQqIfEnabled();
       expect((a as unknown as HostInternals).qq).toBeDefined();
       await b.startQqIfEnabled();
+      const forceTake = vi.spyOn(
+        (b as unknown as { qqLease: { forceTake(): Promise<boolean> } }).qqLease,
+        "forceTake",
+      );
+      // 真实 dispatch：点「接管」→ 关 toast → takeoverQqLease → forceTake。
+      expect(clickToast(QQ_LEASE_TAKEOVER_ACTION, takeover)).toEqual([42]);
       await flushTakeover();
+      expect(takeover).toHaveBeenCalledTimes(1);
+      expect(forceTake).toHaveBeenCalledTimes(1);
       expect(b.qqLeaseState).toBe("ACTIVE");
       expect((backing.get(QQ_LEASE_KEY) as QqLease).ownerId).toBe("window-b");
 

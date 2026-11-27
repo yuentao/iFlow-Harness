@@ -28,6 +28,7 @@ import type {
   QqTaskUi,
   UserQuestion,
 } from "../../shared/messages.js";
+import { QQ_LEASE_TAKEOVER_ACTION, QQ_LEASE_WAIT_ACTION } from "../../shared/messages.js";
 import type { UserQuestionsResponse } from "../acp/protocol.js";
 import { isTerminalSuperStatus, type SuperSessionUi } from "../../shared/super-agent.js";
 import type { SessionStore } from "./store.js";
@@ -917,28 +918,41 @@ export class QqHost {
   }
 
   /**
-   * 被占用提示：默认「等待」，附真实可点的「接管」按钮。
+   * 被占用提示：面板内常驻 warning toast，带「等待 / 接管」两个 action。
    *
-   * `store.sendToast` 的 action 回调由 panel.ts 的 `handleToastAction` 分发，
-   * 而本任务明确不动 panel.ts、也不新增 wire 消息；这里用宿主自带的通知
-   * 按钮直接拿用户选择，语义与「默认等待 / 手动接管」一致。
+   * 不再用原生 showWarningMessage —— 那条弹窗与面板 acrylic 视觉不一致。
+   * actionId 由 panel.ts 的 `handleToastAction` 分发（复用既有 `toastAction`
+   * wire 消息，不新增协议面）；「等待」只收 toast，「接管」走与旧弹窗分支
+   * 完全相同的 takeoverQqLease()。默认行为仍是不接管。
    */
   private promptQqLeaseTakeover(): void {
     if (this.disposed || this.qqLeaseYieldNotified) return;
     this.qqLeaseYieldNotified = true;
-    const waitLabel = vscode.l10n.t("等待");
-    const takeoverLabel = vscode.l10n.t("接管（将停止另一窗口的机器人）");
-    void vscode.window.showWarningMessage(
-      vscode.l10n.t("QQ 机器人已在另一个窗口运行：本窗口默认等待。若要由本窗口接管，请点「接管」。"),
-      waitLabel,
-      takeoverLabel,
-    ).then((choice) => {
-      if (choice === takeoverLabel && !this.disposed) void this.takeoverQqLease();
-    });
+    const lease = this.qqLease?.current();
+    const appId = (lease?.appId ?? this.qqLease?.appId ?? "").trim();
+    // 窗口 id 是 VSCode sessionId（UUID）；截前 8 位足够辨认，又不让 pill 变成一条长串。
+    const ownerId = (lease?.ownerId ?? "").slice(0, 8);
+    this.store.sendToast(
+      "warning",
+      vscode.l10n.t("检测到 QQ 机器人（appId：{0}，窗口：{1}）已被占用，本窗口未启动。", appId, ownerId),
+      {
+        persistent: true,
+        actions: [
+          {
+            actionId: QQ_LEASE_TAKEOVER_ACTION,
+            label: vscode.l10n.t("接管（将停止另一窗口的机器人）"),
+            variant: "warning-soft",
+          },
+          { actionId: QQ_LEASE_WAIT_ACTION, label: vscode.l10n.t("等待"), variant: "secondary" },
+        ],
+      },
+    );
   }
 
-  /** 用户点「接管」：显式抢占租约，再由下一次心跳让旧持有者自检停通道。 */
-  private async takeoverQqLease(): Promise<void> {
+  /** 用户点「接管」：显式抢占租约，再由下一次心跳让旧持有者自检停通道。
+   * 由 panel.ts 的 `handleToastAction("qq-lease-takeover")` 调用，语义与原
+   * showWarningMessage 的「接管」分支完全相同。 */
+  async takeoverQqLease(): Promise<void> {
     if (this.disposed || !this.qqLease) return;
     let taken = false;
     try {

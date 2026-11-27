@@ -17,6 +17,7 @@ import {
   type QqSettingsUi,
   type SessionState,
   type SessionSummaryUi,
+  type ToastAction,
   type UiDensity,
   type UiFontSize,
   type WebviewToHost,
@@ -2874,7 +2875,10 @@ export interface ToastItem {
   sticky?: boolean;
   /** M1 P0-6: inline action button (e.g. 立即压缩 on the context-warning
    * pill). Clicking sends `toastAction` with the actionId + host toastId. */
-  action?: { actionId: string; label: string };
+  action?: ToastAction;
+  /** Multiple inline buttons on one pill (e.g. 等待 / 接管 on the QQ lease
+   * conflict card). Takes precedence over the single `action` when present. */
+  actions?: ToastAction[];
   /** Decision-card notices (auto-memory candidates) list what would be written
    * before the review dialog opens; absent = plain pill. */
   preview?: { text: string; scope: "global" | "project" }[];
@@ -3281,6 +3285,7 @@ export const useChat = create<ChatStore>((set, get) => ({
             persistent,
             sticky,
             action: msg.action,
+            actions: msg.actions,
             preview: msg.preview,
           },
         ],
