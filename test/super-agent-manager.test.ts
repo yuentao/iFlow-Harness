@@ -24,6 +24,7 @@ import {
   type SuperIntegrationMode,
   type SuperReport,
   type SuperSessionUi,
+  type SuperTaskSpec,
 } from "../shared/super-agent.js";
 import type { Block } from "../shared/messages.js";
 
@@ -89,6 +90,8 @@ class FakeClient {
   blocks: ContentBlock[][] = [];
   /** Mode ids pushed to the child session — the manager must send "yolo". */
   modes: string[] = [];
+  /** 推给 `session/set_model` 的模型 id（断言超流体独立模型来源）。 */
+  setModels: string[] = [];
   /** MCP 就绪等待测试用：mcpStatus 依次返回的 discoveryState（最后一个一直复用）。 */
   mcpStatusStates: string[] = ["completed"];
   /** 事件顺序记录（"mcpStatus" / "prompt"）：断言等待发生在首轮 prompt 之前。 */
@@ -140,7 +143,8 @@ class FakeClient {
     return {};
   }
 
-  async setModel(): Promise<unknown> {
+  async setModel(_sessionId: string, modelId: string): Promise<unknown> {
+    this.setModels.push(modelId);
     return {};
   }
 
@@ -266,6 +270,8 @@ interface Harness {
   needInputs: SuperSessionUi[];
   /** 管理器写出的 warn 日志（MCP 就绪降级路径据此断言）。 */
   warns: string[];
+  /** 宿主 createClient 收到的任务级覆盖（断言 profileId/modelId 穿透）。 */
+  clientParams: Array<{ profileId?: string; modelId?: string }>;
 }
 
 function makeManager(
@@ -286,9 +292,13 @@ function makeManager(
     configureClient?: (client: FakeClient) => void;
     /** 效率开关档位（缺省 steady，任务书逐字节不变）。 */
     efficiencyMode?: "steady" | "turbo";
+    /** 超流体独立模型解析（宿主接线；缺省 = 管理器回落到 currentModel）。 */
+    spawnModel?: (spec: SuperTaskSpec) => Promise<string | null>;
   } = {},
 ): Harness {
   const clients: FakeClient[] = [];
+  /** 宿主 createClient 收到的参数（断言任务级 profileId/modelId 穿透）。 */
+  const clientParams: Array<{ profileId?: string; modelId?: string }> = [];
   const sessions: SuperSessionUi[] = [];
   const reports: { session: SuperSessionUi; report: SuperReport }[] = [];
   const transcripts: { sessionId: string; from: number; blocks: Block[] }[] = [];
@@ -305,6 +315,10 @@ function makeManager(
       client.cwd = params.cwd;
       client.allowedRoots = params.allowedRoots;
       client.includeDirectories = params.includeDirectories;
+      clientParams.push({
+        ...(params.profileId ? { profileId: params.profileId } : {}),
+        ...(params.modelId ? { modelId: params.modelId } : {}),
+      });
       options.configureClient?.(client);
       clients.push(client);
       return client as unknown as AcpClient;
@@ -329,6 +343,7 @@ function makeManager(
       transcripts.push({ sessionId, from, blocks });
     },
     currentModel: () => "test-model",
+    ...(options.spawnModel ? { spawnModel: options.spawnModel } : {}),
     currentMainSessionId: () =>
       typeof mainSessionId === "function" ? mainSessionId() : mainSessionId,
     priceFor: () => ({ input: 1, output: 2 }),
@@ -339,7 +354,18 @@ function makeManager(
     efficiencyMode: () => options.efficiencyMode ?? "steady",
     log: { info: () => {}, warn: (msg) => warns.push(msg), error: () => {} },
   });
-  return { manager, clients, sessions, reports, transcripts, needMerges, mergeResults, needInputs, warns };
+  return {
+    manager,
+    clients,
+    sessions,
+    reports,
+    transcripts,
+    needMerges,
+    mergeResults,
+    needInputs,
+    warns,
+    clientParams,
+  };
 }
 
 /**
@@ -969,6 +995,27 @@ describe("super agent · 编排", () => {
       (usage.input / 1_000_000) * 1 + (usage.output / 1_000_000) * 2,
       10,
     );
+  }, 30000);
+
+  it("子会话 set_model 用超流体独立模型；任务级 profileId/modelId 透传到工厂", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "usage", "manual", "main-1", undefined, {
+      // 宿主接线：模型来自超流体自己的解析链（而不是 currentModel）。
+      spawnModel: async () => "super-independent-model",
+    });
+    harness.manager.spawn({
+      title: "独立网关任务",
+      task: "用超流体自己的模型干活",
+      profileId: "task-prof",
+      modelId: "task-model",
+    });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    // set_model 用的是超流体独立模型，不是主会话的 "test-model"。
+    expect(harness.clients[0]?.setModels).toEqual(["super-independent-model"]);
+    expect(harness.sessions[0]?.model).toBe("super-independent-model");
+    // 任务级覆盖（单次任务临时指定）穿过了派发链路，交给宿主解析。
+    expect(harness.clientParams[0]).toEqual({ profileId: "task-prof", modelId: "task-model" });
   }, 30000);
 
   it("中断也保留已产生的用量（输入标记为非权威）", async () => {

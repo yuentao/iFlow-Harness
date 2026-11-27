@@ -39,8 +39,25 @@ import { AcpClient, type AcpClientCallbacks } from "../acp/client.js";
 import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, locateNodeExecutable } from "../acp/cli-locator.js";
 import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
-import { loadCredentials } from "../acp/auth.js";
-import { resolveCliTokensLimit, tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
+import { loadCredentials, loadProfiles } from "../acp/auth.js";
+import { readKernelApiProfiles } from "../acp/api-profiles.js";
+import {
+  readActiveEndpoint,
+  readCliSettings,
+  retireStaleOAuthCreds,
+} from "../acp/models-query.js";
+import {
+  resolveCliTokensLimit,
+  resolveSuperCliTokensLimit,
+  superTokensLimitEnv,
+  tokensLimitEnvFromSettings,
+} from "../acp/cli-tokens-limit.js";
+import {
+  resolveSuperApiSpec,
+  type SuperApiProfile,
+  type SuperApiSpec,
+  type SuperEndpointInput,
+} from "../../shared/super-profile.js";
 import {
   buildChildSessionSettingsForTrust,
   effectiveMcpServerNamesForTrust,
@@ -190,6 +207,9 @@ export function dispatchOutcome(result: SuperDispatchResult): "dispatched" | "fa
   return result.dispatched > 0 || result.duplicates > 0 ? "dispatched" : "failed";
 }
 
+/** 本工作区记录的活动 API Profile（与 `src/panel/panel.ts` 同键）。 */
+const SUPER_WORKSPACE_PROFILE_KEY = "iflow.workspaceActiveProfile";
+
 /** Narrow callback surface the host needs from the panel. No panel import. */
 export interface SuperAgentHostCallbacks {
   readonly log: { info(message: string): void; warn(message: string): void; error(message: string): void };
@@ -279,6 +299,18 @@ export class SuperAgentHost {
       : vscode.workspace.getConfiguration("iflow").get<T>(key, fallback);
   }
 
+  /**
+   * 读一个 `iflow.*` 字符串设置，**永远**返回字符串（去空白）。
+   *
+   * settings.json 是用户可手改的：`"superAgentProfile": 123` 这类脏值会被
+   * `readUserSetting<string>()` 原样返回，随后 `.trim()` 直接抛 TypeError。
+   * 非字符串一律当空串（= 跟随主链路 / 未选模型），绝不抛错。
+   */
+  private readStringSetting(key: string): string {
+    const raw = this.setting<unknown>(key, "");
+    return typeof raw === "string" ? raw.trim() : "";
+  }
+
   // --- Migrated state (整组迁移；panel 仅保留兼容访问器) -------------------
   superAgent: SuperAgentManager | null = null;
   /**
@@ -323,6 +355,15 @@ export class SuperAgentHost {
   } | null = null;
   mcpBroker: import("../acp/mcp-broker.js").McpBroker | null = null;
   mcpBrokerStarting: Promise<import("../acp/mcp-broker.js").McpBroker | null> | null = null;
+  /**
+   * 每个子会话 spawn 时按**超流体自己的模型/Profile**算出的上下文窗口。
+   *
+   * `session/set_model` 只改模型名、不重算 CLI 缓存的 tokensLimit；set_model
+   * 之后必须把同一口径的窗口推回去。这里按 client 实例记录，避免热切换那条
+   * 路径又回落到主会话 `currentApiProfile` 的窗口（那正是要消除的分叉）。
+   * WeakMap：client 被回收后自动释放，不泄漏。
+   */
+  private readonly superClientTokensLimits = new WeakMap<AcpClient, number>();
   pendingSuperMerges: Array<{ id: string; reason: string }> = [];
   superMergeRunning = false;
   readonly superScan = new SuperDirectiveScanner();
@@ -1541,6 +1582,10 @@ export class SuperAgentHost {
       ...(spec.id ? { id: spec.id } : {}),
       ...(spec.dependsOn && spec.dependsOn.length > 0 ? { dependsOn: [...spec.dependsOn] } : {}),
       ...(spec.batch !== undefined ? { batch: spec.batch } : {}),
+      // 任务级覆盖：白名单拷贝必须显式放行，否则「单次任务临时换网关/模型」
+      // 会在派发前被静默丢掉（子会话照旧用超流体指针/主链路）。
+      ...(spec.profileId ? { profileId: spec.profileId } : {}),
+      ...(spec.modelId ? { modelId: spec.modelId } : {}),
     };
     if (attachments.length > 0) next.attachments = attachments;
     return next;
@@ -1720,15 +1765,39 @@ export class SuperAgentHost {
         void this.drainSuperMerges();
       },
       currentModel: () => this.store.getState().currentModelId,
-      // 方案D：子会话 set_model 成功后同步该模型的有效上下文窗口。与主会话
-      // 同一 resolver、同一口径（user override → active profile → settings
-      // 顶层 → 内建表 → 无依据不推），绝不推兜底估算。宿主解析窗口、管理器
-      // 只负责串行 await 调用。
+      // 子会话该用的模型 —— 超流体独立模型链（任务级 modelId →
+      // `iflow.superAgentModel` → 目标 Profile 的 modelName → 主会话当前模型）。
+      // 未配置任何超流体指针时链尾就是主 store 的 currentModelId，与既有
+      // `currentModel` 取值一致，管理器据此推 `session/set_model`。
+      spawnModel: async (spec) => {
+        const plan = await this.resolveSuperSpawnPlan(
+          spec.profileId ?? null,
+          spec.modelId ?? null,
+        );
+        return plan.spec.model.modelId;
+      },
+      // 方案D：子会话 set_model 成功后同步该模型的有效上下文窗口。
+      //
+      // 已按超流体口径在 spawn 时算过窗口的 client 直接复用那份（`set_model`
+      // 只改模型名，不会让窗口变另一个口径）；其余情况按超流体 Profile 解析，
+      // **未配置超流体时**才沿用主会话 resolver（既有行为逐字节不变）。
       setTokensLimit: async (client, sessionId, modelId) => {
-        const resolved = resolveCliTokensLimit({
-          modelId,
-          overrides: parseContextWindowOverrides(this.setting<string[]>("contextWindowOverrides", [])),
-        });
+        const overrides = parseContextWindowOverrides(
+          this.setting<string[]>("contextWindowOverrides", []),
+        );
+        const stashed = this.superClientTokensLimits.get(client);
+        const superProfileName = this.readStringSetting("superAgentProfile");
+        const configured = Boolean(superProfileName || this.readStringSetting("superAgentModel"));
+        const resolved =
+          stashed !== undefined
+            ? { limit: stashed, source: undefined }
+            : configured
+              ? resolveSuperCliTokensLimit({
+                  modelId,
+                  overrides,
+                  profileName: superProfileName || null,
+                })
+              : resolveCliTokensLimit({ modelId, overrides });
         if (resolved.limit !== undefined) {
           await client.setTokensLimit(sessionId, resolved.limit);
         }
@@ -1845,6 +1914,102 @@ export class SuperAgentHost {
     return this.mcpBrokerStarting;
   }
 
+  /**
+   * 收集「超流体端点解析链」的输入 —— 与面板 `superEndpointInput`
+   * （`src/panel/panel.ts`）**同口径**：这里是子会话的真实派发路径，必须和
+   * 设置页/模型列表那条路径读到同一份事实，否则两边解析出的端点会分叉。
+   *
+   * 只负责取事实，回退顺序仍由 `shared/super-profile.ts` 的唯一实现决定：
+   *   ① task `profileId` → ② `iflow.superAgentProfile` → ③
+   *   `iflow.workspaceActiveProfile`（本工作区握手指针）→ ④ 握手调用点的
+   *   下一级（`resolveWorkspaceHandshakeCreds() ?? loadCredentials()`）→
+   *   ⑤ 内核 `currentApiProfile` → 内核顶层默认。
+   */
+  private async superEndpointInput(taskProfileId: string | null): Promise<SuperEndpointInput> {
+    const kernelProfiles = readKernelApiProfiles();
+    const legacyProfiles = await loadProfiles(this.context.secrets).catch(
+      () => ({}) as Record<string, { baseUrl: string; apiKey: string; modelName: string }>,
+    );
+    const profiles: Record<string, SuperApiProfile> = {};
+    for (const [name, creds] of Object.entries(legacyProfiles)) {
+      profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
+    }
+    // 同名 Profile 冲突时内核 `apiProfiles` 优先 —— 与握手路径
+    // `kernelProfileCredentials(name) ?? profiles[name]` 完全同序。
+    for (const [name, creds] of Object.entries(kernelProfiles)) {
+      profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
+    }
+    const cli = readCliSettings();
+    const kernelActive =
+      cli?.selectedAuthType === "openai-compatible" ? cli.currentApiProfile?.trim() : undefined;
+    const kernelProfileName =
+      kernelActive && cli?.apiProfiles?.[kernelActive] ? kernelActive : null;
+    return {
+      taskProfileId,
+      superProfileName: this.readStringSetting("superAgentProfile") || null,
+      mainProfileName:
+        this.context.workspaceState.get<string>(SUPER_WORKSPACE_PROFILE_KEY)?.trim() || null,
+      kernelProfileName,
+      profiles,
+      // 第 4 级 = 子会话握手调用点的下一级（`resolveWorkspaceHandshakeCreds()
+      // ?? loadCredentials()`）：它**先于**内核 currentApiProfile 命中，与今天
+      // 子会话的凭据解析同序。
+      activeCredentials:
+        (await this.resolveWorkspaceHandshakeCreds().catch(() => null)) ??
+        (await loadCredentials(this.context.secrets).catch(() => null)),
+      // ⑤b 内核顶层默认：`readActiveEndpoint()` 已把「具名 Profile → 顶层
+      // baseUrl/apiKey」逐字段合并完，直接作为最后一档喂进去。
+      kernelDefaultEndpoint: readActiveEndpoint(),
+    };
+  }
+
+  /**
+   * 解析「这个子会话该用的端点 + 模型」—— 单真值层 `shared/super-profile.ts`。
+   *
+   * `configured` 表示用户配置了任何超流体专属指针（任务级 Profile 覆盖 /
+   * `iflow.superAgentProfile` / `iflow.superAgentModel`）。调用方据此决定：
+   * 未配置时**完全沿用今天的行为**（同一个握手凭据、同一个主会话模型、
+   * 同一套主会话窗口解析），保证老用户零配置零变化。
+   */
+  private async resolveSuperSpawnPlan(
+    taskProfileId: string | null,
+    taskModelId: string | null,
+  ): Promise<{ spec: SuperApiSpec; configured: boolean }> {
+    const input = await this.superEndpointInput(taskProfileId);
+    const superModelId = this.readStringSetting("superAgentModel");
+    const configured = Boolean(
+      (typeof taskProfileId === "string" && taskProfileId.trim()) ||
+        input.superProfileName ||
+        superModelId,
+    );
+    // 模型链第③级「目标 Profile 自带的 modelName」只在用户**点名了 Profile**
+    // （任务级覆盖或超流体 Profile）时参与；未点名时显式传 `null`，让模型链
+    // 落到主 store 的 `currentModelId` —— 这正是今天子会话的取值，否则完全
+    // 未配置的用户会在主会话换过模型后被子会话静默换回 Profile 默认模型。
+    const namedPointer = Boolean(
+      (typeof taskProfileId === "string" && taskProfileId.trim()) || input.superProfileName,
+    );
+    // 零配置硬约束：今天子会话的凭据链只有 `resolveWorkspaceHandshakeCreds()
+    // ?? loadCredentials()`（第 4 级已装这两档），**从不**回退内核
+    // currentApiProfile / 顶层默认。未配置超流体时把⑤两小步置空，端点因此与
+    // 今天逐字段相同；配置了超流体才启用完整的①→⑤链。
+    const endpointInput: SuperEndpointInput = configured
+      ? input
+      : { ...input, kernelProfileName: null, kernelDefaultEndpoint: null };
+    const spec = resolveSuperApiSpec({
+      ...endpointInput,
+      taskModelId: taskModelId ?? null,
+      superModelId: superModelId || null,
+      profileModelName: namedPointer ? undefined : null,
+      mainModelId: this.store.getState().currentModelId,
+      // live 列表不在 spawn 时查询：拿不到就传 `undefined` —— **不构成下架
+      // 证据**，`resolveSuperModel` 因此绝不会降级（也绝不回退 CLI 内建的
+      // `_meta.models.availableModels`）。
+      liveModelIds: undefined,
+    });
+    return { spec, configured };
+  }
+
   /** Spawn a CLI client for a child session (own process, own worktree). */
 
   async createSuperClient(params: {
@@ -1853,6 +2018,10 @@ export class SuperAgentHost {
     includeDirectories: string[];
     label: string;
     callbacks: AcpClientCallbacks;
+    /** 任务级 API Profile 覆盖（`SuperTaskSpec.profileId`）。 */
+    profileId?: string;
+    /** 任务级模型覆盖（`SuperTaskSpec.modelId`）。 */
+    modelId?: string;
   }): Promise<AcpClient> {
     const entry = this.resolveEntry();
     const nodePathConfigured = this.setting<string>("nodePath", "");
@@ -1898,12 +2067,36 @@ export class SuperAgentHost {
     // e.g. in tests) must not SILENTLY lose the limit — that is exactly the
     // "window falls back to the CLI's 65k" symptom. The degraded branch uses
     // the SAME resolver, only with fewer key facts (the store's model).
-    const childTokensLimitEnv =
-      this.deps.tokensLimitEnv?.() ??
-      tokensLimitEnvFromSettings({
-        modelId: this.store.getState().currentModelId,
-        overrides: parseContextWindowOverrides(this.setting<string[]>("contextWindowOverrides", [])),
-      });
+    // 超流体独立凭据 / 模型的单真值解析。`configured === false` = 用户没有
+    // 配置任何超流体专属指针，下面所有分支都刻意与今天逐字节一致。
+    const spawnPlan = await this.resolveSuperSpawnPlan(
+      params.profileId ?? null,
+      params.modelId ?? null,
+    );
+    const contextWindowOverrides = parseContextWindowOverrides(
+      this.setting<string[]>("contextWindowOverrides", []),
+    );
+    const childTokensLimitEnv = spawnPlan.configured
+      ? superTokensLimitEnv({
+          // tier 1/4 按**子会话自己的模型**查表；tier 2 按超流体端点命中的
+          // 具名 Profile 取 tokensLimit —— 绝不读主会话 `currentApiProfile`。
+          modelId: spawnPlan.spec.model.modelId,
+          overrides: contextWindowOverrides,
+          profileName: spawnPlan.spec.endpoint?.profileName ?? null,
+        })
+      : (this.deps.tokensLimitEnv?.() ??
+        tokensLimitEnvFromSettings({
+          modelId: this.store.getState().currentModelId,
+          overrides: contextWindowOverrides,
+        }));
+    // spawn 时算出的窗口在 `set_model` 之后按同一口径推进子 CLI 缓存的
+    // tokensLimit（见 setTokensLimit 回调）；不记录会让两条路径各算各的。
+    const spawnTokensLimit = (() => {
+      const raw = childTokensLimitEnv.IFLOW_TOKENS_LIMIT;
+      if (raw === undefined) return undefined;
+      const parsed = Number(raw);
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+    })();
     const systemPromptFile = await this.materializeSystemPrompt("child");
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
@@ -1936,14 +2129,27 @@ export class SuperAgentHost {
       },
       params.callbacks,
     );
+    if (spawnTokensLimit !== undefined) {
+      this.superClientTokensLimits.set(client, spawnTokensLimit);
+    }
+    // 防御纵深：即使 vendor 的 `IFLOW_OAUTH_STRIP=0` 回滚，已过期的 OAuth
+    // 缓存也不会让**每个**子会话在 authenticate 上白卡 60s。该函数只做可逆
+    // 改名（`.bak`），token 未过期 / 文件缺失 / 内容不可解析时原样不动。
+    const archivedOAuth = retireStaleOAuthCreds();
+    if (archivedOAuth) {
+      this.log.info(`super agent: 归档过期的 OAuth 凭据缓存 → ${archivedOAuth}`);
+    }
     await client.connect();
-    const creds =
-      (await this.resolveWorkspaceHandshakeCreds().catch(() => null)) ??
-      (await loadCredentials(this.context.secrets).catch(() => null));
-    if (creds) {
+    // 端点 = 超流体独立解析结果（未配置超流体时与主会话握手结果同源）。
+    const endpoint = spawnPlan.spec.endpoint;
+    if (endpoint) {
       await client.authenticate({
         methodId: "openai-compatible",
-        methodInfo: { apiKey: creds.apiKey, baseUrl: creds.baseUrl, modelName: creds.modelName },
+        methodInfo: {
+          apiKey: endpoint.apiKey,
+          baseUrl: endpoint.baseUrl,
+          modelName: endpoint.modelName ?? "",
+        },
       });
     }
     return client;
