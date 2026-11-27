@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronsDownUp,
   FileCode,
   FileText,
   Folder as FolderIcon,
@@ -15,7 +16,6 @@ import {
   Image as ImageIcon,
   ListOrdered,
   Loader2,
-  Minimize2,
   Paperclip,
   Radio,
   SendHorizontal,
@@ -2595,14 +2595,18 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             />
             {/* 「压缩上下文」：主动发起一轮 `/compress`（与上下文警告 pill 的
                 「立即压缩」共用宿主入口）。压缩中显示 spinner 并禁用；无 user
-                块、会话未就绪、正在生成 / 正在停止时一律禁用。 */}
+                块、会话未就绪、正在生成 / 正在停止时一律禁用。
+                图标用 ChevronsDownUp（两枚相向的折角 = 折叠收拢）：旧的
+                Minimize2 是「缩到角落」的斜箭头，读起来像最小化窗口，和
+                「压缩上下文」完全对不上号；折角相向一眼就是「把内容折短」，
+                且与左侧回形针、右侧纸飞机都不撞形。 */}
             <Button
               variant="canvas"
               icon={
                 compressPending ? (
                   <Loader2 className={`${ICON_INLINE} animate-spin`} />
                 ) : (
-                  <Minimize2 className={ICON_INLINE} />
+                  <ChevronsDownUp className={ICON_INLINE} />
                 )
               }
               aria-label={t("压缩上下文")}
