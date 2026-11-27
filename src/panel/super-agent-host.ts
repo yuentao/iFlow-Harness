@@ -150,6 +150,25 @@ const SUPER_ARCHIVED_REPORT_MAX_CHARS = 480;
  */
 const SUPER_SPAWN_LIVE_MODELS_TIMEOUT_MS = 4_000;
 
+/**
+ * `createSuperClient` 与 `spawnModel` 之间复用同一份 spawn 计划的暂存时长
+ * （毫秒）。
+ *
+ * 管理器对**一次**派发会先后调用这两个回调（先建 client，再问模型），原来
+ * 各自把端点/模型/live 校验解析一遍 —— 同一次派发解析两次。这里把
+ * `createSuperClient` 的结果按任务覆盖键暂存、`spawnModel` 消费即删，只留
+ * 一个很短的 TTL 兜住「消费没发生」（例如 client 起来后立刻被中断）的残留。
+ * 键含 profileId/modelId，不同 Profile 的派发互不命中（不串台）。
+ */
+const SUPER_SPAWN_PLAN_REUSE_MS = 60_000;
+
+/** `resolveSuperSpawnPlan` 的解析结果 —— 一次派发只解析一份。 */
+interface SuperSpawnPlan {
+  spec: SuperApiSpec;
+  configured: boolean;
+  modelConfigured: boolean;
+}
+
 /** 路径比较键（Windows 文件系统大小写不敏感）。Mirrors the panel helper (阶段 6). */
 function normalizePathKey(target: string): string {
   const resolved = path.resolve(target);
@@ -265,6 +284,19 @@ export interface SuperAgentHostCallbacks {
    * must be visible here before the window reloads. Optional — a host built
    * without the panel (tests) falls back to the raw configuration. */
   readUserSetting?: <T>(key: string, fallback: T) => T;
+  /**
+   * 子会话派发前 live `/models` 取证的**共享**查询通道（可选）。
+   *
+   * 面板注入自己的实现 —— 与设置页**同一份** 30s TTL 缓存（key = 归一化
+   * models URL，逐次比对 apiKey），所以「设置页刚查过」或「同批并行派发」
+   * 都只产生一次真实请求。宿主拿不到面板的私有状态（也不该 import
+   * panel），因此走回调；未接线（单测里直接 new 的 host）时回退到无缓存
+   * 直连（见 {@link SuperAgentHost.querySpawnLiveModelIds}）。
+   */
+  querySuperModelIds?: (creds: {
+    baseUrl: string;
+    apiKey: string;
+  }) => Promise<{ ids: string[]; error?: string }>;
   chunkText(content: unknown): string;
   sendPrompt(
     text: string,
@@ -380,6 +412,13 @@ export class SuperAgentHost {
    * 只弹一次 toast；日志不受影响，每次仍记。
    */
   private readonly superSpawnDegradeNotices = new Set<string>();
+  /**
+   * `createSuperClient` 解析出的 spawn 计划，按「任务级 profileId/modelId」键
+   * 暂存给紧随其后的 `spawnModel` 复用（同一次派发只解析一次端点/模型/live
+   * 校验）。消费即删；未被消费的条目按 {@link SUPER_SPAWN_PLAN_REUSE_MS}
+   * 在后续写入时清理 —— 键含 Profile，不同 Profile 的派发不会命中彼此的条目。
+   */
+  private readonly superSpawnPlans = new Map<string, { plan: SuperSpawnPlan; at: number }>();
   pendingSuperMerges: Array<{ id: string; reason: string }> = [];
   superMergeRunning = false;
   readonly superScan = new SuperDirectiveScanner();
@@ -1785,13 +1824,7 @@ export class SuperAgentHost {
       // `iflow.superAgentModel` → 目标 Profile 的 modelName → 主会话当前模型）。
       // 未配置任何超流体指针时链尾就是主 store 的 currentModelId，与既有
       // `currentModel` 取值一致，管理器据此推 `session/set_model`。
-      spawnModel: async (spec) => {
-        const plan = await this.resolveSuperSpawnPlan(
-          spec.profileId ?? null,
-          spec.modelId ?? null,
-        );
-        return plan.spec.model.modelId;
-      },
+      spawnModel: async (spec) => this.resolveSpawnModelForSpec(spec),
       // 方案D：子会话 set_model 成功后同步该模型的有效上下文窗口。
       //
       // 已按超流体口径在 spawn 时算过窗口的 client 直接复用那份（`set_model`
@@ -2002,7 +2035,7 @@ export class SuperAgentHost {
   private async resolveSuperSpawnPlan(
     taskProfileId: string | null,
     taskModelId: string | null,
-  ): Promise<{ spec: SuperApiSpec; configured: boolean; modelConfigured: boolean }> {
+  ): Promise<SuperSpawnPlan> {
     const input = await this.superEndpointInput(taskProfileId);
     const superModelId = this.readStringSetting("superAgentModel");
     const configured = Boolean(
@@ -2055,43 +2088,107 @@ export class SuperAgentHost {
     return { spec, configured, modelConfigured };
   }
 
+  /** spawn 计划的暂存键：任务级 Profile / 模型覆盖的组合（同一次派发两端一致）。 */
+  private spawnPlanKey(profileId: string | null, modelId: string | null): string {
+    return `${profileId ?? ""}\u0000${modelId ?? ""}`;
+  }
+
+  /**
+   * 暂存 `createSuperClient` 解析出的计划，供紧随其后的 `spawnModel` 复用。
+   *
+   * 顺带清理过期条目：只有「client 起来但模型回调没被调用」才会留下残条
+   * （例如派发在 set_model 之前被中断），TTL 到期后下一次写入即删除。
+   */
+  private rememberSpawnPlan(profileId: string | null, modelId: string | null, plan: SuperSpawnPlan): void {
+    const now = Date.now();
+    for (const [key, entry] of this.superSpawnPlans) {
+      if (now - entry.at >= SUPER_SPAWN_PLAN_REUSE_MS) this.superSpawnPlans.delete(key);
+    }
+    this.superSpawnPlans.set(this.spawnPlanKey(profileId, modelId), { plan, at: now });
+  }
+
+  /** 消费暂存的计划（消费即删）：未命中或已过期返回 undefined，由调用方重解。 */
+  private takeSpawnPlan(profileId: string | null, modelId: string | null): SuperSpawnPlan | undefined {
+    const key = this.spawnPlanKey(profileId, modelId);
+    const entry = this.superSpawnPlans.get(key);
+    if (!entry) return undefined;
+    this.superSpawnPlans.delete(key);
+    return Date.now() - entry.at < SUPER_SPAWN_PLAN_REUSE_MS ? entry.plan : undefined;
+  }
+
+  /**
+   * `spawnModel` 回调的实现：**优先复用** `createSuperClient` 刚解析出的同一
+   * 份计划（同一次派发只解析一次端点/模型/live 校验）；只有在没有暂存条目
+   * （例如宿主被单测直接驱动、或条目已被另一路消费）时才重新解析。
+   */
+  private async resolveSpawnModelForSpec(spec: SuperTaskSpec): Promise<string | null> {
+    const profileId = spec.profileId ?? null;
+    const modelId = spec.modelId ?? null;
+    const plan = this.takeSpawnPlan(profileId, modelId) ?? (await this.resolveSuperSpawnPlan(profileId, modelId));
+    return plan.spec.model.modelId;
+  }
+
   /**
    * 派发前的一次 live `/models` 查询（`GET {baseUrl}/models`）。
    *
-   * 纪律：
-   *   • **唯一数据源仍是实时查询**（`queryModelIds`，原生 `node:http(s)` 直连，
-   *     绝不用被代理 patch 过的全局 `fetch`；**绝不**回退 CLI 内建的
-   *     `_meta.models.availableModels`）。
+   * 数据源是**实时查询**（原生 `node:http(s)` 直连，绝不用被代理 patch 过的
+   * 全局 `fetch`；**绝不**回退 CLI 内建的 `_meta.models.availableModels`）：
+   *   • 面板注入了 `querySuperModelIds` 时走那条通道 —— 与设置页**同一份**
+   *     30s TTL 缓存（key = 归一化 models URL + apiKey 比对），命中即零请求；
+   *     同批并行派发因此最多产生一次真实请求。
+   *   • 未接线（单测里直接 new 的 host）时回退到无缓存直连（`queryModelIds`）。
+   *
+   * 纪律（两条通道一致）：
    *   • **空列表 / 超时 / 连接失败 / 非 2xx / 解析失败一律按「无证据」处理** →
    *     返回 `undefined`：不降级、不抛错、派发照常进行（AGENTS.md 陷阱 #25）。
-   *   • **短超时**：这是派发路径上的额外一跳，宁可放弃证据也不能卡住冷启动。
-   *
-   * 已知临时性：这里**没有缓存**。设置页那份 30s 缓存（`superProfileModelsCache`
-   * 与 `querySuperProfileModelIds`）是 `ChatPanel` 的私有状态，宿主拿不到；要
-   * 共享就得让面板把它注入宿主（改 `panel.ts`，属另一次改动）。当前代价是每次
-   * 派发（`createSuperClient` 与 `spawnModel` 各复核一次）各发一次短请求。
+   *   • **短超时**：这是派发路径上的额外一跳，宁可放弃证据也不能卡住冷启动；
+   *     共享通道（设置页那条默认 10s）同样受 4s 上限约束，被放弃的请求仍在
+   *     后台填充面板缓存，下一次派发直接命中。
    */
   private async querySpawnLiveModelIds(endpoint: {
     baseUrl: string;
     apiKey: string;
     modelName?: string | null;
   }): Promise<string[] | undefined> {
+    const work: Promise<string[] | undefined> = this.deps.querySuperModelIds
+      ? this.deps
+          .querySuperModelIds({ baseUrl: endpoint.baseUrl, apiKey: endpoint.apiKey })
+          .then((result) => {
+            if (result.error) {
+              this.log.info(
+                `超流体派发前查询模型列表失败（按无证据处理，照常派发）：${result.error}`,
+              );
+              return undefined;
+            }
+            return result.ids;
+          })
+      : queryModelIds(
+          {
+            baseUrl: endpoint.baseUrl,
+            apiKey: endpoint.apiKey,
+            modelName: endpoint.modelName ?? null,
+          },
+          SUPER_SPAWN_LIVE_MODELS_TIMEOUT_MS,
+        );
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const ids = await queryModelIds(
-        {
-          baseUrl: endpoint.baseUrl,
-          apiKey: endpoint.apiKey,
-          modelName: endpoint.modelName ?? null,
-        },
-        SUPER_SPAWN_LIVE_MODELS_TIMEOUT_MS,
-      );
+      const raced = await Promise.race<string[] | undefined>([
+        // 被放弃（超时）的请求之后仍可能 reject：这里先挂 catch，避免成为
+        // 未处理的 rejection。
+        work.catch((error: unknown) => {
+          this.log.info(
+            `超流体派发前查询模型列表失败（按无证据处理，照常派发）：${errorMessage(error)}`,
+          );
+          return undefined;
+        }),
+        new Promise<string[] | undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), SUPER_SPAWN_LIVE_MODELS_TIMEOUT_MS);
+        }),
+      ]);
       // 200 但没有任何模型 = 端点异常，同样不构成「模型下架」的证据。
-      return ids.length > 0 ? ids : undefined;
-    } catch (error) {
-      this.log.info(
-        `超流体派发前查询模型列表失败（按无证据处理，照常派发）：${errorMessage(error)}`,
-      );
-      return undefined;
+      return raced && raced.length > 0 ? raced : undefined;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -2219,6 +2316,18 @@ export class SuperAgentHost {
       // 铺在 options.env 之下，这里用 undefined 显式抹掉该键（Node 的 spawn
       // 会跳过值为 undefined 的环境变量），即便用户 shell 里设了也不继承。
       IFLOW_SUPER_TOOL: undefined,
+      // 凭据只走 ACP `authenticate`（见下方 client.authenticate）。vendor CLI
+      // 另有一条 **env 凭据通道**：`IFLOW_SELECTED_AUTH_TYPE` + `IFLOW_API_KEY`
+      // / `IFLOW_BASE_URL` / `IFLOW_MODEL_NAME`（实测存在，且能越过
+      // `session/new` 的 authRequired 门禁）。子会话绝不能继承用户 shell 里
+      // 残留的这组变量 —— 否则端点/密钥会被环境悄悄改写，子会话派生的任何
+      // shell 也能读到。用 undefined 显式抹掉（Node 的 spawn 跳过值为
+      // undefined 的环境变量），`IFLOW_MODEL` 是同一通道的旧别名，一并抹除。
+      IFLOW_API_KEY: undefined,
+      IFLOW_BASE_URL: undefined,
+      IFLOW_MODEL_NAME: undefined,
+      IFLOW_MODEL: undefined,
+      IFLOW_SELECTED_AUTH_TYPE: undefined,
       // Same effective context window as the main session: without this the
       // child falls back to the CLI's own 128000/65000 default and compresses
       // its baseline immediately on start.
@@ -2262,6 +2371,9 @@ export class SuperAgentHost {
         },
       });
     }
+    // 同一次派发的后续 `spawnModel` 复用这份计划（消费即删）：端点/模型/live
+    // 校验只解析一遍；键含 profileId/modelId，不同 Profile 的派发互不命中。
+    this.rememberSpawnPlan(params.profileId ?? null, params.modelId ?? null, spawnPlan);
     return client;
   }
 

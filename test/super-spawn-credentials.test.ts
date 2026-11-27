@@ -605,6 +605,8 @@ describe("子会话独立凭据与模型注入", () => {
         configured: boolean;
         modelConfigured: boolean;
       }>;
+      /** 管理器 `spawnModel` 回调的实现（先消费 createSuperClient 暂存的计划）。 */
+      resolveSpawnModelForSpec: (spec: SuperTaskSpec) => Promise<string | null>;
     };
 
     /** `superHost` 是面板的私有懒加载访问器；运行时可直接取用（只读调用）。 */
@@ -790,5 +792,103 @@ describe("子会话独立凭据与模型注入", () => {
         vi.restoreAllMocks();
       }
     }, 30000);
+
+    // ── 共享设置页缓存（30s TTL / normalizeModelsUrl key / apiKey 比对）──────
+    //
+    // 可证伪：把 panel.ts `buildSuperHost` 里的 `querySuperModelIds` 注入删掉
+    // （宿主回退到无缓存直连），第二条派发会再发一次请求 → 下面第 1 条变红。
+    it("同一 Profile 连续两次派发：/models 只发 1 次（与设置页共享同一份缓存）", async () => {
+      const server = await startModelsServer((res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ data: [{ id: "profile-model-x" }] }));
+      });
+      try {
+        writeLiveServerSettings(server.baseUrl, "profile-model-x");
+        await spawnAndCollect("cache-first");
+        expect(server.requestCount()).toBe(1);
+        // 第二次派发同一 Profile：命中面板那份 30s 缓存 → 零额外请求。
+        await spawnAndCollect("cache-second");
+        expect(server.requestCount()).toBe(1);
+      } finally {
+        await server.close();
+        vi.restoreAllMocks();
+      }
+    }, 40000);
+
+    it("同一次派发只解析一次计划：createSuperClient 的解析结果被 spawnModel 复用", async () => {
+      const server = await startModelsServer((res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ data: [{ id: "profile-model-x" }] }));
+      });
+      try {
+        writeLiveServerSettings(server.baseUrl, "profile-model-x");
+        const host = hostPlan() as HostInternals;
+        const spy = vi.spyOn(host, "resolveSuperSpawnPlan");
+        await spawnAndCollect("plan-once");
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(server.requestCount()).toBe(1);
+        // 管理器紧随其后的 spawnModel：消费 createSuperClient 暂存的同一份计划，
+        // 不再解析（否则这里会变成 2 次，server 也可能再发一次请求）。
+        await expect(
+          host.resolveSpawnModelForSpec({ title: "同一派发", task: "复用计划" }),
+        ).resolves.toBe("profile-model-x");
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(server.requestCount()).toBe(1);
+      } finally {
+        await server.close();
+        vi.restoreAllMocks();
+      }
+    }, 40000);
+
+    it("不同 Profile 的派发不串台：各自请求一次，互不复用计划", async () => {
+      const serverA = await startModelsServer((res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ data: [{ id: "a-model" }] }));
+      });
+      const serverB = await startModelsServer((res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ data: [{ id: "b-model" }] }));
+      });
+      try {
+        writeSettings({
+          selectedAuthType: "openai-compatible",
+          apiProfiles: {
+            main: { ...MAIN },
+            superA: { baseUrl: serverA.baseUrl, apiKey: "sk-super-a", modelName: "a-profile-model" },
+            superB: { baseUrl: serverB.baseUrl, apiKey: "sk-super-b", modelName: "b-profile-model" },
+          },
+        });
+        setWorkspaceProfile("main");
+        setConfigOverrides({
+          nodePath: process.execPath,
+          superAgentProfile: "superA",
+          superAgentModel: "a-model",
+          contextWindowOverrides: [],
+        });
+        const host = hostPlan() as HostInternals;
+        const spy = vi.spyOn(host, "resolveSuperSpawnPlan");
+        // A 派发：解析到 A 的端点（请求 A 一次）。
+        await spawnAndCollect("isolation-a");
+        expect(serverA.requestCount()).toBe(1);
+        expect(serverB.requestCount()).toBe(0);
+        // B 的任务级覆盖：暂存键不同 → 不得复用 A 的计划，重新解析并打 B 端点。
+        await expect(
+          host.resolveSpawnModelForSpec({
+            title: "B 任务",
+            task: "走 B 端点",
+            profileId: "superB",
+            modelId: "b-model",
+          }),
+        ).resolves.toBe("b-model");
+        // 解析了两次（A 一次、B 一次）；B 的查询只打 B 的端点。
+        expect(spy).toHaveBeenCalledTimes(2);
+        expect(serverB.requestCount()).toBe(1);
+        expect(serverA.requestCount()).toBe(1);
+      } finally {
+        await serverA.close();
+        await serverB.close();
+        vi.restoreAllMocks();
+      }
+    }, 40000);
   });
 });
