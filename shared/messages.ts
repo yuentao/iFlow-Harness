@@ -2013,6 +2013,41 @@ export interface HostSettingsUi {
   /** Default workspace directory for Superfluid dispatch when no folder is open
    * (`iflow.superAgent.defaultWorkspace`). Empty = built-in `~/.iflow/workspace`. */
   superAgentDefaultWorkspace: string;
+  /** 超流体链路选中的 API Profile 名（`iflow.superAgentProfile`）。空串 =
+   * 跟随主会话的活动 Profile（方案文档第 3.1 节回退链的第 3 级）。
+   *
+   * 可选：宿主 `hostSettings` 始终带上它，但 webview 侧的默认设置对象
+   * （`webview/src/store.ts` 的 DEFAULT_HOST_SETTINGS）不必跟着改 —— 消费方
+   * 按 `?? ""` 处理即可。 */
+  superAgentProfile?: string;
+  /** 超流体链路选中的模型 id（`iflow.superAgentModel`）。空串 = 用目标 Profile
+   * 自带的 `modelName`（方案文档第 3.2 节回退链的第 3 级）。 */
+  superAgentModel?: string;
+}
+
+/**
+ * 「按 Profile 拉取模型列表」的载荷（host → webview）。
+ *
+ * 为什么单开一条通道而不是把 models 塞进 `AuthProfileUi`：`profiles` 是
+ * **全部** Profile 的静态元数据快照，每次刷新鉴权态都会重发；模型列表却
+ * 是「某一个端点的实时查询结果」，按需拉取、会过期、会失败，还带自己的
+ * 错误态。塞进 `AuthProfileUi` 会让每次鉴权态刷新都变成 N 个端点的并发
+ * HTTP 往返，并让失败语义混进一份本该只是元数据的快照里。
+ *
+ * `models` 的唯一数据源是实时 `GET {baseUrl}/models`；CLI 上报的
+ * `_meta.models.availableModels` 是硬编码目录，不可作为回退。端点不可达时
+ * `models` 为空数组并带 `error`，绝不退回内建目录。
+ */
+export interface SuperProfileModelsUi {
+  /** 本次查询的 Profile 名；空串 = 跟随主会话的活动 Profile。 */
+  profileName: string;
+  /** 该 Profile 端点实时返回的模型列表；端点不可达时为空数组。 */
+  models: ModelInfoUi[];
+  /** 当前选中的模型 id（`iflow.superAgentModel`，留空则用 Profile 的
+   * `modelName`）。它会被补到列表头，避免下拉框空白。 */
+  currentModelId: string;
+  /** 失败原因（找不到该 Profile / 端点不可达）；成功时缺省。 */
+  error?: string;
 }
 
 /**
@@ -2429,6 +2464,10 @@ export type HostToWebview =
    * the background aurora light-spot opacity with it. */
   | { type: "theme"; kind: "dark" | "light"; auroraIntensity?: number }
   | ({ type: "hostSettings" } & HostSettingsUi)
+  /** 「超流体」设置页的模型下拉数据源：宿主按**指定 Profile** 的 baseUrl
+   * 实时查询 `GET {baseUrl}/models` 后推送。端点不可达时 models 为空数组
+   * 并带 error（绝不回退内建目录）。 */
+  | ({ type: "superProfileModels" } & SuperProfileModelsUi)
   /** 上下文窗口覆写的当前值 + 当前模型的内建建议值（设置页结构化编辑器
    * 的数据源）。宿主在 webview 就绪时推一次、每次写入成功后推一次。 */
   | ({ type: "contextWindowOverrides" } & ContextWindowOverridesUi)
@@ -2786,6 +2825,10 @@ export type WebviewToHost =
   /** Re-query `GET {baseUrl}/models` when the model dropdown opens — the list
    * captured at session start goes stale (new gateway models appear). */
   | { type: "refreshModels" }
+  /** 「超流体」设置页的模型下拉：按 Profile 实时拉取 `GET {baseUrl}/models`。
+   * `profileName` 缺省 = 当前选中的超流体 Profile（`iflow.superAgentProfile`，
+   * 留空则跟随主会话的活动 Profile）。回复：`superProfileModels`。 */
+  | { type: "refreshSuperProfileModels"; profileName?: string }
   /** Settings-page hot restart: tear the CLI child down and spawn a fresh
    * one so startup-only changes (language / mcpServers written
    * to settings.json) take effect without reloading VSCode. */
