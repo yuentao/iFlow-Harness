@@ -1825,6 +1825,10 @@ export class SuperAgentHost {
       // 未配置任何超流体指针时链尾就是主 store 的 currentModelId，与既有
       // `currentModel` 取值一致，管理器据此推 `session/set_model`。
       spawnModel: async (spec) => this.resolveSpawnModelForSpec(spec),
+      // 本子会话实际命中的具名 API Profile 名（看板展示「跑在哪个 API 配置」）。
+      // 与 spawnModel 复用同一份 spawn 计划；未配置超流体时返回 null ——
+      // profileId 保持 undefined，看板与既有行为逐字节一致。
+      spawnProfile: async (spec) => this.resolveSpawnProfileForSpec(spec),
       // 方案D：子会话 set_model 成功后同步该模型的有效上下文窗口。
       //
       // 已按超流体口径在 spawn 时算过窗口的 client 直接复用那份（`set_model`
@@ -2117,6 +2121,17 @@ export class SuperAgentHost {
   }
 
   /**
+   * 只读暂存的计划（**不删除**）：供紧随其前的 `spawnProfile` 复用同一份
+   * 端点/模型解析结果，随后 `spawnModel` 仍用 {@link takeSpawnPlan} 消费并
+   * 清理。过期条目与消费路径同口径视为未命中。
+   */
+  private peekSpawnPlan(profileId: string | null, modelId: string | null): SuperSpawnPlan | undefined {
+    const entry = this.superSpawnPlans.get(this.spawnPlanKey(profileId, modelId));
+    if (!entry) return undefined;
+    return Date.now() - entry.at < SUPER_SPAWN_PLAN_REUSE_MS ? entry.plan : undefined;
+  }
+
+  /**
    * `spawnModel` 回调的实现：**优先复用** `createSuperClient` 刚解析出的同一
    * 份计划（同一次派发只解析一次端点/模型/live 校验）；只有在没有暂存条目
    * （例如宿主被单测直接驱动、或条目已被另一路消费）时才重新解析。
@@ -2126,6 +2141,29 @@ export class SuperAgentHost {
     const modelId = spec.modelId ?? null;
     const plan = this.takeSpawnPlan(profileId, modelId) ?? (await this.resolveSuperSpawnPlan(profileId, modelId));
     return plan.spec.model.modelId;
+  }
+
+  /**
+   * `spawnProfile` 回调的实现：本子会话**实际命中的具名 API Profile 名**。
+   *
+   * 与 {@link resolveSpawnModelForSpec} 复用同一份 spawn 计划：管理器先调它
+   * （{@link peekSpawnPlan} 只读），随后 spawnModel 才消费并清理。未命中时
+   * 重解后**重新暂存**一次 —— 紧随其后的 spawnModel 因此仍命中同一份计划，
+   * 同一次派发不会把端点 / live 校验解析两遍。
+   *
+   * 只有 `configured`（任务级 Profile / `iflow.superAgentProfile` /
+   * `iflow.superAgentModel` 任一被配置）才返回值：零配置老用户即便命中的是
+   * 主链路的具名 Profile，也保持 `profileId` 未定义，看板零变化。
+   */
+  private async resolveSpawnProfileForSpec(spec: SuperTaskSpec): Promise<string | null> {
+    const profileId = spec.profileId ?? null;
+    const modelId = spec.modelId ?? null;
+    const stashed = this.peekSpawnPlan(profileId, modelId);
+    const plan = stashed ?? (await this.resolveSuperSpawnPlan(profileId, modelId));
+    if (!stashed) this.rememberSpawnPlan(profileId, modelId, plan);
+    if (!plan.configured) return null;
+    const name = plan.spec.endpoint?.profileName;
+    return typeof name === "string" && name.trim() ? name.trim() : null;
   }
 
   /**

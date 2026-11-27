@@ -819,6 +819,21 @@ export interface SuperAgentDeps {
    */
   spawnModel?: (spec: SuperTaskSpec) => Promise<string | null>;
   /**
+   * 本子会话**实际命中的 API Profile 名**（超流体端点链的解析结果）：
+   *   ① 任务级 `profileId` → ② `iflow.superAgentProfile` → ③ 本工作区握手指针
+   *   → ④ 握手凭据 / SecretStorage → ⑤ 内核 `currentApiProfile` / 顶层默认。
+   *
+   * 宿主提供了它就回填到 `SuperSessionUi.profileId`（看板展示「这个子会话跑在
+   * 哪个 API 配置上」，与 {@link spawnModel} 成对）。返回 `null` = 未配置
+   * 超流体（零配置老用户）/ 解析不出具名 Profile —— 此时 `profileId` 保持
+   * `undefined`，看板与既有行为逐字节一致。可选：未接线（单测 / 旧 fixture）
+   * 时同样不填。
+   *
+   * 管理器**先**调它、**后**调 {@link spawnModel}：宿主实现按 spawn 计划键
+   * peek（不消费），随后 spawnModel 消费该计划，同一次派发仍只解析一次。
+   */
+  spawnProfile?: (spec: SuperTaskSpec) => Promise<string | null>;
+  /**
    * 方案D：子会话 `session/set_model` 成功后，把用户显式覆盖的上下文窗口同步
    * 进子 CLI 缓存的 tokensLimit（set_model 只改名、不重算）。宿主按 modelId
    * 解析窗口（只推 source === "user"）并串行 await 推送，保证子会话首轮 prompt
@@ -2955,6 +2970,19 @@ export class SuperAgentManager {
         }
       }
 
+      // Profile 名 = 超流体端点链实际命中的那个具名 Profile（宿主提供）。
+      // **先于** spawnModel 取：宿主按 spawn 计划键 peek（不消费），紧随其后的
+      // spawnModel 再消费同一份计划 —— 同一次派发仍只解析一次端点/模型/live。
+      // 解析失败 / 未接线 / 零配置（解析不出具名 Profile）→ null，
+      // `profileId` 保持 undefined（看板不显示，零配置零行为变化）。
+      const profileName = this.deps.spawnProfile
+        ? await this.deps.spawnProfile(spec).catch((error: unknown) => {
+            this.deps.log.warn(
+              `超流体解析 Profile 名失败（看板不显示 Profile，派发不受影响）：${errorMessage(error)}`,
+            );
+            return null;
+          })
+        : null;
       // 模型 = 超流体独立链的解析结果（宿主提供）；宿主没接线（单测/旧
       // fixture）时回落到主会话当前模型 —— 接线前后行为一致。
       model = this.deps.spawnModel
@@ -2974,6 +3002,7 @@ export class SuperAgentManager {
         }
         this.patchModel(id, model);
       }
+      if (profileName) this.patchProfileId(id, profileName);
 
       const taskPrompt = buildTaskPrompt(
         current.title,
@@ -4695,6 +4724,19 @@ export class SuperAgentManager {
     const session = this.sessions.get(id);
     if (!session || session.model === model) return;
     this.sessions.set(id, { ...session, model, updatedAt: Date.now() });
+    this.emit();
+  }
+
+  /**
+   * 记录子会话实际命中的 API Profile 名（看板展示超流体跑在哪个 API 配置上，
+   * 与 {@link patchModel} 成对）。只由派发路径在解析出**具名** Profile 时调用；
+   * 零配置 / 解析不出具名 Profile 时根本不会走到这里，`profileId` 保持
+   * `undefined` —— 与既有看板逐字节一致。
+   */
+  private patchProfileId(id: string, profileId: string): void {
+    const session = this.sessions.get(id);
+    if (!session || session.profileId === profileId) return;
+    this.sessions.set(id, { ...session, profileId, updatedAt: Date.now() });
     this.emit();
   }
 
