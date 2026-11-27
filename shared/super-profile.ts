@@ -20,8 +20,16 @@
  *     1. 任务级 profileId              —— 单次任务临时覆盖
  *     2. `iflow.superAgentProfile`      —— 超流体链路独立指针
  *     3. `iflow.workspaceActiveProfile` —— 主链路活动指针
- *     4. 内核 `currentApiProfile`       —— workspaceState 缺失时再回退
- *     5. 活动凭据 / 内核默认            —— 以上 Profile 都不可用时
+ *     4. 活动凭据（`loadCredentials`）  —— workspaceState 缺失时先回退到这里
+ *     5. 内核 `currentApiProfile` / 内核默认 —— 以上都不可用时再回退
+ *
+ *   **④⑤ 的顺序必须与子会话实际握手路径一致**：`createSuperClient` 解析凭据走
+ *   `resolveWorkspaceHandshakeCreds() ?? loadCredentials(secrets)`（见
+ *   `src/panel/super-agent-host.ts:1936-1944`），`resolveSuperProfileTarget` 再补
+ *   `?? readActiveEndpoint()`（`src/panel/panel.ts:9697-9698`）。也就是说工作区
+ *   指针之后**先**回退到 SecretStorage 活动凭据槽（`loadCredentials`），**最后**
+ *   才轮到内核 `currentApiProfile` / 内核默认。把内核指针提到活动凭据之前会让
+ *   「未配置超流体」时解析出与今天不同的端点。
  *
  *   模型
  *     1. 任务级 modelId
@@ -42,6 +50,23 @@
  *    `cliModelId ?? live[0].id` 同款兜底，只是这里多了「链上候选」一层）。
  *  - 四级候选全空（连主会话当前模型都没有）时**不编造模型**：返回
  *    `modelId: null`，由调用方决定不推 `set_model`。
+ *
+ * ── 宿主接线契约（**接线前必读**，否则「未配置超流体时行为与今天一致」这条
+ * 硬要求会被打破）────────────────────────────────────────────────────────
+ *
+ *  1. **Profile 库的合并口径**：同名 Profile 冲突时**内核 `apiProfiles` 优先**，
+ *     SecretStorage `iflow.profiles` 次之 —— 与握手路径
+ *     `resolveWorkspaceHandshakeCreds`（`src/panel/panel.ts:7199`）的
+ *     `kernelProfileCredentials(name) ?? profiles[name]` 完全同序。宿主若反过来
+ *     合并，第 3 级会解析出**与握手路径不同的凭据**。
+ *  2. **第 4/5 级装什么**：第 4 级装握手路径调用点的下一级（SecretStorage
+ *     `iflow.openai-compatible` 活动凭据槽，即 `loadCredentials(secrets)`）；
+ *     第 5 级才是内核 `currentApiProfile` / 内核顶层默认（`readActiveEndpoint()`
+ *     的后半段），是最后兜底 —— 只在工作区指针与活动凭据都不可用时生效。顺序
+ *     颠倒会与握手路径分叉。
+ *  3. **模型的「跟随主链路」语义**：见 {@link resolveSuperApiSpec} 的
+ *     `profileModelName: null` 说明 —— 想让子会话沿用**主会话当前模型**（今天
+ *     的实际取值）而不是主链路 Profile 的默认模型名，必须显式传 `null`。
  */
 
 /** 一组 API 连接参数（Profile 本体：baseUrl / apiKey / modelName）。 */
@@ -60,10 +85,10 @@ export type SuperEndpointSource =
   | "super-profile"
   /** `iflow.workspaceActiveProfile`（主链路活动指针）。 */
   | "main-profile"
-  /** 内核 `currentApiProfile`。 */
-  | "kernel-profile"
-  /** 活动凭据（`iflow.openai-compatible`）/ 内核顶层默认。 */
-  | "active-credentials";
+  /** 活动凭据（`iflow.openai-compatible`，握手路径的下一级 `loadCredentials`）。 */
+  | "active-credentials"
+  /** 内核 `currentApiProfile` / 内核默认（最后兜底）。 */
+  | "kernel-profile";
 
 /** {@link resolveSuperEndpoint} 的入参（全部由宿主喂进来，本模块不读盘）。 */
 export interface SuperEndpointInput {
@@ -76,11 +101,27 @@ export interface SuperEndpointInput {
   superProfileName?: string | null;
   /** 主链路活动指针 `iflow.workspaceActiveProfile`（workspaceState）。 */
   mainProfileName?: string | null;
-  /** 内核 `currentApiProfile`（workspaceState 缺失时再回退）。 */
+  /** 内核 `currentApiProfile` / 内核默认（最后兜底：工作区指针与活动凭据都不可用时）。 */
   kernelProfileName?: string | null;
-  /** 具名 Profile 库（宿主把 SecretStorage 与内核 `apiProfiles` 合并后的结果）。 */
+  /**
+   * 具名 Profile 库（宿主把 SecretStorage 与内核 `apiProfiles` 合并后的结果）。
+   *
+   * **合并口径由宿主决定，且必须与握手路径一致**：同名 Profile 冲突时
+   * **内核 `apiProfiles` 优先**、SecretStorage `iflow.profiles` 次之 —— 与
+   * `resolveWorkspaceHandshakeCreds` 的 `kernelProfileCredentials(name) ??
+   * profiles[name]` 同序。宿主若反过来合并，第 3 级会解析出与握手路径不同的
+   * 凭据，「未配置超流体时行为与今天一致」当场破掉。
+   */
   profiles?: Readonly<Record<string, SuperApiProfile>> | null;
-  /** 活动凭据（`iflow.openai-compatible`）；内核顶层设置也由宿主归入此处。 */
+  /**
+   * 活动凭据（握手路径工作区指针之后的下一级：SecretStorage
+   * `iflow.openai-compatible`，即 `loadCredentials(secrets)`）。
+   *
+   * 宿主应按子会话握手调用点同口径装入该槽（`src/panel/super-agent-host.ts`
+   * 的 `resolveWorkspaceHandshakeCreds() ?? loadCredentials(secrets)`）。它会
+   * **先于**内核 `currentApiProfile` 命中 —— 顺序与今天子会话的凭据解析一致，
+   * 否则「未配置超流体时行为与今天不同」。
+   */
   activeCredentials?: SuperApiProfile | null;
 }
 
@@ -97,39 +138,91 @@ export interface SuperEndpoint {
 }
 
 /**
+ * 把任意来源的 modelName 归一成「非空字符串或 null」。
+ *
+ * 为什么要 typeof 守卫：`baseUrl` / `apiKey` 都被守卫了，唯独 `modelName`
+ * 没有 —— 而宿主的 Profile 库可能来自**未经字段过滤**的原始 JSON
+ * （`readActiveEndpoint` 就不过滤：一个只有 `baseUrl` 没有 `apiKey` 的残缺
+ * profile 仍会贡献字段）。一个 `modelName: 123` 会让 `modelName.trim()`
+ * 直接抛 TypeError，把一次「解析配置」变成一次崩溃。
+ */
+function normalizeModelName(raw: unknown): string | null {
+  return typeof raw === "string" ? raw.trim() || null : null;
+}
+
+/**
+ * 把 live `/models` 的返回归一成「非空、去重、trim 过的模型 id 列表」。
+ *
+ * 两点纪律：
+ *  - **空白 id 不算一个「存在的模型」**：live 列表里混进空串时，它既不该
+ *    命中目标模型，也不该成为兜底模型（推一个空模型 id 等于没推）。
+ *  - **归一后为空 = 查询失败 / 空列表** ⇒ 不构成下架证据（与 `[]` 同义）。
+ */
+function normalizeLiveModelIds(raw: readonly string[] | null | undefined): string[] {
+  if (!raw) return [];
+  const out: string[] = [];
+  for (const id of raw) {
+    if (typeof id !== "string") continue;
+    const trimmed = id.trim();
+    if (!trimmed || out.includes(trimmed)) continue;
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
  * 按优先级链解析超流体子会话该用的端点 / 凭据来源。
  *
  * 返回 null = 一份可用凭据都没有（宿主据此不推 `authenticate`，沿用 CLI 自身
  * 的启动配置）。**未配置超流体链路时必然落回主链路**（第 3 / 4 级），因此老
  * 用户零配置零行为变化。
+ *
+ * 与握手路径的对应关系（供接线核对）：
+ *  - 第 3 级与 `resolveWorkspaceHandshakeCreds`（`src/panel/panel.ts:7199`）
+ *    **同源**：同一个 workspaceState 键（`iflow.workspaceActiveProfile`）、
+ *    同一种「内核 `apiProfiles` 优先」的 Profile 查找口径。
+ *  - 第 4 级 = 该函数**调用点**的下一级 `loadCredentials(secrets)`：子会话实际
+ *    凭据链是 `resolveWorkspaceHandshakeCreds() ?? loadCredentials()`（见
+ *    `src/panel/super-agent-host.ts:1936-1944`）。
+ *  - 第 5 级 = 内核 `currentApiProfile` / 内核默认，对应面板
+ *    `resolveSuperProfileTarget` 的 `?? readActiveEndpoint()` 兜底，最后生效。
+ *    把这一级提到第 4 级之前会与上面的实际链分叉。
  */
 export function resolveSuperEndpoint(input: SuperEndpointInput): SuperEndpoint | null {
   const profiles = input.profiles ?? {};
-  // 链上的具名 Profile 指针（顺序即优先级）。
+  // ①②③ 链上的具名 Profile 指针（顺序即优先级）。内核 currentApiProfile 不在
+  // 这里 —— 它是最后一档，排在「活动凭据」之后（与子会话握手路径一致）。
   const named: Array<{ name: string | null | undefined; source: SuperEndpointSource }> = [
     { name: input.taskProfileId, source: "task-profile" },
     { name: input.superProfileName, source: "super-profile" },
     { name: input.mainProfileName, source: "main-profile" },
-    { name: input.kernelProfileName, source: "kernel-profile" },
   ];
-  for (const candidate of named) {
-    const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
-    if (!name) continue;
-    const profile = profiles[name];
+  const fromProfile = (
+    name: string | null | undefined,
+    source: SuperEndpointSource,
+  ): SuperEndpoint | null => {
+    const trimmed = typeof name === "string" ? name.trim() : "";
+    if (!trimmed) return null;
+    const profile = profiles[trimmed];
     // 指针指向的 Profile 不存在 / 不完整 → 继续往下回退（见文件头取舍说明）。
-    if (!profile) continue;
+    if (!profile) return null;
     const baseUrl = typeof profile.baseUrl === "string" ? profile.baseUrl.trim() : "";
     const apiKey = typeof profile.apiKey === "string" ? profile.apiKey.trim() : "";
-    if (!baseUrl || !apiKey) continue;
+    if (!baseUrl || !apiKey) return null;
     return {
       baseUrl,
       apiKey,
-      modelName: profile.modelName?.trim() || null,
-      source: candidate.source,
-      profileName: name,
+      modelName: normalizeModelName(profile.modelName),
+      source,
+      profileName: trimmed,
     };
+  };
+  for (const candidate of named) {
+    const hit = fromProfile(candidate.name, candidate.source);
+    if (hit) return hit;
   }
-  // 链上没有一个可用的具名 Profile → 落回活动凭据 / 内核默认。
+  // 第 4 级：活动凭据（握手路径工作区指针之后的下一级 `loadCredentials`）。
+  // 必须先于内核 currentApiProfile —— 今天子会话的凭据就取自这一槽。
   const active = input.activeCredentials;
   if (active) {
     const baseUrl = typeof active.baseUrl === "string" ? active.baseUrl.trim() : "";
@@ -138,13 +231,14 @@ export function resolveSuperEndpoint(input: SuperEndpointInput): SuperEndpoint |
       return {
         baseUrl,
         apiKey,
-        modelName: active.modelName?.trim() || null,
+        modelName: normalizeModelName(active.modelName),
         source: "active-credentials",
         profileName: null,
       };
     }
   }
-  return null;
+  // 第 5 级：内核 currentApiProfile / 内核默认（最后兜底）。
+  return fromProfile(input.kernelProfileName, "kernel-profile");
 }
 
 /** 模型解析命中了链上的哪一级（由高到低），或降级兜底。 */
@@ -166,7 +260,12 @@ export interface SuperModelInput {
   taskModelId?: string | null;
   /** 超流体链路独立模型 `iflow.superAgentModel`。 */
   superModelId?: string | null;
-  /** 目标 Profile 自带的模型名（一般是解析出的端点的 modelName）。 */
+  /**
+   * 目标 Profile 自带的模型名（一般是解析出的端点的 modelName）。
+   *
+   * `null` = **明确没有**这个候选（模型链直接落到主 store 的 currentModelId）；
+   * `undefined` = 没给（由 {@link resolveSuperApiSpec} 按端点补齐）。
+   */
   profileModelName?: string | null;
   /** 主会话当前模型（store 的 `currentModelId`）。 */
   mainModelId?: string | null;
@@ -176,6 +275,8 @@ export interface SuperModelInput {
    * - `null` / `undefined`：**查询失败** —— 不构成下架证据，照常推送；
    * - `[]`：**空列表** —— 同样不构成下架证据（端点挂了 ≠ 模型没了）；
    * - 非空列表：只有「列表里确实没有目标模型」才**能证明下架**。
+   *
+   * 列表里的空白 id 会被剔除；剔除后为空视同「空列表」（不构成下架证据）。
    */
   liveModelIds?: readonly string[] | null;
 }
@@ -218,9 +319,9 @@ export function resolveSuperModel(input: SuperModelInput): SuperModelResolution 
   // 链上一个候选都没有 → 不编造模型（返回 null，由调用方不推 set_model）。
   if (!desired) return { modelId: null, source: null, degraded: false };
 
-  const live = input.liveModelIds;
-  // 空列表 / 查询失败 —— **不构成下架证据**，照常推送目标模型。
-  if (!live || live.length === 0) {
+  const live = normalizeLiveModelIds(input.liveModelIds);
+  // 空列表 / 查询失败 / 只含空白项 —— **不构成下架证据**，照常推送目标模型。
+  if (live.length === 0) {
     return { modelId: desired.id, source: desired.source, degraded: false };
   }
   if (live.includes(desired.id)) {
@@ -268,12 +369,29 @@ export interface SuperApiSpecInput extends SuperEndpointInput, SuperModelInput {
  * 一次性解析出「这个子会话该用的端点 + 模型」。
  *
  * 与 {@link resolveSuperEndpoint} / {@link resolveSuperModel} 的唯一差别：
- * 没显式给 `profileModelName` 时，自动取**解析出的端点**自带的模型名 —— 两条
- * 链就是这样咬合的（端点来自某 Profile，模型默认就跟着那个 Profile 走）。
+ * **没显式给** `profileModelName` 时，自动取**解析出的端点**自带的模型名 ——
+ * 两条链就是这样咬合的（端点来自某 Profile，模型默认就跟着那个 Profile 走）。
+ *
+ * `profileModelName: null` 与「没给」是**两件事**，别混：
+ *  - **没给（`undefined`）或给了空串** → 用端点自带的 modelName 补模型链
+ *    （§3.2 第 3 级，空串按「没给」处理，不当成退出）。
+ *  - **显式给 `null`** → **不要** Profile 自带的模型名，模型链直接落到第 4 级
+ *    （主 store 的 `currentModelId`）。
+ *
+ * 为什么需要这个「退出口」：今天子会话的模型取自主会话 store 的
+ * `currentModelId`（`deps.currentModel()`），而 §3.2 第 3 级取的是**主链路
+ * Profile 的默认 `modelName`**。用户在主会话里换过模型之后，两者不再相等 ——
+ * 若不显式传 `null`，超流体在**完全未配置**的情况下也会静默把模型换回 Profile
+ * 的默认值，直接违反方案文档 §4.1「老用户零配置零行为变化」。
  */
 export function resolveSuperApiSpec(input: SuperApiSpecInput): SuperApiSpec {
   const endpoint = resolveSuperEndpoint(input);
-  const profileModelName = input.profileModelName?.trim() || endpoint?.modelName || null;
+  // 「显式 null」= 明确不要 Profile 自带的模型名（模型链落到主 store 的
+  // currentModelId）；「没给 / 空串」= 用端点自带的 modelName 补模型链（默认）。
+  const profileModelName =
+    input.profileModelName === null
+      ? null
+      : (normalizeModelName(input.profileModelName) ?? endpoint?.modelName ?? null);
   const model = resolveSuperModel({
     taskModelId: input.taskModelId,
     superModelId: input.superModelId,
