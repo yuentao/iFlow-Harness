@@ -2135,11 +2135,14 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     // 根集合增减（多根工作区增删文件夹）：缓存作废 + 投影刷新。当前会话的
-    // CLI 上下文不动（它已经建立，改根需要新建会话）。
+    // CLI 上下文不动（它已经建立，改根需要新建会话）。QQ 通道例外：它的现场
+    // 是按旧根建立的（配置快照 / 启动门控 / 存储目录），必须重新解析并重建，
+    // 否则要用户手动重新保存一次设置才生效。
     this.context.subscriptions.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
         this.fileSearchCache = null;
         this.publishWorkspaceRoots();
+        this.handleQqWorkspaceFoldersChanged();
       }),
     );
     // 启动即发布一次投影：多根工作区在首个会话建立前也能看到根选择器。
@@ -8158,6 +8161,10 @@ export class ChatPanel implements vscode.Disposable {
 
   qqWorkspaceRoots(...args: Parameters<QqHost["qqWorkspaceRoots"]>): ReturnType<QqHost["qqWorkspaceRoots"]> {
     return this.qqHost.qqWorkspaceRoots(...args);
+  }
+
+  handleQqWorkspaceFoldersChanged(...args: Parameters<QqHost["handleWorkspaceFoldersChanged"]>): ReturnType<QqHost["handleWorkspaceFoldersChanged"]> {
+    return this.qqHost.handleWorkspaceFoldersChanged(...args);
   }
 
 

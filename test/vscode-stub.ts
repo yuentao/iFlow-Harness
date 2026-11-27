@@ -191,13 +191,47 @@ export function setConfigOverrides(values: Record<string, unknown>): void {
   Object.assign(configOverrides, { nextStepSuggestions: false }, values);
 }
 
+/** 工作区文件夹变化事件的监听器（测试可手动触发）。 */
+const workspaceFolderListeners: Array<() => void> = [];
+
+/** Test hook: 替换 `workspace.workspaceFolders`（`undefined` = 无文件夹窗口）。 */
+export function setWorkspaceFolders(
+  folders: Array<{ uri: { fsPath: string } }> | undefined,
+): void {
+  workspace.workspaceFolders = folders as unknown[] | undefined;
+}
+
+/**
+ * Test hook: 手动触发 `onDidChangeWorkspaceFolders`（真实 VSCode 在多根工作区
+ * 增删文件夹 / 空窗口打开文件夹时触发）。单个监听器抛错不影响其它监听器 ——
+ * 用例断言的是副作用，不是监听器异常。
+ */
+export function fireWorkspaceFoldersChanged(): void {
+  for (const listener of [...workspaceFolderListeners]) {
+    try {
+      listener();
+    } catch {
+      // 已销毁面板的监听器可能抛错：测试只关心当前用例的接线。
+    }
+  }
+}
+
+/** Test hook: 清空文件夹监听器与根集合（用例之间互不串味）。 */
+export function resetWorkspaceFoldersStub(): void {
+  workspaceFolderListeners.length = 0;
+  workspace.workspaceFolders = undefined;
+}
+
 export const workspace = {
   workspaceFolders: undefined as unknown[] | undefined,
   getConfiguration: (_section?: string) => new WorkspaceConfiguration(configOverrides),
   createFileSystemWatcher: (_pattern: unknown) => new FileSystemWatcher(_pattern),
   onDidChangeConfiguration: () => new Disposable(),
   // 多仓库协作：根集合变化监听 + @ 文件搜索（默认空结果）。
-  onDidChangeWorkspaceFolders: (_listener: unknown) => new Disposable(),
+  onDidChangeWorkspaceFolders: (listener: unknown) => {
+    workspaceFolderListeners.push(listener as () => void);
+    return new Disposable();
+  },
   findFiles: async (_include?: unknown, _exclude?: unknown, _maxResults?: number) => [] as Uri[],
   asRelativePath: (p: string | { fsPath: string }) =>
     (typeof p === "string" ? p : p.fsPath).replace(/\\/g, "/"),

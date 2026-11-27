@@ -84,6 +84,61 @@ export function shouldRestartOnPatch(
 }
 
 // ---------------------------------------------------------------------------
+// 工作区根集合变化
+// ---------------------------------------------------------------------------
+
+/**
+ * 路径比较键：trim、去掉尾部路径分隔符，Windows 上再小写。
+ *
+ * VSCode 回传的根路径在大小写 / 尾分隔符上并不稳定（用户从最近列表打开时
+ * 盘符大小写会变），直接逐字比较会把「同一个根」判成变化并触发一次无谓的
+ * 通道重建 —— 那会打断正在跑的 QQ 任务。
+ */
+function qqRootKey(root: string): string {
+  const trimmed = root.trim().replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? trimmed.toLowerCase() : trimmed;
+}
+
+/**
+ * 工作区根集合是否真的变了（**顺序敏感**）。
+ *
+ * 顺序必须参与比较：`roots[0]` 决定 CLI 进程 cwd 与默认任务目录，删掉第一个
+ * 根会让剩余根本身不变、但语义已经改变。
+ */
+export function qqWorkspaceRootsChanged(
+  previous: readonly string[] | null | undefined,
+  next: readonly string[] | null | undefined,
+): boolean {
+  const before = previous ?? [];
+  const after = next ?? [];
+  if (before.length !== after.length) return true;
+  return before.some((root, index) => qqRootKey(root) !== qqRootKey(after[index] ?? ""));
+}
+
+/**
+ * 工作区根集合变化后的处置。
+ *
+ * QQ 通道的现场在启动时固定了一批与根相关的东西（配置快照、启动门控用的
+ * activeRoot、任务 / 待审核存储目录），根一变就必须重新解析并重建，否则表现
+ * 为「换工作区后 QQ 不生效，必须手动重新保存一次配置」：
+ *  - `noop`：根没变。什么都不做（重建会打断在跑的 QQ 任务）；
+ *  - `restart`：通道正在跑 → 释放旧现场后按新根重建（开关在新工作区里被关掉
+ *    时，重建即「只停不起」）；
+ *  - `start`：没有现场 → 按新工作区重新读设置，能起就起（空窗口激活时启动
+ *    可能被工作区门控拦下，打开文件夹后正是这一次补起）。
+ */
+export type QqWorkspaceChangeAction = "noop" | "start" | "restart";
+
+export function planQqWorkspaceChange(input: {
+  previousRoots: readonly string[] | null | undefined;
+  nextRoots: readonly string[] | null | undefined;
+  running: boolean;
+}): QqWorkspaceChangeAction {
+  if (!qqWorkspaceRootsChanged(input.previousRoots, input.nextRoots)) return "noop";
+  return input.running ? "restart" : "start";
+}
+
+// ---------------------------------------------------------------------------
 // 子会话终态
 // ---------------------------------------------------------------------------
 

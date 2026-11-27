@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { QqConfig } from "../src/qq/config.js";
-import { isTerminalSuperStatus, shouldRestartOnPatch } from "../src/qq/wiring.js";
+import {
+  isTerminalSuperStatus,
+  planQqWorkspaceChange,
+  qqWorkspaceRootsChanged,
+  shouldRestartOnPatch,
+} from "../src/qq/wiring.js";
 
 /** 一份完整配置（只用于 shouldRestartOnPatch 的比较基准）。 */
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
@@ -86,5 +91,60 @@ describe("shouldRestartOnPatch", () => {
     expect(shouldRestartOnPatch(undefined, { allowedUsers: [] })).toBe(false);
     expect(shouldRestartOnPatch(undefined, {})).toBe(false);
     expect(shouldRestartOnPatch(makeConfig(), null)).toBe(false);
+  });
+});
+
+describe("工作区根集合变化", () => {
+  it("根集合逐项相同 → false（大小写 / 尾分隔符归一）", () => {
+    expect(qqWorkspaceRootsChanged(["J:\\git\\a"], ["j:\\git\\a"])).toBe(false);
+    expect(qqWorkspaceRootsChanged(["J:\\git\\a\\"], ["J:\\git\\a"])).toBe(false);
+    expect(qqWorkspaceRootsChanged([], [])).toBe(false);
+    expect(qqWorkspaceRootsChanged(undefined, [])).toBe(false);
+    expect(qqWorkspaceRootsChanged(null, [])).toBe(false);
+  });
+
+  it("增删 / 换根 → true", () => {
+    expect(qqWorkspaceRootsChanged([], ["J:\\git\\a"])).toBe(true);
+    expect(qqWorkspaceRootsChanged(["J:\\git\\a"], [])).toBe(true);
+    expect(qqWorkspaceRootsChanged(["J:\\git\\a"], ["J:\\git\\b"])).toBe(true);
+    expect(
+      qqWorkspaceRootsChanged(["J:\\git\\a"], ["J:\\git\\a", "J:\\git\\b"]),
+    ).toBe(true);
+  });
+
+  it("顺序变化也算变化（roots[0] 决定 cwd）", () => {
+    expect(
+      qqWorkspaceRootsChanged(["J:\\git\\a", "J:\\git\\b"], ["J:\\git\\b", "J:\\git\\a"]),
+    ).toBe(true);
+  });
+
+  it("根没变 → noop（不打断在跑的通道）", () => {
+    expect(
+      planQqWorkspaceChange({
+        previousRoots: ["J:\\git\\a"],
+        nextRoots: ["J:\\git\\a"],
+        running: true,
+      }),
+    ).toBe("noop");
+  });
+
+  it("有现场 → restart（旧连接先释放，再按新根重建）", () => {
+    expect(
+      planQqWorkspaceChange({
+        previousRoots: ["J:\\git\\a"],
+        nextRoots: ["J:\\git\\b"],
+        running: true,
+      }),
+    ).toBe("restart");
+  });
+
+  it("没有现场 → start（空窗口打开文件夹后按新工作区补起）", () => {
+    expect(
+      planQqWorkspaceChange({
+        previousRoots: [],
+        nextRoots: ["J:\\git\\b"],
+        running: false,
+      }),
+    ).toBe("start");
   });
 });

@@ -62,6 +62,7 @@ import {
 } from "../qq/config.js";
 import {
   isTerminalSuperStatus as isQqTerminalSuperStatus,
+  planQqWorkspaceChange,
   QQ_SETTLE_POLL_MS,
   shouldRestartOnPatch,
 } from "../qq/wiring.js";
@@ -390,7 +391,11 @@ export interface QqRuntime {
 
 
 export class QqHost {
-  constructor(private readonly deps: QqHostCallbacks) {}
+  constructor(private readonly deps: QqHostCallbacks) {
+    // 工作区根变化判定的基线：面板（激活）时刻的根集合。必须在事件到达**之前**
+    // 捕获 —— 否则事件里读到的前后根相同，真实切换会被误判成 noop。
+    this.qqWorkspaceRootsSeen = this.qqWorkspaceRoots();
+  }
 
 
   // --- QQ state (整组迁移；panel 仅保留兼容访问器) -------------------------
@@ -571,6 +576,15 @@ export class QqHost {
    * 一份陈旧通道装回 `this.qq`。
    */
   qqGeneration = 0;
+  /**
+   * 上一次见到的**工作区根集合**（顺序敏感，`roots[0]` 决定 CLI cwd）。
+   *
+   * 用途：工作区文件夹增删（多根工作区 / 空窗口打开了文件夹）时，判断根集合
+   * 是否真的变化，只在真的变化时重解析配置并重建通道（见
+   * {@link QqHost.handleWorkspaceFoldersChanged}）。构造期用激活时点的根集合
+   * 初始化 —— 基线早于事件才能识别出「删掉第一个根」这类变化。
+   */
+  qqWorkspaceRootsSeen: readonly string[] = [];
 
 
   // --- Panel proxies -------------------------------------------------------
@@ -1223,6 +1237,10 @@ export class QqHost {
     // promise 直接还给我们，重启就成了空转。
     const inFlight = this.qqStarting;
     if (inFlight) await inFlight.catch(() => undefined);
+    // 扫码绑定路径可能在建通道（不走 qqStarting）：同样要等它落定，否则
+    // stopQq 推进代次后那个建到一半的现场会自行拆掉，最终一条通道都没有。
+    const channel = this.qqChannelStarting;
+    if (channel) await channel.catch(() => undefined);
     await this.stopQq();
     await this.startQqIfEnabled();
   }
@@ -1315,6 +1333,49 @@ export class QqHost {
       });
     }, QQ_SETTINGS_RESTART_DEBOUNCE_MS);
     this.qqRestartTimer.unref?.();
+  }
+
+  /**
+   * 工作区根集合变化（多根工作区增删文件夹 / 空窗口打开了文件夹）→ 按新根
+   * **重新解析配置并重建** QQ 通道。
+   *
+   * 为什么必须重建：通道现场在启动时把一批与根相关的东西固定了下来 ——
+   * 配置快照（`iflow.qq.workspace` 的归一值、启动门控用的 activeRoot）、任务
+   * 存储目录（`context.storageUri`）与待审核用户存储根。旧实现只作废文件缓存
+   * 与根投影，QQ 通道继续沿用激活时的现场，用户看到的就是「换了工作区必须
+   * 重新保存一次配置（触发一次重启）才生效」。
+   *
+   * 处置由 {@link planQqWorkspaceChange} 判定：
+   *  - 根没变 → 不重建（重启会打断正在跑的 QQ 任务）；
+   *  - 有现场 → {@link scheduleQqRestart}（stopQq 释放旧 adapter / socket /
+   *    定时器，再用新根启动；新工作区把开关关掉时重建即「只停不起」）；
+   *  - 没现场 → {@link startQqIfEnabled}（空窗口激活时启动可能被工作区门控
+   *    拦下，打开文件夹后正是这次补起）。
+   *
+   * 懒建的存储根同步作废：`storageUri` 随工作区身份变化，不重置会让新工作区
+   * 继续读写旧目录下的待审核记录。
+   */
+  handleWorkspaceFoldersChanged(): void {
+    if (this.disposed) return;
+    const next = this.qqWorkspaceRoots();
+    // 「在飞的启动」也按有现场处理：它正按旧根建通道，只调用 startQqIfEnabled
+    // 会直接复用那份旧启动，切换就丢了。重建会先等它落定再把现场拆掉。
+    const starting = this.qqStarting !== null || this.qqChannelStarting !== null;
+    const action = planQqWorkspaceChange({
+      previousRoots: this.qqWorkspaceRootsSeen,
+      nextRoots: next,
+      running: this.qq !== undefined || starting,
+    });
+    this.qqWorkspaceRootsSeen = next;
+    if (action === "noop") return;
+    this.qqPendingUsers = null;
+    if (action === "restart") {
+      // 新工作区是一次全新的现场：健康重启预算也重置（不能沿用旧通道的计数）。
+      this.qqHealthRestarts = 0;
+      this.scheduleQqRestart();
+      return;
+    }
+    void this.startQqIfEnabled();
   }
 
   // --- QQ 入口校验工具 -------------------------------------------------------
