@@ -2016,12 +2016,13 @@ export interface HostSettingsUi {
   /** 超流体链路选中的 API Profile 名（`iflow.superAgentProfile`）。空串 =
    * 跟随主会话的活动 Profile（方案文档第 3.1 节回退链的第 3 级）。
    *
-   * 可选：宿主 `hostSettings` 始终带上它，但 webview 侧的默认设置对象
-   * （`webview/src/store.ts` 的 DEFAULT_HOST_SETTINGS）不必跟着改 —— 消费方
-   * 按 `?? ""` 处理即可。 */
+   * 可选字段只是为了让 webview 侧的默认设置对象（`webview/src/store.ts`
+   * 的 DEFAULT_HOST_SETTINGS）不必同步 —— 宿主 `hostSettings` 回推的**永远
+   * 是字符串**（脏值按空串处理），消费方按 `?? ""` 兜底即可。 */
   superAgentProfile?: string;
   /** 超流体链路选中的模型 id（`iflow.superAgentModel`）。空串 = 用目标 Profile
-   * 自带的 `modelName`（方案文档第 3.2 节回退链的第 3 级）。 */
+   * 自带的 `modelName`（方案文档第 3.2 节回退链的第 3 级）。宿主回推的
+   * 永远是字符串（脏值按空串处理）。 */
   superAgentModel?: string;
 }
 
@@ -2036,12 +2037,18 @@ export interface HostSettingsUi {
  *
  * `models` 的唯一数据源是实时 `GET {baseUrl}/models`；CLI 上报的
  * `_meta.models.availableModels` 是硬编码目录，不可作为回退。端点不可达时
- * `models` 为空数组并带 `error`，绝不退回内建目录。
+ * 绝不退回内建目录：`error` 带真实原因，`models` 最多只含当前选中的那个
+ * 模型（补头，避免下拉框空白）。
  */
 export interface SuperProfileModelsUi {
-  /** 本次查询的 Profile 名；空串 = 跟随主会话的活动 Profile。 */
+  /** 本次**实际查询**的 Profile 名。宿主回推的是解析后的结果，不是请求
+   * 里那个指针：跟随主链路（`iflow.superAgentProfile` 留空）时这里是主会话
+   * 当前的活动 Profile 名；只有「连活动 Profile 名都解析不出来」时才是空串。
+   * 消费方不要拿它反推「是否跟随主链路」。 */
   profileName: string;
-  /** 该 Profile 端点实时返回的模型列表；端点不可达时为空数组。 */
+  /** 该 Profile 端点实时返回的模型列表。失败（`error` 有值）时最多只含
+   * 当前选中的那个模型 —— **绝不**含端点没确认过的其它模型（不回退内建
+   * 目录）。消费方以 `error` 为准判断成败，别拿列表长度当成功标志。 */
   models: ModelInfoUi[];
   /** 当前选中的模型 id（`iflow.superAgentModel`，留空则用 Profile 的
    * `modelName`）。它会被补到列表头，避免下拉框空白。 */
@@ -2465,8 +2472,8 @@ export type HostToWebview =
   | { type: "theme"; kind: "dark" | "light"; auroraIntensity?: number }
   | ({ type: "hostSettings" } & HostSettingsUi)
   /** 「超流体」设置页的模型下拉数据源：宿主按**指定 Profile** 的 baseUrl
-   * 实时查询 `GET {baseUrl}/models` 后推送。端点不可达时 models 为空数组
-   * 并带 error（绝不回退内建目录）。 */
+   * 实时查询 `GET {baseUrl}/models` 后推送。端点不可达时带 error（真实原因），
+   * models 最多只含当前选中的模型 —— 绝不回退内建目录。 */
   | ({ type: "superProfileModels" } & SuperProfileModelsUi)
   /** 上下文窗口覆写的当前值 + 当前模型的内建建议值（设置页结构化编辑器
    * 的数据源）。宿主在 webview 就绪时推一次、每次写入成功后推一次。 */

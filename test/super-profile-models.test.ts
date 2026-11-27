@@ -89,17 +89,26 @@ type PanelInternals = {
     creds: Credentials,
   ) => Promise<{ ids: string[]; error?: string }>;
   buildSuperProfileModels: (profileName?: string) => Promise<SuperProfileModelsUi>;
+  pushSuperProfileModels: (profileName?: unknown) => Promise<void>;
+  clearSuperProfileModelsCache: () => void;
+  resolveSuperProfileTarget: (wanted: unknown) => Promise<unknown>;
   store: { sendToast: (...args: unknown[]) => number };
 };
 
-/** 写入内核 `settings.json`（`apiProfiles` 是面板 API 配置的唯一权威）。 */
-function writeKernelSettings(home: string, profiles: Record<string, Credentials>): void {
+/** 写入内核 `settings.json`（`apiProfiles` 是面板 API 配置的唯一权威）。
+ *  `currentApiProfile` = 主链路当前的活动 Profile（空串 = 没选）。 */
+function writeKernelSettings(
+  home: string,
+  profiles: Record<string, Credentials>,
+  currentApiProfile = "",
+): void {
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(
     path.join(home, "settings.json"),
     JSON.stringify(
       {
         selectedAuthType: "openai-compatible",
+        ...(currentApiProfile ? { currentApiProfile } : {}),
         apiProfiles: profiles,
       },
       null,
@@ -307,7 +316,7 @@ describe("超流体链路的独立 API 配置与模型（协议与数据通道�
     // 失败必须带真实原因（而不是静默空列表）。
     expect(payload!.error).toBeTruthy();
     // 列表里最多只有「当前选中的模型」（补头避免下拉空白），绝不含内建目录里的模型。
-    expect(payload!.models.every((m) => m.id === "model-x")).toBe(true);
+    expect(payload!.models.map((m) => m.id)).toEqual(["model-x"]);
     expect(payload!.currentModelId).toBe("model-x");
   });
 
@@ -442,5 +451,195 @@ describe("超流体链路的独立 API 配置与模型（协议与数据通道�
     const payload = lastModelsPayload();
     expect(payload!.error).toContain("未找到 API 配置");
     expect(payload!.models).toEqual([]);
+  });
+
+  it("⑦ 空串 = 跟随主链路（不会被当成「名叫空串的 Profile」）", async () => {
+    const main = await startFakeEndpoint(() => ({
+      status: 200,
+      body: JSON.stringify({ data: [{ id: "main-model" }] }),
+    }));
+    const other = await startFakeEndpoint(() => ({
+      status: 200,
+      body: JSON.stringify({ data: [{ id: "other-model" }] }),
+    }));
+    try {
+      writeKernelSettings(
+        home,
+        {
+          "main-gw": { baseUrl: main.baseUrl, apiKey: "sk-main-test", modelName: "main-model" },
+          "super-gw": { baseUrl: other.baseUrl, apiKey: "sk-super-test", modelName: "other-model" },
+        },
+        "main-gw",
+      );
+      setConfigOverrides({
+        checkpoints: false,
+        efficiencyMode: "steady",
+        autoMemoryCapture: false,
+        autoTitle: false,
+        nextStepSuggestions: false,
+        superAgentProfile: "",
+        superAgentModel: "",
+      });
+
+      await p.handleWebviewMessage({ type: "refreshSuperProfileModels" });
+      await waitFor(() => lastModelsPayload() !== undefined);
+
+      const payload = lastModelsPayload();
+      // 回推的是**实际查询的** Profile 名：跟随主链路 → 主会话的活动 Profile。
+      expect(payload!.profileName).toBe("main-gw");
+      expect(payload!.models.map((m) => m.id)).toEqual(["main-model"]);
+      expect(payload!.error).toBeUndefined();
+      // 查的是主链路的端点，不是「空串 Profile」，也不是别的 Profile。
+      expect(main.requests).toHaveLength(1);
+      expect(other.requests).toHaveLength(0);
+    } finally {
+      await main.close();
+      await other.close();
+    }
+  });
+
+  it("⑧ 载荷里绝不带 apiKey（凭据不出宿主）", async () => {
+    const endpoint = await startFakeEndpoint(() => ({
+      status: 200,
+      body: JSON.stringify({ data: [{ id: "model-a" }] }),
+    }));
+    try {
+      writeKernelSettings(home, {
+        "super-gw": { baseUrl: endpoint.baseUrl, apiKey: "sk-super-secret", modelName: "model-a" },
+      });
+      setConfigOverrides({
+        checkpoints: false,
+        efficiencyMode: "steady",
+        autoMemoryCapture: false,
+        autoTitle: false,
+        nextStepSuggestions: false,
+        superAgentProfile: "super-gw",
+        superAgentModel: "",
+      });
+
+      await p.handleWebviewMessage({ type: "refreshSuperProfileModels" });
+      await waitFor(() => lastModelsPayload() !== undefined);
+
+      const payload = lastModelsPayload();
+      expect(JSON.stringify(payload)).not.toContain("sk-super-secret");
+      // 凭据只出现在请求头里（服务端能看到，webview 看不到）。
+      expect(endpoint.requests[0]!.auth).toBe("Bearer sk-super-secret");
+    } finally {
+      await endpoint.close();
+    }
+  });
+
+  it("⑨ 宿主内部异常也必须回一条载荷（下拉框不能永远转圈）", async () => {
+    vi.spyOn(p, "resolveSuperProfileTarget").mockRejectedValue(
+      new Error("模拟宿主内部错误"),
+    );
+    await p.pushSuperProfileModels();
+    const payload = lastModelsPayload();
+    expect(payload).toBeDefined();
+    expect(payload!.error).toContain("模拟宿主内部错误");
+    expect(payload!.models).toEqual([]);
+  });
+
+  it("⑩ 同一端点的不同写法共用缓存，换端点必失效", async () => {
+    const endpoint = await startFakeEndpoint(() => ({
+      status: 200,
+      body: JSON.stringify({ data: [{ id: "model-a" }] }),
+    }));
+    try {
+      writeKernelSettings(home, {
+        "super-gw": { baseUrl: endpoint.baseUrl, apiKey: "sk-super-test", modelName: "model-a" },
+      });
+      setConfigOverrides({
+        checkpoints: false,
+        efficiencyMode: "steady",
+        autoMemoryCapture: false,
+        autoTitle: false,
+        nextStepSuggestions: false,
+        superAgentProfile: "super-gw",
+        superAgentModel: "",
+      });
+
+      await p.handleWebviewMessage({ type: "refreshSuperProfileModels" });
+      await waitFor(() => lastModelsPayload() !== undefined);
+      expect(endpoint.requests).toHaveLength(1);
+
+      // 同一个端点的另一种写法（多一个尾斜杠）= 同一个请求目标 → 命中缓存。
+      const raw = await p.querySuperProfileModelIds({
+        baseUrl: `${endpoint.baseUrl}/`,
+        apiKey: "sk-super-test",
+        modelName: "model-a",
+      });
+      expect(raw.error).toBeUndefined();
+      expect(endpoint.requests).toHaveLength(1);
+
+      // 换端点（另一个 baseUrl）→ 必须重查，绝不命中旧端点的列表。
+      const other = await startFakeEndpoint(() => ({
+        status: 200,
+        body: JSON.stringify({ data: [{ id: "model-z" }] }),
+      }));
+      try {
+        writeKernelSettings(home, {
+          "super-gw": { baseUrl: other.baseUrl, apiKey: "sk-super-test", modelName: "model-z" },
+        });
+        await p.handleWebviewMessage({ type: "refreshSuperProfileModels" });
+        await waitFor(
+          () => posted.filter((m) => m["type"] === "superProfileModels").length >= 2,
+        );
+        expect(other.requests).toHaveLength(1);
+        expect(lastModelsPayload()!.models.map((m) => m.id)).toContain("model-z");
+      } finally {
+        await other.close();
+      }
+    } finally {
+      await endpoint.close();
+    }
+  });
+
+  it("⑪ 脏值（手改 settings.json 塞了非字符串）不崩，也不拖累同批的其它设置", async () => {
+    // settings.json 是用户可手改的：非字符串必须被当空串，而不是让 .trim() 抛错。
+    setConfigOverrides({
+      checkpoints: false,
+      efficiencyMode: "steady",
+      autoMemoryCapture: false,
+      autoTitle: false,
+      nextStepSuggestions: false,
+      superAgentProfile: 123 as unknown as string,
+      superAgentModel: "",
+    });
+
+    await expect(
+      p.handleWebviewMessage({ type: "setHostSettings", superAgentModel: "model-x" }),
+    ).resolves.toBeUndefined();
+    // 同一批里的其它设置照写不误。
+    expect(state.updates.find((u) => u.key === "superAgentModel")!.value).toBe("model-x");
+
+    // 刷新模型列表也不能抛：脏值按「跟随主链路」处理，给出真实原因。
+    await expect(
+      p.handleWebviewMessage({ type: "refreshSuperProfileModels" }),
+    ).resolves.toBeUndefined();
+    await waitFor(() => lastModelsPayload() !== undefined);
+    const payload = lastModelsPayload();
+    expect(payload!.error).toBeTruthy();
+    expect(payload!.models).toEqual([]);
+  });
+
+  it("⑫ VSCode 侧直接改设置时：缓存失效 + 把新端点的列表推给 webview（源码锁）", () => {
+    const source = fs.readFileSync(path.join(here, "..", "src", "panel", "panel.ts"), "utf8");
+    // Profile 键：配置监听器里必须同时清缓存并推送（面板之外的改动
+    // webview 自己不知道，不会来请求）。
+    expect(source).toMatch(
+      /if \(e\.affectsConfiguration\("iflow\.superAgentProfile"\)\) \{\s*this\.clearSuperProfileModelsCache\(\);\s*void this\.pushSuperProfileModels\(\);/,
+    );
+    // 模型键也要覆盖：端点列表不用失效，但载荷里的 currentModelId / 补头项
+    // 要重推（否则外部改成列表外的模型时下拉空白）。两个新键都被覆盖。
+    expect(source).toMatch(
+      /else if \(e\.affectsConfiguration\("iflow\.superAgentModel"\)\) \{[^}]*void this\.pushSuperProfileModels\(\);/,
+    );
+    // 监听器只存在于 panel.ts（super-agent-host.ts 里没有第二份）。
+    const host = fs.readFileSync(
+      path.join(here, "..", "src", "panel", "super-agent-host.ts"),
+      "utf8",
+    );
+    expect(host).not.toContain("onDidChangeConfiguration");
   });
 });
