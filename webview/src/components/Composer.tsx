@@ -2609,7 +2609,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                   <ChevronsDownUp className={ICON_INLINE} />
                 )
               }
-              aria-label={t("压缩上下文")}
+              aria-label={t("压缩上下文，减少 token 占用")}
               title={t("压缩上下文，减少 token 占用")}
               aria-busy={compressPending || undefined}
               disabled={compressBlocked}

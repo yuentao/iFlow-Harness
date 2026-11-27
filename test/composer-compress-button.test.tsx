@@ -97,8 +97,10 @@ function render(overrides: Partial<SessionState> = {}, remoteTakeover = false): 
   act(() => root.render(<Composer />));
 }
 
+const COMPRESS_LABEL = "压缩上下文，减少 token 占用";
+
 function compressButton(): HTMLButtonElement {
-  const el = container.querySelector<HTMLButtonElement>('button[aria-label="压缩上下文"]');
+  const el = container.querySelector<HTMLButtonElement>(`button[aria-label="${COMPRESS_LABEL}"]`);
   expect(el).toBeTruthy();
   return el!;
 }
@@ -144,9 +146,12 @@ describe("压缩上下文按钮", () => {
     expect(sent.filter((msg) => msg.type === "compressNow")).toHaveLength(1);
   });
 
-  it("title 是「压缩上下文，减少 token 占用」", () => {
+  it("title 与 aria-label 同为「压缩上下文，减少 token 占用」", () => {
     render();
-    expect(compressButton().title).toBe("压缩上下文，减少 token 占用");
+    const button = compressButton();
+    expect(button.title).toBe(COMPRESS_LABEL);
+    // 图标按钮的 aria-label 必须与 title 完全同文（不能各写一套说法）。
+    expect(button.getAttribute("aria-label")).toBe(COMPRESS_LABEL);
   });
 
   it("图标是折叠语义（ChevronsDownUp），不再是「缩到角落」的箭头", () => {

@@ -152,7 +152,6 @@ const en: Record<string, string> = {
   "导出失败：{0}": "Export failed: {0}",
   "上下文接近上限，建议压缩": "Context is close to the limit — consider compressing",
   "立即压缩": "Compress now",
-  "压缩上下文": "Compress context",
   "压缩上下文，减少 token 占用": "Compress context to reduce token usage",
   "暂无可压缩的对话内容": "No conversation content to compress yet",
   "主会话正在生成，等本轮结束后再压缩": "The main session is generating; compress after this turn ends",
