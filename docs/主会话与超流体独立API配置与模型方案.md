@@ -383,20 +383,21 @@
 
 ### 7.5 OAuth 与遥测移除
 
-两个净化类 loader 位于 `vendor/iflow-fork/bundle/`：
+三个净化类 loader 位于 `vendor/iflow-fork/bundle/`：
 
 | loader | 作用 | 开关 |
 | --- | --- | --- |
 | `oauth-strip-loader.cjs` | 移除内核 iFlow / Google OAuth 登录分支，统一走 API 认证 | `IFLOW_OAUTH_STRIP` 取 `0 / false` 时恢复上游行为 |
 | `telemetry-strip-loader.cjs` | 移除阿里侧 `cna` / PV / AI tracking / OTel / ducky 采集 | `IFLOW_TELEMETRY_STRIP` 取 `0 / false` 时恢复上游行为 |
+| `internal-host-strip-loader.cjs` | 移除内核自带的 iFlow 云主机默认值与内部端点（`cloud.iflow.cn` 插件下载、`platform.iflow.cn` 内建 web 工具、`iflow.cn` OAuth/userinfo/ad-phrases、`apis.iflow.cn` 默认 baseUrl） | `IFLOW_INTERNAL_HOST_STRIP` 取 `0 / false` 时恢复上游行为 |
 
-- **锚点机制**：两个 loader 各自导出一张 `PATCHES` 表（`{ id, anchor, replacement, sentinel }`）。`scripts/vendor-cli.mjs` 的 `applyLoaderPatches()` 在拷贝出 `vendor/iflow-cli` 后逐条注入：`anchor` 必须在压缩后的 `bundle/iflow.js` 中**恰好出现一次**，`sentinel` 注入前必须不存在、注入后必须**恰好出现一次**（round-trip）。任一条件不满足即**硬失败**，绝不静默产出未打补丁或重复打补丁的 CLI。快照 `vendor/iflow-fork/bundle/iflow.js` **保持上游原文**，方便核对；锚点漂移时 vendoring 直接失败。
+- **锚点机制**：三个 loader 各自导出一张 `PATCHES` 表（`{ id, anchor, replacement, sentinel }`）。`scripts/vendor-cli.mjs` 的 `applyLoaderPatches()` 在拷贝出 `vendor/iflow-cli` 后逐条注入：`anchor` 必须在压缩后的 `bundle/iflow.js` 中**恰好出现一次**，`sentinel` 注入前必须不存在、注入后必须**恰好出现一次**（round-trip）。任一条件不满足即**硬失败**，绝不静默产出未打补丁或重复打补丁的 CLI。快照 `vendor/iflow-fork/bundle/iflow.js` **保持上游原文**，方便核对；锚点漂移时 vendoring 直接失败。
 - **OAuth 行为**：`authenticate` 入口把 `oauth-iflow` / `oauth-aone` 归一为 `openai-compatible`；`restoreOauthClient`（原 `BOe`，会读 `oauth_creds.json` 并向 Google `getTokenInfo`）与 `validateOAuthToken`（原 `POe`，`initialize` 用）直接返回 false；`Config.refreshAuth` 的 authType 归一为 API；`clearCachedCredentialFile` 被短路（**永不删除 / 改写 `oauth_creds.json`**）；`getOauthClient`（`kG`）抛 `SERVER_OAUTH2_REQUIRED`，pre-ACP 的 `kG` 预热分支被跳过。`openai-compatible` + `methodInfo` 的请求字节不变。
 - **遥测行为**：`bqe()`（`log.mmstat.com` 的 cna 引导，且不再写 `settings.cna`）、`vln()`（PV 上报）、`Q3e()`（`gm.mmstat.com` 的 AI tracking 传输）、`kOt()`（每请求入口）、`DAe()`（OpenTelemetry SDK 初始化，默认端点 `sunfire-ingestion-external.alibaba-inc.com`）全部加「激活即提前返回」守卫；`LTe()`（`ducky.code.alibaba-inc.com/v1/models`）改为返回内置 fallback 列表。
 - **诚实影响声明**：
   - OAuth 用户**失去登录方式**：`getOauthClient` 抛错，只剩 API 认证；旧的 `oauth-iflow` / `oauth-aone` 设置会被归一为 `openai-compatible`，不会崩溃也不会弹浏览器登录。
   - `ducky` 中和后，**仅** Aone / IDEALAB 认证分支的模型下拉退化为**内置 fallback 列表**（`LTe` 返回 `Ucu()`）；`openai-compatible` 用户不受影响。
-  - 未改动的对外依赖：用户 profile 的 `baseUrl`（对话）、MCP server、`platform.iflow.cn` 的搜索 / 抓取（用户触发且需 searchApiKey）、iFlow 云插件下载。
+  - 未改动的对外依赖：用户 profile 的 `baseUrl`（对话）、MCP server。**注意**：`internal-host-strip-loader.cjs` 之后，内建 web 搜索 / 网页抓取工具不可用、IDE 插件下载禁用、内核不再有任何 iFlow 云主机默认值；但**显式配置的 `baseUrl`（哪怕指向 `apis.iflow.cn`）照发**，扩展宿主侧的 Bing/DDG 检索也不受影响。
 
 ### 7.6 零配置零变化保证
 
@@ -433,7 +434,8 @@
 ### 7.9 未覆盖 / 残留
 
 - **`entry.js` 父进程 OTel 配置未做源码级闭环**：`iflow.js` 的 OTel 初始化（`DAe`）已加守卫；`bundle/entry.js` 是否在父进程另行初始化 OpenTelemetry 尚未逐行确认，因此「遥测完全不发」只对 `iflow.js` 内的采集点成立。
-- **`cloud.iflow.cn` 插件下载未处理**：`telemetry-strip-loader.cjs` 明确不动 iFlow 云插件下载；该出口仍按上游行为存在。
+- **`cloud.iflow.cn` 插件下载已移除**：`internal-host-strip-loader.cjs` 把 `oMi()`（IDE 插件 zip 下载）变成 no-op + 明确错误，零网络；`platform.iflow.cn` 内建 `web_search` / `web_fetch` 在注册表层摘除；`iflow.cn` 的 OAuth/userinfo/ad-phrases 与 `apis.iflow.cn` 的默认 baseUrl 同样不再使用（缺 baseUrl 直接报错）。残留的 `apis.iflow.cn` URL 仅出现在「用户显式把 baseUrl 指向该主机」才会走到的多模态 / JSON 修复 / 中文检测分支，属显式配置路径。
+- **扩展侧 iFlow Provider 预设已移除**：`shared/provider-presets.ts` 的内置 iFlow 预设不再提供（由另一变更完成）；本文件所述 CLI 侧改动与其相互独立，两者都只影响「默认值」，不影响用户已保存的 Profile。
 - **`src/acp/auth.ts` 文件头注释过期**：仍称凭据只存 SecretStorage、从不落盘，与 `apiProfiles` 明文落盘的现状矛盾；本轮只改文档，注释待实现任务订正。
 - **任务级 `profileId` / `modelId` 覆盖未对外暴露**：`SuperTaskSpec` 的字段、`resolveSuperSpawnPlan` 的第①级解析、`prepareSuperSpec` 的透传都已就位，但**派发载荷解析（`parseSuperDelegationPayload`）、任务 prompt 与 `super-agent` 工具 schema 均未声明这两个字段**，模型写不出来，故生产通道不会到达。不开放的理由：让模型生成的 JSON 决定子会话用哪套凭据（乃至哪把 apiKey）属于**扩权**，应由用户在设置里显式选择；若将来开放，需显式校验 Profile 名并考虑审批。
 - **已运行子会话不随设置变更**：保持 spawn 时快照；未发现「按新配置重启单个已运行子会话」的专用入口，设置改动只对下一个派发生效。

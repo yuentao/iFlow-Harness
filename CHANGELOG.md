@@ -14,6 +14,7 @@
 
 ### 改进
 - 移除阿里侧遥测：`log.mmstat.com` 的 cna/PV、`gm.mmstat.com` 的 AI tracking、`sunfire` OTel 与 `ducky` fetchModels，由 `IFLOW_TELEMETRY_STRIP` 开关兜底
+- 移除内核自带的 iFlow 云主机默认值与内部端点：`cloud.iflow.cn` 插件下载、`platform.iflow.cn` 内建 `web_search`/`web_fetch`、`iflow.cn` OAuth/userinfo/ad-phrases、`apis.iflow.cn` 默认 baseUrl 全部去除；缺失 baseUrl 时直接报错而不回退到 iFlow 主机，显式配置的 baseUrl（含指向该主机）不受影响；由 `IFLOW_INTERNAL_HOST_STRIP` 开关兜底
 - 派发时校验模型是否已下架（4s 上限，失败/空不降级），降级仅提示不改设置
 - 压缩上下文按钮图标由 `Minimize2` 改为 `ChevronsDownUp`（语义从「缩到角落」改为「折叠收拢」），并让 `aria-label` 与 `title` 同文
 
