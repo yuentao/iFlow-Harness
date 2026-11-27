@@ -585,6 +585,14 @@ export interface SuperSessionUi {
   /** 子会话实际使用的模型 id（null/缺省 = 沿用 CLI 默认）。 */
   model?: string;
   /**
+   * 子会话实际使用的 API Profile 名（null/缺省 = 沿用主链路活动 Profile）。
+   *
+   * 与 {@link SuperSessionUi.model} 成对：两者一起说明「这个子会话跑在哪个
+   * 网关 + 哪个模型上」。取自派发时解析出的超流体链路配置（见
+   * `shared/super-profile.ts`），已运行子会话保持 spawn 时快照。
+   */
+  profileId?: string;
+  /**
    * 实时进度：子会话助手文本的**尾部**快照（宿主节流写入，最长
    * `SUPER_PROGRESS_MAX_CHARS`）。只用于看板的「进度详情」，不是完整转录。
    */
@@ -1087,6 +1095,8 @@ export interface PersistedSuperSession {
   mainSessionId?: string;
   isolation: SuperIsolation;
   model?: string;
+  /** 子会话实际使用的 API Profile 名（与 model 成对，见 SuperSessionUi.profileId）。 */
+  profileId?: string;
   attempts?: number;
   createdAt: number;
   updatedAt: number;
@@ -1206,6 +1216,7 @@ export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuper
     mainSessionId: session.mainSessionId,
     isolation: normalizeIsolation(session.isolation),
     model: session.model,
+    profileId: session.profileId,
     attempts: session.attempts,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
@@ -1325,6 +1336,7 @@ export function fromPersistedSuperSession(
     restored: true,
     isolation: reconcileRestoredIsolation(normalizeIsolation(record.isolation), disk),
     model: record.model,
+    profileId: record.profileId,
     attempts: record.attempts,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -1401,6 +1413,22 @@ export interface SuperTaskSpec {
   task: string;
   /** 随任务交给子会话的附件（指令里只允许写路径，内联图片由宿主补）。 */
   attachments?: SuperAttachment[];
+  /**
+   * 任务级 API Profile 覆盖（**单次任务临时指定**，优先级最高）。
+   *
+   * 缺省 = 走超流体链路的解析链：`iflow.superAgentProfile` → 主链路活动
+   * Profile → 内核 `currentApiProfile` → 活动凭据。解析规则见
+   * `shared/super-profile.ts` 的 `resolveSuperEndpoint`。
+   */
+  profileId?: string;
+  /**
+   * 任务级模型覆盖（**单次任务临时指定**，优先级最高）。
+   *
+   * 缺省 = 走超流体链路的解析链：`iflow.superAgentModel` → 目标 Profile 的
+   * modelName → 主会话当前模型。解析规则见 `shared/super-profile.ts` 的
+   * `resolveSuperModel`。
+   */
+  modelId?: string;
   /**
    * 任务稳定标识（**块内唯一**）。
    *
