@@ -267,6 +267,30 @@ describe("停止请求的进行态", () => {
     expect(container.querySelector('button[title="停止生成"]')).toBeNull();
     expect(container.textContent).toContain("发送");
   });
+
+  it("宿主报告 cancelling 时重复点击停止是幂等的：按钮禁用且不再发 cancel", () => {
+    render({ status: "streaming", cancelling: true });
+    const stopping = container.querySelector<HTMLButtonElement>('button[title="正在停止…"]');
+    expect(stopping).toBeTruthy();
+    expect(stopping!.disabled).toBe(true);
+
+    act(() => stopping!.click());
+    expect(mocked.send).not.toHaveBeenCalledWith({ type: "cancel" });
+  });
+
+  it("点击停止后宿主回 cancelling：按钮保持「正在停止…」，不退回「停止生成」", () => {
+    render({ status: "streaming" });
+    act(() => container.querySelector<HTMLButtonElement>('button[title="停止生成"]')!.click());
+    expect(mocked.send).toHaveBeenCalledWith({ type: "cancel" });
+
+    // 宿主把权威的「正在停止」推回来：即使本地兜底计时器将来会到期，
+    // 只要宿主还在 cancelling + streaming，按钮就不得回到可点的「停止生成」。
+    rerender({ status: "streaming", cancelling: true });
+    const stopping = container.querySelector<HTMLButtonElement>('button[title="正在停止…"]');
+    expect(stopping).toBeTruthy();
+    expect(stopping!.disabled).toBe(true);
+    expect(container.querySelector('button[title="停止生成"]')).toBeNull();
+  });
 });
 
 describe("ESC 停止生成的让位", () => {
