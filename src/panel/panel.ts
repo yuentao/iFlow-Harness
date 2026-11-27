@@ -22,7 +22,7 @@ import {
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
-import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
+import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, normalizeModelsUrl, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
 import type { McpBrokerStatus } from "../acp/mcp-broker.js";
 import { deleteKernelApiProfile, migrateKernelApiProfiles, readKernelApiProfiles, setKernelActiveProfile, writeKernelApiProfile } from "../acp/api-profiles.js";
 import { resolveCliTokensLimit, tokensLimitEnvFromSettings, readKernelTokensLimits } from "../acp/cli-tokens-limit.js";
@@ -1075,9 +1075,11 @@ export class ChatPanel implements vscode.Disposable {
    * settings.json (the migration itself is idempotent; this only keeps the
    * per-snapshot auth build from re-reading/re-writing the file). */
   private authProfilesMigrated = false;
-  /** 超流体链路的模型列表短缓存：key = 端点 baseUrl，value = 查询时间 +
-   * 所用 apiKey + 模型 id 列表。同一端点短时间内不重复请求 /models；端点
-   * 切换（key 变了）自然不命中，另外换 key 的同一端点也会失效。 */
+  /** 超流体链路的模型列表短缓存：key = 归一化后的 models URL（实际请求的
+   * 那个地址），value = 查询时间 + 所用 apiKey + 模型 id 列表。同一端点
+   * 短时间内不重复请求 /models；端点切换（key 变了）自然不命中，同一端点
+   * 换了 apiKey 也会失效。**只缓存成功结果**，失败不入缓存（端点恢复后
+   * 下一次刷新就能拿到真列表）。 */
   private readonly superProfileModelsCache = new Map<
     string,
     { at: number; apiKey: string; models: string[] }
@@ -2144,9 +2146,16 @@ export class ChatPanel implements vscode.Disposable {
               this.superHost.invalidateDefaultWorkspace();
             }
             // 超流体 Profile 在 VSCode 侧被直接改掉时，模型列表缓存必须失效
-            // （否则下拉里还是上一个端点的列表）。
+            // （否则下拉里还是上一个端点的列表），并把新端点的实时列表推给
+            // webview —— 面板之外的改动 webview 自己不知道，不会来请求。
             if (e.affectsConfiguration("iflow.superAgentProfile")) {
               this.clearSuperProfileModelsCache();
+              void this.pushSuperProfileModels();
+            } else if (e.affectsConfiguration("iflow.superAgentModel")) {
+              // 选中的模型变了但端点没变：缓存里是端点的模型 id 列表，不用失效；
+              // 但载荷里的 currentModelId / 补头项要刷新 —— 否则外部把模型改成
+              // 端点列表之外的 id 时，下拉会渲染成空白直到手动刷新。
+              void this.pushSuperProfileModels();
             }
         // 记忆整理的周期 / 空闲阈值 / 总量预算是调度器参数，配置变更要热更新
         // （idleMinutes 变化会重建 tick 定时器）。
@@ -3355,7 +3364,7 @@ export class ChatPanel implements vscode.Disposable {
         }
         // 写入前的超流体 Profile：写完再比一次，用来判断端点是否切换
         // （切换 → 旧的模型列表缓存必须失效）。
-        const previousSuperProfile = this.readUserSetting<string>("superAgentProfile", "").trim();
+        const previousSuperProfile = this.readStringSetting("superAgentProfile");
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
         // 周期 / 空闲阈值 / 总量预算写盘后热更新调度器（写失败时配置仍是旧值，与设置页显示一致）。
         if (
@@ -3385,7 +3394,9 @@ export class ChatPanel implements vscode.Disposable {
         this.postHostSettings();
         // 超流体 Profile 变了 → 目标端点可能变了：旧的模型列表缓存必须失效，
         // 并把新端点的实时列表推给 webview（异步，不阻塞上面的设置回显）。
-        if (this.readUserSetting<string>("superAgentProfile", "").trim() !== previousSuperProfile) {
+        // 比的是**生效值**：写入被拒（失败 / 只进了暂存）时生效值没变，
+        // 缓存与列表都不动 —— 界面与磁盘保持一致。
+        if (this.readStringSetting("superAgentProfile") !== previousSuperProfile) {
           this.clearSuperProfileModelsCache();
           void this.pushSuperProfileModels();
         }
@@ -4190,8 +4201,9 @@ export class ChatPanel implements vscode.Disposable {
       superAgentFullTrust: this.readUserSetting<boolean>("superAgent.fullTrust", false),
       superAgentDefaultWorkspace: this.readUserSetting<string>("superAgent.defaultWorkspace", ""),
       // 超流体链路的独立指针与模型：留空 = 跟随主链路（回退链）。
-      superAgentProfile: this.readUserSetting<string>("superAgentProfile", ""),
-      superAgentModel: this.readUserSetting<string>("superAgentModel", ""),
+      // 永远是字符串（脏值当空串）：webview 侧按 `?? ""` 消费即可。
+      superAgentProfile: this.readStringSetting("superAgentProfile"),
+      superAgentModel: this.readStringSetting("superAgentModel"),
     });
   }
 
@@ -9677,6 +9689,20 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 读一个 `iflow.*` 字符串设置，**永远**返回字符串（去空白）。
+   *
+   * settings.json 是用户可手改的：`"iflow.superAgentProfile": 123` 这类脏值
+   * 会被 `readUserSetting<string>()` 原样返回，随后 `.trim()` 直接抛
+   * TypeError —— 一个脏值足以带崩整条设置写入链路（同一批里的其它设置
+   * 也一起写不进去）。非字符串一律当空串（= 跟随主链路 / 未选模型），
+   * 绝不抛错。
+   */
+  private readStringSetting(key: string): string {
+    const raw = this.readUserSetting<unknown>(key, "");
+    return typeof raw === "string" ? raw.trim() : "";
+  }
+
+  /**
    * 超流体侧「按 Profile 拉模型列表」的端点解析。
    *
    * `wanted` 是超流体侧选中的 Profile 名（`iflow.superAgentProfile`）：
@@ -9689,13 +9715,16 @@ export class ChatPanel implements vscode.Disposable {
    *
    * 找不到时返回**真实原因**（不是一句泛化的「加载失败」），webview 直接
    * 展示这条文案。
+   *
+   * `wanted` 收 `unknown`：载荷来自 webview（JS）也可能是非字符串，
+   * 归一化在函数内部做，调用方不必各自防御。
    */
   private async resolveSuperProfileTarget(
-    wanted: string,
+    wanted: unknown,
   ): Promise<
     { name: string; creds: OpenAiCompatCredentials } | { name: string; error: string }
   > {
-    const name = wanted.trim();
+    const name = typeof wanted === "string" ? wanted.trim() : "";
     if (!name) {
       const active =
         (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets));
@@ -9746,7 +9775,11 @@ export class ChatPanel implements vscode.Disposable {
   private async querySuperProfileModelIds(
     creds: OpenAiCompatCredentials,
   ): Promise<{ ids: string[]; error?: string }> {
-    const key = creds.baseUrl.trim();
+    // 缓存 key = 实际请求的 models URL（`queryModelIds` 内部用的同一个
+    // 归一化）：同一个端点的不同写法（尾斜杠 / 省略 scheme / 直接写
+    // /models）共用一份缓存，而「换了端点」必然换 key —— 不可能命中旧端点
+    // 的列表。凭据仍逐次比对（同一端点换了 key 也必须重查）。
+    const key = normalizeModelsUrl(creds.baseUrl);
     const cached = this.superProfileModelsCache.get(key);
     if (
       cached &&
@@ -9777,8 +9810,9 @@ export class ChatPanel implements vscode.Disposable {
    * Profile 自带的 `modelName`（方案文档第 3.2 节回退链的第 3 级）。
    */
   private superSelectedModel(creds: OpenAiCompatCredentials | null): string {
-    const explicit = this.readUserSetting<string>("superAgentModel", "").trim();
-    return explicit || creds?.modelName?.trim() || "";
+    const explicit = this.readStringSetting("superAgentModel");
+    const fallback = typeof creds?.modelName === "string" ? creds.modelName.trim() : "";
+    return explicit || fallback;
   }
 
   /**
@@ -9786,12 +9820,15 @@ export class ChatPanel implements vscode.Disposable {
    *
    * 端点不可达 → `models` 为空数组并带 `error`（绝不回退内建目录）；当前
    * 选中的模型会被补到列表头，避免下拉框渲染成空白。
+   *
+   * `profileName` 收 `unknown`：webview 显式传字符串时以它为准（空串 =
+   * 跟随主链路）；没传 / 传了非字符串 → 用设置里的值。
    */
-  private async buildSuperProfileModels(profileName?: string): Promise<SuperProfileModelsUi> {
+  private async buildSuperProfileModels(profileName?: unknown): Promise<SuperProfileModelsUi> {
     const wanted =
-      profileName !== undefined
+      typeof profileName === "string"
         ? profileName
-        : this.readUserSetting<string>("superAgentProfile", "");
+        : this.readStringSetting("superAgentProfile");
     const target = await this.resolveSuperProfileTarget(wanted);
     if ("error" in target) {
       return {
@@ -9810,16 +9847,38 @@ export class ChatPanel implements vscode.Disposable {
     return { profileName: target.name, models, currentModelId, error };
   }
 
-  /** 把「超流体侧按 Profile 的模型列表」推给 webview。 */
-  private async pushSuperProfileModels(profileName?: string): Promise<void> {
-    const payload = await this.buildSuperProfileModels(profileName);
+  /**
+   * 把「超流体侧按 Profile 的模型列表」推给 webview。
+   *
+   * **一定回一条载荷**：宿主这一侧出了预料之外的错（脏配置、文件读不了…）
+   * 也不能让 webview 的下拉框永远转圈 —— 回一条空列表 + 真实原因即可。
+   */
+  private async pushSuperProfileModels(profileName?: unknown): Promise<void> {
+    let payload: SuperProfileModelsUi;
+    try {
+      payload = await this.buildSuperProfileModels(profileName);
+    } catch (error) {
+      const reason = vscode.l10n.t(
+        "模型列表查询失败（不回退内置目录）：{0}",
+        errorMessage(error),
+      );
+      this.log.warn(reason);
+      payload = {
+        profileName:
+          typeof profileName === "string" ? profileName : this.readStringSetting("superAgentProfile"),
+        models: [],
+        currentModelId: this.readStringSetting("superAgentModel"),
+        error: reason,
+      };
+    }
     this.postToWebview({ type: "superProfileModels", ...payload });
   }
 
   /**
    * 清空超流体模型列表缓存。端点切换（`iflow.superAgentProfile` 改了名字）
-   * 时调用：缓存 key 虽然含 baseUrl，但同一个 Profile 换端点时 key 也可能
-   * 相同，所以这里显式清空，保证「切换后绝不命中旧端点的列表」。
+   * 时调用：缓存 key 是归一化后的 models URL（换端点必然换 key），但同名
+   * Profile 在别处被改写了端点时 key 可能不变，所以这里显式清空，保证
+   * 「切换后绝不命中旧端点的列表」。
    */
   private clearSuperProfileModelsCache(): void {
     this.superProfileModelsCache.clear();
