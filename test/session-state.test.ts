@@ -44,6 +44,8 @@ import {
   parseNextStepSuggestions,
   setNextStepLoading,
   toAgentPromptText,
+  parseCompressionCommand,
+  COMPRESSION_COMMAND_NAMES,
   appendInjectedContext,
   setPlanEntryStatus,
   MAX_TOOL_OUTPUT_STORE_CHARS,
@@ -1717,6 +1719,52 @@ describe("toAgentPromptText (CLI slash-command disambiguation)", () => {
 
   it("passes everything through when the command list is empty", () => {
     expect(toAgentPromptText("/anything", [])).toBe("/anything");
+  });
+});
+
+describe("parseCompressionCommand (vendor compress/summarize/compact)", () => {
+  it("exposes the vendor-aligned command name set", () => {
+    expect([...COMPRESSION_COMMAND_NAMES].sort()).toEqual(["compact", "compress", "summarize"]);
+  });
+
+  it("recognises the canonical name and both aliases", () => {
+    expect(parseCompressionCommand("/compress")).toBe("compress");
+    expect(parseCompressionCommand("/compact")).toBe("compress");
+    expect(parseCompressionCommand("/summarize")).toBe("compress");
+  });
+
+  it("matches case-insensitively and returns the canonical name", () => {
+    expect(parseCompressionCommand("/COMPRESS")).toBe("compress");
+    expect(parseCompressionCommand("/Compact")).toBe("compress");
+    expect(parseCompressionCommand("/SUMMARIZE")).toBe("compress");
+  });
+
+  it("allows trailing arguments", () => {
+    expect(parseCompressionCommand("/compress now")).toBe("compress");
+    expect(parseCompressionCommand("/compact  --force")).toBe("compress");
+    expect(parseCompressionCommand("/summarize\tkeep decisions")).toBe("compress");
+  });
+
+  it("tolerates leading whitespace and newlines", () => {
+    expect(parseCompressionCommand("  /compress")).toBe("compress");
+    expect(parseCompressionCommand("\n\t /compact")).toBe("compress");
+    expect(parseCompressionCommand("   \n/summarize")).toBe("compress");
+  });
+
+  it("rejects non-command slash input", () => {
+    expect(parseCompressionCommand("/usr/bin/node -v")).toBeNull();
+    expect(parseCompressionCommand("/init")).toBeNull();
+    expect(parseCompressionCommand("//compress")).toBeNull();
+    expect(parseCompressionCommand("/ compress")).toBeNull();
+    expect(parseCompressionCommand("/compressed")).toBeNull();
+    expect(parseCompressionCommand("hello /compress")).toBeNull();
+  });
+
+  it("rejects empty and whitespace-only text", () => {
+    expect(parseCompressionCommand("")).toBeNull();
+    expect(parseCompressionCommand("   ")).toBeNull();
+    expect(parseCompressionCommand("\n\t")).toBeNull();
+    expect(parseCompressionCommand("/")).toBeNull();
   });
 });
 
