@@ -4,7 +4,6 @@ import type {
   AuthProfileUi,
   AuthUiState,
   HostSettingsUi,
-  ModelInfoUi,
   ThinkingModelRuleUi,
   UiCliLanguage,
   UiOsNotifications,
@@ -797,28 +796,8 @@ type SuperAgentRetryUi = {
  * 又会被 TS 的弱类型检测拦下，所以用交叉类型把它们一起送出去。 */
 type SuperAgentRetryPatch = Partial<HostSettingsUi> & SuperAgentRetryUi;
 
-/**
- * 超流体链路的两个指针：`iflow.superAgentProfile`（超流体专用 API 配置名）与
- * `iflow.superAgentModel`（超流体专用模型 id）。
- *
- * 与上面两个字段同理：宿主接线（`shared/messages.ts` 的 `HostSettingsUi` +
- * `src/panel/panel.ts` 的读写）由 host 侧负责，这里用「可选扩展视图」读取：
- * 字段还没进 `HostSettingsUi` 时回落到 manifest 声明的默认值（空串 = 走回退链，
- * 见方案文档「默认与回退规则」），接线后字段自然出现，本文件不需要再改一次。
- */
-type SuperAgentEndpointUi = {
-  /** `iflow.superAgentProfile`：超流体专用 API 配置名；空串 = 跟随主会话。 */
-  superAgentProfile?: string;
-  /** `iflow.superAgentModel`：超流体专用模型 id；空串 = 跟随所选配置的模型名。 */
-  superAgentModel?: string;
-};
-
-/** 写回宿主设置用的补丁类型：这两个字段尚未进 `HostSettingsUi`，用交叉类型一起送出去。 */
-type SuperAgentEndpointPatch = Partial<HostSettingsUi> & SuperAgentEndpointUi;
-
 /** 选择器兜底用的空数组：常量引用，避免每次渲染新建数组导致的无谓更新。 */
 const EMPTY_AUTH_PROFILES: AuthProfileUi[] = [];
-const EMPTY_MODEL_LIST: ModelInfoUi[] = [];
 
 /** manifest 声明的默认值：宿主接线前的兜底读数。 */
 const SUPER_MAX_ATTEMPTS_DEFAULT = 2;
@@ -842,17 +821,31 @@ function SuperAgentSection() {
   );
   const superDependencyPolicy = superRetry.superAgentDependencyPolicy ?? SUPER_DEPENDENCY_POLICY_DEFAULT;
   const updateSuper = (patch: SuperAgentRetryPatch) => update(patch);
-  // 超流体链路的两个指针：宿主把字段接进 HostSettingsUi 之前，用可选扩展视图读取
-  // 并回落到 manifest 声明的默认值（空串 = 走回退链）。
-  const superEndpoint = settings as HostSettingsUi & SuperAgentEndpointUi;
-  const superProfile = superEndpoint.superAgentProfile ?? "";
-  const superModel = superEndpoint.superAgentModel ?? "";
-  const updateEndpoint = (patch: SuperAgentEndpointPatch) => update(patch);
-  // 选项来源只用 webview 已经知道的状态：具名 API 配置（state.auth.profiles）与
-  // 当前会话可见的模型（state.models）；各配置自带的模型名也一并列出，避免模型
-  // 下拉在「配置名不是模型名」时是空的。
+  const send = useChat((s) => s.send);
+  // 超流体链路的两个指针：共享的 HostSettingsUi 已经带有 `superAgentProfile` /
+  // `superAgentModel`（可选，空串 = 走回退链），直接读，不再本地维护同形状类型。
+  const superProfile = settings.superAgentProfile ?? "";
+  const superModel = settings.superAgentModel ?? "";
+  // 选项来源：API 配置来自鉴权态快照；模型列表走「按所选 Profile 实时查询」的
+  // 专用通道（宿主 GET {baseUrl}/models），**不再**复用主会话的 state.models ——
+  // 超流体选了别的 API 配置时，主会话那份列表属于另一个端点，正是要消除的
+  // 「同一功能两条通道」隐患。
   const profiles = useChat((s) => s.state?.auth.profiles ?? EMPTY_AUTH_PROFILES);
-  const models = useChat((s) => s.state?.models ?? EMPTY_MODEL_LIST);
+  const superModelsView = useChat((s) => s.superProfileModelsView);
+  // 挂载、切换 API 配置、或宿主回推的 superAgentProfile 变化时，按当前选择重拉。
+  // 空串 = 跟随主会话：宿主 resolveSuperProfileTarget 在 profileName 为空时按
+  // 回退链（工作区握手凭据 → SecretStorage 活动凭据 → 内核活动 Profile）解析出
+  // 活动端点，所以显式传空串即可拿到对应的实时列表，webview 侧不需要另做回退。
+  useEffect(() => {
+    send({ type: "refreshSuperProfileModels", profileName: superProfile });
+  }, [send, superProfile]);
+  // 迟到的旧配置回包不参与渲染：store 已按所选名丢弃不匹配的回包，这里再对齐
+  // 一次 profileName，避免切换瞬间把旧端点的列表当成新选择的结果。空串选择时
+  // 宿主回包是被解析出的活动 Profile 名（不是空串），因此不参与比对。
+  const modelsView =
+    superModelsView && (!superProfile || superModelsView.profileName === superProfile)
+      ? superModelsView
+      : null;
   const profileOptions: Array<{ value: string; label: string; description?: string }> = [
     { value: "", label: t("跟随主会话") },
   ];
@@ -867,19 +860,27 @@ function SuperAgentSection() {
   const modelOptions: Array<{ value: string; label: string; description?: string }> = [
     { value: "", label: t("跟随所选 API 配置") },
   ];
-  const knownModels = new Set<string>();
-  for (const model of models) {
-    if (!model.id || knownModels.has(model.id)) continue;
-    knownModels.add(model.id);
-    modelOptions.push({ value: model.id, label: model.name || model.id, description: model.id });
-  }
-  for (const profile of profiles) {
-    if (!profile.modelName || knownModels.has(profile.modelName)) continue;
-    knownModels.add(profile.modelName);
-    modelOptions.push({ value: profile.modelName, label: profile.modelName });
-  }
+  /** 空串是「跟随所选配置」本身，先占位避免模型 id 恰好为空串时重复。 */
+  const knownModels = new Set<string>([""]);
+  const pushModel = (id: string | undefined, label?: string, description?: string) => {
+    const value = id?.trim();
+    if (!value || knownModels.has(value)) return;
+    knownModels.add(value);
+    modelOptions.push({ value, label: label || value, description });
+  };
+  for (const model of modelsView?.models ?? []) pushModel(model.id, model.name || model.id, model.id);
+  // 所选配置自带的模型名（空串选择时取活动配置）—— 与宿主把 currentModelId
+  // 补到列表头的口径一致，保证「配置名不是模型名」时下拉仍能看到实际模型。
+  const selectedProfile = superProfile
+    ? profiles.find((profile) => profile.name === superProfile)
+    : profiles.find((profile) => profile.active);
+  pushModel(selectedProfile?.modelName);
+  // 当前值不在候选里时补占位，下拉不会显示成空白；宿主回包里的 currentModelId
+  // 也补一次（陈旧回包 / 端点列表变化时，实际生效的模型仍可见）。
   if (superModel && !knownModels.has(superModel)) {
-    modelOptions.push({ value: superModel, label: superModel, description: t("当前模型不在列表里") });
+    pushModel(superModel, superModel, t("当前模型不在列表里"));
+  } else if (modelsView?.currentModelId) {
+    pushModel(modelsView.currentModelId);
   }
   return (
     <div className="space-y-4">
@@ -894,24 +895,36 @@ function SuperAgentSection() {
               ariaLabel={t("API 配置")}
               value={superProfile}
               options={profileOptions}
-              onChange={(superAgentProfile) => updateEndpoint({ superAgentProfile })}
+              onChange={(superAgentProfile) => update({ superAgentProfile })}
             />
           }
         />
-        <SettingRow
-          wideControl
-          label={t("模型")}
-          description={t("超流体自己发请求时用的模型 id。")}
-          detail={t("留空（默认）时使用所选 API 配置自带的模型名；下拉里是当前会话可见的模型与各 API 配置自带的模型名。修改后对下一个派发的超流体生效，已在运行的超流体保持启动时的模型不变。")}
-          control={
-            <Select
-              ariaLabel={t("模型")}
-              value={superModel}
-              options={modelOptions}
-              onChange={(superAgentModel) => updateEndpoint({ superAgentModel })}
-            />
-          }
-        />
+        <div>
+          <SettingRow
+            wideControl
+            label={t("模型")}
+            description={t("超流体自己发请求时用的模型 id。")}
+            detail={t("留空（默认）时使用所选 API 配置自带的模型名；下拉里是按所选 API 配置实时查询到的模型列表（端点不可达时不回退内置目录）。修改后对下一个派发的超流体生效，已在运行的超流体保持启动时的模型不变。")}
+            control={
+              <Select
+                ariaLabel={t("模型")}
+                value={superModel}
+                options={modelOptions}
+                onChange={(superAgentModel) => update({ superAgentModel })}
+              />
+            }
+          />
+          {modelsView?.error ? (
+            <p role="alert" className="-mt-2 px-4 pb-3 text-ui-caption leading-relaxed text-destructive">
+              {modelsView.error}
+            </p>
+          ) : !modelsView ? (
+            <p className="-mt-2 flex items-center gap-1.5 px-4 pb-3 text-ui-caption leading-relaxed text-muted-foreground">
+              <Loader2 className={`${ICON_INLINE} shrink-0 animate-spin text-primary`} />
+              {t("正在连接并读取可用模型…")}
+            </p>
+          ) : null}
+        </div>
       </SettingsGroup>
       <SettingsGroup title={t("后台任务与并发")}>
         <NumberRow

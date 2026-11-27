@@ -17,6 +17,7 @@ import {
   type QqSettingsUi,
   type SessionState,
   type SessionSummaryUi,
+  type SuperProfileModelsUi,
   type ToastAction,
   type UiDensity,
   type UiFontSize,
@@ -2729,6 +2730,40 @@ function createMockHost(): HostApi {
         console.info(`[iflow] mock host: openLocation ${m.path}${m.line != null ? `:${m.line}` : ""}`);
         return;
       }
+      if (m.type === "refreshSuperProfileModels") {
+        // Dev/browser preview only: mirror the host's dedicated per-profile
+        // model lane (`GET {baseUrl}/models`). The mock has no HTTP client, so
+        // it seeds the selected profile's own modelName plus one fake sibling;
+        // an unknown profile / empty profile name (follow main) with no active
+        // profile answers with the host's real error wording, so the preview
+        // exercises the inline error path too.
+        const wanted = (m.profileName ?? mockHostSettings.superAgentProfile ?? "").trim();
+        const target = wanted
+          ? authState.profiles.find((p) => p.name === wanted)
+          : authState.profiles.find((p) => p.active);
+        if (!target) {
+          broadcast({
+            type: "superProfileModels",
+            profileName: wanted,
+            models: [],
+            currentModelId: (mockHostSettings.superAgentModel ?? "").trim(),
+            error: wanted
+              ? t("未找到 API 配置：{0}", wanted)
+              : t("还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。"),
+          });
+          return;
+        }
+        const currentModelId = (mockHostSettings.superAgentModel ?? "").trim() || target.modelName;
+        const models = [
+          { id: target.modelName, name: target.modelName },
+          { id: `${target.modelName}-mini`, name: `${target.modelName}-mini` },
+        ].filter((model, index, all) => all.findIndex((other) => other.id === model.id) === index);
+        if (currentModelId && !models.some((model) => model.id === currentModelId)) {
+          models.unshift({ id: currentModelId, name: currentModelId });
+        }
+        broadcast({ type: "superProfileModels", profileName: target.name, models, currentModelId });
+        return;
+      }
       // Dev/browser preview only: the real host handles every wire message,
       // but the mock implements just the subset needed for UI iteration.
       // Without a tripwire a missing handler looks like a dead button.
@@ -2973,6 +3008,13 @@ interface ChatStore {
    * （设置页此时显示空列表，等首次推送即可）。
    */
   contextWindowOverridesView: ContextWindowOverridesUi | null;
+  /**
+   * 「超流体」设置页模型下拉的数据源：按**超流体所选 API 配置**实时查询的
+   * 模型列表（`refreshSuperProfileModels` ↔ `superProfileModels` 专用通道）。
+   * 与主会话的 `state.models`（当前连接端点的模型）是两条互不覆盖的通道 ——
+   * 超流体选了别的配置时，用主会话那份列表就是错的。null = 尚未收到回包。
+   */
+  superProfileModelsView: SuperProfileModelsUi | null;
   /** Lifecycle of the settings-panel 「联网补充模型数据」 web-search fetch
    * (see `modelMetadataState`). WebView-local mirror of the host lane: the
    * button shows the spinner while `searching` and the inline error on
@@ -3048,6 +3090,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
   contextWindowOverridesView: null,
+  superProfileModelsView: null,
   modelMetadata: { state: "idle" },
   pending: null,
   promptSeq: 0,
@@ -3249,6 +3292,15 @@ export const useChat = create<ChatStore>((set, get) => ({
           ...(msg.builtinWindow !== undefined ? { builtinWindow: msg.builtinWindow } : {}),
         },
       });
+      return;
+    }
+    if (msg.type === "superProfileModels") {
+      // 「超流体」设置页模型下拉的专用通道。空串 = 跟随主会话：宿主
+      // `resolveSuperProfileTarget("")` 会按回退链解析出活动 Profile，并把
+      // 解析后的名字放在 profileName 里，所以这里不能拿它与空串比对。
+      const selected = (get().hostSettings.superAgentProfile ?? "").trim();
+      if (selected && msg.profileName !== selected) return;
+      set({ superProfileModelsView: msg });
       return;
     }
     if (msg.type === "modelMetadataState") {

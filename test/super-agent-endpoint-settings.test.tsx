@@ -10,6 +10,12 @@
  *  3. 设置页 UI（超流体分类里真的渲染出两个 kit 下拉，且选中后经**已有的通用
  *     设置写入通道** `setHostSettings` 写回——不是另造一条落盘通道）。
  *
+ * 模型下拉的候选来源是独立的「按所选 API 配置实时拉取」通道
+ * （webview→host `refreshSuperProfileModels`，host→webview `superProfileModels`），
+ * **不是**主会话的 `state.models`——超流体选了另一个配置时，主会话那份列表属于
+ * 另一个端点。这里同时锁定这条通道的消费方式（错误显式呈现、占位、按 profileName
+ * 过滤迟到回包）。
+ *
  * 同时锁住 UI 语义：空串 = 走回退链（跟随主会话 / 跟随所选 API 配置），当前值
  * 不在候选列表里（配置被删或用户手改过 settings.json）时必须补占位选项，
  * 否则下拉会显示成空白，用户看不出到底选了什么。
@@ -45,10 +51,20 @@ const nlsEn = JSON.parse(readFileSync(join(REPO_ROOT, "package.nls.json"), "utf8
 const nlsZh = JSON.parse(readFileSync(join(REPO_ROOT, "package.nls.zh-cn.json"), "utf8")) as Record<string, string>;
 const properties = manifest.contributes.configuration.properties;
 
+const send = vi.hoisted(() => vi.fn());
 const updateHostSetting = vi.hoisted(() => vi.fn());
-/** 宿主尚未把这两个字段接进 `HostSettingsUi`（host 侧子会话负责），这里用与
- * webview 相同的「可选扩展视图」模拟「已接线」与「未接线」两种状态。 */
-type SuperAgentEndpointUi = { superAgentProfile?: string; superAgentModel?: string };
+/** 「按 Profile 拉模型」载荷的 mock：用例改写 `current` 模拟宿主回包（含
+ * error）；null = 尚未回包（加载态）。 */
+const superProfileModelsView = vi.hoisted(() => ({
+  current: null as null | {
+    profileName: string;
+    models: Array<{ id: string; name: string }>;
+    currentModelId: string;
+    error?: string;
+  },
+}));
+/** 共享的 `HostSettingsUi` 已带 superAgentProfile / superAgentModel（可选），
+ * 这里不再重复声明同形状的本地类型。 */
 const hostSettings = vi.hoisted(
   () =>
     ({
@@ -62,7 +78,7 @@ const hostSettings = vi.hoisted(
       superAgentKeepWorktree: false,
       superAgentFullTrust: false,
       superAgentDefaultWorkspace: "",
-    }) as unknown as HostSettingsUi & SuperAgentEndpointUi,
+    }) as unknown as HostSettingsUi,
 );
 const state = vi.hoisted(() => ({
   auth: {
@@ -75,6 +91,7 @@ const state = vi.hoisted(() => ({
       { name: "backup", baseUrl: "https://b.example/v1", modelName: "beta-2", keyTail: "efgh", active: false },
     ],
   },
+  // 主会话当前端点的模型列表：模型下拉**不得**再用它当候选来源。
   models: [
     { id: "alpha-1", name: "Alpha One" },
     { id: "gamma-3", name: "Gamma Three" },
@@ -83,8 +100,23 @@ const state = vi.hoisted(() => ({
 
 vi.mock("../webview/src/store", () => ({
   useChat: Object.assign(
-    (selector: (s: unknown) => unknown) => selector({ send: vi.fn(), updateHostSetting, hostSettings, state }),
-    { getState: () => ({ send: vi.fn(), updateHostSetting, hostSettings, state }) },
+    (selector: (s: unknown) => unknown) =>
+      selector({
+        send,
+        updateHostSetting,
+        hostSettings,
+        superProfileModelsView: superProfileModelsView.current,
+        state,
+      }),
+    {
+      getState: () => ({
+        send,
+        updateHostSetting,
+        hostSettings,
+        superProfileModelsView: superProfileModelsView.current,
+        state,
+      }),
+    },
   ),
 }));
 
@@ -120,10 +152,29 @@ function openMenu(trigger: HTMLButtonElement): HTMLButtonElement[] {
   return [...document.body.querySelectorAll<HTMLButtonElement>("[role='menuitemradio']")];
 }
 
+function modelTrigger(): HTMLButtonElement {
+  return container.querySelector<HTMLButtonElement>("button[aria-label='模型']")!;
+}
+
+/** 跟随主会话（空串）时宿主 resolveSuperProfileTarget 解析出活动 Profile
+ * `gateway`，回包里的 profileName 因此是 "gateway" 而不是空串。 */
+function activeProfileReply(): void {
+  superProfileModelsView.current = {
+    profileName: "gateway",
+    models: [
+      { id: "alpha-1", name: "Alpha One" },
+      { id: "delta-4", name: "Delta Four" },
+    ],
+    currentModelId: "alpha-1",
+  };
+}
+
 beforeEach(() => {
+  send.mockClear();
   updateHostSetting.mockClear();
   hostSettings.superAgentProfile = "";
   hostSettings.superAgentModel = "";
+  activeProfileReply();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -169,17 +220,18 @@ describe("超流体链路的两个指针：声明与实现对账", () => {
     act(() => profileItems[1]!.click());
     expect(updateHostSetting).toHaveBeenCalledWith({ superAgentProfile: "gateway" });
 
-    const modelTrigger = container.querySelector<HTMLButtonElement>("button[aria-label='模型']")!;
-    expect(modelTrigger.textContent).toContain("跟随所选 API 配置");
-    const modelItems = openMenu(modelTrigger);
-    // 当前会话可见的模型 + 各 API 配置自带的模型名。
-    expect(modelItems).toHaveLength(4);
+    const trigger = modelTrigger();
+    expect(trigger.textContent).toContain("跟随所选 API 配置");
+    const modelItems = openMenu(trigger);
+    // 专用通道回包的列表（Alpha One / Delta Four）+ 活动配置自带的模型名
+    // （alpha-1 已在回包里，不重复）。
+    expect(modelItems).toHaveLength(3);
     expect(modelItems[0]!.textContent).toContain("跟随所选 API 配置");
     expect(modelItems[1]!.textContent).toContain("Alpha One");
     expect(modelItems[1]!.textContent).toContain("alpha-1");
-    expect(modelItems[3]!.textContent).toContain("beta-2");
+    expect(modelItems[2]!.textContent).toContain("Delta Four");
     act(() => modelItems[2]!.click());
-    expect(updateHostSetting).toHaveBeenCalledWith({ superAgentModel: "gamma-3" });
+    expect(updateHostSetting).toHaveBeenCalledWith({ superAgentModel: "delta-4" });
   });
 
   it("当前值不在候选列表里时补占位选项，下拉不会显示成空白", () => {
@@ -191,5 +243,80 @@ describe("超流体链路的两个指针：声明与实现对账", () => {
     expect(items).toHaveLength(4);
     expect(items[3]!.textContent).toContain("ghost");
     expect(items[3]!.textContent).toContain("找不到这个 API 配置");
+  });
+
+  it("当前选中的模型不在专用通道回包里时补占位选项", () => {
+    hostSettings.superAgentModel = "legacy-model";
+    superProfileModelsView.current = {
+      profileName: "gateway",
+      models: [{ id: "alpha-1", name: "Alpha One" }],
+      currentModelId: "legacy-model",
+    };
+    renderSuperTab();
+    const trigger = modelTrigger();
+    expect(trigger.textContent).toContain("legacy-model");
+    const items = openMenu(trigger);
+    const last = items[items.length - 1]!;
+    expect(last.textContent).toContain("legacy-model");
+    expect(last.textContent).toContain("当前模型不在列表里");
+  });
+
+  it("宿主解析出的 currentModelId 不在列表里时仍出现在候选中", () => {
+    superProfileModelsView.current = {
+      profileName: "gateway",
+      models: [{ id: "alpha-1", name: "Alpha One" }],
+      currentModelId: "resolved-9",
+    };
+    renderSuperTab();
+    const items = openMenu(modelTrigger());
+    expect(items.some((item) => item.textContent?.includes("resolved-9"))).toBe(true);
+  });
+});
+
+describe("模型下拉的专用通道（按所选 API 配置拉取）", () => {
+  it("挂载时按当前选择（空串 = 跟随主会话）请求模型列表", () => {
+    expect(send).toHaveBeenCalledWith({ type: "refreshSuperProfileModels", profileName: "" });
+  });
+
+  it("切换 API 配置后按新配置重拉模型列表", () => {
+    hostSettings.superAgentProfile = "backup";
+    renderSuperTab();
+    expect(send).toHaveBeenCalledWith({ type: "refreshSuperProfileModels", profileName: "backup" });
+  });
+
+  it("端点查询失败时显式呈现真实原因，不回退主会话的模型列表", () => {
+    const reason = "模型列表查询失败（不回退内置目录）：connect ECONNREFUSED";
+    superProfileModelsView.current = {
+      profileName: "gateway",
+      models: [],
+      currentModelId: "",
+      error: reason,
+    };
+    renderSuperTab();
+    expect(container.textContent).toContain(reason);
+    const items = openMenu(modelTrigger());
+    // 只有「跟随所选配置」+ 活动配置自带的 alpha-1；不会出现主会话列表里的 gamma-3。
+    expect(items.some((item) => item.textContent?.includes("gamma-3"))).toBe(false);
+    expect(items.some((item) => item.textContent?.includes("alpha-1"))).toBe(true);
+  });
+
+  it("回包属于别的 API 配置时不拿它渲染（切换瞬间不串台）", () => {
+    hostSettings.superAgentProfile = "backup";
+    superProfileModelsView.current = {
+      profileName: "gateway",
+      models: [{ id: "gateway-only", name: "Gateway Only" }],
+      currentModelId: "gateway-only",
+    };
+    renderSuperTab();
+    const items = openMenu(modelTrigger());
+    expect(items.some((item) => item.textContent?.includes("gateway-only"))).toBe(false);
+    // 新配置自带的模型名已经补进候选，切换过程不会出现空白下拉。
+    expect(items.some((item) => item.textContent?.includes("beta-2"))).toBe(true);
+  });
+
+  it("首次回包到达前显示加载提示，而不是静默留空", () => {
+    superProfileModelsView.current = null;
+    renderSuperTab();
+    expect(container.textContent).toContain("正在连接并读取可用模型…");
   });
 });
