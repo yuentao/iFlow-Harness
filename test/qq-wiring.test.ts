@@ -96,7 +96,9 @@ describe("shouldRestartOnPatch", () => {
 
 describe("工作区根集合变化", () => {
   it("根集合逐项相同 → false（大小写 / 尾分隔符归一）", () => {
-    expect(qqWorkspaceRootsChanged(["J:\\git\\a"], ["j:\\git\\a"])).toBe(false);
+    // 盘符大小写只在 Windows 上不敏感，Linux 保持原样才是正确语义（见 qqRootKey）。
+    const caseVariant = process.platform === "win32" ? "j:\\git\\a" : "J:\\git\\a";
+    expect(qqWorkspaceRootsChanged(["J:\\git\\a"], [caseVariant])).toBe(false);
     expect(qqWorkspaceRootsChanged(["J:\\git\\a\\"], ["J:\\git\\a"])).toBe(false);
     expect(qqWorkspaceRootsChanged([], [])).toBe(false);
     expect(qqWorkspaceRootsChanged(undefined, [])).toBe(false);
