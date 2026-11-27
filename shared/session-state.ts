@@ -124,11 +124,20 @@ const SYSTEM_STATUS_PREFIXES = [
   "Compressing chat history",
   "Compressing context",
   "Failed to compress chat history",
+  // CLI 0.5.19 English locale emits a bare "Compressing..." status line
+  // (compressCommand.compressing in the vendored bundle) rather than the
+  // longer "Compressing context ..." form. Keep the ellipsis in the prefix so
+  // ordinary assistant text like "Compressing the file" stays a normal block.
+  "Compressing...",
+  "Compressing…", // U+2026 single-glyph ellipsis variant
 ];
 
 function isSystemStatusText(text: string): boolean {
-  const t = text.trimStart();
-  return SYSTEM_STATUS_PREFIXES.some((p) => t.startsWith(p));
+  // Case-insensitive, leading-whitespace tolerant, chunk-start prefix match;
+  // the ellipsis is part of each status phrase, so prose that merely begins
+  // with "Compressing" is never misclassified.
+  const t = text.trimStart().toLowerCase();
+  return SYSTEM_STATUS_PREFIXES.some((p) => t.startsWith(p.toLowerCase()));
 }
 
 /**

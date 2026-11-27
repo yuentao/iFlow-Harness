@@ -463,6 +463,94 @@ describe("system status text classification", () => {
     expect(b.system).toBe(true);
   });
 
+  it("flags the English CLI 'Compressing...' status line as system text", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Compressing..." } }),
+    );
+    expect(state.blocks).toHaveLength(1);
+    const b = state.blocks[0]!;
+    if (b.kind !== "text") throw new Error("expected text");
+    expect(b.system).toBe(true);
+  });
+
+  it("flags the U+2026 'Compressing…' ellipsis variant as system text", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Compressing…" } }),
+    );
+    const b = state.blocks[0]!;
+    if (b.kind !== "text") throw new Error("expected text");
+    expect(b.system).toBe(true);
+  });
+
+  it("matches the English status line case-insensitively and tolerates leading whitespace", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "  compressing...  " } }),
+    );
+    const b = state.blocks[0]!;
+    if (b.kind !== "text") throw new Error("expected text");
+    expect(b.system).toBe(true);
+  });
+
+  it("does not flag ordinary assistant text that merely mentions compressing", () => {
+    const texts = [
+      "Compressing the file now.",
+      "I'll start Compressing... the archive in a moment.",
+      "Compressing is a lossy operation.",
+      "compressingHistory is an internal key.",
+    ];
+    for (const text of texts) {
+      const state: SessionState = initialSessionState();
+      applySessionUpdate(
+        state,
+        notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } }),
+      );
+      const b = state.blocks[0]!;
+      if (b.kind !== "text") throw new Error("expected text");
+      expect(b.system).toBeUndefined();
+    }
+  });
+
+  it("keeps the existing English status variants recognized", () => {
+    const texts = [
+      "Compressing chat history",
+      "Compressing context to stay within token limits for gemini...",
+      "Failed to compress chat history: stream timeout",
+    ];
+    for (const text of texts) {
+      const state: SessionState = initialSessionState();
+      applySessionUpdate(
+        state,
+        notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } }),
+      );
+      const b = state.blocks[0]!;
+      if (b.kind !== "text") throw new Error("expected text");
+      expect(b.system).toBe(true);
+    }
+  });
+
+  it("does not merge the English status line with the assistant reply that follows", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Compressing..." } }),
+    );
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done — the file is smaller." } }),
+    );
+    expect(state.blocks).toHaveLength(2);
+    const [sys, reply] = state.blocks as [Extract<Block, { kind: "text" }>, Extract<Block, { kind: "text" }>];
+    expect(sys.system).toBe(true);
+    expect(reply.system).toBeUndefined();
+    expect(reply.text).toBe("Done — the file is smaller.");
+  });
+
   it("flags compression failure lines as system text", () => {
     const state: SessionState = initialSessionState();
     applySessionUpdate(
