@@ -6,7 +6,10 @@
  * 0cbaee9 的 `requestSuperProfileModels` / `superProfileModelsView`）时，没同步
  * 的那些 mock 会在组件挂载瞬间抛 `TypeError` —— 一次回归就带崩 19 个用例。
  * 这里按 `ChatStore` 的**完整表面**（全部 action + 全部视图）建一份默认 mock：
- * 组件新订阅任何成员都拿得到安全值，新成员的漂移在 smoke 测试里当场暴露。
+ * 组件新订阅任何成员都拿得到安全值。成员清单不是手抄的 —— 见下方
+ * `ChatStoreShape`，action 键集与视图键集/类型都从真实 store 纯类型推导，
+ * 所以「`ChatStore` 新增了成员但工厂没跟上」会在 `npm run typecheck` 直接
+ * 报错（smoke 测试只是第二道运行期防线）。
  *
  * 默认值口径：
  * - 全部 action = `vi.fn()`（可直接断言调用）；
@@ -52,75 +55,53 @@ import { vi } from "vitest";
 import {
   initialSessionState,
   pickQqSettingsUi,
-  type Block,
-  type ContextWindowOverridesUi,
   type HostSettingsUi,
-  type HostToWebview,
-  type ModelMetadataStateUi,
-  type QqSettingsUi,
   type SessionState,
-  type SuperProfileModelsUi,
 } from "../../shared/messages";
-// 纯类型导入：store.ts 在测试里整体被 mock，这里不产生任何运行时依赖。
-import type { PendingOpKind, ToastItem } from "../../webview/src/store";
+// 纯类型导入：store.ts 在测试里整体被 mock，这里不产生任何运行时依赖
+// （`import type` 编译后整条消失，不会踩 `vi.mock` hoisting 的 TDZ）。
+import type { useChat as realUseChat } from "../../webview/src/store";
+
+/**
+ * `webview/src/store.ts` 里 `ChatStore` 的完整表面。
+ *
+ * `ChatStore` 接口本身没有导出，但 `useChat` 是 `create<ChatStore>()` 的产物，
+ * `getState` 的返回类型就是它 —— 这里用**纯类型推导**拿到，不需要任何产品
+ * 改动。下面的 action 键集 / 视图键集 / 视图类型全部从它派生，因此
+ * **`ChatStore` 新增了成员而工厂没提供时，`npm run typecheck` 会直接报错**
+ * （而不是等到组件挂载瞬间抛 TypeError）。
+ */
+export type ChatStoreShape = ReturnType<typeof realUseChat.getState>;
+
+/** `ChatStore` 上的 action 键（成员值是函数）。 */
+export type ChatStoreActionKey = {
+  [K in keyof ChatStoreShape]: ChatStoreShape[K] extends (...args: never[]) => unknown ? K : never;
+}[keyof ChatStoreShape];
+
+/** `ChatStore` 上的视图键（成员值不是函数）。 */
+export type ChatStoreViewKey = Exclude<keyof ChatStoreShape, ChatStoreActionKey>;
 
 /** 每个 action 都是 `vi.fn()` 的返回类型，断言时直接 `expect(actions.send)...`。 */
 export type ActionMock = ReturnType<typeof vi.fn>;
 
 /**
- * `webview/src/store.ts` 里 `ChatStore` 的全部 action（逐项对应）。
+ * `ChatStore` 的全部 action（键集从 `ChatStoreShape` 派生，不是手抄）。
  *
- * `ChatStore` 本身没有导出，所以这里用结构化副本 + 类型标注：漏一个成员时
- * 组件挂载会抛 `TypeError`（smoke 测试兜住），改签名时组件侧编译报错。
+ * 新增 action 时这个映射立即多出一个**必填**键，`createActions()` 的返回字面量
+ * 缺它 → typecheck 报「缺少属性 'xxx'」，报错位置正好在工厂里。
+ *
+ * 值统一是 `ActionMock`：`vi.fn()` 的 `Mock` 类型自带 `mockClear` / `mockReturnValue`
+ * 等属性，与真实函数签名不互通，所以用映射把「具体签名」换成「任意签名的
+ * mock」—— 只作用于 action 集合，视图字段仍是真实类型（见 `StoreViews`）。
  */
-export interface StoreActions {
-  respondSuperResidueConfirm: ActionMock;
-  requestSuperResidueList: ActionMock;
-  handleSuperResidueAction: ActionMock;
-  updateHostSetting: ActionMock;
-  requestSuperProfileModels: ActionMock;
-  dismissToast: ActionMock;
-  notify: ActionMock;
-  setHeaderScrolled: ActionMock;
-  toggleFocusMode: ActionMock;
-  requestDraft: ActionMock;
-  clearDraftRequest: ActionMock;
-  requestMemoryDraft: ActionMock;
-  clearMemoryDraft: ActionMock;
-  applyHostMessage: ActionMock;
-  beginPending: ActionMock;
-  clearPending: ActionMock;
-  send: ActionMock;
-}
+export type StoreActions = {
+  [K in ChatStoreActionKey]: ActionMock;
+};
 
-/** `ChatStore` 的全部视图字段（组件用 selector 读的那些）。 */
-export interface StoreViews {
-  state: SessionState | null;
-  superTranscripts: Record<string, Block[]>;
-  superResidueConfirm: Extract<HostToWebview, { type: "superResidueConfirm" }> | null;
-  superResidueList: Extract<HostToWebview, { type: "superResidueList" }> | null;
-  superResidueRequestId: string | null;
-  superResidueLoading: boolean;
-  qqSettings: QqSettingsUi;
-  qqStatus: { connected: boolean; detail?: string } | null;
-  remoteTakeover: boolean;
-  qqPendingUsers: Extract<HostToWebview, { type: "qqPendingUsers" }>["users"];
-  qqLoginQr: Extract<HostToWebview, { type: "qqLoginQr" }> | null;
-  qqManagedStatus: Extract<HostToWebview, { type: "qqManagedStatus" }> | null;
-  editorTheme: "light" | "dark" | null;
-  hostSettings: HostSettingsUi;
-  contextWindowOverridesView: ContextWindowOverridesUi | null;
-  superProfileModelsView: SuperProfileModelsUi | null;
-  superProfileModelsRequestId: number | null;
-  modelMetadata: ModelMetadataStateUi;
-  toasts: ToastItem[];
-  pending: { kind: PendingOpKind; target: string } | null;
-  promptSeq: number;
-  headerScrolled: boolean;
-  focusMode: boolean;
-  composerDraftRequest: { text: string; seq: number } | null;
-  memoryDraftRequest: { text: string; seq: number } | null;
-}
+/** `ChatStore` 的全部视图字段（组件用 selector 读的那些），类型逐键取自真实 store。 */
+export type StoreViews = {
+  [K in ChatStoreViewKey]: ChatStoreShape[K];
+};
 
 /** mock 的完整 store：视图 + action 同一份对象（selector 每次都取到它）。 */
 export type StoreMockState = StoreViews & StoreActions;
