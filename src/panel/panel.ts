@@ -22,7 +22,7 @@ import {
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
-import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
+import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, normalizeModelsUrl, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
 import type { McpBrokerStatus } from "../acp/mcp-broker.js";
 import { deleteKernelApiProfile, migrateKernelApiProfiles, readKernelApiProfiles, setKernelActiveProfile, writeKernelApiProfile } from "../acp/api-profiles.js";
 import { resolveCliTokensLimit, tokensLimitEnvFromSettings, readKernelTokensLimits } from "../acp/cli-tokens-limit.js";
@@ -53,8 +53,9 @@ import type {
   McpServerStatusView,
   SessionSettings,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
-import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, AgentStatus, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, SuperProfileModelsUi, SuperResidueBranchUi, ToolBlock, ToolDiffUi, WebviewToHost, WorkspaceRootUi } from "../../shared/messages.js";
+import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER, QQ_LEASE_TAKEOVER_ACTION, QQ_LEASE_WAIT_ACTION } from "../../shared/messages.js";
+import { resolveSuperEndpoint, resolveSuperModel, type SuperApiProfile, type SuperEndpointInput } from "../../shared/super-profile.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import {
   EFFICIENCY_STEADY_PROMPT,
@@ -92,6 +93,7 @@ import {
   normalizeSuperTitle,
   type SuperIntegrationMode,
 } from "../../shared/super-agent.js";
+import { isAbsoluteWorkspacePath } from "../../shared/super-workspace.js";
 import {
   awaitSuperSessionArchiveWrite,
   deleteSuperSessionArchive,
@@ -121,6 +123,7 @@ import {
   isAgentOutputUpdate,
   isSubAgentToolCall,
   newSessionState,
+  parseCompressionCommand,
   parseEditArgs,
   renameSessionSummary,
   SESSION_LABEL_MAX,
@@ -503,6 +506,37 @@ export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // executing
   "run_shell_command",
 ] as const;
+
+/**
+ * 宿主侧 `/init` 委派的展开意图。
+ *
+ * `/init` 是 CLI 内建命令：其 action 用 Node fs 直接创建/清空 AGENTS.md，再回交
+ * 一段明确要求「列目录、读 README、迭代深入最多 10 个文件」的分析 prompt
+ * （vendor/iflow-fork/bundle/iflow.js:5353、:5959）。主会话只保留编排工具
+ * （上方白名单），跑到分析阶段必然 tool-not-found，等于功能丢失。
+ *
+ * 子会话的 `buildTaskPrompt` 会把 task 包成散文模板（prompts/super-agent-task.md：
+ * 首行 `You are a child session: ...`），裸 `/init` 落在那里不会被 CLI 当成 slash
+ * 命令。因此委派的是**展开后的意图**，让有完整工具面的子会话真正执行初始化，
+ * 而不是把命令 token 原样转交。子会话在隔离 worktree（同一仓库）里生成
+ * AGENTS.md，变更按既有合并流程回到工作区。
+ */
+const INIT_DELEGATE_TASK =
+  "Run the /init workflow in this repository: list the files and directories, " +
+  "read the README and up to 10 key source/config files, then create an " +
+  "AGENTS.md at the repository root that documents the project purpose, " +
+  "build/test/lint commands, high-level architecture and important " +
+  "conventions. Use your file tools to write the file; do not merely describe it.";
+
+/**
+ * 命中 `/init`（可带任意参数），不命中 `/initialize`、`/init-project` 等。
+ * token 大小写不敏感：宿主比 CLI 的严格小写判断更宽容，展开意图一致。
+ */
+function parseInitCommand(text: string): { raw: string } | null {
+  const match = /^\/init(?:\s+[\s\S]*)?$/i.exec(text.trim());
+  return match ? { raw: match[0] } : null;
+}
+
 /** The main session's mode is fixed (2026-11-18). Every tool it holds
  * (`super-agent` / `todo_write` / `todo_read` / `ask_user_question`) has
  * `shouldConfirmExecute() === false` and its CLI process runs without MCP
@@ -713,6 +747,10 @@ const LOCATOR_PATHS_KEY = "iflow.locator.paths";
 const UI_FONT_SIZES = ["compact", "standard", "large"] as const;
 /** `iflow.uiDensity` presets — kept in sync with shared/messages.ts. */
 const UI_DENSITIES = ["compact", "standard", "comfortable"] as const;
+
+/** 超流体链路的模型列表缓存存活时长（毫秒）。同一端点短时间内不重复请求
+ * /models；端点切换（缓存 key 变了）自然不命中，另外写入时还会显式清空。 */
+const SUPER_PROFILE_MODELS_CACHE_TTL_MS = 30_000;
 
 /** settings.json is user-editable — fall back to the default on a stale value. */
 function asUiFontSize(value: unknown): (typeof UI_FONT_SIZES)[number] {
@@ -1017,12 +1055,36 @@ export class ChatPanel implements vscode.Disposable {
   static readonly SUPER_TOOL_CALL_OUTCOME_CAP = 100;
   static readonly SUPER_TOOL_CALL_CORRECTION_CAP = 2;
 
+  /**
+   * 发出 `session/cancel` 后等待本轮落定的上限。
+   *
+   * 取消是真实动作，但内核可能卡在不可中断的等待里（自动压缩 / 已断流却仍
+   * 占着请求）——没有上限时状态永远停在 streaming，界面只能反复点。超时后
+   * 走**可见**的兜底：提示并强制重启内核（先落盘转录、按 restartRestoreId
+   * 恢复同一会话），绝不静默把状态改成 idle。
+   */
+  private static readonly STOP_SETTLE_TIMEOUT_MS = 15_000;
+  /**
+   * 批量取消活子会话的等待上限。每个子会话先落 cancelled 状态再回收进程，
+   * 这里只限制「等它们回收完」的时间：超时后回收在后台继续，如实提示一次。
+   */
+  private static readonly CHILD_CANCEL_TIMEOUT_MS = 12_000;
+
   private editorPanel: vscode.WebviewPanel | undefined;
   private client: AcpClient | null = null;
   /** One-shot guard for copying SecretStorage-only profiles into the kernel
    * settings.json (the migration itself is idempotent; this only keeps the
    * per-snapshot auth build from re-reading/re-writing the file). */
   private authProfilesMigrated = false;
+  /** 超流体链路的模型列表短缓存：key = 归一化后的 models URL（实际请求的
+   * 那个地址），value = 查询时间 + 所用 apiKey + 模型 id 列表。同一端点
+   * 短时间内不重复请求 /models；端点切换（key 变了）自然不命中，同一端点
+   * 换了 apiKey 也会失效。**只缓存成功结果**，失败不入缓存（端点恢复后
+   * 下一次刷新就能拿到真列表）。 */
+  private readonly superProfileModelsCache = new Map<
+    string,
+    { at: number; apiKey: string; models: string[] }
+  >();
   private store: SessionStore;
   /** F3 Phase 1: global/project memory files (read/edit, not the CLI agent). */
   private readonly memory: MemoryService;
@@ -1172,6 +1234,16 @@ export class ChatPanel implements vscode.Disposable {
       // site (the panel owns the cold-start lookup-key fallbacks).
       tokensLimitEnv: () => this.tokensLimitEnv(),
       readUserSetting: (key, fallback) => this.readUserSetting(key, fallback),
+      // 子会话派发前的 live `/models` 取证复用设置页那条查询 —— **同一份**
+      // 30s TTL 缓存（key = normalizeModelsUrl(baseUrl)，逐次比对 apiKey）。
+      // 不另建缓存、不引入第二个数据源：同批并行派发的多个子会话因此只发
+      // 一次真实请求。modelName 只参与请求构造，不影响缓存键。
+      querySuperModelIds: (creds) =>
+        this.querySuperProfileModelIds({
+          baseUrl: creds.baseUrl,
+          apiKey: creds.apiKey,
+          modelName: "",
+        }),
       chunkText: (content) => ChatPanel.chunkText(content),
       sendPrompt: (text, images, files, contexts, options) => this.sendPrompt(text, images, files, contexts, options),
     });
@@ -1614,6 +1686,23 @@ export class ChatPanel implements vscode.Disposable {
   private promptRequestSessionId: string | null = null;
   /** 本轮在飞请求是否已经发过一次 `session/cancel`（同一回合内不重复发）。 */
   private cancelSentForPrompt = false;
+  /**
+   * 「正在停止」窗口的唯一计时器：发出 cancel 后等回合落定，超时就强制重启
+   * 内核（可见兜底）。null = 当前没有停止窗口。
+   */
+  private stopSettleTimer: NodeJS.Timeout | null = null;
+  /** 本停止窗口针对的主会话 id（保证迟到的定时器不会误停新会话）。 */
+  private stoppingSessionId: string | null = null;
+  /**
+   * 测试可覆盖的等待上限（生产用 {@link STOP_SETTLE_TIMEOUT_MS}）。
+   * 单元测试把它调小，就不必和真实 15s 的墙钟赛跑。
+   */
+  private stopSettleTimeoutMs = ChatPanel.STOP_SETTLE_TIMEOUT_MS;
+  /**
+   * 批量取消本会话活子会话的在飞 promise。重复点击停止共用同一轮 —— 既不
+   * 重复 cancel 同一个子会话，也不让第二次点击等第二次完整回收。
+   */
+  private childCancelPromise: Promise<void> | null = null;
   /**
    * 每会话「已注入的档位」（`iflow.efficiencyMode`）：键是 CLI 会话 id。
    *
@@ -2062,6 +2151,23 @@ export class ChatPanel implements vscode.Disposable {
             // Every mirrored setting lives in the same settings panel; a
             // direct VSCode-side edit must repaint it too.
             if (e.affectsConfiguration("iflow")) this.postHostSettings();
+            // 默认工作区在激活期被 prefetch 缓存；运行中改了设置就作废，
+            // 下次派发重新解析（沿用「有子会话在跑时不换根」的约束）。
+            if (e.affectsConfiguration("iflow.superAgent.defaultWorkspace")) {
+              this.superHost.invalidateDefaultWorkspace();
+            }
+            // 超流体 Profile 在 VSCode 侧被直接改掉时，模型列表缓存必须失效
+            // （否则下拉里还是上一个端点的列表），并把新端点的实时列表推给
+            // webview —— 面板之外的改动 webview 自己不知道，不会来请求。
+            if (e.affectsConfiguration("iflow.superAgentProfile")) {
+              this.clearSuperProfileModelsCache();
+              void this.pushSuperProfileModels();
+            } else if (e.affectsConfiguration("iflow.superAgentModel")) {
+              // 选中的模型变了但端点没变：缓存里是端点的模型 id 列表，不用失效；
+              // 但载荷里的 currentModelId / 补头项要刷新 —— 否则外部把模型改成
+              // 端点列表之外的 id 时，下拉会渲染成空白直到手动刷新。
+              void this.pushSuperProfileModels();
+            }
         // 记忆整理的周期 / 空闲阈值 / 总量预算是调度器参数，配置变更要热更新
         // （idleMinutes 变化会重建 tick 定时器）。
         if (
@@ -2129,11 +2235,14 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     // 根集合增减（多根工作区增删文件夹）：缓存作废 + 投影刷新。当前会话的
-    // CLI 上下文不动（它已经建立，改根需要新建会话）。
+    // CLI 上下文不动（它已经建立，改根需要新建会话）。QQ 通道例外：它的现场
+    // 是按旧根建立的（配置快照 / 启动门控 / 存储目录），必须重新解析并重建，
+    // 否则要用户手动重新保存一次设置才生效。
     this.context.subscriptions.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
         this.fileSearchCache = null;
         this.publishWorkspaceRoots();
+        this.handleQqWorkspaceFoldersChanged();
       }),
     );
     // 启动即发布一次投影：多根工作区在首个会话建立前也能看到根选择器。
@@ -2272,6 +2381,10 @@ export class ChatPanel implements vscode.Disposable {
     }
     this.autoTurnsStoppedFor = null;
     this.clearDeferredAutoTurnsToast();
+    // 停止窗口的迟到定时器绝不能在面板销毁后触发强制重启。
+    this.clearStopSettleTimer();
+    this.stoppingSessionId = null;
+    this.childCancelPromise = null;
     this.promptRequestSessionId = null;
     this.stopSuperHeartbeat();
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
@@ -2333,6 +2446,19 @@ export class ChatPanel implements vscode.Disposable {
     if (!enabled) return;
     void this.ensureClient().catch((error) => {
       this.log.error("warm start failed", errorMessage(error));
+    });
+  }
+
+  /**
+   * 激活期静默预热默认工作区（extension.ts 在 warmStart 之后调用）。
+   *
+   * fire-and-forget：不 await、不抛到激活链。无打开工作区时提前异步建好默认目录，
+   * 让首次派发同步命中；有工作区时宿主内部零 I/O。没有 webview，失败只记日志，
+   * 用户可见提示统一留给派发入口。与派发共享 in-flight promise，避免并发重复。
+   */
+  prefetchSuperWorkspace(): void {
+    void this.superHost.prefetchSuperWorkspace().catch((error) => {
+      this.log.warn(`super agent: 默认工作区预热失败：${errorMessage(error)}`);
     });
   }
 
@@ -2626,6 +2752,24 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * OS folder picker → `iflow.superAgent.defaultWorkspace`. Cancellation is
+   * silent (no write, no toast); a picked absolute path is written to the
+   * setting and echoed back so the settings row shows the effective value.
+   */
+  private async pickDefaultWorkspace(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFolders: true,
+      canSelectFiles: false,
+      canSelectMany: false,
+      title: vscode.l10n.t("选择默认工作区目录"),
+    });
+    if (!picked || picked.length === 0) return;
+    const dir = picked[0]!.fsPath;
+    await this.writeUserSetting("superAgent.defaultWorkspace", dir);
+    this.postToWebview({ type: "defaultWorkspacePicked", path: dir });
+  }
+
+  /**
    * OS file picker → attachments. Images are read as base64 (the webview has
    * no fs access); other files keep their real disk paths — no temp-dir
    * staging needed because the picker guarantees an absolute path.
@@ -2722,6 +2866,7 @@ export class ChatPanel implements vscode.Disposable {
       case "queueAction":
       case "resolveContext":
       case "cancel":
+      case "compressNow":
       case "newSession":
       case "setModel":
       case "setThink":
@@ -2732,6 +2877,7 @@ export class ChatPanel implements vscode.Disposable {
       case "setSessionRoots":
       case "stageFiles":
       case "pickAttachments":
+      case "pickDefaultWorkspace":
       case "openImage":
       case "saveAuth":
       case "clearAuth":
@@ -2744,6 +2890,7 @@ export class ChatPanel implements vscode.Disposable {
       case "renameSession":
       case "refreshAuth":
       case "refreshModels":
+      case "refreshSuperProfileModels":
       case "restartCli":
       case "openSettings":
       case "setHostSettings":
@@ -2875,6 +3022,9 @@ export class ChatPanel implements vscode.Disposable {
       case "cancel":
         this.cancelCurrentTurn();
         break;
+      case "compressNow":
+        void this.compressNowFromComposer();
+        break;
       case "newSession":
         await this.startNewSession();
         break;
@@ -2941,6 +3091,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "pickAttachments":
         void this.pickAttachments();
+        break;
+      case "pickDefaultWorkspace":
+        void this.pickDefaultWorkspace();
         break;
       case "openImage":
         void this.openImageAttachment(msg.dataUrl);
@@ -3011,6 +3164,12 @@ export class ChatPanel implements vscode.Disposable {
         // Dropdown opened: re-query /models (may take seconds — fire and forget;
         // the store pushes a snapshot when the fresh list lands).
         void this.refreshLiveModels();
+        break;
+      case "refreshSuperProfileModels":
+        // 「超流体」设置页的模型下拉：按该 Profile 的 baseUrl 实时查 /models
+        // （可能耗时数秒 ——  fire and forget，结果以 superProfileModels 推回）。
+        // requestId 原样回显：webview 只认最后发出的那个 id，迟到的旧回包丢弃。
+        void this.pushSuperProfileModels(msg.profileName, msg.requestId);
         break;
       case "restartCli":
         await this.restartCli();
@@ -3173,6 +3332,51 @@ export class ChatPanel implements vscode.Disposable {
         if (typeof msg.superAgentFullTrust === "boolean") {
           writes.push(["superAgent.fullTrust", msg.superAgentFullTrust]);
         }
+        // 默认工作区：空值绝不写盘（resolver 把空值解释为内置默认），相对路径 /
+        // ~ 开头 / 指向文件的路径也不写；拒绝时保留原值并提示，末尾的
+        // postHostSettings 会把生效值回推给输入框，避免出现「框里改了、设置没变」。
+        if (typeof msg.superAgentDefaultWorkspace === "string") {
+          const raw = msg.superAgentDefaultWorkspace.trim();
+          if (raw.length === 0) {
+            this.store.sendToast(
+              "info",
+              vscode.l10n.t("默认工作区不能清空；留空即使用内置默认目录 ~/.iflow/workspace，原设置未改动。"),
+            );
+          } else if (!isAbsoluteWorkspacePath(raw)) {
+            this.store.sendToast(
+              "warning",
+              vscode.l10n.t("默认工作区必须是绝对路径（{0}），已保留原设置；留空则使用内置默认目录。", raw),
+            );
+          } else {
+            let isFile = false;
+            try {
+              isFile = statSync(raw).isFile();
+            } catch {
+              // 目录尚不存在（或暂时 stat 失败）：resolver 首次派发会自动创建，照常写入。
+            }
+            if (isFile) {
+              this.store.sendToast(
+                "warning",
+                vscode.l10n.t("默认工作区指向的是文件（{0}），已保留原设置。", raw),
+              );
+            } else {
+              writes.push(["superAgent.defaultWorkspace", raw]);
+            }
+          }
+        }
+        // 超流体链路的独立指针与模型（`iflow.superAgentProfile` /
+        // `iflow.superAgentModel`）：与主链路各持一份「我当前用哪个」。
+        // 两者留空都是合法语义（跟随主链路活动 Profile / 用 Profile 自带的
+        // modelName），因此空串必须照写 —— 否则用户取消不了选择。
+        if (typeof msg.superAgentProfile === "string") {
+          writes.push(["superAgentProfile", msg.superAgentProfile.trim()]);
+        }
+        if (typeof msg.superAgentModel === "string") {
+          writes.push(["superAgentModel", msg.superAgentModel.trim()]);
+        }
+        // 写入前的超流体 Profile：写完再比一次，用来判断端点是否切换
+        // （切换 → 旧的模型列表缓存必须失效）。
+        const previousSuperProfile = this.readStringSetting("superAgentProfile");
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
         // 周期 / 空闲阈值 / 总量预算写盘后热更新调度器（写失败时配置仍是旧值，与设置页显示一致）。
         if (
@@ -3200,6 +3404,14 @@ export class ChatPanel implements vscode.Disposable {
         // instead of waiting for the configuration listener round trip.
         if (msg.auroraIntensity !== undefined) this.postTheme();
         this.postHostSettings();
+        // 超流体 Profile 变了 → 目标端点可能变了：旧的模型列表缓存必须失效，
+        // 并把新端点的实时列表推给 webview（异步，不阻塞上面的设置回显）。
+        // 比的是**生效值**：写入被拒（失败 / 只进了暂存）时生效值没变，
+        // 缓存与列表都不动 —— 界面与磁盘保持一致。
+        if (this.readStringSetting("superAgentProfile") !== previousSuperProfile) {
+          this.clearSuperProfileModelsCache();
+          void this.pushSuperProfileModels();
+        }
         break;
       }
       case "setContextWindowOverrides": {
@@ -3999,6 +4211,11 @@ export class ChatPanel implements vscode.Disposable {
       ),
       superAgentKeepWorktree: this.readUserSetting<boolean>("superAgent.keepWorktree", false),
       superAgentFullTrust: this.readUserSetting<boolean>("superAgent.fullTrust", false),
+      superAgentDefaultWorkspace: this.readUserSetting<string>("superAgent.defaultWorkspace", ""),
+      // 超流体链路的独立指针与模型：留空 = 跟随主链路（回退链）。
+      // 永远是字符串（脏值当空串）：webview 侧按 `?? ""` 消费即可。
+      superAgentProfile: this.readStringSetting("superAgentProfile"),
+      superAgentModel: this.readStringSetting("superAgentModel"),
     });
   }
 
@@ -5307,6 +5524,18 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.commands.executeCommand("workbench.action.reloadWindow");
       return;
     }
+    if (actionId === QQ_LEASE_WAIT_ACTION) {
+      // QQ 租约冲突卡片的「等待」：只关 toast，不接管（默认行为）。
+      if (typeof toastId === "number") this.store.dismissToast(toastId);
+      return;
+    }
+    if (actionId === QQ_LEASE_TAKEOVER_ACTION) {
+      // QQ 租约冲突卡片的「接管」：与原 showWarningMessage 分支完全同一条
+      // forceTake + 旧窗口心跳让出流程，租约语义不变。
+      if (typeof toastId === "number") this.store.dismissToast(toastId);
+      void this.qqHost.takeoverQqLease();
+      return;
+    }
     if (typeof toastId === "number") this.store.dismissToast(toastId);
   }
 
@@ -5317,20 +5546,32 @@ export class ChatPanel implements vscode.Disposable {
    * collapsible CompressionBlock. `dismissToastId` removes the warning pill
    * that carried this action, right as the compress turn opens.
    */
-  private async runCompressTurn(dismissToastId?: number): Promise<void> {
-    if (this.historySyncBusy) return;
+  /**
+   * 主动压缩一轮的结果。调用方（底部「压缩上下文」按钮）据此补一条面向
+   * 用户的原因提示；警告 pill 的入口只关心是否真的跑起来。
+   */
+  private async runCompressTurn(
+    dismissToastId?: number,
+  ): Promise<"ok" | "empty" | "busy" | "not-ready" | `error:${string}`> {
+    if (this.historySyncBusy) return "not-ready";
     const state = this.store.getState();
-    if (state.initializing || state.status === "streaming") return;
+    // Stop 窗口里绝不抢跑：cancel 已发出、回合尚未落定，此时再发 prompt 会
+    // 与正在取消的请求并发。
+    if (state.cancelling || state.initializing || state.status === "streaming") return "busy";
     const sessionId = state.sessionId;
-    if (!sessionId) return;
+    if (!sessionId) return "not-ready";
+    if (!state.blocks.some((block) => block.kind === "user")) return "empty";
     const client = await this.ensureClient().catch(() => null);
-    if (!client || this.disposed || this.client !== client) return;
-    if (this.store.getState().sessionId !== sessionId) return;
+    if (!client || this.disposed || this.client !== client) return "not-ready";
+    if (this.store.getState().sessionId !== sessionId) return "not-ready";
     // State-machine flip and pill removal move together, immediately before
     // beginCompressTurn's flush: no push can observe the half-dismissed
     // intermediate (the 2026-10-14 flicker).
     this.contextWarnActive = false;
-    if (typeof dismissToastId === "number") this.store.dismissToast(dismissToastId);
+    if (typeof dismissToastId === "number") {
+      this.store.dismissToast(dismissToastId);
+      if (this.contextWarnToastId === dismissToastId) this.contextWarnToastId = null;
+    }
     // Stream the session for the duration of the turn: without this the
     // whole `/compress` runs inside `idle` and the webview's 正在压缩 pill
     // never renders (2026-10-14 report). Status flips via the reducer; the
@@ -5339,8 +5580,9 @@ export class ChatPanel implements vscode.Disposable {
     try {
       const result = await this.promptWithRetry(client, sessionId, [{ type: "text", text: "/compress" }]);
       if (this.store.getState().sessionId === sessionId) this.store.promptCompleted(result.stopReason, result.usage);
+      return "ok";
     } catch (error) {
-      if (this.disposed || this.store.getState().sessionId !== sessionId) return;
+      if (this.disposed || this.store.getState().sessionId !== sessionId) return "not-ready";
       this.log.warn(`manual compress failed: ${errorMessage(error)}`);
       this.store.sendToast(
         "warning",
@@ -5351,6 +5593,74 @@ export class ChatPanel implements vscode.Disposable {
       // The turn is over on the failure path too — leaving 状态 streaming
       // would strand the panel in a phantom generating state.
       this.store.endCompressTurn();
+      return `error:${errorMessage(error)}`;
+    }
+  }
+
+  /** 底部「压缩上下文」按钮的单飞锁：连点只发一轮。 */
+  private compressTurnActive = false;
+
+  /**
+   * 底部「压缩上下文」按钮：主动发起一轮 `/compress`（与上下文警告 pill 的
+   * 「立即压缩」共用 runCompressTurn）。webview 只负责禁用态与 1.5s 防抖，
+   * 真正的守卫都在这里 —— 所有拒绝都带真实原因，绝不静默吞掉点击。
+   */
+  private async compressNowFromComposer(): Promise<void> {
+    if (this.disposed || this.compressTurnActive) return;
+    // 同步占锁（第一个 await 之前）：连点 / pill + 按钮同时触发只跑一轮。
+    this.compressTurnActive = true;
+    try {
+      const state = this.store.getState();
+      // Stop 窗口里不抢跑：cancel 已发出，回合尚未落定。
+      if (state.cancelling) return;
+      if (state.initializing || state.replaying) {
+        this.store.sendToast("warning", vscode.l10n.t("会话尚未就绪，暂时无法压缩"));
+        return;
+      }
+      if (state.auth.needsSetup) {
+        this.store.sendToast("warning", vscode.l10n.t("会话尚未就绪，暂时无法压缩"));
+        return;
+      }
+      if (this.historySyncBusy) {
+        this.store.sendToast("warning", vscode.l10n.t("正在同步会话历史，请稍后再压缩"));
+        return;
+      }
+      if (!state.sessionId) {
+        this.store.sendToast("warning", vscode.l10n.t("会话尚未就绪，暂时无法压缩"));
+        return;
+      }
+      if (state.status === "streaming" || state.compressing) {
+        this.store.sendToast("warning", vscode.l10n.t("主会话正在生成，等本轮结束后再压缩"));
+        return;
+      }
+      if (!state.blocks.some((block) => block.kind === "user")) {
+        this.store.sendToast("info", vscode.l10n.t("暂无可压缩的对话内容"));
+        return;
+      }
+      // 上一轮 Stop 留下的 cancelSeen 会让 promptWithRetry 在顶部直接判
+      // cancelled（用户看到「点压缩没反应」）。用户此刻明确要求压缩，清掉它。
+      this.cancelSeen = false;
+      // 常驻的上下文警告 pill 用同一个 toastId 收掉（runCompressTurn 内部与
+      // 状态翻转同步执行，不会闪回）。
+      const outcome = await this.runCompressTurn(this.contextWarnToastId ?? undefined);
+      if (outcome === "empty") {
+        this.store.sendToast("info", vscode.l10n.t("暂无可压缩的对话内容"));
+      } else if (outcome === "busy") {
+        this.store.sendToast("warning", vscode.l10n.t("主会话正在生成，等本轮结束后再压缩"));
+      } else if (outcome === "not-ready") {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t(
+            this.historySyncBusy
+              ? "正在同步会话历史，请稍后再压缩"
+              : "会话尚未就绪，暂时无法压缩",
+          ),
+        );
+      }
+      // `error:…` 已在 runCompressTurn 内部按「压缩失败：{0}」提示真实错误，
+      // 这里不重复弹第二条。
+    } finally {
+      this.compressTurnActive = false;
     }
   }
 
@@ -5568,26 +5878,146 @@ export class ChatPanel implements vscode.Disposable {
     pending.resolve({ outcome: { outcome: "selected", optionId } });
   }
 
-  /** Shared complete user-stop chain: unblock cards, suppress retries/watchdog. */
+  /**
+   * Shared complete user-stop chain: unblock cards, suppress retries/watchdog.
+   *
+   * 一次点击的职责边界：
+   *  - **幂等**：已经在「正在停止」里就不再重复发 cancel / 重复取消子会话；
+   *  - **真实取消**：主会话发一次 `session/cancel`，并并行中断本主会话名下
+   *    仍在跑的超流体（用户按停止的语义是「全停」，旧实现只管主会话，子会话
+   *    继续跑、继续把汇报排进队列）；
+   *  - **宿主权威的进行态**：回合仍在 streaming 时置 `cancelling`，webview
+   *    只按它显示「正在停止…」并禁用按钮；
+   *  - **有界**：等待落定有上限，超时强制重启内核并如实提示。
+   */
   private cancelCurrentTurn(): void {
     const client = this.client;
     this.cancelAllApprovals(vscode.l10n.t("用户取消"));
     this.cancelAllPendingQuestions(vscode.l10n.t("用户取消"));
     this.cancelSeen = true;
     this.clearPostRejectionWatchdog();
-    const sessionId = this.store.getState().sessionId;
+    const state = this.store.getState();
+    const sessionId = state.sessionId;
     if (!sessionId) return;
+    // 已经在这个停止窗口里：再点一次是幂等重复 —— 不再发第二条 cancel，
+    // 也不重跑一遍子会话取消（那只会让回收更慢）。按钮仍保持「正在停止…」。
+    if (state.cancelling) return;
     // Stop means "stop". Host-driven turns (child-session reports / re-delivered
     // user messages) would otherwise start the NEXT turn the instant this one
     // settles, flipping the panel straight back to 正在生成 — a single click
     // then reads as "nothing happened" and users click again and again
     // (measured: one cancel per queued report turn). Hold those automatic
     // turns until the user sends the next message; nothing is dropped.
-    if (this.store.getState().status === "streaming") {
-      this.autoTurnsStoppedFor = this.currentMainSessionId();
-      this.announceDeferredAutoTurns();
-    }
+    //
+    // **不再以 status==="streaming" 为前提**：点击经常落在「本轮刚 settle、
+    // 下一条汇报/回执尚未开跑」的缝隙里。旧实现那时直接跳过压制，紧接着的
+    // 自动回合把面板翻回「生成中」——子会话越多，这个缝隙命中得越频繁，表现
+    // 就是「点了没反应 / 要点好几次」。停止意图是无条件的。
+    this.autoTurnsStoppedFor = this.currentMainSessionId();
+    this.announceDeferredAutoTurns();
     this.sendTurnCancel(sessionId, client);
+    void this.cancelLiveChildSessions();
+    if (state.status === "streaming") this.beginStopWindow(sessionId);
+  }
+
+  /**
+   * 中断本主会话名下仍在跑的超流体（并行、有界、重复点击共享同一轮）。
+   *
+   * 归属过滤与 `superBelongsToCurrentMain` 同口径：另一个主会话的子会话不能
+   * 被这一次点击误伤。每个子会话的 cancel 先落 `cancelled` 状态再回收进程，
+   * 所以超时只影响「等回收完」的时间，看板状态早已如实是已中断。
+   */
+  private cancelLiveChildSessions(): Promise<void> {
+    if (this.childCancelPromise) return this.childCancelPromise;
+    const manager = this.superAgent;
+    if (!manager || typeof manager.cancelAll !== "function") return Promise.resolve();
+    const owner = this.currentMainSessionId();
+    this.childCancelPromise = (async () => {
+      let timer: NodeJS.Timeout | null = null;
+      try {
+        const finished = manager.cancelAll("user", { mainSessionId: owner });
+        const timeout = new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), ChatPanel.CHILD_CANCEL_TIMEOUT_MS);
+        });
+        const result = await Promise.race([
+          finished.then((count) => ({ kind: "done" as const, count })),
+          timeout.then(() => ({ kind: "timeout" as const })),
+        ]);
+        if (result.kind === "timeout") {
+          // 真实的进程回收仍在后台继续（状态已落 cancelled）；如实告诉用户，
+          // 不把「还在回收」说成「没停」。
+          this.log.warn(
+            `super agent: child-session cleanup still running after ${ChatPanel.CHILD_CANCEL_TIMEOUT_MS / 1000}s; continuing in background`,
+          );
+          this.store.appendNotice(
+            vscode.l10n.t("部分超流体进程未在 {0} 秒内回收，已在后台继续清理", ChatPanel.CHILD_CANCEL_TIMEOUT_MS / 1000),
+          );
+        } else if (result.count > 0) {
+          this.log.info(`super agent: stopped ${result.count} live child session(s) on user Stop`);
+        }
+      } catch (error) {
+        this.log.warn(`super agent: cancelling live child sessions failed: ${errorMessage(error)}`);
+      } finally {
+        if (timer) clearTimeout(timer);
+        this.childCancelPromise = null;
+      }
+    })();
+    return this.childCancelPromise;
+  }
+
+  /** 开启宿主权威的「正在停止」窗口（见 `SessionState.cancelling`）。 */
+  private beginStopWindow(sessionId: string): void {
+    this.clearStopSettleTimer();
+    this.stoppingSessionId = sessionId;
+    this.store.setCancelling(true);
+    this.stopSettleTimer = setTimeout(() => this.onStopSettleDeadline(sessionId), this.stopSettleTimeoutMs);
+  }
+
+  /** 收掉「正在停止」窗口：回合已落定（成功 / 取消 / 失败）或会话已替换。 */
+  private endStopWindow(): void {
+    this.clearStopSettleTimer();
+    this.stoppingSessionId = null;
+    if (!this.disposed) this.store.setCancelling(false);
+  }
+
+  private clearStopSettleTimer(): void {
+    if (this.stopSettleTimer) {
+      clearTimeout(this.stopSettleTimer);
+      this.stopSettleTimer = null;
+    }
+  }
+
+  /**
+   * 停止超时兜底：cancel 已发出、内核仍未让本轮落定。
+   *
+   * 不静默把状态改成 idle（那是谎报）：先如实提示，再走内核强制重启 ——
+   * `performCliRestart` 会先落盘转录，再按 `restartRestoreId` 恢复同一会话，
+   * 被丢弃的 in-flight 请求在 catch 里因会话已替换而静默丢弃，状态回到 idle。
+   */
+  private onStopSettleDeadline(sessionId: string): void {
+    this.stopSettleTimer = null;
+    if (this.disposed) return;
+    const state = this.store.getState();
+    if (!state.cancelling) return;
+    if (
+      this.stoppingSessionId !== sessionId ||
+      state.sessionId !== sessionId ||
+      state.status !== "streaming"
+    ) {
+      this.endStopWindow();
+      return;
+    }
+    this.log.warn(
+      `stop did not settle within ${this.stopSettleTimeoutMs}ms on session ${sessionId} — forcing CLI restart`,
+    );
+    this.store.sendToast(
+      "warning",
+      vscode.l10n.t("停止超时：内核未响应取消请求，正在重启内核以结束本轮（对话记录已保存）"),
+    );
+    void this.performCliRestart().catch((error: unknown) => {
+      this.log.warn(`forced CLI restart after stop timeout failed: ${errorMessage(error)}`);
+      this.endStopWindow();
+    });
   }
 
   /**
@@ -6238,6 +6668,27 @@ export class ChatPanel implements vscode.Disposable {
       );
       return;
     }
+    await this.performCliRestart();
+  }
+
+  /**
+   * Unguarded restart core shared by {@link restartCli} and the stop-timeout
+   * fallback.
+   *
+   * The forced-stop path calls it while the panel is still `streaming` on
+   * purpose: after `session/cancel` was ignored there is no gentler escape,
+   * and this path is the one that preserves the conversation (tail persisted
+   * first, `restartRestoreId` restores the same session). The in-flight
+   * prompt rejects against the disposed client and its catch sees the
+   * replaced session id, so it drops silently instead of painting an error.
+   */
+  private async performCliRestart(): Promise<void> {
+    if (this.disposed) return;
+    // The stop window is over here: the state is about to be replaced and a
+    // late deadline must not fire against the fresh session.
+    this.clearStopSettleTimer();
+    this.stoppingSessionId = null;
+    const state = this.store.getState();
     const outgoingId = state.activeSessionId ?? state.sessionId;
     if (outgoingId) {
       // A restart must NOT drop the conversation the user is looking at: the
@@ -7690,6 +8141,17 @@ export class ChatPanel implements vscode.Disposable {
   getSuperAgent(...args: Parameters<SuperAgentHost["getSuperAgent"]>): ReturnType<SuperAgentHost["getSuperAgent"]> {
     return this.superHost.getSuperAgent(...args);
   }
+  /**
+   * 派发前拿到子会话管理器（宿主侧唯一判空点：无打开工作区时回退
+   * `iflow.superAgent.defaultWorkspace`，失败按真实原因 toast）。
+   */
+  async ensureSuperAgentForDispatch(...args: Parameters<SuperAgentHost["ensureSuperAgentForDispatch"]>): ReturnType<SuperAgentHost["ensureSuperAgentForDispatch"]> {
+    return this.superHost.ensureSuperAgentForDispatch(...args);
+  }
+  /** 设置改动后作废默认工作区缓存，下次派发重新解析（子会话在跑时不换根）。 */
+  invalidateDefaultWorkspace(...args: Parameters<SuperAgentHost["invalidateDefaultWorkspace"]>): ReturnType<SuperAgentHost["invalidateDefaultWorkspace"]> {
+    return this.superHost.invalidateDefaultWorkspace(...args);
+  }
   async ensureMcpBroker(...args: Parameters<SuperAgentHost["ensureMcpBroker"]>): ReturnType<SuperAgentHost["ensureMcpBroker"]> {
     return this.superHost.ensureMcpBroker(...args);
   }
@@ -8075,6 +8537,10 @@ export class ChatPanel implements vscode.Disposable {
     return this.qqHost.qqWorkspaceRoots(...args);
   }
 
+  handleQqWorkspaceFoldersChanged(...args: Parameters<QqHost["handleWorkspaceFoldersChanged"]>): ReturnType<QqHost["handleWorkspaceFoldersChanged"]> {
+    return this.qqHost.handleWorkspaceFoldersChanged(...args);
+  }
+
 
   reportSuperCleanupBatch(...args: Parameters<SuperAgentHost["reportSuperCleanupBatch"]>): ReturnType<SuperAgentHost["reportSuperCleanupBatch"]> {
     return this.superHost.reportSuperCleanupBatch(...args);
@@ -8326,6 +8792,7 @@ export class ChatPanel implements vscode.Disposable {
             // — the next persist point (prompt completion) will never run.
             void this.persistActiveTranscript();
             this.client = null;
+            this.endStopWindow();
             this.cancelAllApprovals(vscode.l10n.t("内核进程已退出"));
             this.cancelAllPendingQuestions(vscode.l10n.t("内核进程已退出，提问已跳过"));
             this.store.markError(vscode.l10n.t("内核进程已退出，重新打开面板可重试"));
@@ -9234,6 +9701,332 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 读一个 `iflow.*` 字符串设置，**永远**返回字符串（去空白）。
+   *
+   * settings.json 是用户可手改的：`"iflow.superAgentProfile": 123` 这类脏值
+   * 会被 `readUserSetting<string>()` 原样返回，随后 `.trim()` 直接抛
+   * TypeError —— 一个脏值足以带崩整条设置写入链路（同一批里的其它设置
+   * 也一起写不进去）。非字符串一律当空串（= 跟随主链路 / 未选模型），
+   * 绝不抛错。
+   */
+  private readStringSetting(key: string): string {
+    const raw = this.readUserSetting<unknown>(key, "");
+    return typeof raw === "string" ? raw.trim() : "";
+  }
+
+  /**
+   * 收集「超流体端点解析链」的输入，交给 `shared/super-profile.ts` 的
+   * `resolveSuperEndpoint` —— 端点优先级链**只有那一份实现**，宿主不再自己
+   * 实现 ①→⑤ 的回退顺序（两处各写一套，改一处就会分叉）。
+   *
+   * 这里只负责取事实：
+   *  - `superProfileName`：本次要解析的超流体指针（`iflow.superAgentProfile`
+   *    或 webview 显式传入的名字）；
+   *  - `mainProfileName`：本工作区记录过的活动 Profile（`workspaceActiveProfile`
+   *    ）—— 与 `resolveWorkspaceHandshakeCreds` 只认这一个名字，不同；
+   *  - `profiles`：SecretStorage `iflow.profiles` 与内核 `apiProfiles` 合并，
+   *    **同名时内核优先**，与握手路径 `kernelProfileCredentials(name) ??
+   *    profiles[name]` 完全同序；
+   *  - `activeCredentials`：握手路径工作区指针之后的下一级
+   *    （`loadCredentials(secrets)`，SecretStorage 活动凭据槽）；
+   *  - `kernelProfileName` / `kernelDefaultEndpoint`：第⑤级的两小步
+   *    （内核 `currentApiProfile` 具名指针 → 内核顶层默认）。
+   */
+  private async superEndpointInput(
+    wantedProfile: string,
+    taskProfileId: string | null = null,
+  ): Promise<SuperEndpointInput> {
+    const kernelProfiles = readKernelApiProfiles();
+    const legacyProfiles = await loadProfiles(this.context.secrets);
+    const profiles: Record<string, SuperApiProfile> = {};
+    for (const [name, creds] of Object.entries(legacyProfiles)) {
+      profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
+    }
+    for (const [name, creds] of Object.entries(kernelProfiles)) {
+      profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
+    }
+    const cli = readCliSettings();
+    // ⑤a 具名内核指针：与 `readActiveEndpoint()` 的前置门保持同一条 ——
+    //   • 认证类型必须是 openai-compatible（否则内核端点整体不算数）；
+    //   • 只认内核文件里确实存在的 `apiProfiles` 条目 —— 否则 SecretStorage
+    //     里一个同名的历史 Profile 会冒充内核指针，解析出
+    //     `readActiveEndpoint()` 永远不会用的凭据。
+    const kernelActive =
+      cli?.selectedAuthType === "openai-compatible" ? cli.currentApiProfile?.trim() : undefined;
+    const kernelProfileName =
+      kernelActive && cli?.apiProfiles?.[kernelActive] ? kernelActive : null;
+    return {
+      taskProfileId,
+      superProfileName: wantedProfile,
+      mainProfileName:
+        this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim() || null,
+      kernelProfileName,
+      profiles,
+      activeCredentials: await loadCredentials(this.context.secrets).catch(() => null),
+      // ⑤b 内核顶层默认：`readActiveEndpoint()` 已经把「currentApiProfile →
+      // 顶层 baseUrl/apiKey」逐字段合并完，直接作为最后一档喂进去。
+      kernelDefaultEndpoint: readActiveEndpoint(),
+    };
+  }
+
+  /**
+   * 超流体侧「跟随主链路」时回推给 webview 的**展示名**。
+   *
+   * 只用于 UI：它与管理名（真正决定凭据的那个具名 Profile，见
+   * `resolveSuperEndpoint().profileName`）**不同源** —— 命中活动凭据或内核
+   * 顶层默认时没有任何具名 Profile 可展示，而设置页需要给用户一个能看懂的
+   * 名字。展示名只在宿主算这一份，纯模块不重复计算。
+   */
+  private async superActiveProfileDisplayName(): Promise<string> {
+    return (
+      this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim() ||
+      resolveActiveProfileName(readCliSettings(), await getActiveProfileName(this.context.secrets)) ||
+      ""
+    );
+  }
+
+  /**
+   * 超流体侧「按 Profile 拉模型列表」的端点解析。
+   *
+   * **优先级链只有一份实现**（`shared/super-profile.ts` 的
+   * `resolveSuperEndpoint`）：本方法只喂输入、解释结果，不再自己写一遍
+   * 回退顺序。链路与今天主会话握手/活动端点同序：
+   *   ① task `profileId` → ② `iflow.superAgentProfile` → ③
+   *   `iflow.workspaceActiveProfile`（本工作区的握手指针）→ ④ 活动凭据
+   *   （`loadCredentials`，SecretStorage 活动槽）→ ⑤ 内核 `currentApiProfile`
+   *   → 内核顶层默认（`readActiveEndpoint()`）。
+   *
+   * `wanted` 是超流体侧选中的 Profile 名（`iflow.superAgentProfile`）：
+   *   • 非空 → 只认这个具名 Profile。内核 settings.json 的 `apiProfiles` 是
+   *     权威，SecretStorage 里的历史 Profile 只作补充（还没迁移过去的）。
+   *   • 空 → 「跟随主链路」，即上面 ③→⑤。
+   *
+   * 找不到时返回**真实原因**（不是一句泛化的「加载失败」），webview 直接
+   * 展示这条文案。
+   *
+   * `wanted` 收 `unknown`：载荷来自 webview（JS）也可能是非字符串，
+   * 归一化在函数内部做，调用方不必各自防御。
+   */
+  private async resolveSuperProfileTarget(
+    wanted: unknown,
+    /** 任务级 Profile 覆盖（`SuperTaskSpec.profileId`，链上第①级）。UI 的模型
+     *  列表路径没有任务语境，传 null；派发侧才用得到。 */
+    taskProfileId: string | null = null,
+  ): Promise<
+    { name: string; creds: OpenAiCompatCredentials } | { name: string; error: string }
+  > {
+    const name = typeof wanted === "string" ? wanted.trim() : "";
+    const endpoint = resolveSuperEndpoint(await this.superEndpointInput(name, taskProfileId));
+    // 用户在设置页**显式点名**了一个 Profile 时，「选中项必须真实存在」是
+    // UI 契约：纯模块的指针链在名字不存在时会继续往下回退（任务级覆盖写错
+    // 名字不该瘫痪整条链路），但设置页点名的配置找不到时该看到真实原因，
+    // 而不是静默展示主链路的端点。`profileName` 就是命中的那个具名 Profile。
+    if (name && endpoint?.profileName !== name) {
+      return { name, error: vscode.l10n.t("未找到 API 配置：{0}", name) };
+    }
+    if (!endpoint) {
+      return {
+        name,
+        error: vscode.l10n.t(
+          "还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。",
+        ),
+      };
+    }
+    return {
+      name: name || (await this.superActiveProfileDisplayName()),
+      creds: {
+        baseUrl: endpoint.baseUrl,
+        apiKey: endpoint.apiKey,
+        modelName: endpoint.modelName ?? "",
+      },
+    };
+  }
+
+  /**
+   * 实时拉取某个端点的模型 id 列表（`GET {baseUrl}/models`）。
+   *
+   * 两条硬纪律：
+   *   • **唯一数据源是实时查询**。CLI 上报的 `_meta.models.availableModels`
+   *     是硬编码目录，绝不可作为回退 —— 端点不可达就返回空列表。
+   *   • **走原生 `node:http(s)` 直连**（`queryModelIds`）。扩展宿主被代理
+   *     agent patch 过，全局 `fetch` 遇到 SOCKS / 无 scheme 代理会抛
+   *     "Invalid URL protocol"，哪怕目标 URL 完全合法。
+   *
+   * 失败只记日志并返回空数组 + 真实原因（不抛错）；失败结果**不进缓存**，
+   * 这样端点恢复后下一次刷新就能拿到真列表。
+   */
+  private async querySuperProfileModelIds(
+    creds: OpenAiCompatCredentials,
+  ): Promise<{ ids: string[]; error?: string }> {
+    // 缓存 key = 实际请求的 models URL（`queryModelIds` 内部用的同一个
+    // 归一化）：同一个端点的不同写法（尾斜杠 / 省略 scheme / 直接写
+    // /models）共用一份缓存，而「换了端点」必然换 key —— 不可能命中旧端点
+    // 的列表。凭据仍逐次比对（同一端点换了 key 也必须重查）。
+    const key = normalizeModelsUrl(creds.baseUrl);
+    const cached = this.superProfileModelsCache.get(key);
+    if (
+      cached &&
+      cached.apiKey === creds.apiKey &&
+      Date.now() - cached.at < SUPER_PROFILE_MODELS_CACHE_TTL_MS
+    ) {
+      return { ids: [...cached.models] };
+    }
+    let ids: string[];
+    try {
+      ids = await queryModelIds({
+        baseUrl: creds.baseUrl,
+        apiKey: creds.apiKey,
+        modelName: creds.modelName,
+      });
+    } catch (error) {
+      const detail = errorMessage(error);
+      const reason = vscode.l10n.t("模型列表查询失败（不回退内置目录）：{0}", detail);
+      this.log.warn(reason);
+      return { ids: [], error: reason };
+    }
+    this.superProfileModelsCache.set(key, { at: Date.now(), apiKey: creds.apiKey, models: [...ids] });
+    return { ids };
+  }
+
+  /**
+   * 超流体侧当前选中的模型 id。**模型优先级链只有一份实现**
+   * （`shared/super-profile.ts` 的 `resolveSuperModel`）：
+   *   ① 任务级 `modelId` → ② `iflow.superAgentModel` → ③ 目标 Profile 自带的
+   *   `modelName` → ④ 主 store 的 `currentModelId`。
+   *
+   * 原先宿主只实现了 ②③，①（任务覆盖）与④（跟随主会话当前模型）都缺 ——
+   * 「未配置超流体」时模型链会在 Profile 没写 modelName 时断掉，与纯逻辑层
+   * 分叉。`taskModelId` 由派发侧提供（任务级临时覆盖）；UI 的模型列表路径
+   * 没有任务语境，传 null 即按 ②→④ 解析。
+   *
+   * 本方法只解析「链上的目标模型」，**不做** live 下架判定（不传
+   * `liveModelIds`）。下架判定与显式降级在 {@link buildSuperProfileModels}
+   * 里用带 live 列表的同一份 `resolveSuperModel` 完成，并把
+   * `degraded` / `delistedModelId` / 原因带回 `SuperProfileModelsUi` ——
+   * 「降级必须显式」由 UI 提示兑现，宿主不改写用户的 `superAgentModel`。
+   */
+  private superSelectedModel(
+    creds: OpenAiCompatCredentials | null,
+    taskModelId: string | null = null,
+  ): string {
+    return (
+      resolveSuperModel({
+        taskModelId,
+        superModelId: this.readStringSetting("superAgentModel"),
+        // `null` = 明确没有「Profile 自带模型名」这个候选，直接落到主会话
+        // 当前模型；空串也会被纯函数按「没有」处理。
+        profileModelName: creds?.modelName ?? null,
+        mainModelId: this.store.getState().currentModelId,
+      }).modelId ?? ""
+    );
+  }
+
+  /**
+   * 组装「超流体侧按 Profile 的模型列表」载荷。
+   *
+   * 端点不可达 → `models` 为空数组并带 `error`（绝不回退内建目录）；当前
+   * 选中的模型会被补到列表头，避免下拉框渲染成空白。
+   *
+   * `profileName` 收 `unknown`：webview 显式传字符串时以它为准（空串 =
+   * 跟随主链路）；没传 / 传了非字符串 → 用设置里的值。
+   */
+  private async buildSuperProfileModels(profileName?: unknown): Promise<SuperProfileModelsUi> {
+    const wanted =
+      typeof profileName === "string"
+        ? profileName
+        : this.readStringSetting("superAgentProfile");
+    const target = await this.resolveSuperProfileTarget(wanted);
+    if ("error" in target) {
+      return {
+        profileName: target.name,
+        models: [],
+        currentModelId: this.superSelectedModel(null),
+        error: target.error,
+      };
+    }
+    const { ids, error } = await this.querySuperProfileModelIds(target.creds);
+    const currentModelId = this.superSelectedModel(target.creds);
+    // live 下架判定只有一份实现（`shared/super-profile.ts` 的
+    // `resolveSuperModel`）：空 / 失败的 live 列表不构成下架证据（防误伤），
+    // 只有「列表非空且确实不含目标模型」才降级，且降级必须带原因。
+    // 这里只把结论**带回 UI 提示**；绝不因此改写用户的 `superAgentModel`。
+    const resolution = resolveSuperModel({
+      superModelId: this.readStringSetting("superAgentModel"),
+      profileModelName: target.creds.modelName ?? null,
+      mainModelId: this.store.getState().currentModelId,
+      liveModelIds: ids,
+    });
+    const models = ids.map((id) => ({ id, name: id }));
+    if (currentModelId && !models.some((m) => m.id === currentModelId)) {
+      models.unshift({ id: currentModelId, name: currentModelId });
+    }
+    return {
+      profileName: target.name,
+      models,
+      currentModelId,
+      error,
+      ...(resolution.degraded
+        ? {
+            degraded: true,
+            ...(resolution.delistedModelId
+              ? { delistedModelId: resolution.delistedModelId }
+              : {}),
+            ...(resolution.modelId ? { degradedModelId: resolution.modelId } : {}),
+            ...(resolution.reason ? { degradedReason: resolution.reason } : {}),
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * 把「超流体侧按 Profile 的模型列表」推给 webview。
+   *
+   * **一定回一条载荷**：宿主这一侧出了预料之外的错（脏配置、文件读不了…）
+   * 也不能让 webview 的下拉框永远转圈 —— 回一条空列表 + 真实原因即可。
+   */
+  private async pushSuperProfileModels(
+    profileName?: unknown,
+    requestId?: unknown,
+  ): Promise<void> {
+    // 请求序号由 webview 生成，宿主只负责原样回显；脏值（非数字）按「主动
+    // 推送」处理（不带 requestId），绝不伪造一个 id 冒充另一次请求的回包。
+    const echoRequestId =
+      typeof requestId === "number" && Number.isFinite(requestId) ? requestId : undefined;
+    let payload: SuperProfileModelsUi;
+    try {
+      payload = {
+        ...(await this.buildSuperProfileModels(profileName)),
+        ...(echoRequestId !== undefined ? { requestId: echoRequestId } : {}),
+      };
+    } catch (error) {
+      const reason = vscode.l10n.t(
+        "模型列表查询失败（不回退内置目录）：{0}",
+        errorMessage(error),
+      );
+      this.log.warn(reason);
+      payload = {
+        profileName:
+          typeof profileName === "string" ? profileName : this.readStringSetting("superAgentProfile"),
+        models: [],
+        currentModelId: this.superSelectedModel(null),
+        error: reason,
+        ...(echoRequestId !== undefined ? { requestId: echoRequestId } : {}),
+      };
+    }
+    this.postToWebview({ type: "superProfileModels", ...payload });
+  }
+
+  /**
+   * 清空超流体模型列表缓存。端点切换（`iflow.superAgentProfile` 改了名字）
+   * 时调用：缓存 key 是归一化后的 models URL（换端点必然换 key），但同名
+   * Profile 在别处被改写了端点时 key 可能不变，所以这里显式清空，保证
+   * 「切换后绝不命中旧端点的列表」。
+   */
+  private clearSuperProfileModelsCache(): void {
+    this.superProfileModelsCache.clear();
+  }
+
+  /**
    * Late-push the live /models result so the HTTP round trip never gates the
    * session's first paint (a slow or dead endpoint previously stalled the
    * splash for up to the full 10s query timeout AFTER session/new had already
@@ -9682,7 +10475,9 @@ export class ChatPanel implements vscode.Disposable {
     // A `/compress` turn is housekeeping, not conversation: it must not
     // trigger automatic memory extraction. Auto-compression after a real turn
     // is covered separately by maybeAutoCompressOnIdle's return value.
-    const isCompressTurn = !hasContexts && trimmed === "/compress";
+    // 别名（`/compact`、`/summarize`，大小写不敏感、可带尾随参数）同属压缩
+    // 命令 —— 用共享判定，别在这里再写一遍字符串比较。
+    const isCompressTurn = !hasContexts && parseCompressionCommand(trimmed) !== null;
     // A3: the panel was disposed (window close / extension reload) — the
     // store is gone, so there is nothing to send.
     if (this.disposed) return false;
@@ -9723,6 +10518,48 @@ export class ChatPanel implements vscode.Disposable {
     // Host-driven reports (`internal`) never delegate — a report arriving
     // while the main session is busy is dropped, not turned into a child.
     const gateState = this.store.getState();
+    // ── `/init` 产品例外：宿主直接委派 ──────────────────────────────
+    // 其它 slash 命令（含 /compress 与自定义命令）继续走下面的通用规则：
+    // 主会话内展开、忙时拒绝。唯独 `/init` 的 CLI 实现会用 fs 写工作区并回交
+    // 一段依赖工具的分析 prompt，而主会话没有读写/执行工具 —— 留在主会话
+    // 只会写出空文件再 tool-not-found。故宿主在这里先识别、直接委派给有完整
+    // 工具面的子会话：
+    //  - 不把 `/init` 原文发给主 CLI（避免它先写空文件再在主会话失败）；
+    //  - 不压 pendingDelegatedUserTurns（原文回灌会再次触发主会话同款失败）；
+    //  - task 用展开意图（子会话的 buildTaskPrompt 会包散文，裸 token 不会被
+    //    当成 slash 命令，见 INIT_DELEGATE_TASK 注释）。
+    // idle 与 streaming 都委派：忙时不能被通用 slash 早退静默吞掉。
+    const initInvocation = !internal && !hidden ? parseInitCommand(trimmed) : null;
+    if (initInvocation) {
+      if (gateState.replaying || this.historySyncBusy) {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("主会话正在生成，命令请本轮结束后重发"),
+        );
+        return false;
+      }
+      const initContextBlock = hasContexts
+        ? assembleContextSections(contexts!, (c) => this.contextSectionTitleEn(c))
+        : "";
+      const task = [
+        initContextBlock,
+        INIT_DELEGATE_TASK,
+        `Original user input: ${initInvocation.raw}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const title = normalizeSuperTitle(trimmed.split("\n")[0] ?? "") || "/init";
+      const manager = await this.ensureSuperAgentForDispatch();
+      if (!manager) return false;
+      manager.spawn({ title, task });
+      if (gateState.status === "streaming" || laneBusy) {
+        this.store.sendToast(
+          "info",
+          vscode.l10n.t("主会话正在生成，已把这条消息派发为超流体「{0}」", title),
+        );
+      }
+      return false;
+    }
     if (gateState.status === "streaming" || laneBusy) {
       if (gateState.replaying || this.historySyncBusy) {
         this.log.info("sendPrompt rejected: replay/history-sync in flight");
@@ -9733,6 +10570,25 @@ export class ChatPanel implements vscode.Disposable {
       // 把它留在队列里等空闲时重投。绝不能把它派发成子会话（汇报得投给
       // 主会话），也绝不能悄悄丢掉（丢了主会话就永远读不到孩子的结果）。
       if (hidden) return false;
+      // slash 命令绝不能走委派：CLI 只在 `prompt[0].text.trim()` 以 "/" 开头时
+      // 解析命令，而本分支会把它包进子会话 task / 补投散文 —— `/compress` 于是
+      // 变成一段交给子会话的普通文本（压缩不执行），自定义命令同理。
+      // 最小且不乱丢输入的方案：明确告知「本轮结束后重发」，不 spawn、不压
+      // 补投队列（补投协议会把它当普通用户消息，仍然是错的）。
+      if (!hasContexts && parseCompressionCommand(trimmed)) {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("主会话正在生成，等本轮结束后再压缩"),
+        );
+        return false;
+      }
+      if (trimmed.trimStart().startsWith("/")) {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("主会话正在生成，命令请本轮结束后重发"),
+        );
+        return false;
+      }
       // A merge request must run in the MAIN workspace, so delegating it to
       // an isolated child session would be wrong (the child's worktree has
       // its own branch). Refuse and say why instead of doing something else.
@@ -9760,11 +10616,11 @@ export class ChatPanel implements vscode.Disposable {
       }, imageCaptions);
       const task = [contextBlock, trimmed].filter(Boolean).join("\n\n");
       const title = normalizeSuperTitle(trimmed.split("\n")[0] ?? "");
-      const manager = this.getSuperAgent();
-      if (!manager) {
-        this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
-        return false;
-      }
+      // 唯一的判空点：宿主在没有打开工作区时会回退设置里的默认工作区，
+      // 校验失败时自己按真实原因（未配置 / 非绝对路径 / 不存在 / 不是目录）
+      // 弹 toast，这里不要再补一句一刀切文案。
+      const manager = await this.ensureSuperAgentForDispatch();
+      if (!manager) return false;
       manager.spawn({ title, task, ...(attachments.length > 0 ? { attachments } : {}) });
       // 主会话此刻收不到这条消息（本分支马上 return false）：先把原文与附件
       // 缓存下来，等本回合结束后由 drainDelegatedUserTurns 以 hidden 回合补投。
@@ -9875,10 +10731,26 @@ export class ChatPanel implements vscode.Disposable {
     // 图片在模型眼里只是没有名字的内联块：清单必须紧贴在正文之前，模型才
     // 能把「第 2 张」对应到用户的说明。没有说明时不插入任何占位段落。
     const imageCaptionBlock = hasImageCaptions ? buildImageCaptionPrompt(imageCaptions) : "";
-    const promptText =
-      [superDigest, agentContextBlock, imageCaptionBlock, typedText]
-        .filter(Boolean)
-        .join("\n\n") + attachmentBlock;
+    // CLI 只把 `prompt[0].text.trim()` 以 "/" 开头的那一份 prompt 当作命令解析
+    // （vendor bundle）。看板摘要 / 上下文块 / 图片说明 / 附件清单因此绝不能
+    // 拼在命令正文之前 —— 否则 `/compress`、`/compact` 乃至自定义命令都会
+    // 退化成普通正文（被编排模型当成任务派给子会话）。slash 回合把纯命令放进
+    // prompt[0]，其余内容（restBlock）作为**后续**文本块追加；普通回合维持
+    // 既有顺序，零波及。
+    //
+    // 已知且可接受：自定义命令命中时 CLI 会用展开模板**整份替换** prompt，
+    // 后续块（看板摘要 / 上下文）会被丢弃 —— 这是用户命令自身的语义。
+    //
+    // `typedText` 已经过 toAgentPromptText：未知 "/" 文本会被补一个零宽空格
+    // （trimStart 不会去掉它），因此这里的判断只对真实命令 / 路径成立。
+    const restBlock = [superDigest, agentContextBlock, imageCaptionBlock]
+      .filter(Boolean)
+      .join("\n\n");
+    const slashFirst = !internal && !hidden && typedText.trimStart().startsWith("/");
+    // 附件块自带前导空行；作为独立文本块时收掉行首空白（附件协议头本身不变，
+    // 删除消息流程仍按 AGENT_ATTACHMENT_HEADER 原文定位）。
+    const slashRestBlock = [restBlock, attachmentBlock.trimStart()].filter(Boolean).join("\n\n");
+    const promptText = [restBlock, typedText].filter(Boolean).join("\n\n") + attachmentBlock;
     // C3/C9: the webview's busy lock cannot guard the command channels
     // (`iflow.askSelection`, `@iflow` participant). A prompt during a session
     // reset would hit the about-to-be-discarded sessionId; two overlapping
@@ -9893,6 +10765,9 @@ export class ChatPanel implements vscode.Disposable {
       return false;
     }
     this.cancelSeen = false;
+    // 新回合开始 = 上一条停止窗口已无意义：残留的 cancelling 会把这一轮的
+    // 停止按钮锁成「正在停止…」，永远点不动。
+    this.endStopWindow();
     // Hoisted for the catch: a profile switch (hot re-auth or full restart)
     // cancels an in-flight prompt, whose rejection then lands here AFTER the
     // fresh state is already in place.
@@ -9991,7 +10866,11 @@ export class ChatPanel implements vscode.Disposable {
           });
         }
       }
-      const prompt: ContentBlock[] = [{ type: "text", text: promptText }];
+      const prompt: ContentBlock[] = slashFirst
+        ? [{ type: "text", text: typedText }]
+        : [{ type: "text", text: promptText }];
+      // slash 回合：看板摘要 / 上下文 / 图片说明 / 附件清单跟随在命令之后。
+      if (slashFirst && slashRestBlock) prompt.push({ type: "text", text: slashRestBlock });
       for (const img of images ?? []) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
@@ -10031,6 +10910,9 @@ export class ChatPanel implements vscode.Disposable {
         return false;
       }
       this.store.promptCompleted(result.stopReason, result.usage);
+      // The turn settled (cancelled included) — the host-owned stop window is
+      // over; the Stop button must leave 「正在停止…」 on this same push.
+      this.endStopWindow();
       // QQ 最终回执：pendingCount=0 的汇报汇总轮收尾后，把本轮 assistant 文本
       // 作为等待中的 QQ 任务的真正答复回传（fire-and-forget，不挡回合收尾）。
       // 锚点失效（转录被清空/重排）时按「回合开始时的块数」切片取本轮新增文本；
@@ -10162,6 +11044,9 @@ export class ChatPanel implements vscode.Disposable {
       if (this.hasSuperWork()) this.ensureSuperHeartbeat();
     } catch (error) {
       if (!internal) this.currentTurnAttachments = null;
+      // Any failure exit also closes the stop window: an error banner must not
+      // coexist with a Stop button frozen on 「正在停止…」.
+      this.endStopWindow();
       // A3: the panel was disposed mid-flight — the store is gone, so there
       // is nothing to mark and nothing to persist.
       if (this.disposed) {
@@ -10267,7 +11152,7 @@ export class ChatPanel implements vscode.Disposable {
     // 的纯 prompt（与正常发送时 typedText 的口径一致）。
     const regenText = normalizeUserPromptText(lastUserText);
     if (!regenText) return;
-    const isCompressTurn = regenText === "/compress";
+    const isCompressTurn = parseCompressionCommand(regenText) !== null;
     this.cancelSeen = false;
     // 用户主动发起的一轮同样算「继续」：解除 Stop 对自动回合的压制。
     this.autoTurnsStoppedFor = null;
@@ -10331,15 +11216,31 @@ export class ChatPanel implements vscode.Disposable {
           regenAgentText = rewriteRootMentions(regenAgentText, mentionRoots, mentionCwd);
         }
       }
-      const prompt: ContentBlock[] = [
-        {
-          type: "text",
-          text:
-            [regenDigest, regenHasCaptions ? buildImageCaptionPrompt(regenCaptions) : "", regenAgentText]
-              .filter(Boolean)
-              .join("\n\n") + regenAttachmentBlock,
-        },
-      ];
+      // 与 sendPrompt 同一 slash 语义：CLI 只解析 `prompt[0].text.trim()` 以
+      // "/" 开头的那一份 prompt，重生成一条命令轮（`/compress` 等）时看板摘要
+      // 与图片说明必须让位到后续块，否则命令退化成普通正文。
+      // 无 user 块时本方法已在上面早退（`!lastUserText` → return），因此这里
+      // 一定拿得到原文，不存在「没有可重放的命令」的分支。
+      const regenSlashFirst = regenAgentText.trimStart().startsWith("/");
+      const regenRestBlock = [
+        regenDigest,
+        regenHasCaptions ? buildImageCaptionPrompt(regenCaptions) : "",
+        regenAttachmentBlock.trimStart(),
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const prompt: ContentBlock[] = regenSlashFirst
+        ? [{ type: "text", text: regenAgentText }]
+        : [
+            {
+              type: "text",
+              text:
+                [regenDigest, regenHasCaptions ? buildImageCaptionPrompt(regenCaptions) : "", regenAgentText]
+                  .filter(Boolean)
+                  .join("\n\n") + regenAttachmentBlock,
+            },
+          ];
+      if (regenSlashFirst && regenRestBlock) prompt.push({ type: "text", text: regenRestBlock });
       for (const img of regenImages) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
@@ -11226,7 +12127,7 @@ export class ChatPanel implements vscode.Disposable {
         const firstBlock = blocks[0];
         const isCompressAttempt =
           compressNext ||
-          (firstBlock?.type === "text" && firstBlock.text.trimStart() === "/compress");
+          (firstBlock?.type === "text" && parseCompressionCommand(firstBlock.text) !== null);
         this.store.setCompressing(isCompressAttempt);
         // Fresh output flag per attempt: the gate below judges THIS attempt
         // only (a compress turn's own output must not mask an empty resend).

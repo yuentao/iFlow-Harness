@@ -2,9 +2,16 @@
  * OpenAI Compatible credentials (M3).
  *
  * iFlow official servers are closed: `openai-compatible` is the only usable
- * auth method (user-supplied baseUrl + apiKey + modelName). Credentials are
- * stored in VSCode SecretStorage — never in plain settings or on disk, and
- * never logged. They are passed to the agent via `authenticate`
+ * auth method (user-supplied baseUrl + apiKey + modelName).
+ *
+ * The persistence authority is the Core's user settings file
+ * (`~/.iflow/settings.json`) under `apiProfiles` — written by
+ * `writeKernelApiProfile` in `api-profiles.ts`, with the API keys stored in
+ * plain text there. VSCode SecretStorage is NOT the store of record: it only
+ * keeps the runtime cache used for hot re-authentication (`loadCredentials` /
+ * `saveCredentials`) plus the legacy named profiles (`loadProfiles` /
+ * `saveProfiles`) that the one-time migration copies into `apiProfiles`.
+ * Credentials are never logged; they reach the agent via `authenticate`
  * `{methodId: "openai-compatible", methodInfo: {...}}` when the CLI reports
  * `isAuthenticated: false`.
  */

@@ -3,6 +3,39 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [3.13.0] - 2026-11-27
+
+### 新增
+- 超流体子会话看板回填实际命中的具名 API Profile 名（展示「跑在哪个 API 配置」），与 `spawnModel` 复用同一份 spawn 计划、不重复解析端点与模型；零配置老用户保持 `profileId` 未定义、看板逐字节不变
+
+### 修复
+- 补齐超流体设置的 store mock，修复 `requestSuperProfileModels` 缺失导致的测试回归；新增共享 store mock 工厂与设置面板全 tab smoke 测试，并为工厂补编译期兑底、迁移第一批 UI 测试
+
+### 变更
+- 服务商预设清单加锁：只列当前支持的第三方服务商、不含已下线的 iFlow 开放平台；用户已保存的指向 iFlow 主机的 Profile 保持自定义端点，不映射也不改写
+
+### 文档
+- README 全面对齐当前代码能力
+- 方案文档同步派发时模型校验、缓存共享与 env 抹除的落地事实
+
+## [3.12.0] - 2026-11-27
+
+### 新增
+- **超流体（Super Agent）独立 API 配置与模型**：新增顶层设置 `iflow.superAgentProfile`（留空跟随主会话）与 `iflow.superAgentModel`（留空用所选配置的 `modelName`），「超流体」设置页新增「API 与模型」分组；子会话按自己解析出的端点/凭据/模型/上下文窗口运行，未配置时与旧行为逐字段等价
+- 模型下拉按所选 API 配置实时拉取，带 loading / 空列表 / 真实错误 / 下架降级提示，请求带序号防迟到回包串台
+
+### 行为变更（重要）
+- **移除内置 CLI 的 OAuth 登录分支**：内核统一走 API 认证（删除 Google tokeninfo 与 `oauth-iflow` / `oauth-aone` 分支），不再向 Google 发送 token、不再卡 60s 认证超时、不再删改 `oauth_creds.json`；**依赖 iFlow 官方 OAuth 登录的用户需改用 API 配置**。该剥离由 `IFLOW_OAUTH_STRIP` 开关兜底
+
+### 改进
+- 移除阿里侧遥测：`log.mmstat.com` 的 cna/PV、`gm.mmstat.com` 的 AI tracking、`sunfire` OTel 与 `ducky` fetchModels，由 `IFLOW_TELEMETRY_STRIP` 开关兜底
+- 移除内核自带的 iFlow 云主机默认值与内部端点：`cloud.iflow.cn` 插件下载、`platform.iflow.cn` 内建 `web_search`/`web_fetch`、`iflow.cn` OAuth/userinfo/ad-phrases、`apis.iflow.cn` 默认 baseUrl 全部去除；缺失 baseUrl 时直接报错而不回退到 iFlow 主机，显式配置的 baseUrl（含指向该主机）不受影响；由 `IFLOW_INTERNAL_HOST_STRIP` 开关兜底
+- 派发时校验模型是否已下架（4s 上限，失败/空不降级），降级仅提示不改设置
+- 压缩上下文按钮图标由 `Minimize2` 改为 `ChevronsDownUp`（语义从「缩到角落」改为「折叠收拢」），并让 `aria-label` 与 `title` 同文
+
+### 文档
+- 方案文档校正为落地事实：env 通道结论、`IFLOW_HOME` 隔离否决、零配置等价保证、两个 loader 说明与残留清单
+
 ## [3.11.5] - 2026-11-25
 
 ### 修复

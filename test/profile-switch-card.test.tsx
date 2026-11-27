@@ -6,13 +6,14 @@ import { ProfileSwitchCard } from "../webview/src/components/ProfileSwitchCard";
 
 const send = vi.hoisted(() => vi.fn());
 const clearPending = vi.hoisted(() => vi.fn());
-const useChat = vi.hoisted(() =>
-  Object.assign(
-    (selector: (state: { send: typeof send }) => unknown) => selector({ send }),
-    { getState: () => ({ send, clearPending }) },
-  ),
-);
-vi.mock("../webview/src/store", () => ({ useChat }));
+vi.mock("../webview/src/store", async () => {
+  const { createStoreMock } = await import("./helpers/store-mock");
+  const mock = createStoreMock();
+  // 断言仍落在文件级 vi.fn 上；把这两个 action 接到工厂 store，其余全表面由工厂兜住。
+  mock.store.send = send;
+  mock.store.clearPending = clearPending;
+  return mock;
+});
 vi.mock("../webview/src/i18n", () => ({ t: (s: string) => s }));
 
 let root: Root;

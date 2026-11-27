@@ -2,7 +2,7 @@
   "name": "iflow-harness",
   "displayName": "%iflow.displayName%",
   "description": "%iflow.description%",
-  "version": "3.11.5",
+  "version": "3.13.0",
   "type": "module",
   "publisher": "yuantao",
   "author": {
@@ -257,6 +257,12 @@
           "maximum": 100,
           "markdownDescription": "%iflow.configuration.superAgentMaxWorktrees.description%"
         },
+        "iflow.superAgent.defaultWorkspace": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "%iflow.configuration.superAgentDefaultWorkspace.description%"
+        },
         "iflow.superAgent.childToolAllowlist": {
           "type": "array",
           "items": {
@@ -272,6 +278,16 @@
           },
           "default": [],
           "markdownDescription": "%iflow.configuration.superAgentChildMcpServerAllowlist.description%"
+        },
+        "iflow.superAgentProfile": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "%iflow.configuration.superAgentProfile.description%"
+        },
+        "iflow.superAgentModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "%iflow.configuration.superAgentModel.description%"
         },
         "iflow.qq.enabled": {
           "type": "boolean",

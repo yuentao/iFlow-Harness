@@ -17,6 +17,8 @@ import {
   type QqSettingsUi,
   type SessionState,
   type SessionSummaryUi,
+  type SuperProfileModelsUi,
+  type ToastAction,
   type UiDensity,
   type UiFontSize,
   type WebviewToHost,
@@ -122,6 +124,7 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   superAgentMaxWorktrees: 10,
   superAgentKeepWorktree: false,
   superAgentFullTrust: false,
+  superAgentDefaultWorkspace: "",
 };
 
 // --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------
@@ -1472,6 +1475,12 @@ function createMockHost(): HostApi {
         broadcast({ type: "hostSettings", ...mockHostSettings });
         return;
       }
+      if (m.type === "pickDefaultWorkspace") {
+        // Browser preview has no native folder picker: mirror a cancelled
+        // dialog so the click stays a no-op instead of throwing.
+        broadcast({ type: "defaultWorkspacePicked", path: "" });
+        return;
+      }
       if (m.type === "setContextWindowOverrides") {
         mockContextWindowOverrides = { ...mockContextWindowOverrides, overrides: [...m.overrides] };
         mockHostSettings.contextWindowOverrides = [...m.overrides];
@@ -2721,6 +2730,47 @@ function createMockHost(): HostApi {
         console.info(`[iflow] mock host: openLocation ${m.path}${m.line != null ? `:${m.line}` : ""}`);
         return;
       }
+      if (m.type === "refreshSuperProfileModels") {
+        // Dev/browser preview only: mirror the host's dedicated per-profile
+        // model lane (`GET {baseUrl}/models`). The mock has no HTTP client, so
+        // it seeds the selected profile's own modelName plus one fake sibling;
+        // an unknown profile / empty profile name (follow main) with no active
+        // profile answers with the host's real error wording, so the preview
+        // exercises the inline error path too.
+        const wanted = (m.profileName ?? mockHostSettings.superAgentProfile ?? "").trim();
+        const target = wanted
+          ? authState.profiles.find((p) => p.name === wanted)
+          : authState.profiles.find((p) => p.active);
+        if (!target) {
+          broadcast({
+            type: "superProfileModels",
+            requestId: m.requestId,
+            profileName: wanted,
+            models: [],
+            currentModelId: (mockHostSettings.superAgentModel ?? "").trim(),
+            error: wanted
+              ? t("未找到 API 配置：{0}", wanted)
+              : t("还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。"),
+          });
+          return;
+        }
+        const currentModelId = (mockHostSettings.superAgentModel ?? "").trim() || target.modelName;
+        const models = [
+          { id: target.modelName, name: target.modelName },
+          { id: `${target.modelName}-mini`, name: `${target.modelName}-mini` },
+        ].filter((model, index, all) => all.findIndex((other) => other.id === model.id) === index);
+        if (currentModelId && !models.some((model) => model.id === currentModelId)) {
+          models.unshift({ id: currentModelId, name: currentModelId });
+        }
+        broadcast({
+          type: "superProfileModels",
+          requestId: m.requestId,
+          profileName: target.name,
+          models,
+          currentModelId,
+        });
+        return;
+      }
       // Dev/browser preview only: the real host handles every wire message,
       // but the mock implements just the subset needed for UI iteration.
       // Without a tripwire a missing handler looks like a dead button.
@@ -2810,6 +2860,13 @@ let toastSeq = 0;
  * 只接受与最近一次请求配对的回包 —— 迟到的旧回包不能覆盖新清单。
  */
 let superResidueRequestSeq = 0;
+/**
+ * 超流体模型列表请求序号：`requestSuperProfileModels` 每次自增，生成数字
+ * `requestId`。宿主把同一个 id 原样回显在 `superProfileModels` 里，webview
+ * 只接受与**最近一次**请求配对的回包 —— 迟到的旧端点列表不会冒充新选择的
+ * 结果（与 `superResidueRequestSeq` 同款「只认最后发出的 id」语义）。
+ */
+let superProfileModelsRequestSeq = 0;
 /** Lifetime of a WebView-local notice (UI-audit 4.9: transient, ~4s). */
 const LOCAL_TOAST_MS = 4000;
 
@@ -2867,7 +2924,10 @@ export interface ToastItem {
   sticky?: boolean;
   /** M1 P0-6: inline action button (e.g. 立即压缩 on the context-warning
    * pill). Clicking sends `toastAction` with the actionId + host toastId. */
-  action?: { actionId: string; label: string };
+  action?: ToastAction;
+  /** Multiple inline buttons on one pill (e.g. 等待 / 接管 on the QQ lease
+   * conflict card). Takes precedence over the single `action` when present. */
+  actions?: ToastAction[];
   /** Decision-card notices (auto-memory candidates) list what would be written
    * before the review dialog opens; absent = plain pill. */
   preview?: { text: string; scope: "global" | "project" }[];
@@ -2962,6 +3022,28 @@ interface ChatStore {
    * （设置页此时显示空列表，等首次推送即可）。
    */
   contextWindowOverridesView: ContextWindowOverridesUi | null;
+  /**
+   * 「超流体」设置页模型下拉的数据源：按**超流体所选 API 配置**实时查询的
+   * 模型列表（`refreshSuperProfileModels` ↔ `superProfileModels` 专用通道）。
+   * 与主会话的 `state.models`（当前连接端点的模型）是两条互不覆盖的通道 ——
+   * 超流体选了别的配置时，用主会话那份列表就是错的。null = 尚未收到回包。
+   *
+   * 列表只对「某一次选择」有效：`iflow.superAgentProfile` 指针一变就作废
+   * （回 null → 下拉显示加载态）；回包还必须与**最近一次请求**的
+   * `requestId` 配对（见 `superProfileModelsRequestId`），迟到的旧端点列表
+   * 不会冒充新选择的结果。
+   */
+  superProfileModelsView: SuperProfileModelsUi | null;
+  /**
+   * 最近一次 `requestSuperProfileModels` 发出的 requestId；null = 从未请求。
+   *
+   * 这是「回包属于哪一次请求」的**权威判据**：只有 `msg.requestId` 与它相等
+   * 才入库。宿主主动推送（面板外改了设置）没有 requestId，才退回 profileName
+   * 启发式（双保险，不再是主判据）。
+   */
+  superProfileModelsRequestId: number | null;
+  /** 请求宿主按所选 API 配置重新拉取模型列表（自增 requestId）。 */
+  requestSuperProfileModels: (profileName: string) => void;
   /** Lifecycle of the settings-panel 「联网补充模型数据」 web-search fetch
    * (see `modelMetadataState`). WebView-local mirror of the host lane: the
    * button shows the spinner while `searching` and the inline error on
@@ -3021,6 +3103,23 @@ interface ChatStore {
 
 import { setLocale, t } from "./i18n";
 
+/**
+ * `superProfileModelsView` 的列表属于**某一次选择**：超流体 API 配置指针
+ * （`iflow.superAgentProfile`）换了名字，旧端点的列表就不再是当前选择的结果，
+ * 必须立刻作废（下拉回到加载态等新回包）。宿主回推（含外部手改 settings.json）
+ * 与本地乐观更新都按这一条判断；两边都 trim 后比较，只有新快照显式带字符串
+ * 时才算「变化」，避免缺字段的回包把列表误清。
+ */
+function superProfilePointerCleared(
+  prev: Partial<HostSettingsUi>,
+  next: Partial<HostSettingsUi>,
+): boolean {
+  return (
+    typeof next.superAgentProfile === "string" &&
+    next.superAgentProfile.trim() !== (prev.superAgentProfile ?? "").trim()
+  );
+}
+
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
@@ -3037,6 +3136,8 @@ export const useChat = create<ChatStore>((set, get) => ({
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
   contextWindowOverridesView: null,
+  superProfileModelsView: null,
+  superProfileModelsRequestId: null,
   modelMetadata: { state: "idle" },
   pending: null,
   promptSeq: 0,
@@ -3198,13 +3299,22 @@ export const useChat = create<ChatStore>((set, get) => ({
       set({ qqManagedStatus: msg });
       return;
     }
+    if (msg.type === "defaultWorkspacePicked") {
+      set((s) => ({
+        hostSettings: { ...s.hostSettings, superAgentDefaultWorkspace: msg.path },
+      }));
+      return;
+    }
     if (msg.type === "hostSettings") {
       const { type, ...settings } = msg;
       void type;
       const uiFontSize = settings.uiFontSize ?? "standard";
       const uiDensity = settings.uiDensity ?? "standard";
       applyUiScale(uiFontSize, uiDensity);
-      set((s) => ({ hostSettings: { ...s.hostSettings, ...settings, uiFontSize, uiDensity } }));
+      set((s) => ({
+        hostSettings: { ...s.hostSettings, ...settings, uiFontSize, uiDensity },
+        ...(superProfilePointerCleared(s.hostSettings, settings) ? { superProfileModelsView: null } : {}),
+      }));
       // One-shot migration: the old theme toggle stored the choice in
       // localStorage. Now it is a synced setting; hand the legacy value to
       // the host once and clear the key so it never overrides a config edit.
@@ -3232,6 +3342,32 @@ export const useChat = create<ChatStore>((set, get) => ({
           ...(msg.builtinWindow !== undefined ? { builtinWindow: msg.builtinWindow } : {}),
         },
       });
+      return;
+    }
+    if (msg.type === "superProfileModels") {
+      // 回包配对：宿主原样回显请求序号，只认**最近一次**发出的 id —— 慢端点 /
+      // 切换配置期间迟到的旧回包一律丢弃。这条判据不依赖「能否确定活动
+      // Profile 名」，所以「名字解析不出来就放行」的洞被彻底堵上。
+      if (typeof msg.requestId === "number") {
+        if (msg.requestId !== get().superProfileModelsRequestId) return;
+      } else {
+        // 宿主主动推送（面板外改了 iflow.superAgentProfile / superAgentModel，
+        // 不是回包，没有 id 可配对）：退回 profileName 启发式作双保险。
+        // 空串 = 跟随主会话：宿主 `resolveSuperProfileTarget("")` 会按回退链
+        // 解析出活动 Profile，并把解析后的名字放在 profileName 里，所以这里
+        // 不能拿它与空串比对；此时拿鉴权快照里 active 的 Profile 名当期望值
+        // （宿主解析活动 Profile 用的是同一套回退链）。名字解析不出来时照收，
+        // 宁可多一次刷新也不让下拉卡在加载态 —— 真正的迟到回包由上面的
+        // requestId 判据拦下，不靠这条启发式。
+        const selected = (get().hostSettings.superAgentProfile ?? "").trim();
+        if (selected) {
+          if (msg.profileName !== selected) return;
+        } else {
+          const activeName = (get().state?.auth.profiles.find((p) => p.active)?.name ?? "").trim();
+          if (activeName && msg.profileName && msg.profileName !== activeName) return;
+        }
+      }
+      set({ superProfileModelsView: msg });
       return;
     }
     if (msg.type === "modelMetadataState") {
@@ -3268,6 +3404,7 @@ export const useChat = create<ChatStore>((set, get) => ({
             persistent,
             sticky,
             action: msg.action,
+            actions: msg.actions,
             preview: msg.preview,
           },
         ],
@@ -3342,6 +3479,13 @@ export const useChat = create<ChatStore>((set, get) => ({
     set({ superResidueRequestId: requestId, superResidueLoading: true });
     get().send({ type: "requestSuperResidueList", requestId });
   },
+  requestSuperProfileModels: (profileName) => {
+    // 自增序号即「最近一次请求」的权威 id：宿主回包原样带回，只有配对的
+    // 那一条能入库（see applyHostMessage 的 superProfileModels 分支）。
+    const requestId = ++superProfileModelsRequestSeq;
+    set({ superProfileModelsRequestId: requestId });
+    get().send({ type: "refreshSuperProfileModels", profileName, requestId });
+  },
   handleSuperResidueAction: (action, sessionIds) => {
     const ids = sessionIds.filter((id) => typeof id === "string" && id.length > 0);
     if (ids.length === 0) return;
@@ -3389,7 +3533,12 @@ export const useChat = create<ChatStore>((set, get) => ({
     setTimeout(() => get().dismissToast(id), LOCAL_TOAST_MS);
   },
   updateHostSetting: (patch) => {
-    set((s) => ({ hostSettings: { ...s.hostSettings, ...patch } }));
+    set((s) => ({
+      hostSettings: { ...s.hostSettings, ...patch },
+      // 乐观更新也要让模型列表随选择作废：宿主回声要晚一个往返，期间不能让
+      // 上一个端点的候选列表冒充新选择的结果。
+      ...(superProfilePointerCleared(s.hostSettings, patch) ? { superProfileModelsView: null } : {}),
+    }));
     const next = get().hostSettings;
     applyUiScale(next.uiFontSize, next.uiDensity);
     get().send({ type: "setHostSettings", ...patch });

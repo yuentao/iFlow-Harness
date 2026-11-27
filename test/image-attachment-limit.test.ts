@@ -219,3 +219,35 @@ describe("pickAttachments · 5MB degrade threshold measured in raw bytes", () =>
     expect(reply?.files).toHaveLength(1);
   });
 });
+
+describe("pickDefaultWorkspace · 设置页选择目录必须打开原生目录选择器", () => {
+  let panel: ChatPanel;
+  let storageDir: string;
+  const windowMut = vscode.window as unknown as {
+    showOpenDialog?: (opts: unknown) => Promise<Array<{ fsPath: string }> | undefined>;
+  };
+
+  beforeEach(() => {
+    setConfigOverrides({ checkpoints: false });
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-pick-ws-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await panel.dispose();
+    delete windowMut.showOpenDialog;
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  it("routes the settings button message to the host folder picker", async () => {
+    const showOpenDialog = vi.fn(async () => undefined);
+    windowMut.showOpenDialog = showOpenDialog as unknown as typeof windowMut.showOpenDialog;
+    await (panel as unknown as { handleWebviewMessage: (m: unknown) => Promise<void> })
+      .handleWebviewMessage({ type: "pickDefaultWorkspace" });
+    expect(showOpenDialog).toHaveBeenCalledTimes(1);
+    expect(showOpenDialog).toHaveBeenCalledWith(
+      expect.objectContaining({ canSelectFolders: true, canSelectFiles: false }),
+    );
+  });
+});

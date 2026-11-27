@@ -40,6 +40,10 @@
 //      它才是 CI / 运行期的默认源,是产物快照,不是 Mod 源码仓库。
 //   4. `npm run harness` 对裁剪副本跑完整 ACP 流程验收(改 PRUNE 清单尤其
 //      必须,见 AGENTS.md 陷阱 #21)。
+//   例外(净化类 Mod):`oauth-strip-loader.cjs` / `telemetry-strip-loader.cjs`
+//   的注入不写进快照,而由本脚本的 applyLoaderPatches() 在拷贝后按各自导出的
+//   PATCHES 表做「锚点唯一 + sentinel round-trip」校验后注入;快照里的
+//   iflow.js 保持上游原文,方便核对。锚点漂移时 vendoring 直接硬失败。
 //   --force 不可省:版本号可能仍是 0.5.19-custom.12,幂等检查只比
 //   package.json version,同版本 ≠ 同内容(Mod 注入可不 bump 版本)。
 //   reverse/ 属分析工作区(reverse/iflow.readable.js ~23 万行可读化产物 +
@@ -48,8 +52,9 @@
 //   2026-09-11 npm run harness 实测背书);CI / 运行期只要裁剪产物。
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdtempSync, rmSync as rmDir } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -262,6 +267,78 @@ function removeBinDirs(root) {
   walk(root);
 }
 
+// Loader Mods whose *injection into bundle/iflow.js* is applied HERE, at
+// vendoring time, instead of being baked into the committed snapshot. Each
+// loader exports a `PATCHES` table of { id, anchor, replacement, sentinel }:
+//   - `anchor`    must occur EXACTLY ONCE in the minified bundle;
+//   - `sentinel`  a unique fragment of the injected code, absent before the
+//                 patch and present exactly once afterwards (round-trip);
+// Loader files themselves are ordinary bundle/*.cjs and ship with the copy.
+// A missing loader, a non-unique anchor or a failed round-trip is a HARD
+// error: silently shipping an unpatched (or double-patched) CLI is worse than
+// failing the build.
+const PATCH_LOADERS = [
+  "oauth-strip-loader.cjs",
+  "telemetry-strip-loader.cjs",
+  "internal-host-strip-loader.cjs",
+];
+
+function countOccurrences(haystack, needle) {
+  if (!needle) return 0;
+  let count = 0;
+  let at = 0;
+  while ((at = haystack.indexOf(needle, at)) !== -1) {
+    count++;
+    at += needle.length;
+  }
+  return count;
+}
+
+function applyLoaderPatches(pkgDir) {
+  const bundlePath = path.join(pkgDir, "bundle", "iflow.js");
+  if (!existsSync(bundlePath)) {
+    throw new Error(`[vendor-cli] patch target missing: ${bundlePath}`);
+  }
+  const requireFromBundle = createRequire(bundlePath);
+  let source = readFileSync(bundlePath, "utf8");
+  let applied = 0;
+  for (const loaderName of PATCH_LOADERS) {
+    const loaderPath = path.join(pkgDir, "bundle", loaderName);
+    if (!existsSync(loaderPath)) {
+      throw new Error(`[vendor-cli] patch loader missing: bundle/${loaderName}`);
+    }
+    const mod = requireFromBundle(loaderPath);
+    const patches = Array.isArray(mod.PATCHES) ? mod.PATCHES : null;
+    if (!patches || patches.length === 0) {
+      throw new Error(`[vendor-cli] patch loader exports no PATCHES: bundle/${loaderName}`);
+    }
+    for (const patch of patches) {
+      const label = `${loaderName}:${patch.id}`;
+      if (!patch.anchor || !patch.replacement || !patch.sentinel) {
+        throw new Error(`[vendor-cli] malformed patch entry ${label}`);
+      }
+      const anchorHits = countOccurrences(source, patch.anchor);
+      if (anchorHits !== 1) {
+        throw new Error(`[vendor-cli] anchor not unique (${anchorHits} hits) for ${label}`);
+      }
+      if (countOccurrences(source, patch.sentinel) !== 0) {
+        throw new Error(`[vendor-cli] bundle already patched (sentinel present) for ${label}`);
+      }
+      source = source.replace(patch.anchor, patch.replacement);
+      const sentinelHits = countOccurrences(source, patch.sentinel);
+      if (sentinelHits !== 1) {
+        throw new Error(`[vendor-cli] round-trip failed (sentinel ${sentinelHits} hits) for ${label}`);
+      }
+      if (countOccurrences(source, patch.replacement) !== 1) {
+        throw new Error(`[vendor-cli] round-trip failed (replacement not unique) for ${label}`);
+      }
+      applied++;
+    }
+  }
+  writeFileSync(bundlePath, source);
+  console.log(`[vendor-cli] applied ${applied} loader patch(es) to bundle/iflow.js`);
+}
+
 // Ship the loader rule configs alongside the CLI. The extension copies any
 // MISSING ~/.iflow/*.json from here before connecting (existing user files
 // are never overwritten). The source dir is populated by --sync-defaults,
@@ -375,6 +452,9 @@ try {
   if (existsSync(nmDir)) {
     for (const name of PRUNE_PKGS) rmSync(path.join(nmDir, name), { recursive: true, force: true });
   }
+
+  // 3c. Apply the loader Mod injections (unique anchor + round-trip checked).
+  applyLoaderPatches(pkgDir);
 
   // Remove all .bin dirs at every nesting level — npm creates symlinks
   // (Linux) or .cmd shims (Windows) that the CLI never uses and vsce can't

@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronsDownUp,
   FileCode,
   FileText,
   Folder as FolderIcon,
@@ -25,7 +26,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { collectUserPromptTexts, MEMORY_CURATE_COMPOSER_ID_BASE, type ContextRefUi, type FileHitUi, type ModelInfoUi, type ModelMetadataSource, type SkillInfo, type SlashCommand, type ThinkLevel, type UsageNumberSource } from "../../../shared/messages";
+import { collectUserPromptTexts, MEMORY_CURATE_COMPOSER_ID_BASE, type Block, type ContextRefUi, type FileHitUi, type ModelInfoUi, type ModelMetadataSource, type SkillInfo, type SlashCommand, type ThinkLevel, type UsageNumberSource } from "../../../shared/messages";
 import { SKILL_COMMAND } from "../../../shared/skills";
 import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
@@ -57,7 +58,11 @@ const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MENTION_SEARCH_TIMEOUT_MS = 10_000;
 const CONTEXT_RESOLVE_TIMEOUT_MS = 15_000;
 const STAGE_TIMEOUT_MS = 30_000;
-const STOP_TIMEOUT_MS = 10_000;
+// 仅当宿主完全不回话时的兜底：正常路径由宿主把 cancelling 清回 false /
+// status 离开 streaming 收尾（宿主自己有 15s 的落定上限 + 强制重启兜底）。
+const STOP_TIMEOUT_MS = 30_000;
+/** 「压缩上下文」按钮的本地防抖：连点只发一条 compressNow（宿主另有单飞锁）。 */
+const COMPRESS_BUTTON_DEBOUNCE_MS = 1_500;
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
 
@@ -122,6 +127,7 @@ function formatCost(usd: number): string {
 const EMPTY_COMMANDS: SlashCommand[] = [];
 const EMPTY_SKILLS: SkillInfo[] = [];
 const EMPTY_MODELS: ModelInfoUi[] = [];
+const EMPTY_BLOCKS: Block[] = [];
 
 /**
  * 面板本地 slash 指令：`/memory-curate` 立即跑一轮记忆整理。
@@ -454,7 +460,15 @@ export function Composer() {
   const status = useChat((s) => s.state?.status ?? null);
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
+  /** 宿主权威的「正在停止」标记（见 SessionState.cancelling）。 */
+  const hostCancelling = useChat((s) => s.state?.cancelling ?? false);
   const needsSetup = useChat((s) => s.state?.auth.needsSetup ?? false);
+  /** 压缩回合进行中（宿主权威，见 SessionState.compressing）。 */
+  const compressing = useChat((s) => s.state?.compressing ?? false);
+  /** 有 user 块 = 有可压缩的对话内容；空会话点压缩没有意义。 */
+  const hasCompressible = useChat((s) =>
+    (s.state?.blocks ?? EMPTY_BLOCKS).some((block) => block.kind === "user"),
+  );
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
   /** 远程接续按钮只在机器人已启用时渲染；状态来自设置页的 qqSettings 快照。 */
@@ -595,16 +609,26 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   }
   /** Stop the running turn once; the button spins until the turn settles. */
   function stopGeneration(): void {
-    if (stopping) return;
+    // Idempotent: while either the host-owned `cancelling` or this local
+    // optimistic flag says a stop is in flight, a repeat click is a no-op.
+    // The old code only guarded the local flag and let it expire after 10s
+    // while the turn was STILL streaming, so every click re-sent `cancel` and
+    // the button ping-ponged between 「停止生成」 and 「正在停止…」.
+    if (stopping || hostCancelling) return;
     setStopping(true);
     send({ type: "cancel" });
     if (stopTimer.current) clearTimeout(stopTimer.current);
+    // Failsafe for a host that never answers at all (e.g. an older build
+    // without `cancelling`). The normal release is the host clearing
+    // `cancelling` / the status leaving streaming — both handled below.
     stopTimer.current = setTimeout(() => {
       stopTimer.current = null;
       setStopping(false);
     }, STOP_TIMEOUT_MS);
   }
-  // The turn left streaming (cancel landed) → release the Stop spinner early.
+  // The turn left streaming (cancel landed, host settled, or a forced restart)
+  // → release the Stop spinner. Never release it on a timer while the host
+  // still reports streaming: that was the 「点了没反应」 loop.
   useEffect(() => {
     if (!canStop && stopping) {
       if (stopTimer.current) {
@@ -614,6 +638,52 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       setStopping(false);
     }
   }, [canStop, stopping]);
+  /** 渲染用的进行态：宿主权威标记或本地即时反馈。 */
+  const stopPending = stopping || hostCancelling;
+  /**
+   * 「压缩上下文」按钮：一次点击只发一条 `compressNow`。
+   *
+   * 本地 1.5s 防抖（宿主另有 compressTurnActive 单飞锁）：连点 / 双击不会
+   * 连发两条。`compressing` 是宿主权威的压缩进行态，用来把按钮切成 spinner；
+   * 一旦它变 false（成功 / 失败 / 取消），本地锁立即释放。
+   */
+  const [compressLocked, setCompressLocked] = useState(false);
+  const compressLockRef = useRef(false);
+  const compressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const releaseCompressLock = (): void => {
+    compressLockRef.current = false;
+    if (compressTimer.current) {
+      clearTimeout(compressTimer.current);
+      compressTimer.current = null;
+    }
+    setCompressLocked(false);
+  };
+  useEffect(() => {
+    // 宿主权威的压缩态已结束（成功 / 失败 / 取消）→ 立即释放本地锁。
+    if (!compressing && compressLockRef.current) releaseCompressLock();
+  }, [compressing]);
+  function compressNow(): void {
+    // 同步锁（ref）：同一 tick 内的两次点击也只会发一条。
+    if (compressLockRef.current) return;
+    compressLockRef.current = true;
+    setCompressLocked(true);
+    send({ type: "compressNow" });
+    if (compressTimer.current) clearTimeout(compressTimer.current);
+    // 宿主不回话时的兜底（会话未就绪 / 守卫早退不会有 compressing 翻转）。
+    compressTimer.current = setTimeout(releaseCompressLock, COMPRESS_BUTTON_DEBOUNCE_MS);
+  }
+  /** 禁用条件：会话没准备好 / 正在生成 / 正在停止 / 正在压缩 / 无内容可压。 */
+  const compressBlocked =
+    needsSetup ||
+    replaying ||
+    initializing ||
+    streaming ||
+    hostCancelling ||
+    compressing ||
+    compressLocked ||
+    !hasCompressible ||
+    remoteTakeover;
+  const compressPending = compressing || compressLocked;
   // ESC's window listener only depends on canStop; the ref keeps it on the
   // CURRENT stopping state instead of the render that registered it.
   const stopRef = useRef<() => void>(() => {});
@@ -623,6 +693,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     () => () => {
       if (mentionSearchTimer.current) clearTimeout(mentionSearchTimer.current);
       if (stopTimer.current) clearTimeout(stopTimer.current);
+      if (compressTimer.current) clearTimeout(compressTimer.current);
       for (const entry of stagingRef.current.values()) clearTimeout(entry.timer);
       for (const timer of resolveTimers.current.values()) clearTimeout(timer);
     },
@@ -2522,6 +2593,28 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               disabled={controlsLocked}
               onClick={() => send({ type: "pickAttachments" })}
             />
+            {/* 「压缩上下文」：主动发起一轮 `/compress`（与上下文警告 pill 的
+                「立即压缩」共用宿主入口）。压缩中显示 spinner 并禁用；无 user
+                块、会话未就绪、正在生成 / 正在停止时一律禁用。
+                图标用 ChevronsDownUp（两枚相向的折角 = 折叠收拢）：旧的
+                Minimize2 是「缩到角落」的斜箭头，读起来像最小化窗口，和
+                「压缩上下文」完全对不上号；折角相向一眼就是「把内容折短」，
+                且与左侧回形针、右侧纸飞机都不撞形。 */}
+            <Button
+              variant="canvas"
+              icon={
+                compressPending ? (
+                  <Loader2 className={`${ICON_INLINE} animate-spin`} />
+                ) : (
+                  <ChevronsDownUp className={ICON_INLINE} />
+                )
+              }
+              aria-label={t("压缩上下文，减少 token 占用")}
+              title={t("压缩上下文，减少 token 占用")}
+              aria-busy={compressPending || undefined}
+              disabled={compressBlocked}
+              onClick={compressNow}
+            />
             {/* P1-7: stop and send share ONE slot (swap in place) — the old
                 separate stop button made the primary action area jump every
                 time a turn started/ended. Sending while generating stays on
@@ -2530,14 +2623,14 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             {canStop ? (
               <Button
                 variant="emphasis"
-                icon={stopping ? <Loader2 className={`${ICON_INLINE} animate-spin`} /> : <Square className={ICON_INLINE} />}
-                title={stopping ? t("正在停止…") : t("停止生成")}
-                aria-label={stopping ? t("正在停止…") : t("停止生成")}
-                aria-busy={stopping || undefined}
-                disabled={stopping}
+                icon={stopPending ? <Loader2 className={`${ICON_INLINE} animate-spin`} /> : <Square className={ICON_INLINE} />}
+                title={stopPending ? t("正在停止…") : t("停止生成")}
+                aria-label={stopPending ? t("正在停止…") : t("停止生成")}
+                aria-busy={stopPending || undefined}
+                disabled={stopPending}
                 onClick={stopGeneration}
               >
-                <span className="@max-[340px]:hidden">{stopping ? t("正在停止…") : t("停止生成")}</span>
+                <span className="@max-[340px]:hidden">{stopPending ? t("正在停止…") : t("停止生成")}</span>
               </Button>
             ) : (
               <Button

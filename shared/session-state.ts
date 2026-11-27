@@ -124,11 +124,20 @@ const SYSTEM_STATUS_PREFIXES = [
   "Compressing chat history",
   "Compressing context",
   "Failed to compress chat history",
+  // CLI 0.5.19 English locale emits a bare "Compressing..." status line
+  // (compressCommand.compressing in the vendored bundle) rather than the
+  // longer "Compressing context ..." form. Keep the ellipsis in the prefix so
+  // ordinary assistant text like "Compressing the file" stays a normal block.
+  "Compressing...",
+  "Compressing…", // U+2026 single-glyph ellipsis variant
 ];
 
 function isSystemStatusText(text: string): boolean {
-  const t = text.trimStart();
-  return SYSTEM_STATUS_PREFIXES.some((p) => t.startsWith(p));
+  // Case-insensitive, leading-whitespace tolerant, chunk-start prefix match;
+  // the ellipsis is part of each status phrase, so prose that merely begins
+  // with "Compressing" is never misclassified.
+  const t = text.trimStart().toLowerCase();
+  return SYSTEM_STATUS_PREFIXES.some((p) => t.startsWith(p.toLowerCase()));
 }
 
 /**
@@ -1501,6 +1510,37 @@ export function toAgentPromptText(text: string, commands: readonly SlashCommand[
   );
   if (known) return text;
   return "\u200B" + s;
+}
+
+// --- compression command detection ------------------------------------------
+// Vendor evidence: the built-in CLI defines the compression command in
+// `vendor/iflow-fork/bundle/iflow.js:5285` as
+//   `{ name: "compress", altNames: ["summarize", "compact"], kind: "built-in" }`
+// and only parses a prompt as a command when `prompt[0].text.trim()` starts
+// with "/". The host needs the same judgement before rewriting user input, so
+// both sides share this pure predicate instead of re-deriving it ad hoc.
+
+/** Compression command names, mirrored from the vendored CLI bundle. */
+export const COMPRESSION_COMMAND_NAMES: ReadonlySet<string> = new Set([
+  "compress",
+  "summarize",
+  "compact",
+]);
+
+/**
+ * Whether `text` invokes the CLI's compression command. Returns the canonical
+ * name `"compress"` for `/compress`, `/summarize` and `/compact` (any casing,
+ * optional trailing arguments), or `null` otherwise. Leading whitespace and
+ * newlines are tolerated because the CLI trims before its "/" check; path-like
+ * input (`/usr/bin/node`), double slashes (`//compress`) and a bare "/" with a
+ * space (`/ compress`) are not commands.
+ */
+export function parseCompressionCommand(text: string): string | null {
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith("/")) return null;
+  const firstToken = trimmed.slice(1).split(/\s+/)[0] ?? "";
+  if (firstToken === "") return null;
+  return COMPRESSION_COMMAND_NAMES.has(firstToken.toLowerCase()) ? "compress" : null;
 }
 
 export function beginUserPrompt(

@@ -28,8 +28,24 @@ describe("provider presets", () => {
     expect(matchProviderPreset("")).toBeNull();
   });
 
+  it("lists exactly the supported third-party providers", () => {
+    expect(PROVIDER_PRESETS.map((preset) => preset.id)).toEqual([
+      "deepseek",
+      "moonshot",
+      "zhipu",
+      "dashscope",
+      "siliconflow",
+      "openrouter",
+      "ollama",
+    ]);
+  });
+
   it("does not list the discontinued iFlow open platform", () => {
     expect(PROVIDER_PRESETS.some((preset) => preset.id === "iflow")).toBe(false);
     expect(PROVIDER_PRESETS.some((preset) => preset.baseUrl.includes("apis.iflow.cn"))).toBe(false);
+    // A profile the user already saved against that host is never mapped onto
+    // a preset or rewritten: it stays a custom endpoint they own.
+    expect(matchProviderPreset("https://apis.iflow.cn/v1")).toBeNull();
+    expect(matchProviderPreset("https://iflow.cn/v1")).toBeNull();
   });
 });

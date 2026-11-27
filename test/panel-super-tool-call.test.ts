@@ -264,7 +264,7 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     expect(p.superToolCallOutcomes.get("tc-no-manager")).not.toBe("dispatched");
     expect(
       toast.mock.calls.some(
-        (call) => call[0] === "warning" && String(call[1]).includes("没有打开的工作区"),
+        (call) => call[0] === "warning" && String(call[1]).includes("已就绪，但超流体管理器未能启动"),
       ),
     ).toBe(true);
   });

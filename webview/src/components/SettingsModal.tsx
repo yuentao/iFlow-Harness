@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, Sparkles, Trash2, Users } from "lucide-react";
 import type {
+  AuthProfileUi,
   AuthUiState,
   HostSettingsUi,
   ThinkingModelRuleUi,
@@ -32,6 +33,7 @@ import {
   LinesCommitTextArea,
   ModalShell,
   Segmented,
+  Select,
   SettingsDisclosure,
   SettingsGroup,
   Slider,
@@ -412,6 +414,52 @@ function NumberRow({
   );
 }
 
+/** Path row with a native folder-picker trigger. The host owns the dialog;
+ * the text field stays for manual entry / echo and keeps the existing
+ * absolute-path validation on commit. */
+function DirectoryRow({
+  label,
+  description,
+  detail,
+  value,
+  placeholder,
+  buttonLabel,
+  onCommit,
+}: {
+  label: string;
+  description: string;
+  detail?: string;
+  value: string;
+  placeholder?: string;
+  buttonLabel: string;
+  onCommit: (value: string) => void;
+}) {
+  const send = useChat((s) => s.send);
+  return (
+    <SettingRow
+      wideControl
+      label={label}
+      description={description}
+      detail={detail}
+      control={
+        <div className="flex min-w-0 items-center gap-2">
+          <CommitTextInput
+            label={label}
+            mono
+            value={value}
+            placeholder={placeholder}
+            className="min-w-0 flex-1"
+            onCommit={onCommit}
+          />
+          <Button size="sm" onClick={() => send({ type: "pickDefaultWorkspace" })}>
+            {buttonLabel}
+          </Button>
+        </div>
+      }
+    />
+  );
+}
+
 function TextRow({
   label,
   description,
@@ -729,26 +777,11 @@ function DependentRow({ children }: { children: ReactNode }) {
  */
 type SuperDependencyPolicy = "block" | "continue";
 
-/**
- * Super Agent 的「最大尝试次数」与「依赖策略」两个设置。
- *
- * 宿主接线（`shared/messages.ts` 的 `HostSettingsUi` + `src/panel/panel.ts` 的
- * 读写）由 host 侧负责；这里用「可选扩展视图」读取：字段还没进 `HostSettingsUi`
- * 时回落到下面的默认值（与 package.json 的 `default` 一致），接线后字段自然出现，
- * 本文件不需要再改一次。
- */
-type SuperAgentRetryUi = {
-  /** `iflow.superAgent.maxAttempts`：失败后最多自动尝试几次（含首次）。 */
-  superAgentMaxAttempts?: number;
-  /** `iflow.superAgent.dependencyPolicy`：上游失败时下游任务怎么处理。 */
-  superAgentDependencyPolicy?: SuperDependencyPolicy;
-};
+/** 选择器兜底用的空数组：常量引用，避免每次渲染新建数组导致的无谓更新。 */
+const EMPTY_AUTH_PROFILES: AuthProfileUi[] = [];
 
-/** 写回宿主设置用的补丁类型。两个字段目前还没进 `HostSettingsUi`，纯扩展类型
- * 又会被 TS 的弱类型检测拦下，所以用交叉类型把它们一起送出去。 */
-type SuperAgentRetryPatch = Partial<HostSettingsUi> & SuperAgentRetryUi;
-
-/** manifest 声明的默认值：宿主接线前的兜底读数。 */
+/** 「最大尝试次数」与「依赖策略」的默认值 / 上下限，与 `package.json` 的
+ * `default` 逐字一致（共享 `HostSettingsUi` 的字段口径亦是如此）。 */
 const SUPER_MAX_ATTEMPTS_DEFAULT = 2;
 const SUPER_MAX_ATTEMPTS_MIN = 1;
 const SUPER_MAX_ATTEMPTS_MAX = 5;
@@ -761,17 +794,146 @@ const SUPER_DEPENDENCY_POLICY_DEFAULT: SuperDependencyPolicy = "block";
 function SuperAgentSection() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
-  // Super Agent 的两个新设置：宿主把字段接进 HostSettingsUi 之前，用可选扩展
-  // 视图读取并回落到 manifest 声明的默认值。
-  const superRetry = settings as HostSettingsUi & SuperAgentRetryUi;
+  // 两个字段都在共享 HostSettingsUi 里（宿主读写已接线），默认值/上下限只做
+  // 防御性兜底，与 manifest 的 default 保持一致。
   const superMaxAttempts = Math.min(
     SUPER_MAX_ATTEMPTS_MAX,
-    Math.max(SUPER_MAX_ATTEMPTS_MIN, Math.round(superRetry.superAgentMaxAttempts ?? SUPER_MAX_ATTEMPTS_DEFAULT)),
+    Math.max(SUPER_MAX_ATTEMPTS_MIN, Math.round(settings.superAgentMaxAttempts ?? SUPER_MAX_ATTEMPTS_DEFAULT)),
   );
-  const superDependencyPolicy = superRetry.superAgentDependencyPolicy ?? SUPER_DEPENDENCY_POLICY_DEFAULT;
-  const updateSuper = (patch: SuperAgentRetryPatch) => update(patch);
+  const superDependencyPolicy = settings.superAgentDependencyPolicy ?? SUPER_DEPENDENCY_POLICY_DEFAULT;
+  const updateSuper = (patch: Partial<HostSettingsUi>) => update(patch);
+  // 模型列表请求走 store 的专用 action：它自增 requestId 并记录「最近一次
+  // 请求」，回包只有与它配对才会入库（迟到的旧回包丢弃）。这里不能直接
+  // `send`，否则 webview 没有可以配对的序号，慢端点回包就会串台。
+  const requestSuperProfileModels = useChat((s) => s.requestSuperProfileModels);
+  // 超流体链路的两个指针：共享的 HostSettingsUi 已经带有 `superAgentProfile` /
+  // `superAgentModel`（可选，空串 = 走回退链），直接读，不再本地维护同形状类型。
+  const superProfile = settings.superAgentProfile ?? "";
+  const superModel = settings.superAgentModel ?? "";
+  // 选项来源：API 配置来自鉴权态快照；模型列表走「按所选 Profile 实时查询」的
+  // 专用通道（宿主 GET {baseUrl}/models），**不再**复用主会话的 state.models ——
+  // 超流体选了别的 API 配置时，主会话那份列表属于另一个端点，正是要消除的
+  // 「同一功能两条通道」隐患。
+  const profiles = useChat((s) => s.state?.auth.profiles ?? EMPTY_AUTH_PROFILES);
+  const superModelsView = useChat((s) => s.superProfileModelsView);
+  // 挂载、切换 API 配置、或宿主回推的 superAgentProfile 变化时，按当前选择重拉。
+  // 空串 = 跟随主会话：宿主 resolveSuperProfileTarget 在 profileName 为空时按
+  // 回退链（工作区握手凭据 → SecretStorage 活动凭据 → 内核活动 Profile）解析出
+  // 活动端点，所以显式传空串即可拿到对应的实时列表，webview 侧不需要另做回退。
+  useEffect(() => {
+    requestSuperProfileModels(superProfile);
+  }, [requestSuperProfileModels, superProfile]);
+  // 「这个列表属于当前选择」的权威判定在 store：回包必须与最近一次请求的
+  // requestId 配对（迟到的旧回包丢弃），指针一变旧列表也会作废。这里再按
+  // profileName 对齐一次同一份选择，只是同源过滤（同时覆盖宿主主动推送），
+  // 不承担回退语义。
+  const modelsView =
+    superModelsView && (!superProfile || superModelsView.profileName === superProfile)
+      ? superModelsView
+      : null;
+  // 缺口 A：端点返回 200 但一个模型都没有（且没有 error）时显式提示 ——
+  // 否则下拉只剩占位项，用户分不清是加载中还是端点真的没给模型。
+  const modelsEmpty = modelsView !== null && !modelsView.error && modelsView.models.length === 0;
+  // 缺口 B：live 列表能证明当前选择的模型已下架时显式呈现降级（被下架的模型
+  // id + 实际回退到的模型）。只提示，**绝不**据此改写用户的 superAgentModel。
+  const degradeHint =
+    modelsView?.degraded === true
+      ? modelsView.delistedModelId && modelsView.degradedModelId
+        ? t(
+            "模型 {0} 已不在当前可用列表中，实际会回退为 {1}（仅提示，不会自动修改你的设置）。",
+            modelsView.delistedModelId,
+            modelsView.degradedModelId,
+          )
+        : (modelsView.degradedReason ?? "")
+      : "";
+  const profileOptions: Array<{ value: string; label: string; description?: string }> = [
+    { value: "", label: t("跟随主会话") },
+  ];
+  for (const profile of profiles) {
+    profileOptions.push({ value: profile.name, label: profile.name, description: profile.baseUrl });
+  }
+  // 当前值对应的配置可能已被删除（或用户手改过 settings.json）：补一条占位选项，
+  // 否则下拉会显示成空白，看不出到底选了什么。
+  if (superProfile && !profiles.some((profile) => profile.name === superProfile)) {
+    profileOptions.push({ value: superProfile, label: superProfile, description: t("找不到这个 API 配置") });
+  }
+  const modelOptions: Array<{ value: string; label: string; description?: string }> = [
+    { value: "", label: t("跟随所选 API 配置") },
+  ];
+  /** 空串是「跟随所选配置」本身，先占位避免模型 id 恰好为空串时重复。 */
+  const knownModels = new Set<string>([""]);
+  const pushModel = (id: string | undefined, label?: string, description?: string) => {
+    const value = id?.trim();
+    if (!value || knownModels.has(value)) return;
+    knownModels.add(value);
+    modelOptions.push({ value, label: label || value, description });
+  };
+  for (const model of modelsView?.models ?? []) pushModel(model.id, model.name || model.id, model.id);
+  // 所选配置自带的模型名（空串选择时取活动配置）—— 与宿主把 currentModelId
+  // 补到列表头的口径一致，保证「配置名不是模型名」时下拉仍能看到实际模型。
+  const selectedProfile = superProfile
+    ? profiles.find((profile) => profile.name === superProfile)
+    : profiles.find((profile) => profile.active);
+  pushModel(selectedProfile?.modelName);
+  // 当前值不在候选里时补占位，下拉不会显示成空白；宿主回包里的 currentModelId
+  // 也补一次（陈旧回包 / 端点列表变化时，实际生效的模型仍可见）。
+  if (superModel && !knownModels.has(superModel)) {
+    pushModel(superModel, superModel, t("当前模型不在列表里"));
+  } else if (modelsView?.currentModelId) {
+    pushModel(modelsView.currentModelId);
+  }
   return (
     <div className="space-y-4">
+      <SettingsGroup title={t("API 与模型")}>
+        <SettingRow
+          wideControl
+          label={t("API 配置")}
+          description={t("超流体自己发请求时用的 API 配置。")}
+          detail={t("留空（默认）时跟随主会话当前使用的 API 配置；填了名字后，新派发的超流体改用该配置（接口地址、API Key 与默认模型），主会话不受影响。API 配置在「账户与模型」页创建。修改后对下一个派发的超流体生效，已在运行的超流体保持启动时的配置不变。")}
+          control={
+            <Select
+              ariaLabel={t("API 配置")}
+              value={superProfile}
+              options={profileOptions}
+              onChange={(superAgentProfile) => update({ superAgentProfile })}
+            />
+          }
+        />
+        <div>
+          <SettingRow
+            wideControl
+            label={t("模型")}
+            description={t("超流体自己发请求时用的模型 id。")}
+            detail={t("留空（默认）时使用所选 API 配置自带的模型名；下拉里是按所选 API 配置实时查询到的模型列表（端点不可达时不回退内置目录）。修改后对下一个派发的超流体生效，已在运行的超流体保持启动时的模型不变。")}
+            control={
+              <Select
+                ariaLabel={t("模型")}
+                value={superModel}
+                options={modelOptions}
+                onChange={(superAgentModel) => update({ superAgentModel })}
+              />
+            }
+          />
+          {modelsView?.error ? (
+            <p role="alert" className="-mt-2 px-4 pb-3 text-ui-caption leading-relaxed text-destructive">
+              {modelsView.error}
+            </p>
+          ) : !modelsView ? (
+            <p className="-mt-2 flex items-center gap-1.5 px-4 pb-3 text-ui-caption leading-relaxed text-muted-foreground">
+              <Loader2 className={`${ICON_INLINE} shrink-0 animate-spin text-primary`} />
+              {t("正在连接并读取可用模型…")}
+            </p>
+          ) : degradeHint ? (
+            <p role="status" className="-mt-2 px-4 pb-3 text-ui-caption leading-relaxed text-warning">
+              {degradeHint}
+            </p>
+          ) : modelsEmpty ? (
+            <p role="status" className="-mt-2 px-4 pb-3 text-ui-caption leading-relaxed text-muted-foreground">
+              {t("该端点没有返回任何模型。请检查端点地址与密钥，或手动填写模型 id。")}
+            </p>
+          ) : null}
+        </div>
+      </SettingsGroup>
       <SettingsGroup title={t("后台任务与并发")}>
         <NumberRow
           label={t("并发上限")}
@@ -832,6 +994,15 @@ function SuperAgentSection() {
           detail={t("默认关闭：完成后自动回收工作目录（分支一律保留）；失败或中断的超流体从不回收。开启后工作目录会留在磁盘上，可随时手动清理。")}
           checked={settings.superAgentKeepWorktree}
           onChange={(superAgentKeepWorktree) => update({ superAgentKeepWorktree })}
+        />
+        <DirectoryRow
+          label={t("默认工作区")}
+          description={t("没有打开任何文件夹时，超流体改用这个目录作为工作区。")}
+          detail={t("填绝对路径；留空使用内置默认目录 ~/.iflow/workspace（首次派发会自动创建）。相对路径、以 ~ 开头或指向文件的路径不会写入设置。")}
+          value={settings.superAgentDefaultWorkspace}
+          placeholder="~/.iflow/workspace"
+          buttonLabel={t("选择目录")}
+          onCommit={(superAgentDefaultWorkspace) => update({ superAgentDefaultWorkspace })}
         />
       </SettingsGroup>
       <SettingsGroup title={t("安全与信任")}>

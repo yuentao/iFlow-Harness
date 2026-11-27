@@ -676,6 +676,15 @@ export type SuperCancelOutcome =
   | { ok: true; reason: "already-terminal"; status: SuperStatus }
   | { ok: false; reason: "not-found" };
 
+/** `cancelAll` 的过滤选项。 */
+export interface SuperCancelAllOptions {
+  /**
+   * 只中断属于该主会话的子会话（没有归属的旧记录按「跟随当前会话」处理）。
+   * 不传 = 中断全部活着的子会话（看板「全部中断」的既有语义）。
+   */
+  mainSessionId?: string | null;
+}
+
 /** 扩展名 → MIME：复制来的图片除了落盘，也作为图片块直接给模型看。 */
 const IMAGE_MIME_BY_EXT = new Map<string, string>([
   [".png", "image/png"],
@@ -711,6 +720,10 @@ export type SuperClientFactory = (params: {
   includeDirectories: string[];
   label: string;
   callbacks: AcpClientCallbacks;
+  /** 任务级 API Profile 覆盖（`SuperTaskSpec.profileId`），端点解析链第①级。 */
+  profileId?: string;
+  /** 任务级模型覆盖（`SuperTaskSpec.modelId`），模型解析链第①级。 */
+  modelId?: string;
 }) => Promise<AcpClient>;
 
 export interface SuperAgentDeps {
@@ -796,6 +809,30 @@ export interface SuperAgentDeps {
   }) => void;
   /** 子会话使用的模型；跟随主会话当前模型，null = 用 CLI 的默认值。 */
   currentModel: () => string | null;
+  /**
+   * 子会话该用的模型（**超流体独立模型链**的解析结果）：
+   *   ① 任务级 `modelId` → ② `iflow.superAgentModel` → ③ 目标 Profile 的
+   *   modelName → ④ 主 store 的 `currentModelId`（= {@link currentModel}）。
+   *
+   * 宿主提供了它就用它推 `session/set_model`；未提供（单测 / 旧 fixture）时
+   * 管理器回落到 {@link currentModel}，行为与接入前逐字节一致。
+   */
+  spawnModel?: (spec: SuperTaskSpec) => Promise<string | null>;
+  /**
+   * 本子会话**实际命中的 API Profile 名**（超流体端点链的解析结果）：
+   *   ① 任务级 `profileId` → ② `iflow.superAgentProfile` → ③ 本工作区握手指针
+   *   → ④ 握手凭据 / SecretStorage → ⑤ 内核 `currentApiProfile` / 顶层默认。
+   *
+   * 宿主提供了它就回填到 `SuperSessionUi.profileId`（看板展示「这个子会话跑在
+   * 哪个 API 配置上」，与 {@link spawnModel} 成对）。返回 `null` = 未配置
+   * 超流体（零配置老用户）/ 解析不出具名 Profile —— 此时 `profileId` 保持
+   * `undefined`，看板与既有行为逐字节一致。可选：未接线（单测 / 旧 fixture）
+   * 时同样不填。
+   *
+   * 管理器**先**调它、**后**调 {@link spawnModel}：宿主实现按 spawn 计划键
+   * peek（不消费），随后 spawnModel 消费该计划，同一次派发仍只解析一次。
+   */
+  spawnProfile?: (spec: SuperTaskSpec) => Promise<string | null>;
   /**
    * 方案D：子会话 `session/set_model` 成功后，把用户显式覆盖的上下文窗口同步
    * 进子 CLI 缓存的 tokensLimit（set_model 只改名、不重算）。宿主按 modelId
@@ -1417,11 +1454,30 @@ export class SuperAgentManager {
   }
 
   /** 中断全部子会话，返回被中断的数量。 */
-  async cancelAll(source: SuperInterruptSource = "system"): Promise<number> {
+  async cancelAll(source: SuperInterruptSource = "system", options: SuperCancelAllOptions = {}): Promise<number> {
+    // 归属过滤与 superBelongsToCurrentMain 同口径：没有归属的旧记录跟随当前
+    // 会话。用户按「停止」只能停掉当前这段对话派出的子会话，不能误伤同面板
+    // 里另一个主会话仍在跑的超流体。
+    const owner = options.mainSessionId;
     const ids = [...this.sessions.values()]
       .filter((s) => !isTerminalSuperStatus(s.status))
+      .filter((s) => {
+        if (owner === undefined) return true;
+        const sessionOwner = s.mainSessionId;
+        return !sessionOwner || sessionOwner === owner;
+      })
       .map((s) => s.id);
-    for (const id of ids) await this.cancel(id, source);
+    // **并行**取消：每个 cancel 都要等自己的进程树 teardown（Windows 上是
+    // taskkill /T，单次可达数秒）。旧实现逐个 `await`，十几个子会话就是
+    // 十几倍的回收时间，一次「停止」看起来像卡死。并行只受最慢的那一个
+    // 约束；且 cancel 内部先落 cancelled 状态再杀进程，超时只影响回收等待，
+    // 不影响状态与汇报。allSettled：单个失败不得中断其余目标。
+    const results = await Promise.allSettled(ids.map((id) => this.cancel(id, source)));
+    for (const result of results) {
+      if (result.status === "rejected") {
+        this.deps.log.warn(`超流体批量中断：单个目标失败：${errorMessage(result.reason)}`);
+      }
+    }
     return ids.length;
   }
 
@@ -2827,6 +2883,10 @@ export class SuperAgentManager {
         includeDirectories,
         label: id,
         callbacks: this.callbacksFor(id),
+        // 任务级覆盖（单次任务临时指定网关/模型）：白名单拷贝已放行它们，
+        // 这里继续透传给宿主做端点/模型解析。
+        ...(spec.profileId ? { profileId: spec.profileId } : {}),
+        ...(spec.modelId ? { modelId: spec.modelId } : {}),
       });
       if (this.disposed) {
         await client.dispose();
@@ -2910,7 +2970,24 @@ export class SuperAgentManager {
         }
       }
 
-      model = this.deps.currentModel();
+      // Profile 名 = 超流体端点链实际命中的那个具名 Profile（宿主提供）。
+      // **先于** spawnModel 取：宿主按 spawn 计划键 peek（不消费），紧随其后的
+      // spawnModel 再消费同一份计划 —— 同一次派发仍只解析一次端点/模型/live。
+      // 解析失败 / 未接线 / 零配置（解析不出具名 Profile）→ null，
+      // `profileId` 保持 undefined（看板不显示，零配置零行为变化）。
+      const profileName = this.deps.spawnProfile
+        ? await this.deps.spawnProfile(spec).catch((error: unknown) => {
+            this.deps.log.warn(
+              `超流体解析 Profile 名失败（看板不显示 Profile，派发不受影响）：${errorMessage(error)}`,
+            );
+            return null;
+          })
+        : null;
+      // 模型 = 超流体独立链的解析结果（宿主提供）；宿主没接线（单测/旧
+      // fixture）时回落到主会话当前模型 —— 接线前后行为一致。
+      model = this.deps.spawnModel
+        ? ((await this.deps.spawnModel(spec)) ?? this.deps.currentModel())
+        : this.deps.currentModel();
       if (model) {
         try {
           await client.setModel(sessionId, model);
@@ -2925,6 +3002,7 @@ export class SuperAgentManager {
         }
         this.patchModel(id, model);
       }
+      if (profileName) this.patchProfileId(id, profileName);
 
       const taskPrompt = buildTaskPrompt(
         current.title,
@@ -4646,6 +4724,19 @@ export class SuperAgentManager {
     const session = this.sessions.get(id);
     if (!session || session.model === model) return;
     this.sessions.set(id, { ...session, model, updatedAt: Date.now() });
+    this.emit();
+  }
+
+  /**
+   * 记录子会话实际命中的 API Profile 名（看板展示超流体跑在哪个 API 配置上，
+   * 与 {@link patchModel} 成对）。只由派发路径在解析出**具名** Profile 时调用；
+   * 零配置 / 解析不出具名 Profile 时根本不会走到这里，`profileId` 保持
+   * `undefined` —— 与既有看板逐字节一致。
+   */
+  private patchProfileId(id: string, profileId: string): void {
+    const session = this.sessions.get(id);
+    if (!session || session.profileId === profileId) return;
+    this.sessions.set(id, { ...session, profileId, updatedAt: Date.now() });
     this.emit();
   }
 

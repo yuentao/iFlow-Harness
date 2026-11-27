@@ -212,7 +212,7 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     expect(readDumpedEnv(dump).IFLOW_TOKENS_LIMIT).toBeUndefined();
   }, 30000);
 
-  it("子会话与主会话共用同一兜底查表（冷启动时子会话也拿到兜底窗口）", async () => {
+  it("未配置超流体时子会话沿用主会话同一兜底查表（零配置零变化）", async () => {
     fs.writeFileSync(
       path.join(iflowHome, "settings.json"),
       JSON.stringify({
@@ -241,6 +241,65 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
       await child.dispose();
     }
   }, 30000);
+
+  /**
+   * 独立语义（原「子会话与主会话共用同一兜底查表」的反转）：配置了
+   * `iflow.superAgentProfile` 之后，子会话的窗口必须按**超流体自己的**
+   * Profile / 模型解析，绝不跟随主会话 `currentApiProfile`。
+   *
+   * 可证伪：若子会话仍用主会话那套解析，会拿到 main 的 64000 而不是 gpt-4o
+   * 内建表的 128000 —— 这条立刻红。
+   */
+  it("配置超流体 Profile 后，子会话窗口按自己的 Profile 解析，不跟随主会话 currentApiProfile", async () => {
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        selectedAuthType: "openai-compatible",
+        currentApiProfile: "main",
+        apiProfiles: {
+          main: {
+            baseUrl: "https://main.example/v1",
+            apiKey: "sk-main",
+            modelName: "auto/deepseek-v4.1-flash",
+            tokensLimit: 64000,
+          },
+          super: {
+            baseUrl: "https://super.example/v1",
+            apiKey: "sk-super",
+            modelName: "gpt-4o",
+          },
+        },
+      }),
+      "utf8",
+    );
+    setConfigOverrides({
+      nodePath: process.execPath,
+      superAgentProfile: "super",
+      contextWindowOverrides: [],
+    });
+
+    // 子会话：按超流体 Profile 的模型 gpt-4o 命中内建表 128000。
+    const childDump = path.join(storageDir, "child-independent-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = childDump;
+    const child = await (panel as unknown as SpawnEnvInternals).createSuperClient({
+      cwd: here,
+      allowedRoots: [here],
+      includeDirectories: [],
+      label: "spawn-env-child-independent",
+      callbacks: {},
+    });
+    try {
+      expect(readDumpedEnv(childDump).IFLOW_TOKENS_LIMIT).toBe("128000");
+    } finally {
+      await child.dispose();
+    }
+
+    // 对照：主会话仍按 currentApiProfile 的 tokensLimit=64000 解析。
+    const mainDump = path.join(storageDir, "main-independent-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = mainDump;
+    await (panel as unknown as SpawnEnvInternals).ensureClient();
+    expect(readDumpedEnv(mainDump).IFLOW_TOKENS_LIMIT).toBe("64000");
+  }, 40000);
 
   it("超流体的 spawn env 没有 IFLOW_SUPER_TOOL（即便宿主 process.env 里设了）", async () => {
     // 模拟一个「用户 shell 里已经设了该变量」的环境：子会话必须显式抹掉，
@@ -472,4 +531,72 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
       fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   }, 60000);
+
+  /**
+   * 防御纵深：vendor CLI 有一条 **env 凭据通道** —— `IFLOW_SELECTED_AUTH_TYPE`
+   * 配合 `IFLOW_API_KEY` / `IFLOW_BASE_URL` / `IFLOW_MODEL_NAME`（`IFLOW_MODEL`
+   * 是旧别名），实测能越过 `session/new` 的 authRequired 门禁。凭据只应走 ACP
+   * `authenticate`，因此子会话 spawn 时显式抹除这组键，不继承用户 shell 的残留。
+   *
+   * 可证伪：把 spawnEnv 里的这几行 undefined 删掉，下面的 `in` 断言立刻变红
+   * （子进程会原样继承我们注入到 process.env 的值）。
+   */
+  it("超流体的 spawn env 抹除 env 凭据通道（API_KEY / BASE_URL / MODEL_NAME / SELECTED_AUTH_TYPE）", async () => {
+    const leaked: Record<string, string> = {
+      IFLOW_API_KEY: "sk-from-user-shell",
+      IFLOW_BASE_URL: "https://shell.example/v1",
+      IFLOW_MODEL_NAME: "shell-model",
+      IFLOW_MODEL: "shell-model-alias",
+      IFLOW_SELECTED_AUTH_TYPE: "openai-compatible",
+    };
+    const saved: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(leaked)) {
+      saved[key] = process.env[key];
+      process.env[key] = value;
+    }
+    // 让窗口解析有一条确定依据（内核 profile 的 modelName → 内建 1M 表项），
+    // 用来证明「抹除凭据」没有连带把 IFLOW_TOKENS_LIMIT 也抹掉。
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        currentApiProfile: "main",
+        apiProfiles: { main: { modelName: "auto/deepseek-v4.1-flash" } },
+      }),
+      "utf8",
+    );
+    setConfigOverrides({ nodePath: process.execPath, contextWindowOverrides: [] });
+    const dump = path.join(storageDir, "child-env-scrub.json");
+    process.env.ACP_MOCK_ENV_DUMP = dump;
+    try {
+      const child = await (panel as unknown as SpawnEnvInternals).createSuperClient({
+        cwd: here,
+        allowedRoots: [here],
+        includeDirectories: [],
+        label: "spawn-env-child-scrub",
+        callbacks: {},
+      });
+      try {
+        const env = readDumpedEnv(dump);
+        for (const key of Object.keys(leaked)) {
+          // 实际形态：宿主给 spawnEnv 写的是 `undefined`，Node 的 spawn 会**丢弃**
+          // 该键，所以子进程的 env 里该键完全不存在（不是空串、也不是 "undefined"
+          // 字符串）—— 用 `in` 断言这一点，比只断言取值 undefined 更严格。
+          expect(key in env).toBe(false);
+          expect(env[key]).toBeUndefined();
+        }
+        // 抹除只动凭据/派发开关：既有注入逐项保留。
+        expect(env.IFLOW_TOKENS_LIMIT).toBe("1000000");
+        expect(env.IFLOW_HARNESS).toBe("1");
+        expect(env.IFLOW_SUPER_CHILD).toBe("1");
+        expect(env.IFLOW_SUPER_TOOL).toBeUndefined();
+      } finally {
+        await child.dispose();
+      }
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }, 30000);
 });

@@ -44,6 +44,8 @@ import {
   parseNextStepSuggestions,
   setNextStepLoading,
   toAgentPromptText,
+  parseCompressionCommand,
+  COMPRESSION_COMMAND_NAMES,
   appendInjectedContext,
   setPlanEntryStatus,
   MAX_TOOL_OUTPUT_STORE_CHARS,
@@ -459,6 +461,94 @@ describe("system status text classification", () => {
     expect(b.kind).toBe("text");
     if (b.kind !== "text") throw new Error("expected text");
     expect(b.system).toBe(true);
+  });
+
+  it("flags the English CLI 'Compressing...' status line as system text", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Compressing..." } }),
+    );
+    expect(state.blocks).toHaveLength(1);
+    const b = state.blocks[0]!;
+    if (b.kind !== "text") throw new Error("expected text");
+    expect(b.system).toBe(true);
+  });
+
+  it("flags the U+2026 'Compressing…' ellipsis variant as system text", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Compressing…" } }),
+    );
+    const b = state.blocks[0]!;
+    if (b.kind !== "text") throw new Error("expected text");
+    expect(b.system).toBe(true);
+  });
+
+  it("matches the English status line case-insensitively and tolerates leading whitespace", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "  compressing...  " } }),
+    );
+    const b = state.blocks[0]!;
+    if (b.kind !== "text") throw new Error("expected text");
+    expect(b.system).toBe(true);
+  });
+
+  it("does not flag ordinary assistant text that merely mentions compressing", () => {
+    const texts = [
+      "Compressing the file now.",
+      "I'll start Compressing... the archive in a moment.",
+      "Compressing is a lossy operation.",
+      "compressingHistory is an internal key.",
+    ];
+    for (const text of texts) {
+      const state: SessionState = initialSessionState();
+      applySessionUpdate(
+        state,
+        notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } }),
+      );
+      const b = state.blocks[0]!;
+      if (b.kind !== "text") throw new Error("expected text");
+      expect(b.system).toBeUndefined();
+    }
+  });
+
+  it("keeps the existing English status variants recognized", () => {
+    const texts = [
+      "Compressing chat history",
+      "Compressing context to stay within token limits for gemini...",
+      "Failed to compress chat history: stream timeout",
+    ];
+    for (const text of texts) {
+      const state: SessionState = initialSessionState();
+      applySessionUpdate(
+        state,
+        notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } }),
+      );
+      const b = state.blocks[0]!;
+      if (b.kind !== "text") throw new Error("expected text");
+      expect(b.system).toBe(true);
+    }
+  });
+
+  it("does not merge the English status line with the assistant reply that follows", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Compressing..." } }),
+    );
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done — the file is smaller." } }),
+    );
+    expect(state.blocks).toHaveLength(2);
+    const [sys, reply] = state.blocks as [Extract<Block, { kind: "text" }>, Extract<Block, { kind: "text" }>];
+    expect(sys.system).toBe(true);
+    expect(reply.system).toBeUndefined();
+    expect(reply.text).toBe("Done — the file is smaller.");
   });
 
   it("flags compression failure lines as system text", () => {
@@ -1717,6 +1807,52 @@ describe("toAgentPromptText (CLI slash-command disambiguation)", () => {
 
   it("passes everything through when the command list is empty", () => {
     expect(toAgentPromptText("/anything", [])).toBe("/anything");
+  });
+});
+
+describe("parseCompressionCommand (vendor compress/summarize/compact)", () => {
+  it("exposes the vendor-aligned command name set", () => {
+    expect([...COMPRESSION_COMMAND_NAMES].sort()).toEqual(["compact", "compress", "summarize"]);
+  });
+
+  it("recognises the canonical name and both aliases", () => {
+    expect(parseCompressionCommand("/compress")).toBe("compress");
+    expect(parseCompressionCommand("/compact")).toBe("compress");
+    expect(parseCompressionCommand("/summarize")).toBe("compress");
+  });
+
+  it("matches case-insensitively and returns the canonical name", () => {
+    expect(parseCompressionCommand("/COMPRESS")).toBe("compress");
+    expect(parseCompressionCommand("/Compact")).toBe("compress");
+    expect(parseCompressionCommand("/SUMMARIZE")).toBe("compress");
+  });
+
+  it("allows trailing arguments", () => {
+    expect(parseCompressionCommand("/compress now")).toBe("compress");
+    expect(parseCompressionCommand("/compact  --force")).toBe("compress");
+    expect(parseCompressionCommand("/summarize\tkeep decisions")).toBe("compress");
+  });
+
+  it("tolerates leading whitespace and newlines", () => {
+    expect(parseCompressionCommand("  /compress")).toBe("compress");
+    expect(parseCompressionCommand("\n\t /compact")).toBe("compress");
+    expect(parseCompressionCommand("   \n/summarize")).toBe("compress");
+  });
+
+  it("rejects non-command slash input", () => {
+    expect(parseCompressionCommand("/usr/bin/node -v")).toBeNull();
+    expect(parseCompressionCommand("/init")).toBeNull();
+    expect(parseCompressionCommand("//compress")).toBeNull();
+    expect(parseCompressionCommand("/ compress")).toBeNull();
+    expect(parseCompressionCommand("/compressed")).toBeNull();
+    expect(parseCompressionCommand("hello /compress")).toBeNull();
+  });
+
+  it("rejects empty and whitespace-only text", () => {
+    expect(parseCompressionCommand("")).toBeNull();
+    expect(parseCompressionCommand("   ")).toBeNull();
+    expect(parseCompressionCommand("\n\t")).toBeNull();
+    expect(parseCompressionCommand("/")).toBeNull();
   });
 });
 

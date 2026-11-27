@@ -16,23 +16,23 @@ const mocked = vi.hoisted(() => ({
   state: undefined as SessionState | undefined,
 }));
 
-const useChat = vi.hoisted(() =>
-  Object.assign(
-    <T,>(selector: (s: Record<string, unknown>) => T) =>
-      selector({
-        state: mocked.state,
-        pending: null,
-        send: mocked.send,
-        beginPending: vi.fn(),
-        notify: mocked.notify,
-        composerDraftRequest: null,
-        clearDraftRequest: vi.fn(),
-      }),
-    { getState: () => ({ state: mocked.state, send: mocked.send, notify: mocked.notify }) },
-  ),
-);
-
-vi.mock("../webview/src/store", () => ({ useChat }));
+vi.mock("../webview/src/store", async () => {
+  const { createStoreMock } = await import("./helpers/store-mock");
+  const mock = createStoreMock();
+  // 工厂兜住 ChatStore 全表面；本文件只覆盖可变会话与断言用的 send/notify。
+  const live = () =>
+    ({
+      ...mock.store,
+      state: mocked.state,
+      send: mocked.send,
+      notify: mocked.notify,
+    }) as unknown as import("./helpers/store-mock").StoreMockState;
+  const useChat = Object.assign(
+    <T,>(selector: (s: ReturnType<typeof live>) => T): T => selector(live()),
+    { getState: live },
+  );
+  return { ...mock, useChat, getState: live };
+});
 vi.mock("../webview/src/i18n", () => ({ t: (s: string, ...args: unknown[]) => `${s}${args.length ? ` ${args.join(" ")}` : ""}`, modeDisplay: () => ({ label: "mode", desc: "" }) }));
 
 if (!("ResizeObserver" in globalThis)) {

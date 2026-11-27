@@ -33,17 +33,42 @@ import * as vscode from "vscode";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { mkdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { AcpClient, type AcpClientCallbacks } from "../acp/client.js";
 import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, locateNodeExecutable } from "../acp/cli-locator.js";
 import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
-import { loadCredentials } from "../acp/auth.js";
-import { resolveCliTokensLimit, tokensLimitEnvFromSettings } from "../acp/cli-tokens-limit.js";
+import { loadCredentials, loadProfiles } from "../acp/auth.js";
+import { readKernelApiProfiles } from "../acp/api-profiles.js";
+import {
+  queryModelIds,
+  readActiveEndpoint,
+  readCliSettings,
+  retireStaleOAuthCreds,
+} from "../acp/models-query.js";
+import {
+  resolveCliTokensLimit,
+  resolveSuperCliTokensLimit,
+  superTokensLimitEnv,
+  tokensLimitEnvFromSettings,
+} from "../acp/cli-tokens-limit.js";
+import {
+  resolveSuperApiSpec,
+  type SuperApiProfile,
+  type SuperApiSpec,
+  type SuperEndpointInput,
+} from "../../shared/super-profile.js";
 import {
   buildChildSessionSettingsForTrust,
   effectiveMcpServerNamesForTrust,
 } from "../../shared/super-tool-policy.js";
 import { parseContextWindowOverrides, parseCostTable, resolveCost } from "../../shared/context-window.js";
+import {
+  resolveSuperWorkspaceRoot,
+  type SuperWorkspaceEnsureOutcome,
+  type SuperWorkspaceResolution,
+} from "../../shared/super-workspace.js";
 import {
   type Block,
   type ContextRefUi,
@@ -116,13 +141,41 @@ const SUPER_HEARTBEAT_MS = 1_500;
 /** 已归档子会话迟到结论 toast 截断长度. */
 const SUPER_ARCHIVED_REPORT_MAX_CHARS = 480;
 
+/**
+ * 派发前 live `/models` 查询的短超时（毫秒）。
+ *
+ * 它只用来提供「模型已下架」的**证据**：超时 / 连接失败 / 非 2xx / 解析失败
+ * 一律视为「无证据」（不降级、不阻断派发），因此宁可早早放弃，也不能把子会话
+ * 的冷启动卡住。设置页那条查询是用户主动点刷新、等得起，仍用默认 10s。
+ */
+const SUPER_SPAWN_LIVE_MODELS_TIMEOUT_MS = 4_000;
+
+/**
+ * `createSuperClient` 与 `spawnModel` 之间复用同一份 spawn 计划的暂存时长
+ * （毫秒）。
+ *
+ * 管理器对**一次**派发会先后调用这两个回调（先建 client，再问模型），原来
+ * 各自把端点/模型/live 校验解析一遍 —— 同一次派发解析两次。这里把
+ * `createSuperClient` 的结果按任务覆盖键暂存、`spawnModel` 消费即删，只留
+ * 一个很短的 TTL 兜住「消费没发生」（例如 client 起来后立刻被中断）的残留。
+ * 键含 profileId/modelId，不同 Profile 的派发互不命中（不串台）。
+ */
+const SUPER_SPAWN_PLAN_REUSE_MS = 60_000;
+
+/** `resolveSuperSpawnPlan` 的解析结果 —— 一次派发只解析一份。 */
+interface SuperSpawnPlan {
+  spec: SuperApiSpec;
+  configured: boolean;
+  modelConfigured: boolean;
+}
+
 /** 路径比较键（Windows 文件系统大小写不敏感）。Mirrors the panel helper (阶段 6). */
 function normalizePathKey(target: string): string {
   const resolved = path.resolve(target);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-type SuperToolCallOutcome = "dispatched" | "actions" | "rejected" | "dropped" | "failed";
+type SuperToolCallOutcome = "pending" | "dispatched" | "actions" | "rejected" | "dropped" | "failed";
 
 /** 一条待投递给主会话的子会话汇报回合（delivered-unacked 账本与队列共用）。 */
 type PendingSuperReportPrompt = {
@@ -164,6 +217,27 @@ type UnackedSuperDelivery = {
 export type SuperMergeDispatchResult =
   | { dispatched: true; mergeSessionId: string }
   | { dispatched: false; queued: boolean; reason: string };
+
+/** 一次委派派发的同步结果（{@link SuperAgentHost.dispatchSuperTasks} 的返回）。 */
+export interface SuperDispatchResult {
+  dispatched: number;
+  duplicates: number;
+  managerAvailable: boolean;
+  /**
+   * 本次派发被转到了异步链（没有打开工作区、但配置了默认工作区，需要异步
+   * `fs.stat` 校验）。为 true 时不代表失败 —— 真实结果稍后由后台链回填。
+   */
+  deferred?: boolean;
+}
+
+/** 派发结果 → 结构化工具调用的终态账本取值（两条通道共用同一口径）。 */
+export function dispatchOutcome(result: SuperDispatchResult): "dispatched" | "failed" {
+  if (!result.managerAvailable) return "failed";
+  return result.dispatched > 0 || result.duplicates > 0 ? "dispatched" : "failed";
+}
+
+/** 本工作区记录的活动 API Profile（与 `src/panel/panel.ts` 同键）。 */
+const SUPER_WORKSPACE_PROFILE_KEY = "iflow.workspaceActiveProfile";
 
 /** Narrow callback surface the host needs from the panel. No panel import. */
 export interface SuperAgentHostCallbacks {
@@ -210,6 +284,19 @@ export interface SuperAgentHostCallbacks {
    * must be visible here before the window reloads. Optional — a host built
    * without the panel (tests) falls back to the raw configuration. */
   readUserSetting?: <T>(key: string, fallback: T) => T;
+  /**
+   * 子会话派发前 live `/models` 取证的**共享**查询通道（可选）。
+   *
+   * 面板注入自己的实现 —— 与设置页**同一份** 30s TTL 缓存（key = 归一化
+   * models URL，逐次比对 apiKey），所以「设置页刚查过」或「同批并行派发」
+   * 都只产生一次真实请求。宿主拿不到面板的私有状态（也不该 import
+   * panel），因此走回调；未接线（单测里直接 new 的 host）时回退到无缓存
+   * 直连（见 {@link SuperAgentHost.querySpawnLiveModelIds}）。
+   */
+  querySuperModelIds?: (creds: {
+    baseUrl: string;
+    apiKey: string;
+  }) => Promise<{ ids: string[]; error?: string }>;
   chunkText(content: unknown): string;
   sendPrompt(
     text: string,
@@ -254,10 +341,84 @@ export class SuperAgentHost {
       : vscode.workspace.getConfiguration("iflow").get<T>(key, fallback);
   }
 
+  /**
+   * 读一个 `iflow.*` 字符串设置，**永远**返回字符串（去空白）。
+   *
+   * settings.json 是用户可手改的：`"superAgentProfile": 123` 这类脏值会被
+   * `readUserSetting<string>()` 原样返回，随后 `.trim()` 直接抛 TypeError。
+   * 非字符串一律当空串（= 跟随主链路 / 未选模型），绝不抛错。
+   */
+  private readStringSetting(key: string): string {
+    const raw = this.setting<unknown>(key, "");
+    return typeof raw === "string" ? raw.trim() : "";
+  }
+
   // --- Migrated state (整组迁移；panel 仅保留兼容访问器) -------------------
   superAgent: SuperAgentManager | null = null;
+  /**
+   * `iflow.superAgent.defaultWorkspace` 已通过异步校验的根（无打开工作区时
+   * 的派发回退）。只有 stat 成功且确实是目录才会被写入 —— 未校验 / 校验失败
+   * 一律保持 null，绝不让一个不存在的路径进入 worktree / 附件边界。
+   */
+  defaultWorkspaceRoot: string | null = null;
+  /**
+   * 内置默认工作区 `~/.iflow/workspace`（设置留空 / 设置值无效时的最终回退）。
+   *
+   * 由 `os.homedir()` 拼出，**不硬编码用户名**；缺失时派发前用异步 `mkdir -p`
+   * 创建。字段化只为让测试把它指向临时目录 —— 否则每个用例都会在真实家目录
+   * 里建一个目录。用户从不需要手工创建它。
+   */
+  builtinDefaultWorkspace: string = path.join(homedir(), ".iflow", "workspace");
+  /**
+   * 默认工作区派发的串行链：默认工作区需要异步 stat / mkdir，而派发入口是同步的。
+   * 串行化保证同一份载荷的重复帧（pending → in_progress）跑在同一个账本上，
+   * 后一帧看到前一帧已写入的去重键，不会双开子会话。
+   */
+  private defaultWorkspaceDispatchChain: Promise<void> = Promise.resolve();
+  /**
+   * 默认工作区解析的 in-flight promise 缓存（激活期 prefetch 与首次派发共享）。
+   *
+   * 派发入口是同步的，默认工作区却需要异步 stat/mkdir；把解析前置到激活期后，
+   * 用户可能在 prefetch 尚未结束时点击派发。两者必须 join **同一个** promise，
+   * 否则会双重 stat/mkdir、构造两个管理器、让子会话 cwd 不一致。任何一次解析
+   * settle 后清空缓存；配置改动也会作废它（见 {@link invalidateDefaultWorkspace}），
+   * 让下次派发重新解析。恢复历史会话走 {@link resolveSuperWorkspace} 的
+   * `create:false` 直连，不经过这里，保持原语义逐字节不变。
+   */
+  private superWorkspaceResolveInFlight: Promise<SuperWorkspaceResolution> | null = null;
+  /**
+   * 最近一次解析结果。prefetch 阶段没有 webview、静默跳过 fallback 警告；
+   * 首次派发命中已预热的管理器时用这份缓存补发，避免「设置写错却毫无提示」。
+   * `fallbackToastSent` 保证同一份解析只警告一次。
+   */
+  private lastSuperWorkspaceResolution: {
+    resolution: SuperWorkspaceResolution;
+    fallbackToastSent: boolean;
+  } | null = null;
   mcpBroker: import("../acp/mcp-broker.js").McpBroker | null = null;
   mcpBrokerStarting: Promise<import("../acp/mcp-broker.js").McpBroker | null> | null = null;
+  /**
+   * 每个子会话 spawn 时按**超流体自己的模型/Profile**算出的上下文窗口。
+   *
+   * `session/set_model` 只改模型名、不重算 CLI 缓存的 tokensLimit；set_model
+   * 之后必须把同一口径的窗口推回去。这里按 client 实例记录，避免热切换那条
+   * 路径又回落到主会话 `currentApiProfile` 的窗口（那正是要消除的分叉）。
+   * WeakMap：client 被回收后自动释放，不泄漏。
+   */
+  private readonly superClientTokensLimits = new WeakMap<AcpClient, number>();
+  /**
+   * 派发时已提示过的「下架模型 → 实际回退目标」组合（键为
+   * `delisted\u0000fallback`）。一批并行派发会各自解析出同一结论，去重后
+   * 只弹一次 toast；日志不受影响，每次仍记。
+   */
+  private readonly superSpawnDegradeNotices = new Set<string>();
+  /**
+   * `createSuperClient` 解析出的 spawn 计划，按「任务级 profileId/modelId」键
+   * 暂存给紧随其后的 `spawnModel` 复用（同一次派发只解析一次端点/模型/live
+   * 校验）。消费即删；未被消费的条目按 {@link SUPER_SPAWN_PLAN_REUSE_MS}
+   * 在后续写入时清理 —— 键含 Profile，不同 Profile 的派发不会命中彼此的条目。
+   */
+  private readonly superSpawnPlans = new Map<string, { plan: SuperSpawnPlan; at: number }>();
   pendingSuperMerges: Array<{ id: string; reason: string }> = [];
   superMergeRunning = false;
   readonly superScan = new SuperDirectiveScanner();
@@ -973,6 +1134,11 @@ export class SuperAgentHost {
         }),
       );
       this.log.info(`super agent: restored ${restored.length} historical child session(s) for ${mainSessionId}`);
+      // 历史记录同样要能落到默认工作区上：管理器需要一个 repoRoot 才能构造。
+      // 启动阶段静默解析（不弹 toast）—— 路径没配 / 写错不该在恢复历史时打扰
+      // 用户，真正需要提示的时机是派发。`create:false`：恢复不是派发，不该
+      // 顺手在用户家目录里建 `~/.iflow/workspace`。
+      if (this.superRepoRoot() === null) await this.resolveSuperWorkspace({ create: false });
       this.deps.getSuperAgent()?.restoreSessions(mainSessionId, restored);
       // 终态转录是旁路展示数据：读回填充详情面板。只读小 JSON、读失败静默
       // 跳过，绝不因它挡住看板恢复（与 sweepStaleWorktrees 改后台同一纪律：
@@ -1107,15 +1273,300 @@ export class SuperAgentHost {
   /**
    * 主仓根目录（worktree 的来源，也是委派附件路径的允许边界）。
    *
-   * 没有打开的工作区时返回 null：隔离目录现在建在项目内，回退到扩展自己的
-   * 安装目录会在那里堆 worktree，必须由调用方直接拒绝委派。
+   * 顺序：打开的工作区根 → 已校验的默认工作区（`iflow.superAgent.defaultWorkspace`）
+   * → null。默认工作区只在异步校验成功后才会出现在这里（见
+   * {@link resolveSuperWorkspace}），所以同步读取不会把不存在的路径交给
+   * worktree / 附件边界。
+   *
+   * 没有可用目录时返回 null，调用方必须经
+   * {@link ensureSuperAgentForDispatch} 统一判空并给出真实原因 —— 不要各自
+   * 再写一份拒绝逻辑（那正是「未配置 / 路径不存在 / 不是目录」被压成一句
+   * 话的来源）。
    */
   superRepoRoot(): string | null {
     return (
       this.services.workspaceRoot ??
       vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+      this.defaultWorkspaceRoot ??
       null
     );
+  }
+
+
+  /**
+   * 激活期静默预热默认工作区（`extension.ts` 在 warmStart 之后 fire-and-forget 调用）。
+   *
+   * 无打开工作区时提前异步解析并按需建目录（`create:true`），让首次派发同步命中、
+   * 不再 deferred；有工作区时 {@link resolveSuperWorkspace} 内部走零 I/O 分支，
+   * 不建目录、不弹提示。此刻没有 webview，失败只记日志，用户可见提示仍归
+   * {@link ensureSuperAgentForDispatch}。不预热管理器：`dispatchSuperTasks` 的
+   * `getSuperAgent()` 会在首次点击时同步按已校验的根构造，避免激活期多余副作用。
+   */
+  async prefetchSuperWorkspace(): Promise<void> {
+    if (this.disposed) return;
+    const resolution = await this.resolveSuperWorkspaceShared({ create: true });
+    if (!resolution.ok) {
+      this.log.warn(
+        `super agent: 激活期默认工作区预热失败（不影响启动，派发时会重试并给出原因）：${resolution.reason} ${resolution.path}`,
+      );
+      return;
+    }
+    if (resolution.source === "default-workspace") {
+      this.log.info(`super agent: 激活期已预热默认工作区 ${resolution.root}`);
+    }
+  }
+
+  /**
+   * prefetch 与派发共用的解析入口：join 同一个 in-flight promise，并缓存结果。
+   * 并发语义详见 {@link superWorkspaceResolveInFlight}。
+   */
+  private resolveSuperWorkspaceShared(
+    options: { create?: boolean } = {},
+  ): Promise<SuperWorkspaceResolution> {
+    if (this.superWorkspaceResolveInFlight) return this.superWorkspaceResolveInFlight;
+    const run = this.resolveSuperWorkspace(options)
+      .then((resolution) => {
+        this.lastSuperWorkspaceResolution = { resolution, fallbackToastSent: false };
+        return resolution;
+      })
+      .finally(() => {
+        // 只清自己那一份：极端交错下可能已有更新的解析占住了缓存。
+        if (this.superWorkspaceResolveInFlight === run) this.superWorkspaceResolveInFlight = null;
+      });
+    this.superWorkspaceResolveInFlight = run;
+    return run;
+  }
+
+  /** 首次派发补发 prefetch 静默跳过的 fallback 警告（同一份解析只发一次）。 */
+  private emitCachedFallbackToast(): void {
+    const cached = this.lastSuperWorkspaceResolution;
+    if (!cached || cached.fallbackToastSent) return;
+    cached.fallbackToastSent = true;
+    const { resolution } = cached;
+    // 只有「当前根确实是这次解析采纳的默认工作区」才补发：工作区用户 /
+    // 配置已变更的用户都不该收到这条与现状不符的警告。
+    if (!resolution.ok || resolution.source !== "default-workspace") return;
+    if (!resolution.fallback || this.superRepoRoot() !== resolution.root) return;
+    this.log.warn(
+      `super agent: 默认工作区设置无效（${resolution.fallback.reason}: ${resolution.fallback.configured}），已改用 ${resolution.root}`,
+    );
+    this.store.sendToast("warning", this.superWorkspaceFallbackToast(resolution));
+  }
+
+  /**
+   * `iflow.superAgent.defaultWorkspace` 在运行中被改动时由 panel 调用：
+   * 作废 prefetch / adopt 的默认工作区缓存，下次派发重新解析。
+   * 有打开工作区时默认工作区本就不参与，无需处理；沿用
+   * {@link adoptDefaultWorkspaceRoot} 的约束：有子会话在跑时保持旧根不切换。
+   */
+  invalidateDefaultWorkspace(): void {
+    if (this.services.workspaceRoot || (vscode.workspace.workspaceFolders?.length ?? 0) > 0) return;
+    const manager = this.superAgent;
+    if (manager && !this.isSuperAgentIdle(manager)) {
+      this.log.warn("super agent: 默认工作区设置已改，但仍有子会话在跑，本次不换根");
+      return;
+    }
+    this.defaultWorkspaceRoot = null;
+    this.superWorkspaceResolveInFlight = null;
+    this.lastSuperWorkspaceResolution = null;
+    if (manager) {
+      this.superAgent = null;
+      void manager.dispose().catch(() => undefined);
+    }
+  }
+
+  /** 管理器是否空闲（没有在跑的子会话）——换根 / 作废缓存的安全条件。 */
+  private isSuperAgentIdle(manager: SuperAgentManager): boolean {
+    try {
+      return manager.list().length === 0;
+    } catch {
+      return false;
+    }
+  }
+
+
+  /**
+   * 派发可用工作目录的唯一 resolver。
+   *
+   * 顺序与 {@link SuperWorkspaceResolution} 一致：
+   *   1. 打开的工作区根 → 直接返回（零 I/O，既有行为逐字节不变）；
+   *   2. 没有 → `iflow.superAgent.defaultWorkspace`：留空 / 空白直接用内置默认
+   *      目录；非绝对路径或指向普通文件 → **非阻断**回退内置默认（带 fallback
+   *      原因，由调用方弹一条警告 toast）；合法但不存在 → 异步 mkdir 后使用；
+   *   3. 内置默认目录 `~/.iflow/workspace` 同样按需创建；
+   *   4. 只有 mkdir / stat 真失败才返回 `ok:false`（附底层错误）；
+   *   5. 成功 → 缓存进 {@link superRepoRoot}，让子会话 cwd、
+   *      `--include-directories`、allowedRoots、附件边界全部同源。
+   *
+   * 陷阱 #18：绝不同步探测 —— stat / mkdir 全部走 `node:fs/promises`。
+   * `create:false` 只用于恢复历史记录：用户没在派发的场景下不该被我们
+   * 悄悄在家目录里建目录。
+   */
+  async resolveSuperWorkspace(options: { create?: boolean } = {}): Promise<SuperWorkspaceResolution> {
+    const roots: string[] = [];
+    if (this.services.workspaceRoot) roots.push(this.services.workspaceRoot);
+    for (const folder of vscode.workspace.workspaceFolders ?? []) roots.push(folder.uri.fsPath);
+    const configured = this.setting<string>("superAgent.defaultWorkspace", "");
+    const create = options.create !== false;
+    const resolution = await resolveSuperWorkspaceRoot(
+      roots,
+      configured,
+      this.builtinDefaultWorkspace,
+      (candidate) => this.prepareSuperWorkspaceDirectory(candidate, create),
+    );
+    if (resolution.ok && resolution.source === "default-workspace") {
+      this.adoptDefaultWorkspaceRoot(resolution.root);
+    } else if (!resolution.ok) {
+      // 目录被删掉 / 设置被清空：缓存必须同步失效，否则 superRepoRoot() 会把
+      // 一个已不存在的路径交给管理器（worktree 建不出来，报错也指错方向）。
+      this.defaultWorkspaceRoot = null;
+    }
+    return resolution;
+  }
+
+
+  /**
+   * 异步「确保该绝对路径是目录」：存在且是目录 → directory；存在但是普通文件
+   * → file；不存在且允许创建 → `mkdir -p` 后再 stat 确认；其余（权限 / 磁盘 /
+   * 符号链断裂……）→ 把底层错误原样带回，由调用方给出真实 errno / message。
+   */
+  private async prepareSuperWorkspaceDirectory(
+    absolutePath: string,
+    create: boolean,
+  ): Promise<SuperWorkspaceEnsureOutcome> {
+    try {
+      const info = await stat(absolutePath);
+      return info.isDirectory() ? { kind: "directory" } : { kind: "file" };
+    } catch (error) {
+      // 只有「不存在」才值得尝试创建；权限 / 其它 errno 原样上报，不猜。
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { kind: "error", error };
+    }
+    if (!create) return { kind: "error", error: new Error(`ENOENT: no such directory, '${absolutePath}'`) };
+    try {
+      await mkdir(absolutePath, { recursive: true });
+      const info = await stat(absolutePath);
+      return info.isDirectory() ? { kind: "directory" } : { kind: "file" };
+    } catch (error) {
+      return { kind: "error", error };
+    }
+  }
+
+
+  /** 采纳（并缓存）一个已校验的默认工作区根；根变了且没有在跑的子会话时重建管理器。 */
+  private adoptDefaultWorkspaceRoot(root: string): void {
+    if (this.defaultWorkspaceRoot === root) return;
+    const previous = this.defaultWorkspaceRoot;
+    this.defaultWorkspaceRoot = root;
+    // 管理器在首次派发时把 repoRoot 固定下来。默认工作区是用户可改的设置，
+    // 若已有管理器绑在旧根上：没有子会话就重建（安全），有子会话则保持旧根
+    // 并如实记日志 —— 中途换根会让在跑的子会话与 allowedRoots 失配。
+    if (this.superAgent) {
+      const idle = this.isSuperAgentIdle(this.superAgent);
+      if (idle && typeof this.superAgent.dispose === "function") {
+        const stale = this.superAgent;
+        this.superAgent = null;
+        void stale.dispose().catch(() => undefined);
+      } else {
+        this.log.warn(
+          `super agent: 默认工作区已改为 ${root}，但仍有子会话绑定旧根 ${previous ?? ""}，本次不切换`,
+        );
+        return;
+      }
+    }
+    this.log.info(`super agent: 使用默认工作区 ${root}（没有打开的工作区）`);
+  }
+
+
+  /**
+   * 默认工作目录**真的**不可用（mkdir / stat 失败，或内置默认目录被占成普通
+   * 文件）→ 带真实路径与底层 errno / message 的 toast 文案。
+   *
+   * 正常流程（无打开工作区）不会再走到这里：设置留空用内置默认，设置值非法
+   * 只警告不阻断。只有磁盘 / 权限层面的真失败才拒绝派发。
+   */
+  private superWorkspaceRejectToast(resolution: SuperWorkspaceResolution): string {
+    if (resolution.ok) return "";
+    if (resolution.reason === "not-a-directory") {
+      return vscode.l10n.t(
+        "无法准备超流体工作目录 {0}：该路径是一个文件（请修改设置 iflow.superAgent.defaultWorkspace）",
+        resolution.path,
+      );
+    }
+    return vscode.l10n.t(
+      "无法准备超流体工作目录 {0}：{1}（请检查该目录的权限，或修改设置 iflow.superAgent.defaultWorkspace）",
+      resolution.path,
+      errorMessage(resolution.error),
+    );
+  }
+
+
+  /** 设置值无效、已非阻断回退到内置默认目录 → 警告 toast 文案。 */
+  private superWorkspaceFallbackToast(
+    resolution: Extract<SuperWorkspaceResolution, { ok: true }>,
+  ): string {
+    const fallback = resolution.fallback;
+    if (!fallback) return "";
+    if (fallback.reason === "not-absolute") {
+      return vscode.l10n.t(
+        "默认工作区设置无效（{0} 不是绝对路径），已改用默认目录 {1}",
+        fallback.configured,
+        resolution.root,
+      );
+    }
+    if (fallback.reason === "not-a-directory") {
+      return vscode.l10n.t(
+        "默认工作区设置无效（{0} 不是目录），已改用默认目录 {1}",
+        fallback.configured,
+        resolution.root,
+      );
+    }
+    return vscode.l10n.t(
+      "默认工作区设置不可用（{0}：{1}），已改用默认目录 {2}",
+      fallback.configured,
+      errorMessage(fallback.cause),
+      resolution.root,
+    );
+  }
+
+
+  /**
+   * 派发前拿到子会话管理器 —— **唯一**的判空 + 提示入口。
+   *
+   * 有工作区时立即返回（同步零 I/O）；没有时解析默认工作区，失败按真实原因
+   * 弹 toast 并返回 null。调用方拿到 null 时不要再自己弹拒绝文案。
+   */
+  async ensureSuperAgentForDispatch(): Promise<SuperAgentManager | null> {
+    const existing = this.deps.getSuperAgent();
+    if (existing) {
+      // 首次派发命中已预热的管理器：补发 prefetch 阶段静默跳过的 fallback 警告
+      // （那时没有 webview，不弹 toast；用户可见提示统一归这里）。
+      this.emitCachedFallbackToast();
+      return existing;
+    }
+    // join 激活期 prefetch 的 in-flight 解析（若有），避免并发重复 stat/mkdir。
+    const resolution = await this.resolveSuperWorkspaceShared();
+    if (!resolution.ok) {
+      this.log.warn(
+        `super agent: 无法派发——工作目录不可用（${resolution.reason}: ${resolution.path}${
+          resolution.reason === "directory-unavailable" ? ` — ${errorMessage(resolution.error)}` : ""
+        }）`,
+      );
+      this.store.sendToast("warning", this.superWorkspaceRejectToast(resolution));
+      return null;
+    }
+    // 设置值无效（相对路径 / ~ / 普通文件 / 不可用）时如实告知改用哪个目录；
+    // 同一份解析只警告一次（emitCachedFallbackToast 内部去重）。
+    this.emitCachedFallbackToast();
+    const manager = this.deps.getSuperAgent();
+    if (!manager) {
+      // 解析成功却仍拿不到管理器：工作目录可用但管理器构造失败（异常注入）。
+      this.log.warn(`super agent unavailable: manager construction failed for ${resolution.root}`);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("超流体工作目录 {0} 已就绪，但超流体管理器未能启动，请重试", resolution.root),
+      );
+    }
+    return manager;
   }
 
 
@@ -1186,6 +1637,10 @@ export class SuperAgentHost {
       ...(spec.id ? { id: spec.id } : {}),
       ...(spec.dependsOn && spec.dependsOn.length > 0 ? { dependsOn: [...spec.dependsOn] } : {}),
       ...(spec.batch !== undefined ? { batch: spec.batch } : {}),
+      // 任务级覆盖：白名单拷贝必须显式放行，否则「单次任务临时换网关/模型」
+      // 会在派发前被静默丢掉（子会话照旧用超流体指针/主链路）。
+      ...(spec.profileId ? { profileId: spec.profileId } : {}),
+      ...(spec.modelId ? { modelId: spec.modelId } : {}),
     };
     if (attachments.length > 0) next.attachments = attachments;
     return next;
@@ -1365,15 +1820,37 @@ export class SuperAgentHost {
         void this.drainSuperMerges();
       },
       currentModel: () => this.store.getState().currentModelId,
-      // 方案D：子会话 set_model 成功后同步该模型的有效上下文窗口。与主会话
-      // 同一 resolver、同一口径（user override → active profile → settings
-      // 顶层 → 内建表 → 无依据不推），绝不推兜底估算。宿主解析窗口、管理器
-      // 只负责串行 await 调用。
+      // 子会话该用的模型 —— 超流体独立模型链（任务级 modelId →
+      // `iflow.superAgentModel` → 目标 Profile 的 modelName → 主会话当前模型）。
+      // 未配置任何超流体指针时链尾就是主 store 的 currentModelId，与既有
+      // `currentModel` 取值一致，管理器据此推 `session/set_model`。
+      spawnModel: async (spec) => this.resolveSpawnModelForSpec(spec),
+      // 本子会话实际命中的具名 API Profile 名（看板展示「跑在哪个 API 配置」）。
+      // 与 spawnModel 复用同一份 spawn 计划；未配置超流体时返回 null ——
+      // profileId 保持 undefined，看板与既有行为逐字节一致。
+      spawnProfile: async (spec) => this.resolveSpawnProfileForSpec(spec),
+      // 方案D：子会话 set_model 成功后同步该模型的有效上下文窗口。
+      //
+      // 已按超流体口径在 spawn 时算过窗口的 client 直接复用那份（`set_model`
+      // 只改模型名，不会让窗口变另一个口径）；其余情况按超流体 Profile 解析，
+      // **未配置超流体时**才沿用主会话 resolver（既有行为逐字节不变）。
       setTokensLimit: async (client, sessionId, modelId) => {
-        const resolved = resolveCliTokensLimit({
-          modelId,
-          overrides: parseContextWindowOverrides(this.setting<string[]>("contextWindowOverrides", [])),
-        });
+        const overrides = parseContextWindowOverrides(
+          this.setting<string[]>("contextWindowOverrides", []),
+        );
+        const stashed = this.superClientTokensLimits.get(client);
+        const superProfileName = this.readStringSetting("superAgentProfile");
+        const configured = Boolean(superProfileName || this.readStringSetting("superAgentModel"));
+        const resolved =
+          stashed !== undefined
+            ? { limit: stashed, source: undefined }
+            : configured
+              ? resolveSuperCliTokensLimit({
+                  modelId,
+                  overrides,
+                  profileName: superProfileName || null,
+                })
+              : resolveCliTokensLimit({ modelId, overrides });
         if (resolved.limit !== undefined) {
           await client.setTokensLimit(sessionId, resolved.limit);
         }
@@ -1490,6 +1967,291 @@ export class SuperAgentHost {
     return this.mcpBrokerStarting;
   }
 
+  /**
+   * 收集「超流体端点解析链」的输入 —— 与面板 `superEndpointInput`
+   * （`src/panel/panel.ts`）**同口径**：这里是子会话的真实派发路径，必须和
+   * 设置页/模型列表那条路径读到同一份事实，否则两边解析出的端点会分叉。
+   *
+   * 只负责取事实，回退顺序仍由 `shared/super-profile.ts` 的唯一实现决定：
+   *   ① task `profileId` → ② `iflow.superAgentProfile` → ③
+   *   `iflow.workspaceActiveProfile`（本工作区握手指针）→ ④ 握手调用点的
+   *   下一级（`resolveWorkspaceHandshakeCreds() ?? loadCredentials()`）→
+   *   ⑤ 内核 `currentApiProfile` → 内核顶层默认。
+   */
+  private async superEndpointInput(taskProfileId: string | null): Promise<SuperEndpointInput> {
+    const kernelProfiles = readKernelApiProfiles();
+    const legacyProfiles = await loadProfiles(this.context.secrets).catch(
+      () => ({}) as Record<string, { baseUrl: string; apiKey: string; modelName: string }>,
+    );
+    const profiles: Record<string, SuperApiProfile> = {};
+    for (const [name, creds] of Object.entries(legacyProfiles)) {
+      profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
+    }
+    // 同名 Profile 冲突时内核 `apiProfiles` 优先 —— 与握手路径
+    // `kernelProfileCredentials(name) ?? profiles[name]` 完全同序。
+    for (const [name, creds] of Object.entries(kernelProfiles)) {
+      profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
+    }
+    const cli = readCliSettings();
+    const kernelActive =
+      cli?.selectedAuthType === "openai-compatible" ? cli.currentApiProfile?.trim() : undefined;
+    // 只认**完整**的内核 Profile（`readKernelApiProfiles` 已过滤缺字段的条目）：
+    // 若只用 `cli.apiProfiles?.[name]` 判存在，一个「缺少 apiKey/modelName」的
+    // 内核条目也会通过门控，随后合并表里只剩 SecretStorage 的同名历史 Profile
+    // —— 它就会冒充内核指针、解析出 `readActiveEndpoint()` 永远不会用的凭据。
+    // 内核条目残缺时交给 ⑤b：`readActiveEndpoint()` 按内核文件自身语义逐字段
+    // 回退（它自己会校验 baseUrl/apiKey），全程不碰 SecretStorage。
+    const kernelProfileName =
+      kernelActive && Object.hasOwn(kernelProfiles, kernelActive) ? kernelActive : null;
+    return {
+      taskProfileId,
+      superProfileName: this.readStringSetting("superAgentProfile") || null,
+      mainProfileName:
+        this.context.workspaceState.get<string>(SUPER_WORKSPACE_PROFILE_KEY)?.trim() || null,
+      kernelProfileName,
+      profiles,
+      // 第 4 级 = 子会话握手调用点的下一级（`resolveWorkspaceHandshakeCreds()
+      // ?? loadCredentials()`）：它**先于**内核 currentApiProfile 命中，与今天
+      // 子会话的凭据解析同序。
+      activeCredentials:
+        (await this.resolveWorkspaceHandshakeCreds().catch(() => null)) ??
+        (await loadCredentials(this.context.secrets).catch(() => null)),
+      // ⑤b 内核顶层默认：`readActiveEndpoint()` 已把「具名 Profile → 顶层
+      // baseUrl/apiKey」逐字段合并完，直接作为最后一档喂进去。
+      kernelDefaultEndpoint: readActiveEndpoint(),
+    };
+  }
+
+  /**
+   * 解析「这个子会话该用的端点 + 模型」—— 单真值层 `shared/super-profile.ts`。
+   *
+   * `configured` 表示用户配置了任何超流体专属**指针**（任务级 Profile 覆盖 /
+   * `iflow.superAgentProfile` / `iflow.superAgentModel`）。调用方据此决定：
+   * 未配置时**完全沿用今天的行为**（同一个握手凭据、同一个主会话模型、
+   * 同一套主会话窗口解析），保证老用户零配置零变化。
+   *
+   * `modelConfigured` 表示子会话的**模型**可能不是主会话当前模型（`configured`
+   * 成立，或任务级 `modelId` 覆盖）。窗口解析必须用它而不是 `configured`：
+   * 任务级 `modelId` 只换模型、不换凭据（端点链仍与今天同序，不启用内核 ⑤），
+   * 但窗口必须按子会话自己的模型解析 —— 否则会出现「模型是替代的、窗口是
+   * 主会话的」这种自相矛盾。
+   */
+  private async resolveSuperSpawnPlan(
+    taskProfileId: string | null,
+    taskModelId: string | null,
+  ): Promise<SuperSpawnPlan> {
+    const input = await this.superEndpointInput(taskProfileId);
+    const superModelId = this.readStringSetting("superAgentModel");
+    const configured = Boolean(
+      (typeof taskProfileId === "string" && taskProfileId.trim()) ||
+        input.superProfileName ||
+        superModelId,
+    );
+    const modelConfigured =
+      configured || (typeof taskModelId === "string" && taskModelId.trim().length > 0);
+    // 模型链第③级「目标 Profile 自带的 modelName」只在用户**点名了 Profile**
+    // （任务级覆盖或超流体 Profile）时参与；未点名时显式传 `null`，让模型链
+    // 落到主 store 的 `currentModelId` —— 这正是今天子会话的取值，否则完全
+    // 未配置的用户会在主会话换过模型后被子会话静默换回 Profile 默认模型。
+    const namedPointer = Boolean(
+      (typeof taskProfileId === "string" && taskProfileId.trim()) || input.superProfileName,
+    );
+    // 零配置硬约束：今天子会话的凭据链只有 `resolveWorkspaceHandshakeCreds()
+    // ?? loadCredentials()`（第 4 级已装这两档），**从不**回退内核
+    // currentApiProfile / 顶层默认。未配置超流体时把⑤两小步置空，端点因此与
+    // 今天逐字段相同；配置了超流体才启用完整的①→⑤链。
+    const endpointInput: SuperEndpointInput = configured
+      ? input
+      : { ...input, kernelProfileName: null, kernelDefaultEndpoint: null };
+    const resolutionInput = {
+      ...endpointInput,
+      taskModelId: taskModelId ?? null,
+      superModelId: superModelId || null,
+      profileModelName: namedPointer ? undefined : null,
+      mainModelId: this.store.getState().currentModelId,
+    };
+    // 第一遍只解「端点 + 链上的目标模型」（纯函数，无网络）：有了目标模型和
+    // 实际要用的端点，才知道该向哪个 `/models` 取证、要不要取证。
+    const baseSpec = resolveSuperApiSpec(resolutionInput);
+    // 派发时的 live 下架校验（方案 §7.8 的取舍已反转：派发也校验）。
+    //
+    // 三点纪律：
+    //   • **只在 `modelConfigured` 时查**：零配置子会话的模型就是主会话当前
+    //     模型，给它额外一跳 HTTP 既拖慢冷启动，又可能让「零配置零行为变化」
+    //     失守（§4.1）—— 主会话自己正在用的模型，下架时主会话会先报错。
+    //   • **查询失败 / 超时 / 空列表 = 无证据**：`querySpawnLiveModelIds` 返回
+    //     `undefined`，这里就不重解，`resolveSuperModel` 绝不会降级。
+    //   • 取证成功才用**同一份** `resolveSuperModel` 重解（判定只有一份实现）；
+    //     降级则显式提示，绝不静默换模型、绝不改写 `superAgentModel`。
+    let spec = baseSpec;
+    if (modelConfigured && baseSpec.endpoint && baseSpec.model.modelId) {
+      const liveModelIds = await this.querySpawnLiveModelIds(baseSpec.endpoint);
+      if (liveModelIds) spec = resolveSuperApiSpec({ ...resolutionInput, liveModelIds });
+    }
+    if (spec.model.degraded) this.noticeSpawnModelDegraded(spec.model);
+    return { spec, configured, modelConfigured };
+  }
+
+  /** spawn 计划的暂存键：任务级 Profile / 模型覆盖的组合（同一次派发两端一致）。 */
+  private spawnPlanKey(profileId: string | null, modelId: string | null): string {
+    return `${profileId ?? ""}\u0000${modelId ?? ""}`;
+  }
+
+  /**
+   * 暂存 `createSuperClient` 解析出的计划，供紧随其后的 `spawnModel` 复用。
+   *
+   * 顺带清理过期条目：只有「client 起来但模型回调没被调用」才会留下残条
+   * （例如派发在 set_model 之前被中断），TTL 到期后下一次写入即删除。
+   */
+  private rememberSpawnPlan(profileId: string | null, modelId: string | null, plan: SuperSpawnPlan): void {
+    const now = Date.now();
+    for (const [key, entry] of this.superSpawnPlans) {
+      if (now - entry.at >= SUPER_SPAWN_PLAN_REUSE_MS) this.superSpawnPlans.delete(key);
+    }
+    this.superSpawnPlans.set(this.spawnPlanKey(profileId, modelId), { plan, at: now });
+  }
+
+  /** 消费暂存的计划（消费即删）：未命中或已过期返回 undefined，由调用方重解。 */
+  private takeSpawnPlan(profileId: string | null, modelId: string | null): SuperSpawnPlan | undefined {
+    const key = this.spawnPlanKey(profileId, modelId);
+    const entry = this.superSpawnPlans.get(key);
+    if (!entry) return undefined;
+    this.superSpawnPlans.delete(key);
+    return Date.now() - entry.at < SUPER_SPAWN_PLAN_REUSE_MS ? entry.plan : undefined;
+  }
+
+  /**
+   * 只读暂存的计划（**不删除**）：供紧随其前的 `spawnProfile` 复用同一份
+   * 端点/模型解析结果，随后 `spawnModel` 仍用 {@link takeSpawnPlan} 消费并
+   * 清理。过期条目与消费路径同口径视为未命中。
+   */
+  private peekSpawnPlan(profileId: string | null, modelId: string | null): SuperSpawnPlan | undefined {
+    const entry = this.superSpawnPlans.get(this.spawnPlanKey(profileId, modelId));
+    if (!entry) return undefined;
+    return Date.now() - entry.at < SUPER_SPAWN_PLAN_REUSE_MS ? entry.plan : undefined;
+  }
+
+  /**
+   * `spawnModel` 回调的实现：**优先复用** `createSuperClient` 刚解析出的同一
+   * 份计划（同一次派发只解析一次端点/模型/live 校验）；只有在没有暂存条目
+   * （例如宿主被单测直接驱动、或条目已被另一路消费）时才重新解析。
+   */
+  private async resolveSpawnModelForSpec(spec: SuperTaskSpec): Promise<string | null> {
+    const profileId = spec.profileId ?? null;
+    const modelId = spec.modelId ?? null;
+    const plan = this.takeSpawnPlan(profileId, modelId) ?? (await this.resolveSuperSpawnPlan(profileId, modelId));
+    return plan.spec.model.modelId;
+  }
+
+  /**
+   * `spawnProfile` 回调的实现：本子会话**实际命中的具名 API Profile 名**。
+   *
+   * 与 {@link resolveSpawnModelForSpec} 复用同一份 spawn 计划：管理器先调它
+   * （{@link peekSpawnPlan} 只读），随后 spawnModel 才消费并清理。未命中时
+   * 重解后**重新暂存**一次 —— 紧随其后的 spawnModel 因此仍命中同一份计划，
+   * 同一次派发不会把端点 / live 校验解析两遍。
+   *
+   * 只有 `configured`（任务级 Profile / `iflow.superAgentProfile` /
+   * `iflow.superAgentModel` 任一被配置）才返回值：零配置老用户即便命中的是
+   * 主链路的具名 Profile，也保持 `profileId` 未定义，看板零变化。
+   */
+  private async resolveSpawnProfileForSpec(spec: SuperTaskSpec): Promise<string | null> {
+    const profileId = spec.profileId ?? null;
+    const modelId = spec.modelId ?? null;
+    const stashed = this.peekSpawnPlan(profileId, modelId);
+    const plan = stashed ?? (await this.resolveSuperSpawnPlan(profileId, modelId));
+    if (!stashed) this.rememberSpawnPlan(profileId, modelId, plan);
+    if (!plan.configured) return null;
+    const name = plan.spec.endpoint?.profileName;
+    return typeof name === "string" && name.trim() ? name.trim() : null;
+  }
+
+  /**
+   * 派发前的一次 live `/models` 查询（`GET {baseUrl}/models`）。
+   *
+   * 数据源是**实时查询**（原生 `node:http(s)` 直连，绝不用被代理 patch 过的
+   * 全局 `fetch`；**绝不**回退 CLI 内建的 `_meta.models.availableModels`）：
+   *   • 面板注入了 `querySuperModelIds` 时走那条通道 —— 与设置页**同一份**
+   *     30s TTL 缓存（key = 归一化 models URL + apiKey 比对），命中即零请求；
+   *     同批并行派发因此最多产生一次真实请求。
+   *   • 未接线（单测里直接 new 的 host）时回退到无缓存直连（`queryModelIds`）。
+   *
+   * 纪律（两条通道一致）：
+   *   • **空列表 / 超时 / 连接失败 / 非 2xx / 解析失败一律按「无证据」处理** →
+   *     返回 `undefined`：不降级、不抛错、派发照常进行（AGENTS.md 陷阱 #25）。
+   *   • **短超时**：这是派发路径上的额外一跳，宁可放弃证据也不能卡住冷启动；
+   *     共享通道（设置页那条默认 10s）同样受 4s 上限约束，被放弃的请求仍在
+   *     后台填充面板缓存，下一次派发直接命中。
+   */
+  private async querySpawnLiveModelIds(endpoint: {
+    baseUrl: string;
+    apiKey: string;
+    modelName?: string | null;
+  }): Promise<string[] | undefined> {
+    const work: Promise<string[] | undefined> = this.deps.querySuperModelIds
+      ? this.deps
+          .querySuperModelIds({ baseUrl: endpoint.baseUrl, apiKey: endpoint.apiKey })
+          .then((result) => {
+            if (result.error) {
+              this.log.info(
+                `超流体派发前查询模型列表失败（按无证据处理，照常派发）：${result.error}`,
+              );
+              return undefined;
+            }
+            return result.ids;
+          })
+      : queryModelIds(
+          {
+            baseUrl: endpoint.baseUrl,
+            apiKey: endpoint.apiKey,
+            modelName: endpoint.modelName ?? null,
+          },
+          SUPER_SPAWN_LIVE_MODELS_TIMEOUT_MS,
+        );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const raced = await Promise.race<string[] | undefined>([
+        // 被放弃（超时）的请求之后仍可能 reject：这里先挂 catch，避免成为
+        // 未处理的 rejection。
+        work.catch((error: unknown) => {
+          this.log.info(
+            `超流体派发前查询模型列表失败（按无证据处理，照常派发）：${errorMessage(error)}`,
+          );
+          return undefined;
+        }),
+        new Promise<string[] | undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), SUPER_SPAWN_LIVE_MODELS_TIMEOUT_MS);
+        }),
+      ]);
+      // 200 但没有任何模型 = 端点异常，同样不构成「模型下架」的证据。
+      return raced && raced.length > 0 ? raced : undefined;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 派发时的模型降级必须**显式**：用真实原因（被下架的模型 id + 实际回退
+   * 目标）提示用户，并**绝不**因此改写用户的 `iflow.superAgentModel`。
+   *
+   * 同一批派发（并行的多个子会话）会重复拿到同一个结论，因此同一组
+   * 「下架 → 回退」只弹一次 toast；日志每次照记，便于排查。
+   */
+  private noticeSpawnModelDegraded(model: SuperApiSpec["model"]): void {
+    const delisted = model.delistedModelId ?? "";
+    const fallback = model.modelId ?? "";
+    const message = vscode.l10n.t(
+      "子会话模型 {0} 已不在可用模型中，本次派发改用 {1}（不会修改你的超流体模型设置）",
+      delisted || "（未知）",
+      fallback || "（未知）",
+    );
+    this.log.warn(message);
+    const key = `${delisted}\u0000${fallback}`;
+    if (this.superSpawnDegradeNotices.has(key)) return;
+    this.superSpawnDegradeNotices.add(key);
+    this.store.sendToast("warning", message);
+  }
+
   /** Spawn a CLI client for a child session (own process, own worktree). */
 
   async createSuperClient(params: {
@@ -1498,6 +2260,10 @@ export class SuperAgentHost {
     includeDirectories: string[];
     label: string;
     callbacks: AcpClientCallbacks;
+    /** 任务级 API Profile 覆盖（`SuperTaskSpec.profileId`）。 */
+    profileId?: string;
+    /** 任务级模型覆盖（`SuperTaskSpec.modelId`）。 */
+    modelId?: string;
   }): Promise<AcpClient> {
     const entry = this.resolveEntry();
     const nodePathConfigured = this.setting<string>("nodePath", "");
@@ -1543,12 +2309,36 @@ export class SuperAgentHost {
     // e.g. in tests) must not SILENTLY lose the limit — that is exactly the
     // "window falls back to the CLI's 65k" symptom. The degraded branch uses
     // the SAME resolver, only with fewer key facts (the store's model).
-    const childTokensLimitEnv =
-      this.deps.tokensLimitEnv?.() ??
-      tokensLimitEnvFromSettings({
-        modelId: this.store.getState().currentModelId,
-        overrides: parseContextWindowOverrides(this.setting<string[]>("contextWindowOverrides", [])),
-      });
+    // 超流体独立凭据 / 模型的单真值解析。`configured === false` = 用户没有
+    // 配置任何超流体专属指针，下面所有分支都刻意与今天逐字节一致。
+    const spawnPlan = await this.resolveSuperSpawnPlan(
+      params.profileId ?? null,
+      params.modelId ?? null,
+    );
+    const contextWindowOverrides = parseContextWindowOverrides(
+      this.setting<string[]>("contextWindowOverrides", []),
+    );
+    const childTokensLimitEnv = spawnPlan.modelConfigured
+      ? superTokensLimitEnv({
+          // tier 1/4 按**子会话自己的模型**查表；tier 2 按超流体端点命中的
+          // 具名 Profile 取 tokensLimit —— 绝不读主会话 `currentApiProfile`。
+          modelId: spawnPlan.spec.model.modelId,
+          overrides: contextWindowOverrides,
+          profileName: spawnPlan.spec.endpoint?.profileName ?? null,
+        })
+      : (this.deps.tokensLimitEnv?.() ??
+        tokensLimitEnvFromSettings({
+          modelId: this.store.getState().currentModelId,
+          overrides: contextWindowOverrides,
+        }));
+    // spawn 时算出的窗口在 `set_model` 之后按同一口径推进子 CLI 缓存的
+    // tokensLimit（见 setTokensLimit 回调）；不记录会让两条路径各算各的。
+    const spawnTokensLimit = (() => {
+      const raw = childTokensLimitEnv.IFLOW_TOKENS_LIMIT;
+      if (raw === undefined) return undefined;
+      const parsed = Number(raw);
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+    })();
     const systemPromptFile = await this.materializeSystemPrompt("child");
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
@@ -1564,6 +2354,18 @@ export class SuperAgentHost {
       // 铺在 options.env 之下，这里用 undefined 显式抹掉该键（Node 的 spawn
       // 会跳过值为 undefined 的环境变量），即便用户 shell 里设了也不继承。
       IFLOW_SUPER_TOOL: undefined,
+      // 凭据只走 ACP `authenticate`（见下方 client.authenticate）。vendor CLI
+      // 另有一条 **env 凭据通道**：`IFLOW_SELECTED_AUTH_TYPE` + `IFLOW_API_KEY`
+      // / `IFLOW_BASE_URL` / `IFLOW_MODEL_NAME`（实测存在，且能越过
+      // `session/new` 的 authRequired 门禁）。子会话绝不能继承用户 shell 里
+      // 残留的这组变量 —— 否则端点/密钥会被环境悄悄改写，子会话派生的任何
+      // shell 也能读到。用 undefined 显式抹掉（Node 的 spawn 跳过值为
+      // undefined 的环境变量），`IFLOW_MODEL` 是同一通道的旧别名，一并抹除。
+      IFLOW_API_KEY: undefined,
+      IFLOW_BASE_URL: undefined,
+      IFLOW_MODEL_NAME: undefined,
+      IFLOW_MODEL: undefined,
+      IFLOW_SELECTED_AUTH_TYPE: undefined,
       // Same effective context window as the main session: without this the
       // child falls back to the CLI's own 128000/65000 default and compresses
       // its baseline immediately on start.
@@ -1581,16 +2383,35 @@ export class SuperAgentHost {
       },
       params.callbacks,
     );
+    // 只有走了超流体口径（模型 / 凭据被覆盖）的 client 才留 spawn 快照：
+    // 零配置路径的 set_model 必须与今天相同（届时按当时的设置重算），快照
+    // 会让它回放 spawn 时的旧数。
+    if (spawnPlan.modelConfigured && spawnTokensLimit !== undefined) {
+      this.superClientTokensLimits.set(client, spawnTokensLimit);
+    }
+    // 防御纵深：即使 vendor 的 `IFLOW_OAUTH_STRIP=0` 回滚，已过期的 OAuth
+    // 缓存也不会让**每个**子会话在 authenticate 上白卡 60s。该函数只做可逆
+    // 改名（`.bak`），token 未过期 / 文件缺失 / 内容不可解析时原样不动。
+    const archivedOAuth = retireStaleOAuthCreds();
+    if (archivedOAuth) {
+      this.log.info(`super agent: 归档过期的 OAuth 凭据缓存 → ${archivedOAuth}`);
+    }
     await client.connect();
-    const creds =
-      (await this.resolveWorkspaceHandshakeCreds().catch(() => null)) ??
-      (await loadCredentials(this.context.secrets).catch(() => null));
-    if (creds) {
+    // 端点 = 超流体独立解析结果（未配置超流体时与主会话握手结果同源）。
+    const endpoint = spawnPlan.spec.endpoint;
+    if (endpoint) {
       await client.authenticate({
         methodId: "openai-compatible",
-        methodInfo: { apiKey: creds.apiKey, baseUrl: creds.baseUrl, modelName: creds.modelName },
+        methodInfo: {
+          apiKey: endpoint.apiKey,
+          baseUrl: endpoint.baseUrl,
+          modelName: endpoint.modelName ?? "",
+        },
       });
     }
+    // 同一次派发的后续 `spawnModel` 复用这份计划（消费即删）：端点/模型/live
+    // 校验只解析一遍；键含 profileId/modelId，不同 Profile 的派发互不命中。
+    this.rememberSpawnPlan(params.profileId ?? null, params.modelId ?? null, spawnPlan);
     return client;
   }
 
@@ -1671,16 +2492,77 @@ export class SuperAgentHost {
    * （{@link handleSuperToolCall}）共用这一段：去重键、附件丢弃计数、
    * toast 文案都不允许两条通道各写一份 —— 同一份载荷从两条路径同时到达时，
    * `superDirectiveDedupeKey` 必须能看见同一个账本，否则会双开子会话。
+   *
+   * 有管理器时完全同步（既有行为逐字节不变）；只有「没有打开工作区、但设置
+   * 了默认工作区」这一条新路径需要异步 fs.stat，因此同步返回 `deferred`，
+   * 由后台链在解析成功后真正派发并回填结果。
    */
   dispatchSuperTasks(
     blocks: readonly SuperTaskSpec[][],
     issues: readonly string[] = [],
-  ): { dispatched: number; duplicates: number; managerAvailable: boolean } {
+    toolCallId?: string,
+  ): SuperDispatchResult {
     const manager = this.deps.getSuperAgent();
-    if (!manager) {
-      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发超流体"));
+    if (manager) {
+      // prefetch 静默解析出的 fallback 原因在这里补发；有工作区用户不会命中
+      // 这条缓存（guard 在 emitCachedFallbackToast 内），行为逐字节不变。
+      this.emitCachedFallbackToast();
+      return this.dispatchSuperTasksWith(manager, blocks, issues);
+    }
+    const resolvedRoot = this.superRepoRoot();
+    if (resolvedRoot !== null) {
+      // 工作目录已经可用却没有管理器：这是管理器构造失败，不是「没有工作区」。
+      // 不要再用那句与事实相反的固定文案。
+      this.log.error(`super agent: manager unavailable for resolved root ${resolvedRoot}`);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("超流体工作目录 {0} 已就绪，但超流体管理器未能启动，请重试", resolvedRoot),
+      );
       return { dispatched: 0, duplicates: 0, managerAvailable: false };
     }
+    // 没有打开任何工作区：可能是「配置了默认工作区」的场景。存在性校验必须
+    // 异步，因此这里先如实返回「本次未派发」，由后台链决定派发还是给出真实
+    // 拒绝原因（未配置 / 非绝对路径 / 不存在 / 不是目录）。
+    // 先同步登记 pending：同一工具调用的后续帧据此跳过（不重复排队），
+    // completed 帧的审核也不会把「还在校验」误判成「载荷整轮没送达」。
+    if (toolCallId) this.recordSuperToolCallOutcome(toolCallId, "pending");
+    void this.dispatchSuperTasksViaDefaultWorkspace(blocks, issues, toolCallId);
+    return { dispatched: 0, duplicates: 0, managerAvailable: false, deferred: true };
+  }
+
+
+  /** 同步入口判定为 deferred 时，后台链串行解析默认工作区并派发。 */
+  private dispatchSuperTasksViaDefaultWorkspace(
+    blocks: readonly SuperTaskSpec[][],
+    issues: readonly string[],
+    toolCallId?: string,
+  ): void {
+    const run = this.defaultWorkspaceDispatchChain
+      .then(async () => {
+        const manager = await this.ensureSuperAgentForDispatch();
+        if (!manager) {
+          if (toolCallId) this.recordSuperToolCallOutcome(toolCallId, "failed");
+          return;
+        }
+        const result = this.dispatchSuperTasksWith(manager, blocks, issues);
+        if (toolCallId) this.recordSuperToolCallOutcome(toolCallId, dispatchOutcome(result));
+      })
+      .catch((error: unknown) => {
+        // 后台链绝不能冒成 unhandled rejection：onSessionUpdate 的调用方是同步
+        // 通知分发，一帧异常会把整条流打断。
+        this.log.error(`super agent: 默认工作区派发失败：${errorMessage(error)}`);
+        if (toolCallId) this.recordSuperToolCallOutcome(toolCallId, "failed");
+      });
+    this.defaultWorkspaceDispatchChain = run;
+  }
+
+
+  /** 拿到管理器之后的派发体（同步；两条派发通道共用）。 */
+  private dispatchSuperTasksWith(
+    manager: SuperAgentManager,
+    blocks: readonly SuperTaskSpec[][],
+    issues: readonly string[] = [],
+  ): SuperDispatchResult {
     if (issues.length > 0) {
       // 宿主侧可诊断日志：字段级原因里带 tasks[i]，这里整条记下来（尤其 title 必填
       // 的拒绝），便于从日志直接定位是哪个任务缺标题，而不是只有一句笼统 toast。
@@ -1859,17 +2741,18 @@ export class SuperAgentHost {
       `super agent: accepted structured ${parsed.kind} tool call (${update.toolCallId || "no-id"})`,
     );
     if (parsed.kind === "dispatch") {
-      const result = this.dispatchSuperTasks(parsed.tasks, parsed.issues);
+      const result = this.dispatchSuperTasks(parsed.tasks, parsed.issues, toolCallId);
+      if (result.deferred) {
+        // 没有打开工作区、可能回退默认工作区：结果要等异步 stat 之后才知道。
+        // 这里先不记账（记 failed 会是假账，记 dispatched 更是谎报），由
+        // dispatchSuperTasksViaDefaultWorkspace 回填同一 toolCallId 的终态。
+        return;
+      }
       // 记账必须反映真实结果，不能只因为「解析成功」就写 dispatched：
       //  - 没有管理器 → 零 spawn，记 failed（旧实现这里记 dispatched 是假账）；
       //  - 有管理器但一条都没派出去（spawn 全抛错 / 无任务）→ 记 failed；
       //  - 纯重复载荷此前确实已派发过 → 仍记 dispatched。
-      const outcome: SuperToolCallOutcome = !result.managerAvailable
-        ? "failed"
-        : result.dispatched > 0 || result.duplicates > 0
-          ? "dispatched"
-          : "failed";
-      this.recordSuperToolCallOutcome(toolCallId, outcome);
+      this.recordSuperToolCallOutcome(toolCallId, dispatchOutcome(result));
       return;
     }
     // 同一工具帧会在 pending / in_progress 两帧各带一次载荷；动作没有载荷

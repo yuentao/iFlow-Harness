@@ -282,6 +282,8 @@ describe("sendPrompt turn-end wiring → proactive compress before the next prom
   };
   let storageDir: string;
   let promptTexts: string[];
+  /** Full block lists per prompt (slash 回合的 prompt[0] 必须是命令本身). */
+  let promptBlocks: Array<Array<{ type: string; text?: string }>>;
 
   beforeEach(async () => {
     setConfigOverrides({ checkpoints: false, autoCompressOnIdle: true });
@@ -289,6 +291,7 @@ describe("sendPrompt turn-end wiring → proactive compress before the next prom
     panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as typeof p;
     promptTexts = [];
+    promptBlocks = [];
     const fakeClient = {};
     p.client = fakeClient;
     p.ensureClient = async () => fakeClient;
@@ -299,6 +302,7 @@ describe("sendPrompt turn-end wiring → proactive compress before the next prom
     }).runTurnFollowup = async () => {};
     p.promptWithRetry = vi.fn(async (_c: unknown, _s: string, prompt: unknown) => {
       const blocks = prompt as Array<{ type: string; text?: string }>;
+      promptBlocks.push(blocks);
       promptTexts.push(blocks[0]?.text ?? "");
       return { stopReason: "end_turn" };
     }) as unknown as PanelInternals["promptWithRetry"];
@@ -334,6 +338,10 @@ describe("sendPrompt turn-end wiring → proactive compress before the next prom
     const compressDeadline = Date.now() + 2000;
     while (promptTexts.length < 2 && Date.now() < compressDeadline) await flush();
     expect(promptTexts.map(userText)).toEqual(["first question", "/compress"]);
+    // slash 回合的 prompt[0] 必须是命令本身（CLI 只按它判定命令）。本轮
+    // auto-compress 由 maybeAutoCompressOnIdle 直接发出 /compress，因此只有
+    // 一个文本块 —— 这里锁住「命令在 prompt[0]」这一契约。
+    expect(promptBlocks[1]![0]).toEqual({ type: "text", text: "/compress" });
 
     await p.handleWebviewMessage({ type: "sendPrompt", text: "next question" });
     const nextDeadline = Date.now() + 2000;

@@ -1051,6 +1051,17 @@ export interface SessionState {
   status: AgentStatus;
   errorMessage: string | null;
   stopReason: StopReason | null;
+  /**
+   * 宿主权威的「正在停止」标记：用户按了停止，宿主已发出 `session/cancel`
+   * （并在取消本会话的活子会话），但回合尚未落定。
+   *
+   * webview 只按它把停止按钮渲染成「正在停止…」并禁用 —— 不再用本地 10s
+   * 定时器猜：旧实现的本地超时会在 `status` 仍是 streaming 时把按钮退回
+   * 「停止生成」，用户只能反复点，形成「停止 → 正在停止 → 停止」的循环。
+   * 回合真正 settle（`promptCompleted` / 失败 / 会话替换 / 强制重启）时由
+   * 宿主清回 false；缺省（undefined）等价 false。
+   */
+  cancelling?: boolean;
   sessionId: string | null;
   modes: SessionModeState | null;
   /**
@@ -1999,6 +2010,78 @@ export interface HostSettingsUi {
   /** Run child sessions in the main repository workspace with no isolation
    * (`iflow.superAgent.fullTrust`); default false. */
   superAgentFullTrust: boolean;
+  /** Default workspace directory for Superfluid dispatch when no folder is open
+   * (`iflow.superAgent.defaultWorkspace`). Empty = built-in `~/.iflow/workspace`. */
+  superAgentDefaultWorkspace: string;
+  /** 超流体链路选中的 API Profile 名（`iflow.superAgentProfile`）。空串 =
+   * 跟随主会话的活动 Profile（方案文档第 3.1 节回退链的第 3 级）。
+   *
+   * 可选字段只是为了让 webview 侧的默认设置对象（`webview/src/store.ts`
+   * 的 DEFAULT_HOST_SETTINGS）不必同步 —— 宿主 `hostSettings` 回推的**永远
+   * 是字符串**（脏值按空串处理），消费方按 `?? ""` 兜底即可。 */
+  superAgentProfile?: string;
+  /** 超流体链路选中的模型 id（`iflow.superAgentModel`）。空串 = 用目标 Profile
+   * 自带的 `modelName`（方案文档第 3.2 节回退链的第 3 级）。宿主回推的
+   * 永远是字符串（脏值按空串处理）。 */
+  superAgentModel?: string;
+}
+
+/**
+ * 「按 Profile 拉取模型列表」的载荷（host → webview）。
+ *
+ * 为什么单开一条通道而不是把 models 塞进 `AuthProfileUi`：`profiles` 是
+ * **全部** Profile 的静态元数据快照，每次刷新鉴权态都会重发；模型列表却
+ * 是「某一个端点的实时查询结果」，按需拉取、会过期、会失败，还带自己的
+ * 错误态。塞进 `AuthProfileUi` 会让每次鉴权态刷新都变成 N 个端点的并发
+ * HTTP 往返，并让失败语义混进一份本该只是元数据的快照里。
+ *
+ * `models` 的唯一数据源是实时 `GET {baseUrl}/models`；CLI 上报的
+ * `_meta.models.availableModels` 是硬编码目录，不可作为回退。端点不可达时
+ * 绝不退回内建目录：`error` 带真实原因，`models` 最多只含当前选中的那个
+ * 模型（补头，避免下拉框空白）。
+ */
+export interface SuperProfileModelsUi {
+  /** 本次**实际查询**的 Profile 名。宿主回推的是解析后的结果，不是请求
+   * 里那个指针：跟随主链路（`iflow.superAgentProfile` 留空）时这里是主会话
+   * 当前的活动 Profile 名；只有「连活动 Profile 名都解析不出来」时才是空串。
+   * 消费方不要拿它反推「是否跟随主链路」。 */
+  profileName: string;
+  /** 该 Profile 端点实时返回的模型列表。失败（`error` 有值）时最多只含
+   * 当前选中的那个模型 —— **绝不**含端点没确认过的其它模型（不回退内建
+   * 目录）。消费方以 `error` 为准判断成败，别拿列表长度当成功标志。
+   *
+   * 端点返回 200 但一个模型都没有时 `models` 为空数组且**没有** `error`：
+   * 这是「成功但空」的第三种状态，UI 必须显式提示（不能拿它冒充加载中，
+   * 也不能静默留空）。 */
+  models: ModelInfoUi[];
+  /** 当前选中的模型 id（`iflow.superAgentModel`，留空则用 Profile 的
+   * `modelName`）。它会被补到列表头，避免下拉框空白。 */
+  currentModelId: string;
+  /** 失败原因（找不到该 Profile / 端点不可达）；成功时缺省。 */
+  error?: string;
+  /**
+   * 请求序号：webview 每次 `refreshSuperProfileModels` 自增生成，宿主**原样
+   * 回显**。webview 只接受与最近一次请求配对的回包，迟到的旧回包一律丢弃 ——
+   * 与 `requestSuperResidueList` ↔ `superResidueList` 同款「只认最后发出的
+   * id」语义（字段名也一致）。宿主**主动推送**（配置文件被面板外改动）时
+   * 缺省：那不是回包，webview 另走 profileName 启发式双保险。
+   */
+  requestId?: number;
+  /**
+   * true = live 列表**能证明**当前选择的模型已下架，宿主按
+   * `shared/super-profile.ts` 的 `resolveSuperModel` 的显式降级结果标出来。
+   *
+   * 防误伤纪律：空 / 失败的 live 列表从不构成下架证据（端点挂了 ≠ 模型没
+   * 了），所以这里为 true 时 `models` 必然非空。UI 据此显式提示，但**绝不**
+   * 因此改写用户的 `iflow.superAgentModel` 设置。
+   */
+  degraded?: boolean;
+  /** 被判定为已下架的模型 id（仅 `degraded` 时有值）。 */
+  delistedModelId?: string;
+  /** 降级后**实际会使用**的模型 id（仅 `degraded` 时有值）。 */
+  degradedModelId?: string;
+  /** 降级原因（`resolveSuperModel` 给出的可读文案，仅 `degraded` 时有值）。 */
+  degradedReason?: string;
 }
 
 /**
@@ -2193,6 +2276,20 @@ export function pickQqSettingsUi(
  */
 export const MEMORY_CURATE_COMPOSER_ID_BASE = 1_000_000;
 
+/** Inline button carried by a toast. `actionId` is echoed back in the
+ * `toastAction` WebviewToHost message for the host to dispatch on; `variant`
+ * is an optional tone hint (the webview falls back to the pill's level). */
+export interface ToastAction {
+  actionId: string;
+  label: string;
+  variant?: "primary" | "secondary" | "warning-soft" | "danger-soft";
+}
+
+/** Action ids of the QQ single-active lease conflict card. Shared so the
+ * host's toast producer and the panel's `toastAction` dispatcher cannot drift. */
+export const QQ_LEASE_WAIT_ACTION = "qq-lease-wait";
+export const QQ_LEASE_TAKEOVER_ACTION = "qq-lease-takeover";
+
 export type HostToWebview =
   | { type: "turnChanges"; sessionId: string; userBlockId: string; requestId: string; records: TurnChangeUi[]; unavailable: boolean }
   /** A single file's turn changes were reverted; refetch the turn records. */
@@ -2281,7 +2378,12 @@ export type HostToWebview =
        * the host performs the action and owns pill removal (persistent
        * semantics unchanged — a non-persistent action pill still
        * auto-dismisses). */
-      action?: { actionId: string; label: string };
+      action?: ToastAction;
+      /** Multiple inline actions (e.g. 等待 / 接管 on the QQ lease conflict
+       * card). When present the webview renders a button row and `actions`
+       * takes precedence over the single `action`. Each click still sends
+       * `toastAction` with its own actionId. */
+      actions?: ToastAction[];
       /** Preview lines for a decision-card notice (auto-memory candidates): the
        * card shows WHAT would be written before the review dialog opens. The
        * host caps the list; absence keeps the plain pill rendering. */
@@ -2297,6 +2399,9 @@ export type HostToWebview =
   /** Reply to `pickAttachments`: `images` are base64 attachment payloads,
    * `files` carry real disk paths (no staging needed). */
   | { type: "filesPicked"; images: { name: string; data: string; mimeType: string }[]; files: { name: string; path: string }[] }
+  /** Reply to `pickDefaultWorkspace`: the absolute directory the user picked.
+   * The host has already written it to `iflow.superAgent.defaultWorkspace`. */
+  | { type: "defaultWorkspacePicked"; path: string }
   /** Reply to `listMcpServers` / `saveMcpServers`: BOTH scopes' MCP server
    * dicts (name → config) as they stand on disk after the operation, so the
    * card can switch scope locally without another round trip. `error`
@@ -2393,6 +2498,10 @@ export type HostToWebview =
    * the background aurora light-spot opacity with it. */
   | { type: "theme"; kind: "dark" | "light"; auroraIntensity?: number }
   | ({ type: "hostSettings" } & HostSettingsUi)
+  /** 「超流体」设置页的模型下拉数据源：宿主按**指定 Profile** 的 baseUrl
+   * 实时查询 `GET {baseUrl}/models` 后推送。端点不可达时带 error（真实原因），
+   * models 最多只含当前选中的模型 —— 绝不回退内建目录。 */
+  | ({ type: "superProfileModels" } & SuperProfileModelsUi)
   /** 上下文窗口覆写的当前值 + 当前模型的内建建议值（设置页结构化编辑器
    * 的数据源）。宿主在 webview 就绪时推一次、每次写入成功后推一次。 */
   | ({ type: "contextWindowOverrides" } & ContextWindowOverridesUi)
@@ -2530,6 +2639,13 @@ export type WebviewToHost =
    */
   | { type: "editAndResend"; blockId: string; text: string }
   | { type: "cancel" }
+  /**
+   * 底部「压缩上下文」按钮：请求宿主主动发起一轮 `/compress`（与上下文
+   * 接近上限时的「立即压缩」pill 走同一入口）。宿主持有全部守卫（Stop
+   * 窗口、会话就绪、历史同步、无内容可压）并在失败时回真实错误 toast，
+   * webview 只负责禁用态与 1.5s 防抖。
+   */
+  | { type: "compressNow" }
   /** CLI 0.5.19 only supports whole-turn cancellation. */
   | { type: "stopSubagent"; sessionId: string; agentId: string }
   /**
@@ -2697,6 +2813,9 @@ export type WebviewToHost =
   /** Open the OS file picker; results arrive as `filesPicked`. Images come
    * back as base64 attachment slots, other files as real disk paths. */
   | { type: "pickAttachments" }
+  /** Open the OS folder picker for `iflow.superAgent.defaultWorkspace`.
+   * The host writes the picked absolute path and replies `defaultWorkspacePicked`. */
+  | { type: "pickDefaultWorkspace" }
   /** Open a user-attached image (data URL) in VSCode's image preview. */
   | { type: "openImage"; dataUrl: string }
   /** M3: store openai-compatible credentials and authenticate a fresh session.
@@ -2740,6 +2859,14 @@ export type WebviewToHost =
   /** Re-query `GET {baseUrl}/models` when the model dropdown opens — the list
    * captured at session start goes stale (new gateway models appear). */
   | { type: "refreshModels" }
+  /** 「超流体」设置页的模型下拉：按 Profile 实时拉取 `GET {baseUrl}/models`。
+   * `profileName` 缺省 = 当前选中的超流体 Profile（`iflow.superAgentProfile`，
+   * 留空则跟随主会话的活动 Profile）。回复：`superProfileModels`。
+   *
+   * `requestId` 由 webview 自增生成，宿主在回包里原样回显；webview 只接受与
+   * **最近一次**请求配对的回包（迟到的旧回包丢弃），根治「慢端点回包串台」。
+   * 与 `requestSuperResidueList` 的配对语义一致。 */
+  | { type: "refreshSuperProfileModels"; profileName?: string; requestId: number }
   /** Settings-page hot restart: tear the CLI child down and spawn a fresh
    * one so startup-only changes (language / mcpServers written
    * to settings.json) take effect without reloading VSCode. */
@@ -2857,8 +2984,9 @@ export type WebviewToHost =
    * pending state locally, so a late result has nothing to fill into. */
   | { type: "cancelEnhance"; requestId: number }
   /** M1 P0-6: a toast's inline action button was clicked (see the `toast`
-   * message's `action`). The host dispatches on `actionId` (e.g. "compress"
-   * drives the /compress bridge) and dismisses the pill. */
+   * message's `action` / `actions`). The host dispatches on `actionId` (e.g.
+   * "compress" drives the /compress bridge, "qq-lease-takeover" takes over
+   * the QQ lease) and dismisses the pill. */
   | { type: "toastAction"; actionId: string; toastId?: number }
   /** The user ticked/unticked one item of a TaskList card (`PlanBlock`).
    * `blockId` is the stable block id (P4), `index` the entry position; the

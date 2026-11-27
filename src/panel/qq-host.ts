@@ -28,6 +28,7 @@ import type {
   QqTaskUi,
   UserQuestion,
 } from "../../shared/messages.js";
+import { QQ_LEASE_TAKEOVER_ACTION, QQ_LEASE_WAIT_ACTION } from "../../shared/messages.js";
 import type { UserQuestionsResponse } from "../acp/protocol.js";
 import { isTerminalSuperStatus, type SuperSessionUi } from "../../shared/super-agent.js";
 import type { SessionStore } from "./store.js";
@@ -49,6 +50,7 @@ import {
 } from "../qq/panel-host.js";
 import {
   applyQqSettingsPatch,
+  createShadowedOverrideNotice,
   createVscodeQqSettingsIo,
   readQqSettings,
   type QqSettingsIo,
@@ -62,6 +64,7 @@ import {
 } from "../qq/config.js";
 import {
   isTerminalSuperStatus as isQqTerminalSuperStatus,
+  planQqWorkspaceChange,
   QQ_SETTLE_POLL_MS,
   shouldRestartOnPatch,
 } from "../qq/wiring.js";
@@ -73,6 +76,12 @@ import {
   type QqPendingUserInput,
 } from "../qq/pending-users.js";
 import { maskQqOpenId } from "../../shared/qq-access.js";
+import {
+  createQqLeaseController,
+  QQ_LEASE_HEARTBEAT_MS,
+  type QqLeaseController,
+} from "../../shared/qq-lease.js";
+import { createQqMementoLeaseStore } from "../qq/lease-host.js";
 import type { InboundMessage } from "../qq/adapter/types.js";
 import { setQqTasks } from "../../shared/session-state.js";
 import {
@@ -390,7 +399,14 @@ export interface QqRuntime {
 
 
 export class QqHost {
-  constructor(private readonly deps: QqHostCallbacks) {}
+  constructor(private readonly deps: QqHostCallbacks) {
+    // 工作区根变化判定的基线：面板（激活）时刻的根集合。必须在事件到达**之前**
+    // 捕获 —— 否则事件里读到的前后根相同，真实切换会被误判成 noop。
+    this.qqWorkspaceRootsSeen = this.qqWorkspaceRoots();
+    // 租约身份：优先 VSCode 的窗口会话 id；老版本 / 测试 stub 没有时退回
+    // 进程 id + 随机数，保证同机多进程绝不撞 owner。
+    this.qqLeaseOwnerId = vscode.env.sessionId || `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+  }
 
 
   // --- QQ state (整组迁移；panel 仅保留兼容访问器) -------------------------
@@ -542,6 +558,13 @@ export class QqHost {
   qqChannelStarting: Promise<void> | null = null;
   /** 健康检查驱动的自动重启次数（上限 {@link QQ_HEALTH_RESTART_LIMIT}）。 */
   qqHealthRestarts = 0;
+  /**
+   * 「旧工作区级 QQ 配置已被用户级设置取代」的**一次性**提示器（每窗口一次）。
+   *
+   * 懒建：闭包在首次调用时才捕获 `this`，构造期不依赖回调就绪。只读检测，
+   * 不迁移、不写盘、不删旧值。
+   */
+  private qqShadowedOverrideNotice: ((io: QqSettingsIo) => string[]) | null = null;
   /** 设置事件合并定时器（一次补丁逐键写配置会连发多轮事件）。 */
   qqSettingsSyncTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -571,6 +594,33 @@ export class QqHost {
    * 一份陈旧通道装回 `this.qq`。
    */
   qqGeneration = 0;
+
+  // --- QQ 跨窗口单活租约 ----------------------------------------------------
+  /** 本窗口租约状态机：IDLE → ACQUIRING → ACTIVE → YIELDED / STOPPED。 */
+  qqLeaseState: "IDLE" | "ACQUIRING" | "ACTIVE" | "YIELDED" | "STOPPED" = "IDLE";
+  /**
+   * 本窗口身份，默认取 `vscode.env.sessionId`（同一窗口跨面板重开稳定，
+   * 不同窗口互不相同）。测试可直接改这个字段造多窗口，无需改全局 stub。
+   */
+  qqLeaseOwnerId: string;
+  /** 租约控制器（按 appId 建，换机器人时重建）。 */
+  private qqLease: QqLeaseController | null = null;
+  /** 心跳定时器：只在 ACTIVE 存活；窗口关闭由 stopQq 一并清理。 */
+  private qqLeaseTimer: ReturnType<typeof setInterval> | null = null;
+  /** 心跳周期（测试可注入更小值）。 */
+  qqLeaseHeartbeatMs = QQ_LEASE_HEARTBEAT_MS;
+  /** 「已被占用」提示每窗口只弹一次，避免设置事件反复打扰。 */
+  private qqLeaseYieldNotified = false;
+
+  /**
+   * 上一次见到的**工作区根集合**（顺序敏感，`roots[0]` 决定 CLI cwd）。
+   *
+   * 用途：工作区文件夹增删（多根工作区 / 空窗口打开了文件夹）时，判断根集合
+   * 是否真的变化，只在真的变化时重解析配置并重建通道（见
+   * {@link QqHost.handleWorkspaceFoldersChanged}）。构造期用激活时点的根集合
+   * 初始化 —— 基线早于事件才能识别出「删掉第一个根」这类变化。
+   */
+  qqWorkspaceRootsSeen: readonly string[] = [];
 
 
   // --- Panel proxies -------------------------------------------------------
@@ -778,7 +828,19 @@ export class QqHost {
     // 待审核记录与通道是否启用无关：启动时先推一次，面板打开即可看到历史。
     void this.pushQqPendingUsers();
     if (this.qqStarting) return this.qqStarting;
-    const task = this.doStartQq()
+    // 读配置之前先做一次**只读**的作用域探测：旧版本（6f0ec90 之前）写在
+    // 工作区级的 QQ 配置已被用户级设置压住，提示用户重存一次即可带走它。
+    // 不迁移、不写盘、每窗口只提示一次。
+    this.noticeShadowedQqWorkspaceSettings();
+    const task = this.enterQqLease()
+      .then(async (granted) => {
+        // YIELDED：同一个机器人已被另一个窗口持有，本窗口连 adapter 都不建。
+        if (!granted) return;
+        await this.doStartQq();
+        // 配置未启用 / 校验失败等「没真的建通道」路径：把租约还回去，
+        // 否则一个空窗口会白占 TTL，挡住真正要用的那个窗口。
+        if (!this.qq) await this.releaseQqLease("IDLE");
+      })
       .catch(async (error: unknown) => {
         const detail = errorMessage(error);
         if (!this.disposed) this.log.warn(`QQ 通道启动失败：${detail}`);
@@ -794,6 +856,228 @@ export class QqHost {
       });
     this.qqStarting = task;
     return task;
+  }
+
+  // --- QQ 跨窗口单活租约 ----------------------------------------------------
+  //
+  // 闸门只发生在 ACQUIRING：先连上的窗口持有机器人，后来者一律不建通道。
+  // globalState 跨窗口共享但没有 onDidChangeValue / CAS，因此用
+  // 「写后回读 owner 自校验」判竞态，用 5s 心跳 + 15s TTL + PID 探活回收
+  // 僵死窗口。接管由新窗口显式抢占租约，旧窗口在下一次心跳自检让出。
+
+  /** 租约闸门：拿到（或本就持有）才允许启动；没绑定机器人时放行。 */
+  private async enterQqLease(): Promise<boolean> {
+    if (this.disposed) return false;
+    if (this.qqLease?.isHeld()) {
+      this.qqLeaseState = "ACTIVE";
+      return true;
+    }
+    this.qqLeaseState = "ACQUIRING";
+    // appId 来自 SecretStorage（扫码写入），不是 iflow.qq 配置。读不到凭据
+    // 说明没有可仲裁的机器人，交给 doStartQq 出「先扫码」的常规提示。
+    let creds: { appId: string } | null = null;
+    try {
+      creds = await readQqBotCredentials(this.qqIo());
+    } catch (error) {
+      this.log.warn(`QQ 租约读取机器人身份失败：${errorMessage(error)}`);
+    }
+    if (!creds) {
+      this.qqLeaseState = "IDLE";
+      return true;
+    }
+    const appId = creds.appId;
+    // 换绑了另一个机器人：旧租约不再代表同一个机器人，先归还再重建控制器。
+    if (this.qqLease && this.qqLease.appId.trim() !== appId.trim()) {
+      await this.releaseQqLease("IDLE");
+      this.qqLease = null;
+    }
+    this.qqLease ??= createQqLeaseController(
+      createQqMementoLeaseStore(this.context.globalState),
+      this.qqLeaseOwnerId,
+      appId,
+      { pid: process.pid },
+    );
+    let granted = false;
+    try {
+      granted = await this.qqLease.acquire();
+    } catch (error) {
+      this.log.warn(`QQ 租约获取失败：${errorMessage(error)}`);
+      this.qqLeaseState = "STOPPED";
+      return false;
+    }
+    if (granted) {
+      this.qqLeaseState = "ACTIVE";
+      this.startQqLeaseHeartbeat();
+      return true;
+    }
+    // 租约新鲜且 owner 是别人：先启动者保留，本窗口让出。
+    this.qqLeaseState = "YIELDED";
+    this.pushQqStatus(false, vscode.l10n.t("QQ 机器人已在另一个窗口运行，本窗口已等待"));
+    this.promptQqLeaseTakeover();
+    return false;
+  }
+
+  /**
+   * 被占用提示：面板内常驻 warning toast，带「等待 / 接管」两个 action。
+   *
+   * 不再用原生 showWarningMessage —— 那条弹窗与面板 acrylic 视觉不一致。
+   * actionId 由 panel.ts 的 `handleToastAction` 分发（复用既有 `toastAction`
+   * wire 消息，不新增协议面）；「等待」只收 toast，「接管」走与旧弹窗分支
+   * 完全相同的 takeoverQqLease()。默认行为仍是不接管。
+   */
+  private promptQqLeaseTakeover(): void {
+    if (this.disposed || this.qqLeaseYieldNotified) return;
+    this.qqLeaseYieldNotified = true;
+    const lease = this.qqLease?.current();
+    const appId = (lease?.appId ?? this.qqLease?.appId ?? "").trim();
+    // 窗口 id 是 VSCode sessionId（UUID）；截前 8 位足够辨认，又不让 pill 变成一条长串。
+    const ownerId = (lease?.ownerId ?? "").slice(0, 8);
+    this.store.sendToast(
+      "warning",
+      vscode.l10n.t("检测到 QQ 机器人（appId：{0}，窗口：{1}）已被占用，本窗口未启动。", appId, ownerId),
+      {
+        persistent: true,
+        actions: [
+          {
+            actionId: QQ_LEASE_TAKEOVER_ACTION,
+            label: vscode.l10n.t("接管（将停止另一窗口的机器人）"),
+            variant: "warning-soft",
+          },
+          { actionId: QQ_LEASE_WAIT_ACTION, label: vscode.l10n.t("等待"), variant: "secondary" },
+        ],
+      },
+    );
+  }
+
+  /** 用户点「接管」：显式抢占租约，再由下一次心跳让旧持有者自检停通道。
+   * 由 panel.ts 的 `handleToastAction("qq-lease-takeover")` 调用，语义与原
+   * showWarningMessage 的「接管」分支完全相同。 */
+  async takeoverQqLease(): Promise<void> {
+    if (this.disposed || !this.qqLease) return;
+    let taken = false;
+    try {
+      taken = await this.qqLease.forceTake();
+    } catch (error) {
+      this.log.warn(`QQ 租约接管失败：${errorMessage(error)}`);
+    }
+    if (!taken) {
+      this.store.sendToast("warning", vscode.l10n.t("QQ 机器人接管失败，租约已被其它窗口更新，请重试"));
+      return;
+    }
+    this.qqLeaseState = "ACTIVE";
+    this.startQqLeaseHeartbeat();
+    // 最初那次 startQqIfEnabled 可能还在飞，等它落定再重新走闸门（此时
+    // isHeld()=true，直接放行），避免 qqStarting 把本次启动当成重复调用吞掉。
+    const inFlight = this.qqStarting;
+    if (inFlight) await inFlight.catch(() => undefined);
+    if (!this.disposed) await this.startQqIfEnabled();
+  }
+
+  private startQqLeaseHeartbeat(): void {
+    if (this.qqLeaseTimer) return;
+    this.qqLeaseTimer = setInterval(() => {
+      void this.tickQqLease();
+    }, this.qqLeaseHeartbeatMs);
+    this.qqLeaseTimer.unref?.();
+  }
+
+  private stopQqLeaseHeartbeat(): void {
+    if (this.qqLeaseTimer) clearInterval(this.qqLeaseTimer);
+    this.qqLeaseTimer = null;
+  }
+
+  /** 心跳节拍：租约仍是自己的才续约；owner 变化 / 过期即静默让出。 */
+  async tickQqLease(): Promise<void> {
+    if (this.disposed || !this.qqLease) return;
+    let ok = this.qqLease.canRenew();
+    if (ok) {
+      try {
+        ok = await this.qqLease.renew();
+      } catch (error) {
+        this.log.warn(`QQ 租约续约失败：${errorMessage(error)}`);
+        ok = false;
+      }
+    }
+    if (!ok) await this.onQqLeaseLost();
+  }
+
+  /** 失去租约（被接管 / 过期）：不弹提示、不写配置，只停连接并回推状态。 */
+  private async onQqLeaseLost(): Promise<void> {
+    this.stopQqLeaseHeartbeat();
+    this.qqLeaseState = "STOPPED";
+    // 租约已不属于本窗口，绝不能在 stopQq 里把它释放掉（那会删掉新持有者
+    // 刚抢到的租约）。清空控制器引用后 stopQq 的 release 成为空操作。
+    this.qqLease = null;
+    this.log.info("QQ 租约已被其它窗口接管，本窗口停止通道");
+    await this.stopQq();
+    this.pushQqStatus(false, vscode.l10n.t("QQ 通道已由另一个窗口接管"));
+  }
+
+  /** 归还租约：仅删 owner 仍是自己的那份；非持有者空操作。 */
+  private async releaseQqLease(next: "IDLE" | "STOPPED"): Promise<void> {
+    this.stopQqLeaseHeartbeat();
+    const lease = this.qqLease;
+    this.qqLease = null;
+    if (lease) {
+      try {
+        await lease.release();
+      } catch (error) {
+        this.log.warn(`QQ 租约释放失败：${errorMessage(error)}`);
+      }
+    }
+    if (this.qqLeaseState !== "YIELDED") this.qqLeaseState = next;
+  }
+
+  /**
+   * 设置事件 / 重启防抖时顺带复查租约：Memento 没有变更通知，这是现成的
+   * 跨窗口复查节拍。ACTIVE 被夺走就静默让出；YIELDED 发现租约已过期就重试。
+   */
+  private async recheckQqLease(): Promise<void> {
+    if (this.disposed || !this.qqLease) return;
+    if (!this.qqLease.canRenew()) {
+      if (this.qqLeaseState === "ACTIVE") await this.onQqLeaseLost();
+      else await this.releaseQqLease("IDLE");
+      return;
+    }
+    if (this.qqLeaseState === "YIELDED") {
+      const granted = await this.enterQqLease();
+      if (granted) void this.startQqIfEnabled();
+      return;
+    }
+    try {
+      await this.qqLease.renew();
+    } catch (error) {
+      this.log.warn(`QQ 租约复查续约失败：${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * 一次性提示：旧版本写入的工作区级 QQ 配置已被用户级设置取代。
+   *
+   * 读侧改为 Global 优先后，6f0ec90 之前落在 Workspace 作用域的值不再生效，
+   * 换工作区时行为会变（正是用户报告的「必须重存一次」）。这里只**检测 +
+   * 提示**：不迁移、不写盘、不删旧值，也不弹带破坏性动作的按钮。每窗口
+   * 只提示一次（{@link createShadowedOverrideNotice} 去重）。
+   */
+  private noticeShadowedQqWorkspaceSettings(): void {
+    if (this.disposed) return;
+    this.qqShadowedOverrideNotice ??= createShadowedOverrideNotice((keys) => {
+      this.log.info(
+        `QQ 设置：检测到 ${keys.length} 项被用户级设置取代的工作区级覆盖（${keys.join("、")}），读取以用户级为准`,
+      );
+      this.store.sendToast(
+        "info",
+        vscode.l10n.t(
+          "检测到旧版本写入的工作区级 QQ 配置（{0} 项）已被用户级设置取代；如需保留，请在 QQ 设置页重新保存一次",
+          keys.length,
+        ),
+      );
+    });
+    try {
+      this.qqShadowedOverrideNotice(this.qqIo());
+    } catch (error) {
+      this.log.warn(`QQ 设置作用域探测失败：${errorMessage(error)}`);
+    }
   }
 
   /**
@@ -1017,12 +1301,12 @@ export class QqHost {
    * 内存置 enabled → 停扫码 → 重建官方通道 → 首次绑定把 enabled 落盘 →
    * 推已连接回执。
    *
-   * **顺序是刻意的**：`writeAll` 走 Workspace 作用域，会触发
-   * `onDidChangeConfiguration` 的 QQ 监听；若先落盘再启动，监听会在
-   * `this.qq` 还没赋值时并发发起一次启动，而首次绑定时白名单通常还是空的，
-   * 那一次启动会被 `allowlist_empty` 拦下（现在降为 warning，但并发启动
-   * 本身仍会制造两套现场）。先启动则监听看到的是同一份运行中的配置，
-   * `shouldRestartOnPatch` 判定无需重启。
+   * **顺序是刻意的**：`writeAll` 走 Global 作用域（6f0ec90 起；写入后会顺手
+   * 清掉同键的存量 Workspace 覆盖），会触发 `onDidChangeConfiguration` 的 QQ
+   * 监听；若先落盘再启动，监听会在 `this.qq` 还没赋值时并发发起一次启动，
+   * 而首次绑定时白名单通常还是空的，那一次启动会被 `allowlist_empty` 拦下
+   * （现在降为 warning，但并发启动本身仍会制造两套现场）。先启动则监听看到
+   * 的是同一份运行中的配置，`shouldRestartOnPatch` 判定无需重启。
    */
   async onQqBotBound(creds: Parameters<typeof storeQqBotCredentials>[1], config: QqConfig): Promise<void> {
     try {
@@ -1094,6 +1378,9 @@ export class QqHost {
       // 空 dataUrl 过不了 isQrDataUrl，因此 webview 侧也不会把它送进 <img>。
       this.postToWebview(buildConfirmedQrMessage());
       if (this.qq) await this.stopQq();
+      // 扫码成功走的是独立于 startQqIfEnabled 的建通道路径，同样要过单活闸门：
+      // 不抢到租约就连 adapter 都不建（提示已在 enterQqLease 里弹过）。
+      if (!(await this.enterQqLease())) return;
       await this.startQqBotChannel(config, io, this.qqGeneration);
       if (!wasEnabled) {
         // 首次绑定自动开启远程任务。写失败不能谎报成功：通道已经连上，
@@ -1150,6 +1437,9 @@ export class QqHost {
     // 任何停止意图都必须让在飞的启动失效 —— 哪怕这次因为已有停止在进行而
     // 直接返回：那个慢启动不能在 stop 之后把一份陈旧通道装回 this.qq。
     const generation = ++this.qqGeneration;
+    // 单活租约：任何停止意图都归还租约，且只删 owner 仍是自己的那份 ——
+    // 被别人接管后 stopQq 里的 release 是空操作，不会删掉新持有者的租约。
+    await this.releaseQqLease("STOPPED");
     // F6：停通道 = 立刻放手主会话注入。只 abort 服务信号不够 —— 已经开始的
     // ACP 回合不会被它打断，会继续流式跑完且 QQ 早已停止、收不到结果。这里
     // 对「当前真正跑在主会话上的那一轮」发 session/cancel，并撤掉所有等待者。
@@ -1223,6 +1513,10 @@ export class QqHost {
     // promise 直接还给我们，重启就成了空转。
     const inFlight = this.qqStarting;
     if (inFlight) await inFlight.catch(() => undefined);
+    // 扫码绑定路径可能在建通道（不走 qqStarting）：同样要等它落定，否则
+    // stopQq 推进代次后那个建到一半的现场会自行拆掉，最终一条通道都没有。
+    const channel = this.qqChannelStarting;
+    if (channel) await channel.catch(() => undefined);
     await this.stopQq();
     await this.startQqIfEnabled();
   }
@@ -1315,6 +1609,49 @@ export class QqHost {
       });
     }, QQ_SETTINGS_RESTART_DEBOUNCE_MS);
     this.qqRestartTimer.unref?.();
+  }
+
+  /**
+   * 工作区根集合变化（多根工作区增删文件夹 / 空窗口打开了文件夹）→ 按新根
+   * **重新解析配置并重建** QQ 通道。
+   *
+   * 为什么必须重建：通道现场在启动时把一批与根相关的东西固定了下来 ——
+   * 配置快照（`iflow.qq.workspace` 的归一值、启动门控用的 activeRoot）、任务
+   * 存储目录（`context.storageUri`）与待审核用户存储根。旧实现只作废文件缓存
+   * 与根投影，QQ 通道继续沿用激活时的现场，用户看到的就是「换了工作区必须
+   * 重新保存一次配置（触发一次重启）才生效」。
+   *
+   * 处置由 {@link planQqWorkspaceChange} 判定：
+   *  - 根没变 → 不重建（重启会打断正在跑的 QQ 任务）；
+   *  - 有现场 → {@link scheduleQqRestart}（stopQq 释放旧 adapter / socket /
+   *    定时器，再用新根启动；新工作区把开关关掉时重建即「只停不起」）；
+   *  - 没现场 → {@link startQqIfEnabled}（空窗口激活时启动可能被工作区门控
+   *    拦下，打开文件夹后正是这次补起）。
+   *
+   * 懒建的存储根同步作废：`storageUri` 随工作区身份变化，不重置会让新工作区
+   * 继续读写旧目录下的待审核记录。
+   */
+  handleWorkspaceFoldersChanged(): void {
+    if (this.disposed) return;
+    const next = this.qqWorkspaceRoots();
+    // 「在飞的启动」也按有现场处理：它正按旧根建通道，只调用 startQqIfEnabled
+    // 会直接复用那份旧启动，切换就丢了。重建会先等它落定再把现场拆掉。
+    const starting = this.qqStarting !== null || this.qqChannelStarting !== null;
+    const action = planQqWorkspaceChange({
+      previousRoots: this.qqWorkspaceRootsSeen,
+      nextRoots: next,
+      running: this.qq !== undefined || starting,
+    });
+    this.qqWorkspaceRootsSeen = next;
+    if (action === "noop") return;
+    this.qqPendingUsers = null;
+    if (action === "restart") {
+      // 新工作区是一次全新的现场：健康重启预算也重置（不能沿用旧通道的计数）。
+      this.qqHealthRestarts = 0;
+      this.scheduleQqRestart();
+      return;
+    }
+    void this.startQqIfEnabled();
   }
 
   // --- QQ 入口校验工具 -------------------------------------------------------
@@ -2648,6 +2985,9 @@ export class QqHost {
 
   async syncQqServiceWithSettings(): Promise<void> {
     if (this.disposed) return;
+    // Memento 没有 onDidChangeValue，设置事件是现成的跨窗口复查节拍：
+    // 顺带确认租约没被接管 / 没有被回收后空占。
+    await this.recheckQqLease();
     // 扫码绑定进行中 / 通道正在启动：绑定路径与启动路径自己会收尾，此刻任何
     // 按磁盘配置做的停/起都会把刚建好的 owner 反杀（首绑 enable 尚未落盘，
     // 配置事件读到 false 就会 stopQq）。等它们结束后由事件/心跳补一次同步。

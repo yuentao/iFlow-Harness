@@ -22,25 +22,25 @@ const mocked = vi.hoisted(() => ({
   efficiencyMode: "steady" as "steady" | "turbo",
 }));
 
-const useChat = vi.hoisted(() =>
-  Object.assign(
-    <T,>(selector: (s: Record<string, unknown>) => T) =>
-      selector({
-        state: mocked.state,
-        pending: null,
-        send: mocked.send,
-        beginPending: vi.fn(),
-        notify: mocked.notify,
-        composerDraftRequest: null,
-        clearDraftRequest: vi.fn(),
-        updateHostSetting: mocked.updateHostSetting,
-        hostSettings: { efficiencyMode: mocked.efficiencyMode },
-      }),
-    { getState: () => ({ state: mocked.state, send: mocked.send, notify: mocked.notify }) },
-  ),
-);
-
-vi.mock("../webview/src/store", () => ({ useChat }));
+vi.mock("../webview/src/store", async () => {
+  const { createStoreMock } = await import("./helpers/store-mock");
+  const mock = createStoreMock();
+  // 工厂兜住 ChatStore 全表面；本文件只覆盖可变会话、档位设置与断言用 action。
+  const live = () =>
+    ({
+      ...mock.store,
+      state: mocked.state,
+      send: mocked.send,
+      notify: mocked.notify,
+      updateHostSetting: mocked.updateHostSetting,
+      hostSettings: { ...mock.store.hostSettings, efficiencyMode: mocked.efficiencyMode },
+    }) as unknown as import("./helpers/store-mock").StoreMockState;
+  const useChat = Object.assign(
+    <T,>(selector: (s: ReturnType<typeof live>) => T): T => selector(live()),
+    { getState: live },
+  );
+  return { ...mock, useChat, getState: live };
+});
 vi.mock("../webview/src/i18n", () => ({
   t: (s: string, ...args: unknown[]) => `${s}${args.length ? ` ${args.join(" ")}` : ""}`,
   modeDisplay: () => ({ label: "mode", desc: "" }),

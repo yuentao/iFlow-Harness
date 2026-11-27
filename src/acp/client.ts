@@ -309,7 +309,15 @@ export class AcpClient {
       // teardown would await an event that can never arrive.
       child.once("close", () => resolve());
     });
-    await killTree(child);
+    // `taskkill /T /F` normally returns in milliseconds, but it CAN stall on a
+    // process tree holding an unreleased handle. Awaiting it unbounded made
+    // dispose() (and the child-session cancel chain on top of it) hang
+    // forever. Bound it and let the existing SIGKILL + bounded-wait fallbacks
+    // below finish the teardown.
+    await Promise.race([
+      killTree(child),
+      new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+    ]);
     const graceful = await Promise.race([exited.then(() => true), new Promise<false>((resolve) => setTimeout(() => resolve(false), 3000))]);
     if (!graceful && !settled()) child.kill("SIGKILL");
     // Bounded safety net: teardown must never wedge the extension host, even if

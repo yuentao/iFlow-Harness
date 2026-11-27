@@ -2,7 +2,14 @@ import { afterAll, beforeAll, describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { cliTokensLimitEnv, resolveCliTokensLimit, resolveTokensLimitLookupKey, tokensLimitEnvFromSettings } from "../src/acp/cli-tokens-limit.js";
+import {
+  cliTokensLimitEnv,
+  resolveCliTokensLimit,
+  resolveSuperCliTokensLimit,
+  resolveTokensLimitLookupKey,
+  superTokensLimitEnv,
+  tokensLimitEnvFromSettings,
+} from "../src/acp/cli-tokens-limit.js";
 import { parseContextWindowOverrides } from "../shared/context-window.js";
 
 /**
@@ -323,7 +330,7 @@ describe("冷启动兜底 · 查表键降级链", () => {
     });
   });
 
-  it("resolveTokensLimitLookupKey：按降级链取键，全空时为 null", () => {
+  it("resolveTokensLimitLookupKey：按降级链取键，全空时为 null（见下一节超流体独立入口）", () => {
     const settingsPath = settingsFile(
       "coldstart-key.json",
       profileSettings("auto/deepseek-v4.1-flash"),
@@ -351,5 +358,109 @@ describe("冷启动兜底 · 查表键降级链", () => {
     expect(
       resolveTokensLimitLookupKey({ modelId: null, settingsPath: missingSettings }),
     ).toBeNull();
+  });
+});
+
+/**
+ * 超流体（子会话）独立窗口：tier 2 必须读「超流体端点命中的 Profile」，
+ * **绝不**读内核 `currentApiProfile`（那是主会话那条链）。
+ *
+ * 这是「主会话切 API 配置不能连带改掉子会话窗口」的纯逻辑锁；接线侧的
+ * 端到端断言在 `test/super-spawn-credentials.test.ts`。
+ */
+describe("超流体独立窗口解析（resolveSuperCliTokensLimit）", () => {
+  it("tier2 用传入的超流体 Profile，而不是 currentApiProfile", () => {
+    const settingsPath = settingsFile("super-profile-tier.json", {
+      selectedAuthType: "openai-compatible",
+      currentApiProfile: "main",
+      apiProfiles: {
+        main: { tokensLimit: 64000 },
+        super: { tokensLimit: 128000 },
+      },
+    });
+    // 超流体 Profile = super → 128000；主会话那套会给 64000。
+    expect(
+      resolveSuperCliTokensLimit({ modelId: "unknown-model", profileName: "super", settingsPath }),
+    ).toEqual({ limit: 128000, source: "profile" });
+    expect(resolveCliTokensLimit({ modelId: "unknown-model", settingsPath })).toEqual({
+      limit: 64000,
+      source: "profile",
+    });
+  });
+
+  it("没有具名 Profile 时不读 currentApiProfile（只靠 settings 顶层 / 内建表 / 无依据）", () => {
+    const settingsPath = settingsFile("super-no-profile.json", {
+      currentApiProfile: "main",
+      apiProfiles: { main: { tokensLimit: 64000 } },
+    });
+    // profileName 为空 → tier2 跳过；既无顶层也无内建表命中 → 不推。
+    expect(
+      resolveSuperCliTokensLimit({ modelId: "totally-unknown-model", profileName: null, settingsPath }),
+    ).toEqual({ limit: undefined, source: undefined });
+    expect(
+      superTokensLimitEnv({ modelId: "totally-unknown-model", profileName: null, settingsPath }),
+    ).toEqual({});
+  });
+
+  it("user override 仍按子会话模型优先于 Profile 窗口", () => {
+    const settingsPath = settingsFile("super-user-override.json", {
+      currentApiProfile: "main",
+      apiProfiles: { main: { tokensLimit: 64000 }, super: { tokensLimit: 128000 } },
+    });
+    const overrides = parseContextWindowOverrides(["deepseek-v4.1-flash=960000"]);
+    expect(
+      resolveSuperCliTokensLimit({
+        modelId: "auto/deepseek-v4.1-flash",
+        overrides,
+        profileName: "super",
+        settingsPath,
+      }),
+    ).toEqual({ limit: 960000, source: "user" });
+    expect(
+      superTokensLimitEnv({
+        modelId: "auto/deepseek-v4.1-flash",
+        overrides,
+        profileName: "super",
+        settingsPath,
+      }),
+    ).toEqual({ IFLOW_TOKENS_LIMIT: "960000" });
+  });
+
+  it("settings 顶层与内建表在 Profile 没有 tokensLimit 时仍生效", () => {
+    const topPath = settingsFile("super-settings-top.json", {
+      currentApiProfile: "main",
+      apiProfiles: { main: { tokensLimit: 64000 }, super: { modelName: "gpt-4o" } },
+      tokensLimit: 200000,
+    });
+    expect(
+      resolveSuperCliTokensLimit({ modelId: "gpt-4o", profileName: "super", settingsPath: topPath }),
+    ).toEqual({ limit: 200000, source: "settings" });
+
+    const tablePath = settingsFile("super-builtin.json", {
+      currentApiProfile: "main",
+      apiProfiles: { main: { tokensLimit: 64000 }, super: { modelName: "gpt-4o" } },
+    });
+    expect(
+      resolveSuperCliTokensLimit({ modelId: "gpt-4o", profileName: "super", settingsPath: tablePath }),
+    ).toEqual({ limit: 128000, source: "builtin-table" });
+  });
+
+  it("profileName 指向不存在的 Profile 时也不回退 currentApiProfile", () => {
+    const settingsPath = settingsFile("super-ghost-profile.json", {
+      currentApiProfile: "main",
+      apiProfiles: { main: { tokensLimit: 64000 } },
+    });
+    // 「typo / 已删除的 Profile 名」不等于「跟随主会话」：tier2 只认那个
+    // 具名条目，缺失就继续往下走；没有其它依据时**不推**，绝不借用主会话窗口。
+    expect(
+      resolveSuperCliTokensLimit({
+        modelId: "totally-unknown-model",
+        profileName: "ghost",
+        settingsPath,
+      }),
+    ).toEqual({ limit: undefined, source: undefined });
+    expect(
+      superTokensLimitEnv({ modelId: "totally-unknown-model", profileName: "ghost", settingsPath }),
+    ).toEqual({});
   });
 });
