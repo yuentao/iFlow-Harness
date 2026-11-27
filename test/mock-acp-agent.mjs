@@ -52,6 +52,19 @@ if (argvDumpPath) {
   }
 }
 
+/** Auth / model request dump (JSONL): lets tests assert exactly which
+ * credentials and model the host pushed to the child CLI. Append-only so both
+ * `authenticate` and `session/set_model` can be observed. */
+const authDumpPath = process.env.ACP_MOCK_AUTH_DUMP;
+function dumpAuth(method, params) {
+  if (!authDumpPath) return;
+  try {
+    appendFileSync(authDumpPath, `${JSON.stringify({ method, params })}\n`);
+  } catch {
+    // Same: diagnostics only.
+  }
+}
+
 let buffer = "";
 const pendingEscapeReplies = []; // resolvers for sandbox_escape write replies
 const escapeReplies = []; // collected client replies (asserted by the test)
@@ -106,6 +119,20 @@ async function handle(msg) {
             ],
           },
         },
+      });
+      break;
+
+    case "authenticate":
+      dumpAuth("authenticate", msg.params);
+      send({ jsonrpc: "2.0", id: msg.id, result: {} });
+      break;
+
+    case "session/set_model":
+      dumpAuth("session/set_model", msg.params);
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { success: true, currentModelId: msg.params?.modelId },
       });
       break;
 

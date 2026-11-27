@@ -303,3 +303,60 @@ export function tokensLimitEnvFromSettings(
 ): { IFLOW_TOKENS_LIMIT?: string } {
   return cliTokensLimitEnv(resolveCliTokensLimit(options).limit);
 }
+
+/**
+ * 超流体（子会话）令牌上限的解析入参。
+ *
+ * 与 {@link ResolveCliTokensLimitOptions} 的关键差别：**tier 2 不再读内核
+ * `currentApiProfile`**，而是读「超流体端点命中的那个具名 Profile」。这样
+ * 「主会话切 API 配置」不会连带改掉子会话推给 CLI 的窗口。
+ */
+export interface SuperTokensLimitOptions {
+  /** 子会话实际要用的模型（超流体模型链的解析结果）。 */
+  modelId?: string | null;
+  /** 已归一化的 `iflow.contextWindowOverrides` 表。 */
+  overrides?: Record<string, number>;
+  /**
+   * 超流体端点命中的具名 Profile 名（`SuperEndpoint.profileName`）。
+   * 空 = 没有任何具名 Profile（活动凭据 / 内核顶层默认），此时**不读**
+   * 内核 `currentApiProfile` 的 `tokensLimit` —— 那属于主会话那条链。
+   */
+  profileName?: string | null;
+  settingsPath?: string;
+}
+
+/**
+ * 子会话窗口的唯一解析入口（五档链，tier 2 换成超流体 Profile）。
+ *
+ * 优先级：user override（按子会话模型）→ 命中的超流体 Profile 的
+ * `tokensLimit` → 内核 settings 顶层 `tokensLimit` → 内建对照表 → **不推**。
+ *
+ * 与 {@link resolveCliTokensLimit} 共用 `resolveContextWindowAuthority`，
+ * 只是把 tier 2 的事实来源从「内核 currentApiProfile」换成「超流体端点命中的
+ * Profile」；tier 3（settings 顶层）与 tier 4（内建表）与模型相关、与主会话
+ * 无关，保持同源。没有依据时同样**不推**，绝不补猜测值。
+ */
+export function resolveSuperCliTokensLimit(
+  options: SuperTokensLimitOptions = {},
+): CliTokensLimitResolution {
+  const { modelId, overrides = {}, profileName, settingsPath } = options;
+  const settings = readCliSettings(settingsPath);
+  const name = typeof profileName === "string" ? profileName.trim() : "";
+  const profileTokensLimit = name
+    ? positiveTokenLimit(settings?.apiProfiles?.[name]?.tokensLimit)
+    : undefined;
+  const settingsTokensLimit = positiveTokenLimit(settings?.tokensLimit);
+  return resolveContextWindowAuthority({
+    modelId,
+    overrides,
+    ...(profileTokensLimit !== undefined ? { profileTokensLimit } : {}),
+    ...(settingsTokensLimit !== undefined ? { settingsTokensLimit } : {}),
+  });
+}
+
+/** 子会话 spawn-env 补丁：tier 2 用超流体 Profile，不读主会话 currentApiProfile。 */
+export function superTokensLimitEnv(
+  options: SuperTokensLimitOptions = {},
+): { IFLOW_TOKENS_LIMIT?: string } {
+  return cliTokensLimitEnv(resolveSuperCliTokensLimit(options).limit);
+}

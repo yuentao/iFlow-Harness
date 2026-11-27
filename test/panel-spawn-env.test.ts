@@ -212,7 +212,7 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     expect(readDumpedEnv(dump).IFLOW_TOKENS_LIMIT).toBeUndefined();
   }, 30000);
 
-  it("子会话与主会话共用同一兜底查表（冷启动时子会话也拿到兜底窗口）", async () => {
+  it("未配置超流体时子会话沿用主会话同一兜底查表（零配置零变化）", async () => {
     fs.writeFileSync(
       path.join(iflowHome, "settings.json"),
       JSON.stringify({
@@ -241,6 +241,65 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
       await child.dispose();
     }
   }, 30000);
+
+  /**
+   * 独立语义（原「子会话与主会话共用同一兜底查表」的反转）：配置了
+   * `iflow.superAgentProfile` 之后，子会话的窗口必须按**超流体自己的**
+   * Profile / 模型解析，绝不跟随主会话 `currentApiProfile`。
+   *
+   * 可证伪：若子会话仍用主会话那套解析，会拿到 main 的 64000 而不是 gpt-4o
+   * 内建表的 128000 —— 这条立刻红。
+   */
+  it("配置超流体 Profile 后，子会话窗口按自己的 Profile 解析，不跟随主会话 currentApiProfile", async () => {
+    fs.writeFileSync(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({
+        selectedAuthType: "openai-compatible",
+        currentApiProfile: "main",
+        apiProfiles: {
+          main: {
+            baseUrl: "https://main.example/v1",
+            apiKey: "sk-main",
+            modelName: "auto/deepseek-v4.1-flash",
+            tokensLimit: 64000,
+          },
+          super: {
+            baseUrl: "https://super.example/v1",
+            apiKey: "sk-super",
+            modelName: "gpt-4o",
+          },
+        },
+      }),
+      "utf8",
+    );
+    setConfigOverrides({
+      nodePath: process.execPath,
+      superAgentProfile: "super",
+      contextWindowOverrides: [],
+    });
+
+    // 子会话：按超流体 Profile 的模型 gpt-4o 命中内建表 128000。
+    const childDump = path.join(storageDir, "child-independent-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = childDump;
+    const child = await (panel as unknown as SpawnEnvInternals).createSuperClient({
+      cwd: here,
+      allowedRoots: [here],
+      includeDirectories: [],
+      label: "spawn-env-child-independent",
+      callbacks: {},
+    });
+    try {
+      expect(readDumpedEnv(childDump).IFLOW_TOKENS_LIMIT).toBe("128000");
+    } finally {
+      await child.dispose();
+    }
+
+    // 对照：主会话仍按 currentApiProfile 的 tokensLimit=64000 解析。
+    const mainDump = path.join(storageDir, "main-independent-env.json");
+    process.env.ACP_MOCK_ENV_DUMP = mainDump;
+    await (panel as unknown as SpawnEnvInternals).ensureClient();
+    expect(readDumpedEnv(mainDump).IFLOW_TOKENS_LIMIT).toBe("64000");
+  }, 40000);
 
   it("超流体的 spawn env 没有 IFLOW_SUPER_TOOL（即便宿主 process.env 里设了）", async () => {
     // 模拟一个「用户 shell 里已经设了该变量」的环境：子会话必须显式抹掉，

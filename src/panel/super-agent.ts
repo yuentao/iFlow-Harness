@@ -720,6 +720,10 @@ export type SuperClientFactory = (params: {
   includeDirectories: string[];
   label: string;
   callbacks: AcpClientCallbacks;
+  /** 任务级 API Profile 覆盖（`SuperTaskSpec.profileId`），端点解析链第①级。 */
+  profileId?: string;
+  /** 任务级模型覆盖（`SuperTaskSpec.modelId`），模型解析链第①级。 */
+  modelId?: string;
 }) => Promise<AcpClient>;
 
 export interface SuperAgentDeps {
@@ -805,6 +809,15 @@ export interface SuperAgentDeps {
   }) => void;
   /** 子会话使用的模型；跟随主会话当前模型，null = 用 CLI 的默认值。 */
   currentModel: () => string | null;
+  /**
+   * 子会话该用的模型（**超流体独立模型链**的解析结果）：
+   *   ① 任务级 `modelId` → ② `iflow.superAgentModel` → ③ 目标 Profile 的
+   *   modelName → ④ 主 store 的 `currentModelId`（= {@link currentModel}）。
+   *
+   * 宿主提供了它就用它推 `session/set_model`；未提供（单测 / 旧 fixture）时
+   * 管理器回落到 {@link currentModel}，行为与接入前逐字节一致。
+   */
+  spawnModel?: (spec: SuperTaskSpec) => Promise<string | null>;
   /**
    * 方案D：子会话 `session/set_model` 成功后，把用户显式覆盖的上下文窗口同步
    * 进子 CLI 缓存的 tokensLimit（set_model 只改名、不重算）。宿主按 modelId
@@ -2855,6 +2868,10 @@ export class SuperAgentManager {
         includeDirectories,
         label: id,
         callbacks: this.callbacksFor(id),
+        // 任务级覆盖（单次任务临时指定网关/模型）：白名单拷贝已放行它们，
+        // 这里继续透传给宿主做端点/模型解析。
+        ...(spec.profileId ? { profileId: spec.profileId } : {}),
+        ...(spec.modelId ? { modelId: spec.modelId } : {}),
       });
       if (this.disposed) {
         await client.dispose();
@@ -2938,7 +2955,11 @@ export class SuperAgentManager {
         }
       }
 
-      model = this.deps.currentModel();
+      // 模型 = 超流体独立链的解析结果（宿主提供）；宿主没接线（单测/旧
+      // fixture）时回落到主会话当前模型 —— 接线前后行为一致。
+      model = this.deps.spawnModel
+        ? ((await this.deps.spawnModel(spec)) ?? this.deps.currentModel())
+        : this.deps.currentModel();
       if (model) {
         try {
           await client.setModel(sessionId, model);
