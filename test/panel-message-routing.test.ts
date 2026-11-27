@@ -22,11 +22,12 @@ const panelSource = fs.readFileSync(path.join(here, "..", "src", "panel", "panel
 /** 重构前从原 switch 逐字提取的 83 个 case 类型（源码顺序），外加多仓库协作
  * 新增的 setSessionRoots = 84 个，再加设置页上下文窗口覆写
  * setContextWindowOverrides = 85 个，再加「立即整理记忆」curateMemoryNow = 86 个，
- * 再加默认工作区目录选择 pickDefaultWorkspace = 87 个。 */
+ * 再加默认工作区目录选择 pickDefaultWorkspace = 87 个，
+ * 再加底部「压缩上下文」按钮 compressNow = 88 个。 */
 const EXPECTED_CASES = [
   "ready", "sendPrompt", "queueAction", "resolveContext", "stopSubagent", "superAgent",
   "superRetryWave", "superRetryFailed", "requestSuperResidueList", "superResidueHandle",
-  "cancel", "newSession", "setModel", "setThink", "openLocation", "openExternal",
+  "cancel", "compressNow", "newSession", "setModel", "setThink", "openLocation", "openExternal",
   "respondApproval", "answerQuestions", "respondProfileSwitch", "respondSuperResidueConfirm",
   "revertTool", "applyHunkSelection", "restoreCheckpoint", "requestTurnChanges",
   "revertTurnFile", "openDiff", "runInTerminal", "searchFiles", "setSessionRoots", "stageFiles",
@@ -48,7 +49,7 @@ const EXPECTED_CASES = [
 /** 4 域的精确划分（阶段 7 的设计结论，逐域固化）。 */
 const DOMAIN_CASES = {
   handleSessionMessage: [
-    "ready", "sendPrompt", "queueAction", "resolveContext", "cancel", "newSession", "setModel",
+    "ready", "sendPrompt", "queueAction", "resolveContext", "cancel", "compressNow", "newSession", "setModel",
     "setThink", "openLocation", "openExternal", "runInTerminal", "searchFiles", "setSessionRoots", "stageFiles",
     "pickAttachments", "pickDefaultWorkspace", "openImage", "saveAuth", "clearAuth", "activateProfile", "deleteProfile",
     "setOnboardingDismissed", "loadSession", "deleteSession", "setSessionFlags", "renameSession",
@@ -97,8 +98,8 @@ describe("阶段 7 · Webview 消息路由分域等价性", () => {
   const routerBody = methodBody("private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {");
   const routerCases = caseLabels(routerBody);
 
-  it("薄入口的 case 清单 == 重构前的 83 个 + 后续新增（setSessionRoots、setContextWindowOverrides、curateMemoryNow、pickDefaultWorkspace）", () => {
-    expect(routerCases).toHaveLength(87);
+  it("薄入口的 case 清单 == 重构前的 83 个 + 后续新增（setSessionRoots、setContextWindowOverrides、curateMemoryNow、pickDefaultWorkspace、compressNow）", () => {
+    expect(routerCases).toHaveLength(88);
     expect(sorted(routerCases)).toEqual(sorted(EXPECTED_CASES));
   });
 
@@ -124,7 +125,8 @@ describe("阶段 7 · Webview 消息路由分域等价性", () => {
     // 多仓库协作新增了 setSessionRoots（见 EXPECTED_CASES），计数随之 +1；
     // 设置页的上下文窗口覆写又新增 setContextWindowOverrides，计数再 +1；
     // 记忆页「整理记忆」按钮 / `/memory-curate` 指令新增 curateMemoryNow，再 +1；
-    // 默认工作区目录选择新增 pickDefaultWorkspace，再 +1。
-    expect(new Set(routerCases).size).toBe(87);
+    // 默认工作区目录选择新增 pickDefaultWorkspace，再 +1；
+    // 底部「压缩上下文」按钮新增 compressNow，再 +1。
+    expect(new Set(routerCases).size).toBe(88);
   });
 });

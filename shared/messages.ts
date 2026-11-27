@@ -2547,6 +2547,13 @@ export type WebviewToHost =
    */
   | { type: "editAndResend"; blockId: string; text: string }
   | { type: "cancel" }
+  /**
+   * 底部「压缩上下文」按钮：请求宿主主动发起一轮 `/compress`（与上下文
+   * 接近上限时的「立即压缩」pill 走同一入口）。宿主持有全部守卫（Stop
+   * 窗口、会话就绪、历史同步、无内容可压）并在失败时回真实错误 toast，
+   * webview 只负责禁用态与 1.5s 防抖。
+   */
+  | { type: "compressNow" }
   /** CLI 0.5.19 only supports whole-turn cancellation. */
   | { type: "stopSubagent"; sessionId: string; agentId: string }
   /**
